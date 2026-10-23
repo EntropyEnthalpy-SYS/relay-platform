@@ -278,10 +278,16 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     }.await;
     engine.shutdown().await?;
     store.seal_budget_run(&budget_run)?;
-    let budget = store.budget_outbox(&budget_run, false)?;
-    let usage = store.agent_usage(true)?;
-    if !budget.reports.is_empty() || !usage.is_empty() {
-        let cleanup = async {
+    let cleanup = async {
+        loop {
+            // Recover replies lost in flight without issuing new reservations.
+            // Seal each recovered grant before returning its unused balance.
+            store.seal_budget_run(&budget_run)?;
+            let budget = store.budget_outbox(&budget_run, false)?;
+            let usage = store.agent_usage(true)?;
+            if budget.reports.is_empty() && budget.requests.is_empty() && usage.is_empty() {
+                return Ok::<_, anyhow::Error>(());
+            }
             let request = SyncRequest {
                 budget: Some(budget),
                 ledger_id: store.metadata("ledger_id")?.context("missing ledger")?,
@@ -303,16 +309,15 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
             if let Some(reply) = reply.budget {
                 store.accept_budget_reply(&budget_run, reply)?;
             }
-            Ok::<_, anyhow::Error>(())
-        };
-        if !matches!(
-            tokio::time::timeout(Duration::from_secs(2), cleanup).await,
-            Ok(Ok(()))
-        ) {
-            tracing::warn!(
-                "final usage or unused reservation return is pending; durable state remains for retry"
-            );
         }
+    };
+    if !matches!(
+        tokio::time::timeout(Duration::from_secs(2), cleanup).await,
+        Ok(Ok(()))
+    ) {
+        tracing::warn!(
+            "final usage or unused reservation return is pending; durable state remains for retry"
+        );
     }
     result
 }

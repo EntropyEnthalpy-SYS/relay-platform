@@ -143,6 +143,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/budgets", get(budgets).post(create_budget))
         .route("/api/v1/budgets/{id}", axum::routing::put(update_budget))
         .route("/api/v1/audit", get(audit))
+        .route("/api/v1/recovery", get(recovery_status))
         .route("/api/v1/capabilities", get(capabilities))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -150,12 +151,7 @@ pub fn router(state: AppState) -> Router {
         ));
     Router::new()
         .merge(authenticated)
-        .route(
-            "/healthz",
-            get(|| async {
-                Json(serde_json::json!({"status":"ok","version":env!("CARGO_PKG_VERSION")}))
-            }),
-        )
+        .route("/healthz", get(health))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/agent/enroll", post(enroll))
         .route("/api/v1/agent/reconcile", post(reconcile))
@@ -476,12 +472,45 @@ async fn sync(
         .await?,
     ))
 }
+async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
+    let healthy = database(state.store, |db| db.recovery_log_status())
+        .await
+        .is_ok_and(|s| s.healthy);
+    (
+        if healthy {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        },
+        Json(
+            serde_json::json!({"status":if healthy {"ok"}else{"recovery_log_unavailable"},"version":env!("CARGO_PKG_VERSION")}),
+        ),
+    )
+}
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["tcp","udp","ipv4","ipv6","dns-targets","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return"],
+        "available":["tcp","udp","ipv4","ipv6","dns-targets","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["websocket","mptcp","multipath-aggregation","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
+}
+
+async fn recovery_status(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::journal::JournalStatus> {
+    Ok(Json(
+        database(state.store, move |db| {
+            if actor.role != Role::SystemAdmin {
+                return crate::store::reject(
+                    403,
+                    "recovery status requires system administrator access",
+                );
+            }
+            db.recovery_log_status()
+        })
+        .await?,
+    ))
 }
 
 async fn budgets(

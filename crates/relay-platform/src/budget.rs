@@ -68,6 +68,8 @@ pub struct GrantReport {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetExchange {
+    #[serde(default)]
+    pub settle_only: bool,
     pub run_id: String,
     pub requests: Vec<GrantRequest>,
     pub reports: Vec<GrantReport>,
@@ -84,6 +86,8 @@ pub struct Grant {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetReply {
+    #[serde(default)]
+    pub cancelled_requests: Vec<String>,
     pub grants: Vec<Grant>,
     pub acknowledgements: Vec<GrantReport>,
     pub allocation_paused: bool,

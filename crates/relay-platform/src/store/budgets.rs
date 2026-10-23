@@ -266,7 +266,6 @@ impl Store {
                 tx.execute("UPDATE agent_budget_grants SET state='sealed' WHERE budget_id=?1 AND run_id=?2 AND state='open'",params![id,run])?;
             }
         }
-        tx.execute("DELETE FROM agent_budget_requests WHERE budget_id NOT IN (SELECT b.budget_id FROM agent_rule_budgets b JOIN agent_meters m ON m.rule_id=b.rule_id AND m.meter_epoch=b.meter_epoch WHERE m.enabled=1)",[])?;
         if allocate {
             for id in active {
                 let Some(minimum) = tx
@@ -286,18 +285,15 @@ impl Store {
             }
         }
         let mut q=tx.prepare("SELECT budget_id,request_id,minimum_bytes FROM agent_budget_requests WHERE run_id=?1 ORDER BY budget_id LIMIT 1024")?;
-        let requests = if allocate {
-            q.query_map([run], |r| {
+        let requests = q
+            .query_map([run], |r| {
                 Ok(GrantRequest {
                     budget_id: r.get(0)?,
                     request_id: r.get(1)?,
                     minimum_bytes: r.get(2)?,
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-        } else {
-            vec![]
-        };
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(q);
         let mut q=tx.prepare("SELECT id,consumed_bytes,state='sealed' FROM agent_budget_grants WHERE consumed_bytes>ack_consumed OR (state='sealed' AND ack_closed=0) ORDER BY id LIMIT 1024")?;
         let reports = q
@@ -312,6 +308,7 @@ impl Store {
         drop(q);
         tx.commit()?;
         Ok(BudgetExchange {
+            settle_only: !allocate,
             run_id: run.into(),
             requests,
             reports,
@@ -319,11 +316,23 @@ impl Store {
     }
     pub fn accept_budget_reply(&self, run: &str, reply: BudgetReply) -> Result<()> {
         ensure!(
-            reply.grants.len() <= 1024 && reply.acknowledgements.len() <= 1024,
+            reply.grants.len() <= 1024
+                && reply.acknowledgements.len() <= 1024
+                && reply.cancelled_requests.len() <= 1024,
             "budget response exceeds limit"
         );
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        for id in &reply.cancelled_requests {
+            ensure!(
+                identifier(id) && !reply.grants.iter().any(|g| &g.request_id == id),
+                "inconsistent reservation cancellation"
+            );
+            tx.execute(
+                "DELETE FROM agent_budget_requests WHERE run_id=?1 AND request_id=?2",
+                params![run, id],
+            )?;
+        }
         for grant in reply.grants {
             ensure!(
                 grant.run_id == run
@@ -494,7 +503,18 @@ pub(super) fn exchange(
         if budget.tenant_id != tenant {
             return reject(403, "budget belongs to another tenant");
         }
-        if result.allocation_paused || !active.contains(&request.budget_id) {
+        let cancelled:Option<String>=tx.query_row("SELECT budget_id FROM cancelled_budget_requests WHERE node_id=?1 AND run_id=?2 AND request_id=?3",params![node,exchange.run_id,request.request_id],|r|r.get(0)).optional()?;
+        if let Some(id) = &cancelled
+            && id != &request.budget_id
+        {
+            return reject(409, "cancelled reservation identity was reused");
+        }
+        if exchange.settle_only || cancelled.is_some() || !active.contains(&request.budget_id) {
+            tx.execute("INSERT OR IGNORE INTO cancelled_budget_requests(node_id,run_id,request_id,budget_id) VALUES(?1,?2,?3,?4)",params![node,exchange.run_id,request.request_id,request.budget_id])?;
+            result.cancelled_requests.push(request.request_id);
+            continue;
+        }
+        if result.allocation_paused {
             continue;
         }
         let bytes = (budget.limit_bytes - budget.committed_bytes)

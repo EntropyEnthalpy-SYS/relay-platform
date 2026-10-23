@@ -36,7 +36,11 @@ pub fn reject<T>(status: u16, message: impl Into<String>) -> Result<T> {
 }
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>, Arc<PathBuf>, Arc<BudgetSignals>);
+pub struct Store(
+    Arc<Mutex<crate::journal::LoggedConnection>>,
+    Arc<PathBuf>,
+    Arc<BudgetSignals>,
+);
 #[derive(Default)]
 struct BudgetSignals {
     refill: tokio::sync::Notify,
@@ -178,7 +182,7 @@ impl Store {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 3, "database schema newer than this binary");
+        ensure!(version <= 4, "database schema newer than this binary");
         if version == 0 {
             let tables: u64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0))?;
             ensure!(tables == 0, "refusing to initialize an unrelated database");
@@ -211,8 +215,11 @@ impl Store {
             tx.execute_batch("INSERT OR IGNORE INTO metadata(key,value) SELECT 'budget_allocation_paused','true' FROM metadata WHERE key='backup_created_at_ms'; PRAGMA user_version=3;")?;
             tx.commit()?;
         }
+        if version < 4 {
+            conn.execute_batch("BEGIN; CREATE TABLE recovery_state(id INTEGER PRIMARY KEY CHECK(id=1),journal_id TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence>=0),digest TEXT NOT NULL); CREATE TABLE cancelled_budget_requests(node_id TEXT NOT NULL REFERENCES nodes(id),run_id TEXT NOT NULL,request_id TEXT NOT NULL,budget_id TEXT NOT NULL REFERENCES budgets(id),PRIMARY KEY(node_id,run_id,request_id)); PRAGMA user_version=4; COMMIT;")?;
+        }
         Ok(Self(
-            Arc::new(Mutex::new(conn)),
+            Arc::new(Mutex::new(crate::journal::LoggedConnection::new(conn)?)),
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
         ))
@@ -233,6 +240,12 @@ impl Store {
             })?;
         ensure!(old == kind, "database belongs to {old}, not {kind}");
         Ok(())
+    }
+    pub fn enable_recovery_log(&self, path: &Path) -> Result<()> {
+        self.0.lock().unwrap().enable(path)
+    }
+    pub fn recovery_log_status(&self) -> Result<crate::journal::JournalStatus> {
+        self.0.lock().unwrap().status()
     }
 
     pub fn metadata(&self, key: &str) -> Result<Option<String>> {
@@ -905,6 +918,14 @@ impl Store {
         if managed_agent {
             dest.execute("INSERT INTO metadata(key,value) VALUES('recovery_required','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
         }
+        let original_pause: Option<String> = dest
+            .query_row(
+                "SELECT value FROM metadata WHERE key='budget_allocation_paused'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        dest.execute("INSERT INTO metadata(key,value) VALUES('backup_original_budget_pause',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(&original_pause)?])?;
         dest.execute("INSERT INTO metadata(key,value) VALUES('budget_allocation_paused','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
         dest.execute("INSERT INTO metadata(key,value) VALUES('backup_created_at_ms',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [now_ms().to_string()])?;
         drop(dest);

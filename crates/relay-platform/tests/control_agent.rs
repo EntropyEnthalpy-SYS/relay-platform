@@ -933,3 +933,103 @@ async fn graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat() 
     assert!(local.agent_usage(true).unwrap().is_empty());
     stop_server(s).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn journal_restore_recovers_a_post_backup_node_and_refills_its_live_tcp_session() {
+    use relay_platform::{
+        budget::{BudgetScope, NewBudget},
+        journal::restore_controller,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("controller.sqlite")).unwrap();
+    let log = temp.path().join("recovery.log");
+    control.enable_recovery_log(&log).unwrap();
+    control.set_kind("controller").unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    control
+        .create_budget(
+            &admin,
+            NewBudget {
+                scope: BudgetScope::User,
+                scope_id: admin.id.clone(),
+                name: "recoverable quota".into(),
+                limit_bytes: 512,
+                quantum_bytes: 64,
+            },
+        )
+        .unwrap();
+    let backup = temp.path().join("older-than-node.sqlite");
+    control.backup(&backup).unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let address = s.address;
+    let origin = format!("http://{address}");
+    let (node, token) = control
+        .create_node(&admin, "default", "post-backup node")
+        .unwrap();
+    let echo = tcp_echo().await;
+    let r = rule(echo.address, Protocol::Tcp);
+    let forwarding = r.listen;
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        local.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    let mut stream = TcpStream::connect(forwarding).await.unwrap();
+    let mut small = [0; 8];
+    stream.write_all(b"before!!").await.unwrap();
+    timeout(Duration::from_secs(2), stream.read_exact(&mut small))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&small, b"before!!");
+    wait_usage(&control, &admin, 16).await;
+    stop_server(s).await;
+    drop(control);
+    stream.write_all(b"offline!").await.unwrap();
+    timeout(Duration::from_secs(2), stream.read_exact(&mut small))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&small, b"offline!");
+    let output = temp.path().join("restored");
+    let source = backup.clone();
+    let journal = log.clone();
+    let destination = output.clone();
+    let report =
+        tokio::task::spawn_blocking(move || restore_controller(&source, &journal, &destination))
+            .await
+            .unwrap()
+            .unwrap();
+    assert!(!report.budget_allocation_paused);
+    let restored = Store::open(&output.join("controller.sqlite")).unwrap();
+    restored
+        .enable_recovery_log(&output.join("recovery.log"))
+        .unwrap();
+    let s = server(restored.clone(), address).await;
+    wait_usage(&restored, &admin, 32).await;
+    let payload = vec![0x73; 48];
+    let mut received = vec![0u8; 48];
+    stream.write_all(&payload).await.unwrap();
+    timeout(Duration::from_secs(3), stream.read_exact(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received, payload);
+    wait_usage(&restored, &admin, 128).await;
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let budget = restored.budgets(&admin).unwrap().budgets.remove(0);
+    assert_eq!((budget.consumed_bytes, budget.committed_bytes), (128, 128));
+    stop_server(s).await;
+}

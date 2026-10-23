@@ -465,6 +465,7 @@ fn budget_activation_requires_quiescence_and_published_bindings_cannot_be_remove
         let mut request = f.request(
             n,
             BudgetExchange {
+                settle_only: false,
                 run_id: f.runs[n].clone(),
                 reports: vec![],
                 requests: vec![],
@@ -613,4 +614,83 @@ fn datagram_larger_than_quantum_requests_enough_credit_without_partial_charges()
     );
     f.sync(0);
     assert_eq!(f.user().consumed_bytes, 4096);
+}
+
+#[test]
+fn settlement_cancels_an_unissued_request_before_a_late_original_can_allocate() {
+    let f = Fixture::new(100, 64, false);
+    let original = f.agents[0].budget_outbox(&f.runs[0], true).unwrap();
+    let id = original.requests[0].request_id.clone();
+    let mut settling = original.clone();
+    settling.settle_only = true;
+    let closed = f
+        .control
+        .sync(&f.nodes[0], f.request(0, settling))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert!(closed.grants.is_empty());
+    assert_eq!(closed.cancelled_requests, vec![id.clone()]);
+    f.agents[0].accept_budget_reply(&f.runs[0], closed).unwrap();
+    let late = f
+        .control
+        .sync(&f.nodes[0], f.request(0, original))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert!(late.grants.is_empty());
+    assert_eq!(late.cancelled_requests, vec![id.clone()]);
+    assert_eq!(f.user().committed_bytes, 0);
+    let next = f.agents[0].budget_outbox(&f.runs[0], true).unwrap();
+    assert_ne!(next.requests[0].request_id, id);
+    let granted = f
+        .control
+        .sync(&f.nodes[0], f.request(0, next))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert_eq!(granted.grants[0].bytes, 64);
+}
+
+#[test]
+fn settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed() {
+    let f = Fixture::new(100, 64, false);
+    let original = f.agents[0].budget_outbox(&f.runs[0], true).unwrap();
+    let response = f
+        .control
+        .sync(&f.nodes[0], f.request(0, original))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert_eq!(response.grants[0].bytes, 64);
+    assert_eq!(f.user().committed_bytes, 64);
+    // The grant reply is lost; the agent never learned its grant ID.
+    let disabled = f
+        .control
+        .set_config(&f.admin, &f.nodes[0], 1, vec![])
+        .unwrap();
+    f.agents[0].save_agent_config(&disabled).unwrap();
+    let settling = f.agents[0].budget_outbox(&f.runs[0], false).unwrap();
+    assert!(settling.settle_only);
+    assert_eq!(settling.requests.len(), 1);
+    let recovered = f
+        .control
+        .sync(&f.nodes[0], f.request(0, settling))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert_eq!(recovered.grants[0].grant_id, response.grants[0].grant_id);
+    f.agents[0]
+        .accept_budget_reply(&f.runs[0], recovered)
+        .unwrap();
+    let final_report = f.agents[0].budget_outbox(&f.runs[0], false).unwrap();
+    assert!(final_report.reports[0].surrender);
+    let reply = f
+        .control
+        .sync(&f.nodes[0], f.request(0, final_report))
+        .unwrap()
+        .budget
+        .unwrap();
+    f.agents[0].accept_budget_reply(&f.runs[0], reply).unwrap();
+    assert_eq!((f.user().consumed_bytes, f.user().committed_bytes), (0, 0));
 }

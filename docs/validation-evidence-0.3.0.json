@@ -1,0 +1,344 @@
+{
+  "version": "0.3.0-development",
+  "verified_at_utc": "2026-10-23T23:05:34.905276+00:00",
+  "full_goal_complete": false,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "hardware": {
+    "cpu": "Apple M1 Pro",
+    "logical_cpus": 10,
+    "memory_bytes": 34359738368
+  },
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "profile": "release",
+  "binary_sha256": "7076f0ac721cb2ec26449c54d53b6cd6415b14c2d0b6561416196330c501a111",
+  "source_fingerprint_sha256": "612a41a709fdfb4e3baf7fd7b0cecc4a7567d12a42c1dada130af44eac534bdf",
+  "source_fingerprint_algorithm": "SHA256 of concatenated sorted relative UTF-8 paths, NUL, and raw file SHA256; Cargo.toml, Cargo.lock, rustfmt.toml, crates/, web/, scripts/ (excluding __pycache__), deploy/",
+  "source_fingerprint_paths": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/relay-platform/Cargo.toml",
+    "crates/relay-platform/src/agent.rs",
+    "crates/relay-platform/src/api.rs",
+    "crates/relay-platform/src/budget.rs",
+    "crates/relay-platform/src/engine.rs",
+    "crates/relay-platform/src/lib.rs",
+    "crates/relay-platform/src/main.rs",
+    "crates/relay-platform/src/model.rs",
+    "crates/relay-platform/src/schema.sql",
+    "crates/relay-platform/src/store.rs",
+    "crates/relay-platform/src/store/budget_schema.sql",
+    "crates/relay-platform/src/store/budgets.rs",
+    "crates/relay-platform/src/store/recovery.rs",
+    "crates/relay-platform/src/transport.rs",
+    "crates/relay-platform/tests/budgets.rs",
+    "crates/relay-platform/tests/common/mod.rs",
+    "crates/relay-platform/tests/common/tls.rs",
+    "crates/relay-platform/tests/control_agent.rs",
+    "crates/relay-platform/tests/forwarding.rs",
+    "crates/relay-platform/tests/ledger.rs",
+    "crates/relay-platform/tests/recovery.rs",
+    "crates/relay-platform/tests/tls_transport.rs",
+    "deploy/Caddyfile.example",
+    "deploy/agent.env.example",
+    "deploy/relay-agent.service",
+    "deploy/relay-controller.service",
+    "rustfmt.toml",
+    "scripts/bench_budget.py",
+    "scripts/bench_loopback.py",
+    "scripts/echo_fixture.py",
+    "scripts/probe.py",
+    "scripts/verify.sh",
+    "web/app.js",
+    "web/index.html",
+    "web/style.css"
+  ],
+  "automated_tests_passed": 58,
+  "automated_tests_failed": 0,
+  "test_cases": [
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "failed_meter_transaction_rolls_back_reservation_consumption_as_well"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "invalid_report_rolls_back_other_reports_and_retry_updates_totals_once"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_permissions_revision_conflicts_and_committed_floor_are_enforced"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restored_controller_cannot_reissue_reservations_forgotten_by_its_backup"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "datagram_larger_than_quantum_requests_enough_credit_without_partial_charges"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "api_agent_control_outage_restart_and_reconciliation"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "http_auth_role_and_schema_enforcement"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "remote_controller_requires_https_and_never_embeds_credentials"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "enrollment_recovers_after_the_controller_commits_but_response_is_lost"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "restored_backup_waits_for_controller_and_cannot_spend_confirmed_quota_twice"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "running_agent_republishes_acknowledged_counters_after_controller_restore"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "two_real_agents_share_user_quota_refill_without_stream_loss_and_return_idle_reservations"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "udp_uses_only_its_reserved_budget_during_outage_and_resumes_when_control_returns"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "udp_larger_than_the_reservation_quantum_preserves_the_whole_datagram"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "tcp_binary_payload_half_close_and_durable_bidirectional_metering"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_preserves_datagrams_empty_payloads_and_peer_isolation"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_config_keeps_old_listener_and_persisted_revision"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "deleting_a_rule_terminates_existing_connections"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_enforces_combined_quota_without_partial_datagrams"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "concurrent_tcp_sessions_cannot_multiply_the_rule_quota"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "ipv6_and_dns_targets_transfer_real_bytes"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "source_acl_denies_before_any_billable_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "shared_rate_limit_includes_both_directions_and_declares_burst"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_session_limit_and_idle_reclamation_are_real"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "weighted_target_selection_and_connect_failure_fallback"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_meter_transaction_never_forwards_uncommitted_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "dual_protocol_listener_and_ipv6_udp_are_independently_verified"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "source_hash_is_stable_and_least_connections_uses_active_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "quota_is_shared_across_directions_and_survives_restart"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "periods_do_not_reset_on_reapply_and_old_periods_cannot_spend"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "exhausted_expired_and_disabled_rules_reject_empty_datagrams_too"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "controller_replay_is_idempotent_and_counter_regression_is_rejected"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "authorization_is_enforced_at_store_boundary_and_sessions_revoke"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "enrollment_is_single_use_and_configuration_writes_are_optimistic"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "consistent_backup_restores_config_counters_and_private_permissions"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "model_rejects_unknown_options_invalid_targets_and_listener_duplicates"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "checkpoint_raises_stale_backup_and_lower_controller_checkpoint_replays_local_totals"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "conflicting_page_rolls_back_all_rows_and_never_changes_identity"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "historical_checkpoints_paginate_past_sync_limit_and_revision_changes_invalidate_cursor"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "only_exported_managed_backup_requires_recovery_and_lock_is_exclusive"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "v1_managed_database_migrates_without_silently_reopening_old_quotas"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "unrelated_and_future_databases_are_rejected_without_schema_migration"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "mutually_authenticated_tls_hop_preserves_binary_half_close_and_payload_accounting"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "tls_rejects_missing_client_identity_wrong_authority_and_wrong_server_name"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "outbound_tls_failure_does_not_forward_payload_or_fall_back_to_plaintext"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "invalid_tls_updates_keep_old_listener_and_material_rotation_ends_old_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "slow_tls_handshake_is_bounded_and_releases_connection_capacity"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "tls_profiles_reject_paths_mismatched_keys_and_public_private_keys"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "tls12_and_tls13_negotiate_explicitly_and_transfer_application_bytes"
+    }
+  ],
+  "format_check": "passed",
+  "clippy_warnings_as_errors": "passed",
+  "javascript_syntax": "passed",
+  "python_syntax": "passed",
+  "cli_smoke": {
+    "validate": "passed",
+    "probe": {
+      "tcp": "verified",
+      "udp": "verified",
+      "bytes_each_direction_per_protocol": 44
+    },
+    "durable_bytes": 176,
+    "backup_restore": "identical",
+    "child_processes_stopped": true
+  },
+  "benchmark_file": "benchmark-local.json",
+  "benchmark_ledger": {
+    "expected_admitted_bytes": 1680058752,
+    "recorded_bytes": 1680058752,
+    "exact_match": true
+  },
+  "tls_functional_verified": true,
+  "tls12_verified": true,
+  "tls13_verified": true,
+  "mutual_tls_verified": true,
+  "managed_backup_reconciliation_verified": true,
+  "browser_visual_verified": false,
+  "linux_deployment_verified": false,
+  "remaining_full_scope": "REQUIREMENTS.md and STATUS.md",
+  "budget_benchmark_files": [
+    "benchmark-budget.json",
+    "benchmark-budget-32m.json"
+  ],
+  "budget_benchmark_ledger": {
+    "expected_admitted_bytes": 4034920448,
+    "controller_bytes": 4034920448,
+    "agent_bytes": 4034920448,
+    "exact_match": true
+  },
+  "global_user_budget_verified": true,
+  "hierarchical_budget_verified": true,
+  "graceful_reservation_return_verified": true,
+  "old_run_reservation_reuse_prevented": true,
+  "restored_controller_allocation_quarantine_verified": true,
+  "complete_budget_disaster_recovery_verified": false,
+  "complete_global_rate_limit_verified": false,
+  "tls_fixture_repair": {
+    "issue": "legacy LibreSSL SEC1 generation emitted a 31-byte P-256 scalar in 1 of 1024 generated keys during diagnosis; observed intermittent fixture parse failure",
+    "change": "generate transient P-256 PKCS#8 with ring, PEM encode with base64, retain OpenSSL certificate signing",
+    "runtime_certificate_validation_relaxed": false
+  }
+}

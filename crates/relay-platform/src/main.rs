@@ -30,6 +30,9 @@ enum Command {
         state: PathBuf,
         #[arg(long)]
         admin_password_file: Option<PathBuf>,
+        /// Append-only controller recovery log (defaults to STATE/recovery.log).
+        #[arg(long)]
+        recovery_log: Option<PathBuf>,
         /// Acknowledge that a TLS reverse proxy protects a non-loopback listener.
         #[arg(long)]
         behind_tls_proxy: bool,
@@ -77,6 +80,16 @@ enum Command {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Restore a controller backup by replaying its latest log and head manifest.
+    Restore {
+        #[arg(long)]
+        backup: PathBuf,
+        #[arg(long)]
+        recovery_log: PathBuf,
+        /// New private state directory; must not already exist.
+        #[arg(long)]
+        output: PathBuf,
+    },
     /// Print locally admitted payload counters; never prints credentials.
     Usage {
         #[arg(long)]
@@ -105,6 +118,7 @@ async fn main() -> Result<()> {
             listen,
             state,
             admin_password_file,
+            recovery_log,
             behind_tls_proxy,
         } => {
             ensure!(
@@ -114,6 +128,8 @@ async fn main() -> Result<()> {
             private_directory(&state)?;
             let store = Store::open(&state.join("controller.sqlite"))?;
             let _instance = store.lock_instance()?;
+            store
+                .enable_recovery_log(&recovery_log.unwrap_or_else(|| state.join("recovery.log")))?;
             store.set_kind("controller")?;
             if store.needs_bootstrap()? {
                 let password_path =
@@ -134,6 +150,15 @@ async fn main() -> Result<()> {
             )
             .with_graceful_shutdown(stop.cancelled_owned())
             .await?;
+        }
+        Command::Restore {
+            backup,
+            recovery_log,
+            output,
+        } => {
+            let report =
+                relay_platform::journal::restore_controller(&backup, &recovery_log, &output)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Agent {
             controller,
