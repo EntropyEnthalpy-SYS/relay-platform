@@ -46,6 +46,9 @@ enum Command {
         enrollment_token_file: Option<PathBuf>,
         #[arg(long)]
         ca_certificate: Option<PathBuf>,
+        /// Directory of local TLS certificate/key profiles (defaults to STATE/tls).
+        #[arg(long)]
+        tls_directory: Option<PathBuf>,
         #[arg(long,default_value_t=5,value_parser=clap::value_parser!(u64).range(1..=300))]
         poll_seconds: u64,
     },
@@ -55,6 +58,9 @@ enum Command {
         config: PathBuf,
         #[arg(long, default_value = "state/standalone/agent.sqlite")]
         database: PathBuf,
+        /// Directory of local TLS profiles, required for private certificates.
+        #[arg(long)]
+        tls_directory: Option<PathBuf>,
         /// Reload versioned JSON every two seconds; invalid updates keep the prior version.
         #[arg(long)]
         watch: bool,
@@ -107,6 +113,7 @@ async fn main() -> Result<()> {
             );
             private_directory(&state)?;
             let store = Store::open(&state.join("controller.sqlite"))?;
+            let _instance = store.lock_instance()?;
             store.set_kind("controller")?;
             if store.needs_bootstrap()? {
                 let password_path =
@@ -134,6 +141,7 @@ async fn main() -> Result<()> {
             state,
             enrollment_token_file,
             ca_certificate,
+            tls_directory,
             poll_seconds,
         } => {
             private_directory(&state)?;
@@ -145,6 +153,7 @@ async fn main() -> Result<()> {
                     node_id,
                     enrollment_token_file,
                     ca_certificate,
+                    tls_directory: Some(tls_directory.unwrap_or_else(|| state.join("tls"))),
                     poll_interval: Duration::from_secs(poll_seconds),
                 },
                 stop,
@@ -154,11 +163,13 @@ async fn main() -> Result<()> {
         Command::Standalone {
             config,
             database,
+            tls_directory,
             watch,
         } => {
             let store = Store::open(&database)?;
+            let _instance = store.lock_instance()?;
             store.set_kind("agent")?;
-            let engine = Engine::new(store);
+            let engine = Engine::with_tls_directory(store, tls_directory);
             let initial = read_config(&config).await?;
             engine.apply(initial).await?;
             tracing::info!(

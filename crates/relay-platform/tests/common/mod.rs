@@ -26,9 +26,11 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         name: "Test rule".into(),
         listen: free_address(),
         protocol,
+        inbound_tls: None,
         targets: vec![Target {
             address: target.to_string(),
             weight: 1,
+            tls: None,
         }],
         balance: Balance::WeightedRoundRobin,
         enabled: true,

@@ -59,6 +59,27 @@ pub struct Target {
     pub address: String,
     #[serde(default = "one")]
     pub weight: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsClient>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsServer {
+    /// Local profile ID, never an arbitrary filename or a private key.
+    pub identity: String,
+    /// When present, require a client certificate signed by this CA profile.
+    pub client_ca: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsClient {
+    pub server_name: String,
+    /// None uses the bundled public root store; Some selects a local CA profile.
+    pub ca: Option<String>,
+    /// Optional client certificate for mutually authenticated TLS.
+    pub identity: Option<String>,
 }
 fn one() -> u16 {
     1
@@ -88,6 +109,8 @@ pub struct Rule {
     pub name: String,
     pub listen: SocketAddr,
     pub protocol: Protocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_tls: Option<TlsServer>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -116,7 +139,20 @@ pub struct Rule {
 }
 
 impl Rule {
+    pub fn uses_tls(&self) -> bool {
+        self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
+    }
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.uses_tls() || self.protocol == Protocol::Tcp,
+            "TLS requires TCP-only forwarding; UDP cannot silently bypass encryption"
+        );
+        if let Some(tls) = &self.inbound_tls {
+            ensure!(
+                identifier(&tls.identity) && tls.client_ca.as_ref().is_none_or(|id| identifier(id)),
+                "invalid inbound TLS profile ID"
+            );
+        }
         for (name, value) in [
             ("id", &self.id),
             ("tenant_id", &self.tenant_id),
@@ -142,7 +178,21 @@ impl Rule {
             "requires 1..32 targets"
         );
         let mut targets = HashSet::new();
+        let encrypted_targets = self.targets[0].tls.is_some();
         for target in &self.targets {
+            ensure!(
+                target.tls.is_some() == encrypted_targets,
+                "all targets in a rule must use the same TLS mode; plaintext downgrade is forbidden"
+            );
+            if let Some(tls) = &target.tls {
+                ensure!(
+                    tls.ca.as_ref().is_none_or(|id| identifier(id))
+                        && tls.identity.as_ref().is_none_or(|id| identifier(id)),
+                    "invalid outbound TLS profile ID"
+                );
+                tokio_rustls::rustls::pki_types::ServerName::try_from(tls.server_name.as_str())
+                    .map_err(|_| anyhow::anyhow!("invalid TLS server name"))?;
+            }
             validate_target(&target.address)?;
             ensure!(
                 target.weight > 0 && target.weight <= 1000,
@@ -302,6 +352,7 @@ pub struct EngineStats {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncRequest {
+    pub ledger_id: String,
     #[serde(default)]
     pub need_config: bool,
     pub applied_revision: u64,
@@ -311,7 +362,37 @@ pub struct SyncRequest {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncResponse {
+    /// Changes on each controller process start; prompts already-running agents
+    /// to replay counters that a restored controller may have forgotten.
+    pub controller_instance: String,
     pub config: Option<NodeConfig>,
     pub acknowledgements: Vec<UsageAck>,
     pub server_time_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct UsageCursor {
+    pub rule_id: String,
+    pub meter_epoch: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcileRequest {
+    pub ledger_id: Option<String>,
+    pub after: Option<UsageCursor>,
+    pub expected_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconcileResponse {
+    pub node_id: String,
+    pub ledger_id: String,
+    pub revision: u64,
+    pub usage: Vec<Usage>,
+    pub next: Option<UsageCursor>,
+    /// The final page carries the configuration for the same revision.
+    pub config: Option<NodeConfig>,
 }

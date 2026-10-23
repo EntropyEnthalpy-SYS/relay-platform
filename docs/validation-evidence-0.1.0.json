@@ -1,0 +1,144 @@
+{
+  "version": "0.1.0-development",
+  "full_goal_complete": false,
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "profile": "release",
+  "binary_sha256": "8c9010bd2e2bbc8dd9bc72c7c835a101d35e437a043cc9f068ceaed24e384208",
+  "source_fingerprint_sha256": "d67faf14457c1f6e23164c6c517e1d22af5e99727124f1dbc8bd6647fd73225f",
+  "automated_tests_passed": 28,
+  "automated_tests_failed": 0,
+  "test_cases": [
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "api_agent_control_outage_restart_and_reconciliation"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "http_auth_role_and_schema_enforcement"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "remote_controller_requires_https_and_never_embeds_credentials"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "enrollment_recovers_after_the_controller_commits_but_response_is_lost"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "tcp_binary_payload_half_close_and_durable_bidirectional_metering"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_preserves_datagrams_empty_payloads_and_peer_isolation"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_config_keeps_old_listener_and_persisted_revision"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "deleting_a_rule_terminates_existing_connections"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_enforces_combined_quota_without_partial_datagrams"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "concurrent_tcp_sessions_cannot_multiply_the_rule_quota"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "ipv6_and_dns_targets_transfer_real_bytes"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "source_acl_denies_before_any_billable_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "shared_rate_limit_includes_both_directions_and_declares_burst"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_session_limit_and_idle_reclamation_are_real"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "weighted_target_selection_and_connect_failure_fallback"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_meter_transaction_never_forwards_uncommitted_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "dual_protocol_listener_and_ipv6_udp_are_independently_verified"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "source_hash_is_stable_and_least_connections_uses_active_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "quota_is_shared_across_directions_and_survives_restart"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "periods_do_not_reset_on_reapply_and_old_periods_cannot_spend"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "exhausted_expired_and_disabled_rules_reject_empty_datagrams_too"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "controller_replay_is_idempotent_and_counter_regression_is_rejected"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "authorization_is_enforced_at_store_boundary_and_sessions_revoke"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "enrollment_is_single_use_and_configuration_writes_are_optimistic"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "consistent_backup_restores_config_counters_and_private_permissions"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "model_rejects_unknown_options_invalid_targets_and_listener_duplicates"
+    }
+  ],
+  "format_check": "passed",
+  "clippy_warnings_as_errors": "passed",
+  "javascript_syntax": "passed",
+  "python_syntax": "passed",
+  "cli_smoke": {
+    "validate": "passed",
+    "probe": {
+      "tcp": "verified",
+      "udp": "verified",
+      "bytes_each_direction_per_protocol": 44
+    },
+    "durable_bytes": 176,
+    "backup_restore": "identical",
+    "child_processes_stopped": true
+  },
+  "browser_visual_verified": false,
+  "linux_deployment_verified": false
+}

@@ -22,8 +22,19 @@ fn rejection<T>(result: anyhow::Result<T>) -> u16 {
         .unwrap()
         .status
 }
-fn sync(usage: Vec<Usage>) -> SyncRequest {
+fn sync(db: &Store, node: &str, usage: Vec<Usage>) -> SyncRequest {
     SyncRequest {
+        ledger_id: db
+            .reconcile(
+                node,
+                ReconcileRequest {
+                    ledger_id: None,
+                    after: None,
+                    expected_revision: None,
+                },
+            )
+            .unwrap()
+            .ledger_id,
         need_config: false,
         applied_revision: 0,
         apply_error: None,
@@ -152,20 +163,26 @@ fn controller_replay_is_idempotent_and_counter_regression_is_rejected() {
         upload_bytes: 1_073_741_824,
         download_bytes: 17,
     };
-    db.sync(&node.id, sync(vec![u.clone()])).unwrap();
-    db.sync(&node.id, sync(vec![u.clone()])).unwrap();
+    db.sync(&node.id, sync(&db, &node.id, vec![u.clone()]))
+        .unwrap();
+    db.sync(&node.id, sync(&db, &node.id, vec![u.clone()]))
+        .unwrap();
     let records = db.reported_usage(&admin).unwrap();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["upload_bytes"], 1_073_741_824u64);
     let mut changed = u.clone();
     changed.upload_bytes += 1;
     assert_eq!(
-        rejection(db.sync(&node.id, sync(vec![changed.clone()]))),
+        rejection(db.sync(&node.id, sync(&db, &node.id, vec![changed.clone()]))),
         409
     );
     changed.sequence = 2;
-    db.sync(&node.id, sync(vec![changed])).unwrap();
-    assert_eq!(rejection(db.sync(&node.id, sync(vec![u]))), 409);
+    db.sync(&node.id, sync(&db, &node.id, vec![changed]))
+        .unwrap();
+    assert_eq!(
+        rejection(db.sync(&node.id, sync(&db, &node.id, vec![u]))),
+        409
+    );
     let unknown = Usage {
         rule_id: "someone-elses-rule".into(),
         meter_epoch: "one".into(),
@@ -173,7 +190,10 @@ fn controller_replay_is_idempotent_and_counter_regression_is_rejected() {
         upload_bytes: 1,
         download_bytes: 0,
     };
-    assert_eq!(rejection(db.sync(&node.id, sync(vec![unknown]))), 403);
+    assert_eq!(
+        rejection(db.sync(&node.id, sync(&db, &node.id, vec![unknown]))),
+        403
+    );
 }
 
 #[test]
@@ -242,7 +262,7 @@ fn enrollment_is_single_use_and_configuration_writes_are_optimistic() {
         upload_bytes: 9,
         download_bytes: 0,
     };
-    db.sync(&node.id, sync(vec![u])).unwrap();
+    db.sync(&node.id, sync(&db, &node.id, vec![u])).unwrap();
     assert_eq!(db.reported_usage(&admin).unwrap()[0]["upload_bytes"], 9);
 }
 

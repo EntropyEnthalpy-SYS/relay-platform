@@ -15,6 +15,7 @@ pub struct AgentOptions {
     pub node_id: String,
     pub enrollment_token_file: Option<PathBuf>,
     pub ca_certificate: Option<PathBuf>,
+    pub tls_directory: Option<PathBuf>,
     pub poll_interval: Duration,
 }
 #[derive(Serialize, Deserialize)]
@@ -64,6 +65,7 @@ async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> R
 }
 
 pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -> Result<()> {
+    let _instance = store.lock_instance()?;
     store.set_kind("agent")?;
     let base = controller_url(&options.controller)?;
     let mut builder = Client::builder()
@@ -121,15 +123,66 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         credential.pending_enrollment_token = None;
         store.set_metadata("agent_credential", &serde_json::to_string(&credential)?)?;
     }
-    let engine = Arc::new(Engine::new(store.clone()));
+    let engine = Arc::new(Engine::with_tls_directory(
+        store.clone(),
+        options.tls_directory,
+    ));
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
+    let mut reconciled = false;
+    let mut controller_instance: Option<String> = None;
     let result: Result<()> = async {
         loop {
+            if !reconciled {
+                let result = tokio::select! {
+                    biased;
+                    _ = stop.cancelled() => break,
+                    result = reconcile(&client, &base, &credential, &store, active) => result,
+                };
+                match result {
+                    Ok(config) => {
+                        reconciled = true;
+                        match engine.apply(config).await {
+                            Ok(()) => {
+                                store.finish_reconcile()?;
+                                active = true;
+                                apply_error = None;
+                                tracing::info!("controller ledger reconciled before configuration activation");
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "reconciled configuration cannot be activated; recovery remains pending");
+                                apply_error = Some(error.to_string().chars().take(512).collect());
+                            }
+                        }
+                    }
+                    Err(error) if error.is::<ReconcileRetry>() => {
+                        if !connection_failed {
+                            tracing::warn!(%error, "reconciliation pending; only ordinary restarts may use cached configuration");
+                        }
+                        connection_failed = true;
+                    }
+                    Err(error) => return Err(error.context("ledger reconciliation failed; forwarding stopped")),
+                }
+                if !reconciled {
+                    if !active && !store.recovery_required()? && let Some(cached) = store.agent_config()? {
+                        ensure!(cached.node_id == credential.node_id, "cached configuration belongs to another node");
+                        engine.apply(cached).await.context("cannot restore last successful configuration")?;
+                        active = true;
+                        tracing::info!("ordinary offline restart restored local durable configuration");
+                    }
+                    tokio::select! {
+                        biased;
+                        _ = stop.cancelled() => break,
+                        _ = tokio::time::sleep(options.poll_interval) => {},
+                    }
+                    continue;
+                }
+            }
             let db = store.clone();
             let usage = tokio::task::spawn_blocking(move || db.agent_usage(true)).await??;
             let request = SyncRequest {
+                ledger_id: store.metadata("ledger_id")?.context("missing reconciled ledger identity")?,
                 need_config: !active,
                 applied_revision: engine.revision().await,
                 apply_error: apply_error.clone(),
@@ -151,6 +204,11 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 Ok(response) if response.status().is_success() => {
                     match bounded_json::<SyncResponse>(response).await {
                         Ok(synced) => {
+                            ensure!(identifier(&synced.controller_instance), "invalid controller instance identity");
+                            if controller_instance.as_ref().is_some_and(|previous|previous != &synced.controller_instance) {
+                                reconciled = false;
+                            }
+                            controller_instance = Some(synced.controller_instance);
                             let db = store.clone();
                             tokio::task::spawn_blocking(move || db.acknowledge(&synced.acknowledgements)).await??;
                             if let Some(config) = synced.config {
@@ -159,11 +217,11 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                     ensure!(config.revision >= cached.revision, "controller is behind the local durable configuration; reconcile restored state");
                                 }
                                 match engine.apply(config).await {
-                                    Ok(()) => { active = true; apply_error = None; }
+                                    Ok(()) => { store.finish_reconcile()?; active = true; apply_error = None; }
                                     Err(error) => {
                                         let message = error.to_string();
                                         tracing::warn!(%message, "configuration rejected; retaining previous revision");
-                                        apply_error = Some(message.chars().take(2048).collect());
+                                        apply_error = Some(message.chars().take(512).collect());
                                     }
                                 }
                             }
@@ -188,7 +246,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     connection_failed = true;
                 }
             }
-            if !active && let Some(cached) = store.agent_config()? {
+            if !active && !store.recovery_required()? && let Some(cached) = store.agent_config()? {
                 ensure!(cached.node_id == credential.node_id, "cached configuration belongs to another node");
                 engine.apply(cached).await.context("cannot restore last successful configuration")?;
                 active = true;
@@ -204,4 +262,122 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     }.await;
     engine.shutdown().await?;
     result
+}
+
+#[derive(Debug)]
+struct ReconcileRetry(String);
+impl std::fmt::Display for ReconcileRetry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ReconcileRetry {}
+
+async fn reconcile(
+    client: &Client,
+    base: &Url,
+    credential: &Credential,
+    store: &Store,
+    active: bool,
+) -> Result<NodeConfig> {
+    let db = store.clone();
+    tokio::task::spawn_blocking(move || db.begin_reconcile()).await??;
+    let mut ledger_id = store.metadata("ledger_id")?;
+    let mut after: Option<UsageCursor> = None;
+    let mut revision = None;
+    // Bound a faulty controller's pagination while retaining up to a million periods.
+    for _ in 0..4096 {
+        let response = client
+            .post(base.join("api/v1/agent/reconcile")?)
+            .bearer_auth(&credential.token)
+            .json(&ReconcileRequest {
+                ledger_id: ledger_id.clone(),
+                after: after.clone(),
+                expected_revision: revision,
+            })
+            .send()
+            .await
+            .map_err(|error| ReconcileRetry(format!("checkpoint request failed: {error}")))?;
+        let status = response.status();
+        if status.is_server_error()
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::PRECONDITION_FAILED
+        {
+            return Err(ReconcileRetry(format!(
+                "checkpoint temporarily unavailable: HTTP {status}"
+            ))
+            .into());
+        }
+        ensure!(
+            status.is_success(),
+            "controller rejected reconciliation with HTTP {status}"
+        );
+        let page: ReconcileResponse = bounded_json(response)
+            .await
+            .map_err(|error| ReconcileRetry(format!("incomplete checkpoint response: {error}")))?;
+        ensure!(
+            page.node_id == credential.node_id,
+            "checkpoint belongs to another node"
+        );
+        ensure!(
+            ledger_id.as_ref().is_none_or(|id| id == &page.ledger_id),
+            "checkpoint ledger identity changed"
+        );
+        ensure!(
+            revision.is_none_or(|r| r == page.revision),
+            "checkpoint configuration revision changed"
+        );
+        if let Some(cached) = store.agent_config()? {
+            ensure!(
+                page.revision >= cached.revision,
+                "controller is behind the local durable configuration; explicit recovery is required"
+            );
+        }
+        let first = page.usage.first().map(|u| UsageCursor {
+            rule_id: u.rule_id.clone(),
+            meter_epoch: u.meter_epoch.clone(),
+        });
+        ensure!(
+            after
+                .as_ref()
+                .is_none_or(|previous| first.as_ref().is_none_or(|key| key > previous)),
+            "checkpoint pagination did not advance"
+        );
+        if let Some(next) = &page.next {
+            let last = page
+                .usage
+                .last()
+                .context("non-final checkpoint page is empty")?;
+            ensure!(
+                next.rule_id == last.rule_id
+                    && next.meter_epoch == last.meter_epoch
+                    && page.config.is_none(),
+                "invalid checkpoint continuation"
+            );
+        } else {
+            let config = page
+                .config
+                .as_ref()
+                .context("final checkpoint lacks configuration")?;
+            ensure!(
+                config.node_id == credential.node_id && config.revision == page.revision,
+                "checkpoint configuration does not match its revision"
+            );
+        }
+        if !active {
+            // Once a checkpoint starts merging, an interrupted walk must not reopen
+            // cached listeners before all remotely confirmed counters are known.
+            store.set_metadata("recovery_required", "true")?;
+        }
+        let db = store.clone();
+        let checkpoint = page.clone();
+        tokio::task::spawn_blocking(move || db.merge_checkpoint(&checkpoint, !active)).await??;
+        ledger_id = Some(page.ledger_id);
+        revision = Some(page.revision);
+        after = page.next;
+        if after.is_none() {
+            return page.config.context("final checkpoint lacks configuration");
+        }
+    }
+    bail!("controller checkpoint exceeds the supported period limit")
 }

@@ -127,7 +127,21 @@ async fn routing_updates_preserve_existing_connections_and_shutdown_cancels_all_
     assert_eq!(&bytes, b"alive");
     c.revision = 3;
     c.rules[0].name = "third-generation".into();
+    c.rules[0].targets.push(Target {
+        address: first.address.to_string(),
+        weight: 1,
+        tls: None,
+    });
     engine.apply(c).await.unwrap();
+    old.write_all(b"alive").await.unwrap();
+    timeout(Duration::from_secs(2), old.read_exact(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        &bytes, b"alive",
+        "adding a plaintext target must not cancel existing routing generations"
+    );
     timeout(Duration::from_secs(2), engine.shutdown())
         .await
         .expect("shutdown leaked an old routing generation")
@@ -335,10 +349,12 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
         Target {
             address: a.address.to_string(),
             weight: 2,
+            tls: None,
         },
         Target {
             address: b.address.to_string(),
             weight: 1,
+            tls: None,
         },
     ];
     let address = r.listen;
@@ -360,10 +376,12 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
         Target {
             address: free_address().to_string(),
             weight: 1,
+            tls: None,
         },
         Target {
             address: b.address.to_string(),
             weight: 1,
+            tls: None,
         },
     ];
     engine.apply(c).await.unwrap();
@@ -438,6 +456,7 @@ async fn source_hash_is_stable_and_least_connections_uses_active_sessions() {
     r.targets.push(Target {
         address: b.address.to_string(),
         weight: 1,
+        tls: None,
     });
     r.balance = Balance::SourceHash;
     let address = r.listen;

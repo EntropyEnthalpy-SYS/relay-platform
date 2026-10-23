@@ -1,6 +1,7 @@
 use crate::{
     model::*,
     store::{Admission, Store},
+    transport::{BoxStream, PreparedTls},
 };
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,7 @@ use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
+    path::PathBuf,
     sync::{
         Arc, Mutex as StdMutex,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -243,13 +245,14 @@ impl Drop for TargetGuard {
 
 struct RuntimeRule {
     spec: Rule,
+    tls: PreparedTls,
     shared: Arc<SharedRule>,
     cancel: CancellationToken,
     cursor: AtomicU64,
     target_active: Vec<Arc<AtomicUsize>>,
 }
 impl RuntimeRule {
-    fn new(spec: Rule, shared: Option<Arc<SharedRule>>) -> Self {
+    fn new(spec: Rule, shared: Option<Arc<SharedRule>>, tls: PreparedTls) -> Self {
         let target_active = spec
             .targets
             .iter()
@@ -258,6 +261,7 @@ impl RuntimeRule {
         let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(spec.rate_bytes_per_sec)));
         Self {
             spec,
+            tls,
             shared,
             cancel: CancellationToken::new(),
             cursor: AtomicU64::new(0),
@@ -342,6 +346,7 @@ struct EngineInner {
 
 pub struct Engine {
     store: Store,
+    tls_directory: Option<PathBuf>,
     meter: Meter,
     inner: Mutex<EngineInner>,
     stats: Arc<Counters>,
@@ -349,7 +354,11 @@ pub struct Engine {
 }
 impl Engine {
     pub fn new(store: Store) -> Self {
+        Self::with_tls_directory(store, None)
+    }
+    pub fn with_tls_directory(store: Store, tls_directory: Option<PathBuf>) -> Self {
         Self {
+            tls_directory,
             meter: Meter::new(store.clone()),
             store,
             inner: Mutex::new(EngineInner::default()),
@@ -389,23 +398,32 @@ impl Engine {
         let mut rules = HashMap::new();
         let mut staged = HashMap::new();
         for spec in config.rules.iter().filter(|r| r.enabled) {
-            let runtime =
-                if let Some(old) = inner.rules.get(&spec.id).filter(|old| old.spec == *spec) {
-                    old.clone()
-                } else {
-                    let mut new = RuntimeRule::new(
-                        spec.clone(),
-                        inner.rules.get(&spec.id).map(|old| old.shared.clone()),
-                    );
-                    if let Some(old) = inner
-                        .rules
-                        .get(&spec.id)
-                        .filter(|old| !security_policy_changed(&old.spec, spec))
-                    {
-                        new.cancel = old.cancel.clone();
-                    }
-                    Arc::new(new)
-                };
+            let runtime = if let Some(old) = inner
+                .rules
+                .get(&spec.id)
+                .filter(|old| old.spec == *spec && !spec.uses_tls())
+            {
+                old.clone()
+            } else {
+                let tls_spec = spec.clone();
+                let directory = self.tls_directory.clone();
+                let tls = tokio::task::spawn_blocking(move || {
+                    PreparedTls::load(&tls_spec, directory.as_deref())
+                })
+                .await??;
+                let mut new = RuntimeRule::new(
+                    spec.clone(),
+                    inner.rules.get(&spec.id).map(|old| old.shared.clone()),
+                    tls,
+                );
+                if let Some(old) = inner.rules.get(&spec.id).filter(|old| {
+                    !security_policy_changed(&old.spec, spec)
+                        && old.tls.fingerprint == new.tls.fingerprint
+                }) {
+                    new.cancel = old.cancel.clone();
+                }
+                Arc::new(new)
+            };
             rules.insert(spec.id.clone(), runtime.clone());
             for tcp in [true, false] {
                 if (tcp && !spec.protocol.tcp()) || (!tcp && !spec.protocol.udp()) {
@@ -442,7 +460,12 @@ impl Engine {
         for (id, old) in &inner.rules {
             match rules.get(id) {
                 None => old.cancel.cancel(),
-                Some(new) if security_policy_changed(&old.spec, &new.spec) => old.cancel.cancel(),
+                Some(new)
+                    if security_policy_changed(&old.spec, &new.spec)
+                        || old.tls.fingerprint != new.tls.fingerprint =>
+                {
+                    old.cancel.cancel()
+                }
                 _ => {}
             }
         }
@@ -521,7 +544,18 @@ impl Engine {
 }
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
-    old.meter_epoch != new.meter_epoch
+    old.inbound_tls != new.inbound_tls
+        || old
+            .targets
+            .iter()
+            .filter_map(|t| t.tls.as_ref())
+            .collect::<Vec<_>>()
+            != new
+                .targets
+                .iter()
+                .filter_map(|t| t.tls.as_ref())
+                .collect::<Vec<_>>()
+        || old.meter_epoch != new.meter_epoch
         || old.protocol != new.protocol
         || old.allow_sources != new.allow_sources
         || old.deny_sources != new.deny_sources
@@ -575,15 +609,16 @@ async fn tcp_listener(
     }
 }
 
-async fn connect_tcp(rule: &RuntimeRule, peer: SocketAddr) -> Result<(TcpStream, TargetGuard)> {
+async fn connect_tcp(rule: &RuntimeRule, peer: SocketAddr) -> Result<(BoxStream, TargetGuard)> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     let mut last = None;
     for index in rule.order(peer) {
         let guard = rule.target_guard(index);
-        match timeout_at(
-            deadline,
-            TcpStream::connect(&rule.spec.targets[index].address),
-        )
+        match timeout_at(deadline, async {
+            let stream = TcpStream::connect(&rule.spec.targets[index].address).await?;
+            stream.set_nodelay(true)?;
+            rule.tls.connect(index, stream).await
+        })
         .await
         {
             Ok(Ok(stream)) => return Ok((stream, guard)),
@@ -595,18 +630,23 @@ async fn connect_tcp(rule: &RuntimeRule, peer: SocketAddr) -> Result<(TcpStream,
 }
 
 async fn tcp_session(
-    mut client: TcpStream,
+    client: TcpStream,
     peer: SocketAddr,
     rule: Arc<RuntimeRule>,
     meter: Meter,
     stats: Arc<Counters>,
 ) -> Result<()> {
-    let (mut target, _target_guard) = connect_tcp(&rule, peer).await?;
     client.set_nodelay(true)?;
-    target.set_nodelay(true)?;
+    let client = timeout_at(
+        Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms),
+        rule.tls.accept(client),
+    )
+    .await
+    .context("inbound TLS handshake timed out")??;
+    let (target, _target_guard) = connect_tcp(&rule, peer).await?;
     let activity = Arc::new(StdMutex::new(Instant::now()));
-    let (cr, cw) = client.split();
-    let (tr, tw) = target.split();
+    let (cr, cw) = tokio::io::split(client);
+    let (tr, tw) = tokio::io::split(target);
     let forward = async {
         tokio::try_join!(
             copy_direction(cr, tw, &rule, &meter, &stats, &activity, true),
@@ -664,6 +704,9 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 return Err(io::Error::from(io::ErrorKind::WriteZero).into());
             }
             written += n;
+            // Tokio-rustls buffers writes. Flush before waiting for the next
+            // application read or a small request/response can deadlock.
+            writer.flush().await?;
             if upload {
                 stats
                     .forwarded_upload_bytes

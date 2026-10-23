@@ -56,6 +56,7 @@ fn options(origin: &str, node: &str, token: Option<PathBuf>) -> AgentOptions {
         node_id: node.into(),
         enrollment_token_file: token,
         ca_certificate: None,
+        tls_directory: None,
         poll_interval: Duration::from_millis(50),
     }
 }
@@ -390,4 +391,249 @@ async fn enrollment_recovers_after_the_controller_commits_but_response_is_lost()
         .unwrap()
         .unwrap();
     stop_server(second_server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restored_backup_waits_for_controller_and_cannot_spend_confirmed_quota_twice() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (node, token) = control
+        .create_node(&admin, "default", "backup recovery")
+        .unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let address = s.address;
+    let origin = format!("http://{address}");
+    let echo = tcp_echo().await;
+    let mut r = rule(echo.address, Protocol::Tcp);
+    r.quota_bytes = Some(100);
+    let forwarding = r.listen;
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let token_path = temp.path().join("enrollment.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("live.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        local.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    assert_eq!(exchange(forwarding, b"0123456789").await, b"0123456789");
+    wait_usage(&control, &admin, 20).await;
+    let until = Instant::now() + Duration::from_secs(3);
+    while !local.agent_usage(true).unwrap().is_empty() {
+        assert!(Instant::now() < until);
+        sleep(Duration::from_millis(10)).await;
+    }
+    let backup_path = temp.path().join("snapshot.db");
+    local.backup(&backup_path).unwrap();
+    let payload = vec![0x57; 40];
+    assert_eq!(exchange(forwarding, &payload).await, payload);
+    wait_usage(&control, &admin, 100).await;
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(s).await;
+    let restored = Store::open(&backup_path).unwrap();
+    assert_eq!(restored.agent_usage(false).unwrap()[0].upload_bytes, 10);
+    assert!(restored.recovery_required().unwrap());
+    let stop = CancellationToken::new();
+    let recovering = tokio::spawn(agent::run(
+        restored.clone(),
+        options(&origin, &node.id, None),
+        stop.clone(),
+    ));
+    sleep(Duration::from_millis(200)).await;
+    assert!(!recovering.is_finished());
+    assert!(
+        TcpStream::connect(forwarding).await.is_err(),
+        "a restored backup must stay closed while the controller is offline"
+    );
+    let s = server(control.clone(), address).await;
+    wait_listening(forwarding).await;
+    assert!(exchange(forwarding, b"must-not-pass").await.is_empty());
+    let used = restored.agent_usage(false).unwrap();
+    assert_eq!(used[0].upload_bytes + used[0].download_bytes, 100);
+    assert!(!restored.recovery_required().unwrap());
+    stop.cancel();
+    timeout(Duration::from_secs(3), recovering)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn running_agent_republishes_acknowledged_counters_after_controller_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (node, token) = control
+        .create_node(&admin, "default", "control restore")
+        .unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let address = s.address;
+    let origin = format!("http://{address}");
+    let echo = tcp_echo().await;
+    let r = rule(echo.address, Protocol::Tcp);
+    let forwarding = r.listen;
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        local.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    let snapshot = temp.path().join("old-controller.db");
+    control.backup(&snapshot).unwrap();
+    assert_eq!(
+        exchange(forwarding, b"already-confirmed").await,
+        b"already-confirmed"
+    );
+    wait_usage(&control, &admin, 34).await;
+    sleep(Duration::from_millis(100)).await;
+    assert!(local.agent_usage(true).unwrap().is_empty());
+    stop_server(s).await;
+    let older = Store::open(&snapshot).unwrap();
+    assert!(older.reported_usage(&admin).unwrap().is_empty());
+    let s = server(older.clone(), address).await;
+    wait_usage(&older, &admin, 34).await;
+    assert_eq!(
+        exchange(forwarding, b"after-restore").await,
+        b"after-restore"
+    );
+    wait_usage(&older, &admin, 60).await;
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let control_path = temp.path().join("controller.db");
+    let control = Store::open(&control_path).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (node, token) = control
+        .create_node(&admin, "default", "staged recovery")
+        .unwrap();
+    let credential = relay_platform::store::secret();
+    control.enroll(&node.id, &token, &credential).unwrap();
+    let echo = tcp_echo().await;
+    let r = rule(echo.address, Protocol::Tcp);
+    let old_listener = r.listen;
+    let cached = control
+        .set_config(&admin, &node.id, 0, vec![r.clone()])
+        .unwrap();
+    let mut raw = rusqlite::Connection::open(&control_path).unwrap();
+    let tx = raw.transaction().unwrap();
+    for n in 0..257 {
+        let epoch = format!("history-{n:03}");
+        tx.execute(
+            "INSERT INTO rule_epochs(rule_id,meter_epoch) VALUES(?1,?2)",
+            rusqlite::params![r.id, epoch],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO usage VALUES(?1,?2,?3,1,2,3,0)",
+            rusqlite::params![node.id, r.id, epoch],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    let blocker = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut next_rule = r;
+    next_rule.listen = blocker.local_addr().unwrap();
+    let new_listener = next_rule.listen;
+    control
+        .set_config(&admin, &node.id, 1, vec![next_rule])
+        .unwrap();
+    let interrupted = Arc::new(AtomicBool::new(true));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let gate = interrupted.clone();
+    let requests = calls.clone();
+    let app = api::router(AppState::new(control.clone())).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let gate = gate.clone();
+            let requests = requests.clone();
+            async move {
+                if request.uri().path() == "/api/v1/agent/reconcile"
+                    && requests.fetch_add(1, Ordering::SeqCst) > 0
+                    && gate.load(Ordering::SeqCst)
+                {
+                    return axum::response::IntoResponse::into_response(
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    );
+                }
+                next.run(request).await
+            }
+        },
+    ));
+    let s = server_with_router(app, "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let live = Store::open(&temp.path().join("live.db")).unwrap();
+    live.save_agent_config(&cached).unwrap();
+    live.set_metadata(
+        "agent_credential",
+        &json!({"controller":format!("{origin}/"),"node_id":node.id,"token":credential})
+            .to_string(),
+    )
+    .unwrap();
+    let backup_path = temp.path().join("recovered.db");
+    live.backup(&backup_path).unwrap();
+    let restored = Store::open(&backup_path).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        restored.clone(),
+        options(&origin, &node.id, None),
+        stop.clone(),
+    ));
+    let until = Instant::now() + Duration::from_secs(5);
+    while calls.load(Ordering::SeqCst) < 3 {
+        assert!(Instant::now() < until);
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert!(restored.recovery_required().unwrap());
+    assert_eq!(restored.agent_usage(false).unwrap().len(), 256);
+    assert!(TcpStream::connect(old_listener).await.is_err());
+    interrupted.store(false, Ordering::SeqCst);
+    let until = Instant::now() + Duration::from_secs(5);
+    while control.nodes(&admin).unwrap()[0].apply_error.is_none() {
+        assert!(Instant::now() < until);
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert!(restored.recovery_required().unwrap());
+    assert_eq!(restored.agent_usage(false).unwrap().len(), 257);
+    assert!(
+        TcpStream::connect(old_listener).await.is_err(),
+        "a failed new bind must not release a restored old listener"
+    );
+    drop(blocker);
+    wait_applied(&control, &admin, 2).await;
+    assert!(!restored.recovery_required().unwrap());
+    assert_eq!(exchange(new_listener, b"recovered").await, b"recovered");
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(s).await;
 }

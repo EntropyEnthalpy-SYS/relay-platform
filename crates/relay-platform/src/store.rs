@@ -7,11 +7,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fmt, fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
 use uuid::Uuid;
+
+mod recovery;
 
 #[derive(Debug)]
 pub struct Rejection {
@@ -33,7 +35,7 @@ pub fn reject<T>(status: u16, message: impl Into<String>) -> Result<T> {
 }
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>);
+pub struct Store(Arc<Mutex<Connection>>, Arc<PathBuf>);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -162,18 +164,38 @@ impl Store {
         }
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        ensure!(version <= 2, "database schema newer than this binary");
+        if version == 0 {
+            let tables: u64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0))?;
+            ensure!(tables == 0, "refusing to initialize an unrelated database");
+        } else {
+            let expected: u64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('metadata','nodes','agent_meters','config_history')", [], |r| r.get(0))?;
+            ensure!(expected == 4, "not a Relay database");
+        }
         conn.execute_batch(
             "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
         )?;
-        let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 1, "database schema newer than this binary");
         if version == 0 {
             let tx = conn.transaction()?;
             tx.execute_batch(include_str!("schema.sql"))?;
             tx.execute_batch("PRAGMA user_version=1")?;
             tx.commit()?;
         }
-        Ok(Self(Arc::new(Mutex::new(conn))))
+        if version < 2 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(
+                "ALTER TABLE nodes ADD COLUMN ledger_id TEXT;
+                INSERT OR REPLACE INTO metadata(key,value)
+                  SELECT 'recovery_required','true' FROM metadata WHERE key='agent_credential';
+                PRAGMA user_version=2;",
+            )?;
+            tx.commit()?;
+        }
+        Ok(Self(
+            Arc::new(Mutex::new(conn)),
+            Arc::new(fs::canonicalize(path)?),
+        ))
     }
 
     pub fn set_kind(&self, kind: &str) -> Result<()> {
@@ -587,6 +609,14 @@ impl Store {
         }
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        let ledger: Option<String> =
+            tx.query_row("SELECT ledger_id FROM nodes WHERE id=?1", [node], |r| {
+                r.get(0)
+            })?;
+        if ledger.as_deref() != Some(request.ledger_id.as_str()) || !identifier(&request.ledger_id)
+        {
+            return reject(409, "ledger identity mismatch; reconcile before syncing");
+        }
         let desired: u64 = tx.query_row(
             "SELECT desired_revision FROM nodes WHERE id=?1",
             [node],
@@ -645,6 +675,7 @@ impl Store {
         };
         tx.commit()?;
         Ok(SyncResponse {
+            controller_instance: "store-direct".into(),
             config,
             acknowledgements,
             server_time_ms: now_ms(),
@@ -768,7 +799,7 @@ impl Store {
     }
     pub fn agent_usage(&self, unsynced_only: bool) -> Result<Vec<Usage>> {
         let conn = self.0.lock().unwrap();
-        let mut q=conn.prepare("SELECT rule_id,meter_epoch,sequence,upload_bytes,download_bytes FROM agent_meters WHERE sequence>0 AND (?1=0 OR sequence>ack_sequence) ORDER BY rule_id,meter_epoch LIMIT 1024")?;
+        let mut q=conn.prepare("SELECT rule_id,meter_epoch,sequence,upload_bytes,download_bytes FROM agent_meters WHERE sequence>0 AND (?1=0 OR sequence>ack_sequence) ORDER BY rule_id,meter_epoch LIMIT CASE WHEN ?1 THEN 1024 ELSE -1 END")?;
         Ok(q.query_map([unsynced_only], |r| {
             Ok(Usage {
                 rule_id: r.get(0)?,
@@ -805,6 +836,15 @@ impl Store {
         let backup = rusqlite::backup::Backup::new(&src, &mut dest)?;
         backup.run_to_completion(256, Duration::from_millis(10), None)?;
         drop(backup);
+        let managed_agent: bool = dest.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='agent_credential')",
+            [],
+            |r| r.get(0),
+        )?;
+        if managed_agent {
+            dest.execute("INSERT INTO metadata(key,value) VALUES('recovery_required','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
+        }
+        dest.execute("INSERT INTO metadata(key,value) VALUES('backup_created_at_ms',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [now_ms().to_string()])?;
         drop(dest);
         fs::File::open(destination)?.sync_all()?;
         Ok(())

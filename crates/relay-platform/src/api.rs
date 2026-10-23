@@ -22,6 +22,7 @@ use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
+    instance: String,
     login_attempts: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     login_slots: Arc<Semaphore>,
 }
@@ -29,6 +30,7 @@ impl AppState {
     pub fn new(store: Store) -> Self {
         Self {
             store,
+            instance: uuid::Uuid::new_v4().to_string(),
             login_attempts: Arc::new(Mutex::new(HashMap::new())),
             login_slots: Arc::new(Semaphore::new(4)),
         }
@@ -153,6 +155,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/agent/enroll", post(enroll))
+        .route("/api/v1/agent/reconcile", post(reconcile))
         .route("/api/v1/agent/sync", post(sync))
         .route(
             "/",
@@ -439,16 +442,33 @@ async fn enroll(
     .await?;
     Ok(Json(EnrollmentResponse { enrolled: true }))
 }
+async fn reconcile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<ReconcileRequest>,
+) -> ApiResult<ReconcileResponse> {
+    let token = bearer(&headers)?;
+    Ok(Json(
+        database(state.store, move |db| {
+            let node = db.authenticate_node(&token)?;
+            db.reconcile(&node, input)
+        })
+        .await?,
+    ))
+}
 async fn sync(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<SyncRequest>,
 ) -> ApiResult<SyncResponse> {
     let token = bearer(&headers)?;
+    let instance = state.instance;
     Ok(Json(
         database(state.store, move |db| {
             let node = db.authenticate_node(&token)?;
-            db.sync(&node, input)
+            let mut result = db.sync(&node, input)?;
+            result.controller_instance = instance;
+            Ok(result)
         })
         .await?,
     ))
@@ -456,7 +476,7 @@ async fn sync(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["tcp","udp","ipv4","ipv6","dns-targets","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation"],
-        "pending":["tls-data-transport","websocket","mptcp","multipath-aggregation","global-user-budgets","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
+        "available":["tcp","udp","ipv4","ipv6","dns-targets","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation"],
+        "pending":["websocket","mptcp","multipath-aggregation","global-user-budgets","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
 }
