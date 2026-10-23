@@ -123,6 +123,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         credential.pending_enrollment_token = None;
         store.set_metadata("agent_credential", &serde_json::to_string(&credential)?)?;
     }
+    let budget_run = store.start_budget_run()?;
     let engine = Arc::new(Engine::with_tls_directory(
         store.clone(),
         options.tls_directory,
@@ -180,8 +181,16 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 }
             }
             let db = store.clone();
-            let usage = tokio::task::spawn_blocking(move || db.agent_usage(true)).await??;
+            let run=budget_run.clone();
+            let stats=engine.stats();let idle=stats.active_tcp==0&&stats.active_udp==0;
+            let (usage,budget)=tokio::task::spawn_blocking(move || {
+                if idle {db.seal_budget_run(&run)?;}
+                Ok::<_,anyhow::Error>((db.agent_usage(true)?,db.budget_outbox(&run,!idle)?))
+            }).await??;
+            let requested_budget = !budget.requests.is_empty();
+            let mut granted_budget = false;
             let request = SyncRequest {
+                budget: Some(budget),
                 ledger_id: store.metadata("ledger_id")?.context("missing reconciled ledger identity")?,
                 need_config: !active,
                 applied_revision: engine.revision().await,
@@ -209,8 +218,10 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                 reconciled = false;
                             }
                             controller_instance = Some(synced.controller_instance);
+                            granted_budget = synced.budget.as_ref().is_some_and(|reply| !reply.grants.is_empty());
                             let db = store.clone();
-                            tokio::task::spawn_blocking(move || db.acknowledge(&synced.acknowledgements)).await??;
+                            let run=budget_run.clone();
+                            tokio::task::spawn_blocking(move || {db.acknowledge(&synced.acknowledgements)?;if let Some(reply)=synced.budget {db.accept_budget_reply(&run,reply)?;}Ok::<_,anyhow::Error>(())}).await??;
                             if let Some(config) = synced.config {
                                 ensure!(config.node_id == credential.node_id, "controller sent a different node identity");
                                 if let Some(cached) = store.agent_config()? {
@@ -252,15 +263,57 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 active = true;
                 tracing::info!("restored last successful local configuration");
             }
+            let interval=if store.agent_config()?.is_some_and(|c|c.rules.iter().any(|r|!r.budget_ids.is_empty())) {options.poll_interval.min(Duration::from_millis(500))}else{options.poll_interval};
+            // Coalesce successful refills briefly. Exhaustion and outages must
+            // back off instead of turning each waiting payload into an HTTP poll.
+            let refill_delay = Duration::from_millis(if connection_failed {500} else if requested_budget && !granted_budget {100} else {2});
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
-                _ = tokio::time::sleep(options.poll_interval) => {},
+                _ = tokio::time::sleep(interval) => {},
+                _ = async {store.budget_refill_needed().await;tokio::time::sleep(refill_delay).await;} => {},
             }
         }
         Ok(())
     }.await;
     engine.shutdown().await?;
+    store.seal_budget_run(&budget_run)?;
+    let budget = store.budget_outbox(&budget_run, false)?;
+    let usage = store.agent_usage(true)?;
+    if !budget.reports.is_empty() || !usage.is_empty() {
+        let cleanup = async {
+            let request = SyncRequest {
+                budget: Some(budget),
+                ledger_id: store.metadata("ledger_id")?.context("missing ledger")?,
+                need_config: false,
+                applied_revision: engine.revision().await,
+                apply_error: None,
+                usage,
+                stats: engine.stats(),
+            };
+            let response = client
+                .post(base.join("api/v1/agent/sync")?)
+                .bearer_auth(&credential.token)
+                .json(&request)
+                .send()
+                .await?
+                .error_for_status()?;
+            let reply: SyncResponse = bounded_json(response).await?;
+            store.acknowledge(&reply.acknowledgements)?;
+            if let Some(reply) = reply.budget {
+                store.accept_budget_reply(&budget_run, reply)?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        if !matches!(
+            tokio::time::timeout(Duration::from_secs(2), cleanup).await,
+            Ok(Ok(()))
+        ) {
+            tracing::warn!(
+                "final usage or unused reservation return is pending; durable state remains for retry"
+            );
+        }
+    }
     result
 }
 

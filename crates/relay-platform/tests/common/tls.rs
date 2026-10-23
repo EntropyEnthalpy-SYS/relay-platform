@@ -1,3 +1,8 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
+use ring::{
+    rand::SystemRandom,
+    signature::{ECDSA_P256_SHA256_ASN1_SIGNING, EcdsaKeyPair},
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -28,6 +33,26 @@ fn openssl(dir: &Path, args: &[&str]) {
         String::from_utf8_lossy(&result.stderr)
     );
 }
+fn private_key(path: &Path) {
+    // Legacy LibreSSL ecparam can omit leading zero bytes from a SEC1 scalar.
+    // Generate standards-compliant PKCS#8 with the same library used by rustls;
+    // OpenSSL still signs the fixtures, preserving independent TLS interop.
+    let der = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &SystemRandom::new())
+        .unwrap();
+    let encoded = STANDARD.encode(der.as_ref());
+    let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).unwrap());
+        pem.push('\n');
+    }
+    pem.push_str("-----END PRIVATE KEY-----\n");
+    fs::write(path, pem).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 impl Certificates {
     pub fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
@@ -36,18 +61,7 @@ impl Certificates {
         let ca = root.join("root");
         fs::create_dir(&ca).unwrap();
         fs::write(ca.join("ca.cnf"), "[req]\ndistinguished_name=dn\nx509_extensions=ca\nprompt=no\n[dn]\nCN=Relay isolated test CA\n[ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\n").unwrap();
-        openssl(
-            &ca,
-            &[
-                "ecparam",
-                "-name",
-                "prime256v1",
-                "-genkey",
-                "-noout",
-                "-out",
-                "root.key",
-            ],
-        );
+        private_key(&ca.join("root.key"));
         openssl(
             &ca,
             &[
@@ -64,18 +78,7 @@ impl Certificates {
         let path = self.root.join(identity);
         fs::create_dir_all(&path).unwrap();
         fs::write(path.join("leaf.cnf"), "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth,clientAuth\nsubjectAltName=DNS:relay.test,DNS:localhost,IP:127.0.0.1\n").unwrap();
-        openssl(
-            &path,
-            &[
-                "ecparam",
-                "-name",
-                "prime256v1",
-                "-genkey",
-                "-noout",
-                "-out",
-                "key.pem",
-            ],
-        );
+        private_key(&path.join("key.pem"));
         openssl(
             &path,
             &[
@@ -110,11 +113,6 @@ impl Certificates {
                 "leaf.cnf",
             ],
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path.join("key.pem"), fs::Permissions::from_mode(0o600)).unwrap();
-        }
     }
     pub fn connector(&self, client_auth: bool) -> TlsConnector {
         self.connector_with_identity(if client_auth { Some(self) } else { None })

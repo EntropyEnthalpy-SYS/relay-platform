@@ -20,6 +20,7 @@ pub fn free_address() -> SocketAddr {
 }
 pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
     Rule {
+        budget_ids: vec![],
         id: "rule-one".into(),
         tenant_id: "default".into(),
         owner_id: "admin".into(),

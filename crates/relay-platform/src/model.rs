@@ -103,6 +103,9 @@ fn enabled() -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
+    /// Controller-assigned hierarchical budgets. Empty means no global budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budget_ids: Vec<String>,
     pub id: String,
     pub tenant_id: String,
     pub owner_id: String,
@@ -143,6 +146,12 @@ impl Rule {
         self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
     }
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.budget_ids.len() <= 8
+                && self.budget_ids.iter().all(|id| identifier(id))
+                && self.budget_ids.iter().collect::<HashSet<_>>().len() == self.budget_ids.len(),
+            "invalid or duplicate budget bindings"
+        );
         ensure!(
             !self.uses_tls() || self.protocol == Protocol::Tcp,
             "TLS requires TCP-only forwarding; UDP cannot silently bypass encryption"
@@ -352,6 +361,8 @@ pub struct EngineStats {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncRequest {
+    #[serde(default)]
+    pub budget: Option<crate::budget::BudgetExchange>,
     pub ledger_id: String,
     #[serde(default)]
     pub need_config: bool,
@@ -362,6 +373,7 @@ pub struct SyncRequest {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncResponse {
+    pub budget: Option<crate::budget::BudgetReply>,
     /// Changes on each controller process start; prompts already-running agents
     /// to replay counters that a restored controller may have forgotten.
     pub controller_instance: String,

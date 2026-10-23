@@ -137,10 +137,14 @@ impl Store {
     /// A controller restored to an older checkpoint may have forgotten previously
     /// acknowledged counters. Reset only acknowledgements, never the local totals.
     pub fn begin_reconcile(&self) -> Result<()> {
-        self.0
-            .lock()
-            .unwrap()
-            .execute("UPDATE agent_meters SET ack_sequence=0", [])?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("UPDATE agent_meters SET ack_sequence=0", [])?;
+        tx.execute(
+            "UPDATE agent_budget_grants SET ack_consumed=0,ack_closed=0",
+            [],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

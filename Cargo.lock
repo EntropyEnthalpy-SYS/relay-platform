@@ -1080,16 +1080,18 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "relay-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
  "axum",
+ "base64 0.22.1",
  "clap",
  "http-body-util",
  "ipnet",
  "rand 0.8.8",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

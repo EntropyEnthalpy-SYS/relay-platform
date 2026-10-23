@@ -1,4 +1,5 @@
 use crate::{
+    budget::{Budget, BudgetOverview, BudgetUpdate, NewBudget},
     model::*,
     store::{Actor, Rejection, Role, Store, reject},
 };
@@ -139,6 +140,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/tenants", post(create_tenant))
         .route("/api/v1/usage", get(usage))
+        .route("/api/v1/budgets", get(budgets).post(create_budget))
+        .route("/api/v1/budgets/{id}", axum::routing::put(update_budget))
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/capabilities", get(capabilities))
         .route_layer(middleware::from_fn_with_state(
@@ -476,7 +479,35 @@ async fn sync(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["tcp","udp","ipv4","ipv6","dns-targets","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation"],
-        "pending":["websocket","mptcp","multipath-aggregation","global-user-budgets","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
+        "available":["tcp","udp","ipv4","ipv6","dns-targets","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return"],
+        "pending":["websocket","mptcp","multipath-aggregation","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
+}
+
+async fn budgets(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<BudgetOverview> {
+    Ok(Json(
+        database(state.store, move |db| db.budgets(&actor)).await?,
+    ))
+}
+async fn create_budget(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NewBudget>,
+) -> ApiResult<Budget> {
+    Ok(Json(
+        database(state.store, move |db| db.create_budget(&actor, input)).await?,
+    ))
+}
+async fn update_budget(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<BudgetUpdate>,
+) -> ApiResult<Budget> {
+    Ok(Json(
+        database(state.store, move |db| db.update_budget(&actor, &id, input)).await?,
+    ))
 }

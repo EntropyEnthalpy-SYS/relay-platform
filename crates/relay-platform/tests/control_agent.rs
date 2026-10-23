@@ -637,3 +637,299 @@ async fn interrupted_checkpoint_and_failed_activation_never_reopen_restored_cach
         .unwrap();
     stop_server(s).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_real_agents_share_user_quota_refill_without_stream_loss_and_return_idle_reservations()
+{
+    use relay_platform::budget::{Budget, BudgetOverview};
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let (token, _) = control.login("admin", PASSWORD).unwrap();
+    let quota = 98_304u64;
+    let budget:Budget=client.post(format!("{origin}/api/v1/budgets")).bearer_auth(&token).json(&json!({"scope":"user","scope_id":admin.id,"name":"two-node shared quota","limit_bytes":quota,"quantum_bytes":16384})).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    let echo = tcp_echo().await;
+    let mut addresses = vec![];
+    let mut stops = vec![];
+    let mut tasks = vec![];
+    for n in 0..2 {
+        let (node, enrollment) = control
+            .create_node(&admin, "default", &format!("budget-{n}"))
+            .unwrap();
+        let mut r = rule(echo.address, Protocol::Tcp);
+        r.id = format!("budget-rule-{n}");
+        r.connect_timeout_ms = 1000;
+        addresses.push(r.listen);
+        let config = control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+        assert_eq!(config.rules[0].budget_ids, vec![budget.id.clone()]);
+        let path = temp.path().join(format!("enroll-{n}.secret"));
+        write_secret(&path, enrollment.as_bytes()).unwrap();
+        let db = Store::open(&temp.path().join(format!("agent-{n}.db"))).unwrap();
+        let stop = CancellationToken::new();
+        tasks.push(tokio::spawn(agent::run(
+            db,
+            options(&origin, &node.id, Some(path)),
+            stop.clone(),
+        )));
+        stops.push(stop);
+    }
+    for address in &addresses {
+        wait_listening(*address).await;
+    }
+    let payload = vec![0xA7; 24_576];
+    let (a, b) = tokio::join!(
+        exchange(addresses[0], &payload),
+        exchange(addresses[1], &payload)
+    );
+    assert_eq!(a, payload);
+    assert_eq!(b, payload);
+    wait_usage(&control, &admin, quota).await;
+    let overview: BudgetOverview = client
+        .get(format!("{origin}/api/v1/budgets"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(overview.budgets[0].consumed_bytes, quota);
+    assert_eq!(overview.budgets[0].committed_bytes, quota);
+    assert!(exchange(addresses[0], b"exhausted").await.is_empty());
+    let updated: Budget = client
+        .put(format!("{origin}/api/v1/budgets/{}", budget.id))
+        .bearer_auth(&token)
+        .json(&json!({"expected_revision":1,"limit_bytes":quota+20,"quantum_bytes":16384}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated.revision, 2);
+    assert_eq!(exchange(addresses[1], b"topup").await, b"topup");
+    for stop in stops {
+        stop.cancel();
+    }
+    for task in tasks {
+        timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    let actual = control.budgets(&admin).unwrap().budgets.remove(0);
+    assert_eq!(actual.consumed_bytes, quota + 10);
+    assert_eq!(
+        actual.committed_bytes,
+        quota + 10,
+        "idle and stopped agents must return unused reservations"
+    );
+    wait_usage(&control, &admin, quota + 10).await;
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_uses_only_its_reserved_budget_during_outage_and_resumes_when_control_returns() {
+    use relay_platform::budget::{BudgetScope, NewBudget};
+    use tokio::net::UdpSocket;
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    control
+        .create_budget(
+            &admin,
+            NewBudget {
+                scope: BudgetScope::User,
+                scope_id: admin.id.clone(),
+                name: "offline quota".into(),
+                limit_bytes: 128,
+                quantum_bytes: 64,
+            },
+        )
+        .unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let address = s.address;
+    let origin = format!("http://{address}");
+    let (node, token) = control
+        .create_node(&admin, "default", "UDP budget")
+        .unwrap();
+    let echo = udp_echo().await;
+    let mut r = rule(echo.address, Protocol::Udp);
+    r.connect_timeout_ms = 200;
+    let forwarding = r.listen;
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        local.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(forwarding).await.unwrap();
+    let mut buf = [0; 16];
+    socket.send(b"12345678").await.unwrap();
+    let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], b"12345678");
+    wait_usage(&control, &admin, 16).await;
+    stop_server(s).await;
+    for _ in 0..3 {
+        socket.send(b"offline!").await.unwrap();
+        let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..n], b"offline!");
+    }
+    socket.send(b"no-more!").await.unwrap();
+    assert!(
+        timeout(Duration::from_millis(500), socket.recv(&mut buf))
+            .await
+            .is_err()
+    );
+    let usage = local.agent_usage(false).unwrap();
+    assert_eq!(usage[0].upload_bytes + usage[0].download_bytes, 64);
+    let s = server(control.clone(), address).await;
+    wait_usage(&control, &admin, 64).await;
+    socket.send(b"resumed!").await.unwrap();
+    let n = timeout(Duration::from_secs(2), socket.recv(&mut buf))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buf[..n], b"resumed!");
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let budget = control.budgets(&admin).unwrap().budgets.remove(0);
+    assert_eq!(budget.consumed_bytes, 80);
+    assert_eq!(budget.committed_bytes, 80);
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_larger_than_the_reservation_quantum_preserves_the_whole_datagram() {
+    use relay_platform::budget::{BudgetScope, NewBudget};
+    use tokio::net::UdpSocket;
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    control
+        .create_budget(
+            &admin,
+            NewBudget {
+                scope: BudgetScope::User,
+                scope_id: admin.id.clone(),
+                name: "whole datagrams".into(),
+                limit_bytes: 8192,
+                quantum_bytes: 64,
+            },
+        )
+        .unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let (node, token) = control.create_node(&admin, "default", "large UDP").unwrap();
+    let echo = udp_echo().await;
+    let r = rule(echo.address, Protocol::Udp);
+    let forwarding = r.listen;
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        local.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket.connect(forwarding).await.unwrap();
+    let payload = (0..4096).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+    let mut received = vec![0u8; 8192];
+    socket.send(&payload).await.unwrap();
+    let n = timeout(Duration::from_secs(3), socket.recv(&mut received))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&received[..n], &payload);
+    wait_usage(&control, &admin, 8192).await;
+    socket.send(b"quota-exhausted").await.unwrap();
+    assert!(
+        timeout(Duration::from_millis(1200), socket.recv(&mut received))
+            .await
+            .is_err()
+    );
+    let usage = local.agent_usage(false).unwrap();
+    assert_eq!(
+        (usage[0].upload_bytes, usage[0].download_bytes),
+        (4096, 4096)
+    );
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let budget = control.budgets(&admin).unwrap().budgets.remove(0);
+    assert_eq!(
+        (budget.consumed_bytes, budget.committed_bytes),
+        (8192, 8192)
+    );
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let (node, token) = control
+        .create_node(&admin, "default", "final accounting")
+        .unwrap();
+    let echo = tcp_echo().await;
+    let r = rule(echo.address, Protocol::Tcp);
+    let forwarding = r.listen;
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let mut opts = options(&origin, &node.id, Some(token_path));
+    opts.poll_interval = Duration::from_secs(300);
+    let running = tokio::spawn(agent::run(local.clone(), opts, stop.clone()));
+    wait_applied(&control, &admin, 1).await;
+    assert_eq!(
+        exchange(forwarding, b"final-counter").await,
+        b"final-counter"
+    );
+    assert_eq!(local.agent_usage(true).unwrap()[0].upload_bytes, 13);
+    assert!(control.reported_usage(&admin).unwrap().is_empty());
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    wait_usage(&control, &admin, 26).await;
+    assert!(local.agent_usage(true).unwrap().is_empty());
+    stop_server(s).await;
+}

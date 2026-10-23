@@ -13,6 +13,7 @@ use std::{
 };
 use uuid::Uuid;
 
+mod budgets;
 mod recovery;
 
 #[derive(Debug)]
@@ -35,7 +36,19 @@ pub fn reject<T>(status: u16, message: impl Into<String>) -> Result<T> {
 }
 
 #[derive(Clone)]
-pub struct Store(Arc<Mutex<Connection>>, Arc<PathBuf>);
+pub struct Store(Arc<Mutex<Connection>>, Arc<PathBuf>, Arc<BudgetSignals>);
+#[derive(Default)]
+struct BudgetSignals {
+    refill: tokio::sync::Notify,
+    updated: tokio::sync::Notify,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum AdmissionDecision {
+    Admitted(usize),
+    Rejected,
+    AwaitingBudget,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -165,7 +178,7 @@ impl Store {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 2, "database schema newer than this binary");
+        ensure!(version <= 3, "database schema newer than this binary");
         if version == 0 {
             let tables: u64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0))?;
             ensure!(tables == 0, "refusing to initialize an unrelated database");
@@ -192,9 +205,16 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        if version < 3 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(include_str!("store/budget_schema.sql"))?;
+            tx.execute_batch("INSERT OR IGNORE INTO metadata(key,value) SELECT 'budget_allocation_paused','true' FROM metadata WHERE key='backup_created_at_ms'; PRAGMA user_version=3;")?;
+            tx.commit()?;
+        }
         Ok(Self(
             Arc::new(Mutex::new(conn)),
             Arc::new(fs::canonicalize(path)?),
+            Arc::new(BudgetSignals::default()),
         ))
     }
 
@@ -533,7 +553,7 @@ impl Store {
         if expected >= MAX_COUNTER {
             return reject(400, "revision out of range");
         }
-        let config = NodeConfig {
+        let mut config = NodeConfig {
             api_version: API_VERSION,
             node_id: node.into(),
             revision: expected + 1,
@@ -546,7 +566,8 @@ impl Store {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let tenant = require_node(&tx, actor, node, true)?;
-        for rule in &config.rules {
+        for rule in &mut config.rules {
+            rule.budget_ids = budgets::bindings(&tx, node, rule)?;
             if rule.tenant_id != tenant {
                 return reject(403, "rule tenant does not match node");
             }
@@ -663,6 +684,10 @@ impl Store {
                 sequence: usage.sequence,
             });
         }
+        let budget = request
+            .budget
+            .map(|exchange| budgets::exchange(&tx, node, &request.ledger_id, exchange))
+            .transpose()?;
         tx.execute("UPDATE nodes SET applied_revision=?1,last_seen_ms=?2,apply_error=?3,stats_json=?4 WHERE id=?5",params![request.applied_revision,now_ms(),request.apply_error,serde_json::to_string(&request.stats)?,node])?;
         let config = if request.need_config || desired != request.applied_revision {
             Some(serde_json::from_str(&tx.query_row(
@@ -675,6 +700,7 @@ impl Store {
         };
         tx.commit()?;
         Ok(SyncResponse {
+            budget,
             controller_instance: "store-direct".into(),
             config,
             acknowledgements,
@@ -730,20 +756,41 @@ impl Store {
             }
         }
         tx.execute("UPDATE agent_meters SET enabled=0", [])?;
+        tx.execute("DELETE FROM agent_rule_budgets", [])?;
         for rule in &config.rules {
-            tx.execute("INSERT INTO agent_meters(rule_id,meter_epoch,enabled,quota_bytes,expires_at_ms) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(rule_id,meter_epoch) DO UPDATE SET enabled=excluded.enabled,quota_bytes=excluded.quota_bytes,expires_at_ms=excluded.expires_at_ms",params![rule.id,rule.meter_epoch,rule.enabled,rule.quota_bytes,rule.expires_at_ms])?;
+            for id in &rule.budget_ids {
+                tx.execute("INSERT INTO agent_rule_budgets(rule_id,meter_epoch,budget_id) VALUES(?1,?2,?3)",params![rule.id,rule.meter_epoch,id])?;
+            }
+            tx.execute("INSERT INTO agent_meters(rule_id,meter_epoch,enabled,quota_bytes,expires_at_ms,budgeted) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(rule_id,meter_epoch) DO UPDATE SET enabled=excluded.enabled,quota_bytes=excluded.quota_bytes,expires_at_ms=excluded.expires_at_ms,budgeted=excluded.budgeted",params![rule.id,rule.meter_epoch,rule.enabled,rule.quota_bytes,rule.expires_at_ms,!rule.budget_ids.is_empty()])?;
         }
         tx.execute("INSERT INTO metadata(key,value) VALUES('agent_config',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[serde_json::to_string(config)?])?;
         tx.commit()?;
         Ok(())
     }
     pub fn admit_batch(&self, requests: &[Admission]) -> Result<Vec<Option<usize>>> {
+        Ok(self
+            .admit_batch_detailed(requests)?
+            .into_iter()
+            .map(|d| match d {
+                AdmissionDecision::Admitted(n) => Some(n),
+                _ => None,
+            })
+            .collect())
+    }
+    pub async fn budget_refill_needed(&self) {
+        self.2.refill.notified().await;
+    }
+    pub async fn budget_updated(&self) {
+        self.2.updated.notified().await;
+    }
+    pub fn admit_batch_detailed(&self, requests: &[Admission]) -> Result<Vec<AdmissionDecision>> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut result = Vec::with_capacity(requests.len());
+        let mut refill = false;
         let now = now_ms();
         let mut read_meter = tx.prepare_cached(
-            "SELECT enabled,quota_bytes,expires_at_ms,upload_bytes,download_bytes,sequence
+            "SELECT enabled,quota_bytes,expires_at_ms,upload_bytes,download_bytes,sequence,budgeted
              FROM agent_meters WHERE rule_id=?1 AND meter_epoch=?2",
         )?;
         let mut write_meter = tx.prepare_cached(
@@ -761,11 +808,12 @@ impl Store {
                         row.get::<_, u64>(3)?,
                         row.get::<_, u64>(4)?,
                         row.get::<_, u64>(5)?,
+                        row.get::<_, bool>(6)?,
                     ))
                 })
                 .optional()?;
-            let Some((enabled, quota, expires, up, down, seq)) = state else {
-                result.push(None);
+            let Some((enabled, quota, expires, up, down, seq, budgeted)) = state else {
+                result.push(AdmissionDecision::Rejected);
                 continue;
             };
             let remaining = quota
@@ -778,10 +826,20 @@ impl Store {
                 || seq >= MAX_COUNTER
                 || (r.datagram && r.bytes as u64 > remaining)
             {
-                result.push(None);
+                result.push(AdmissionDecision::Rejected);
                 continue;
             }
             let allowed = (r.bytes as u64).min(remaining) as usize;
+            let (budget_allowed, needs_refill) = if budgeted {
+                budgets::admit(&tx, r, allowed)?
+            } else {
+                (Some(allowed), false)
+            };
+            refill |= needs_refill;
+            let Some(allowed) = budget_allowed else {
+                result.push(AdmissionDecision::AwaitingBudget);
+                continue;
+            };
             if allowed > 0 {
                 write_meter.execute(params![
                     if r.upload { allowed as u64 } else { 0 },
@@ -790,11 +848,14 @@ impl Store {
                     r.meter_epoch
                 ])?;
             }
-            result.push(Some(allowed));
+            result.push(AdmissionDecision::Admitted(allowed));
         }
         drop(read_meter);
         drop(write_meter);
         tx.commit()?;
+        if refill {
+            self.2.refill.notify_one();
+        }
         Ok(result)
     }
     pub fn agent_usage(&self, unsynced_only: bool) -> Result<Vec<Usage>> {
@@ -844,6 +905,7 @@ impl Store {
         if managed_agent {
             dest.execute("INSERT INTO metadata(key,value) VALUES('recovery_required','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
         }
+        dest.execute("INSERT INTO metadata(key,value) VALUES('budget_allocation_paused','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
         dest.execute("INSERT INTO metadata(key,value) VALUES('backup_created_at_ms',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [now_ms().to_string()])?;
         drop(dest);
         fs::File::open(destination)?.sync_all()?;

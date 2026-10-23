@@ -1,6 +1,6 @@
 use crate::{
     model::*,
-    store::{Admission, Store},
+    store::{Admission, AdmissionDecision, Store},
     transport::{BoxStream, PreparedTls},
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -56,13 +56,17 @@ impl Counters {
 
 struct MeterMessage {
     request: Option<Admission>,
-    response: oneshot::Sender<Result<Option<usize>>>,
+    response: oneshot::Sender<Result<AdmissionDecision>>,
 }
 #[derive(Clone)]
-struct Meter(mpsc::Sender<MeterMessage>);
+struct Meter {
+    sender: mpsc::Sender<MeterMessage>,
+    store: Store,
+}
 impl Meter {
     fn new(store: Store) -> Self {
         let (sender, mut receiver) = mpsc::channel::<MeterMessage>(1024);
+        let actor_store = store.clone();
         tokio::spawn(async move {
             while let Some(first) = receiver.recv().await {
                 let mut batch = vec![first];
@@ -73,8 +77,9 @@ impl Meter {
                     }
                 }
                 let requests: Vec<_> = batch.iter().filter_map(|m| m.request.clone()).collect();
-                let db = store.clone();
-                let result = tokio::task::spawn_blocking(move || db.admit_batch(&requests)).await;
+                let db = actor_store.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || db.admit_batch_detailed(&requests)).await;
                 match result {
                     Ok(Ok(values)) => {
                         let mut iter = values.into_iter();
@@ -82,7 +87,7 @@ impl Meter {
                             let value = if message.request.is_some() {
                                 iter.next().unwrap()
                             } else {
-                                None
+                                AdmissionDecision::Rejected
                             };
                             let _ = message.response.send(Ok(value));
                         }
@@ -98,7 +103,7 @@ impl Meter {
                 }
             }
         });
-        Self(sender)
+        Self { sender, store }
     }
     async fn admit(
         &self,
@@ -107,25 +112,37 @@ impl Meter {
         bytes: usize,
         datagram: bool,
     ) -> Result<Option<usize>> {
-        let (tx, rx) = oneshot::channel();
-        self.0
-            .send(MeterMessage {
-                request: Some(Admission {
-                    rule_id: rule.id.clone(),
-                    meter_epoch: rule.meter_epoch.clone(),
-                    upload,
-                    bytes,
-                    datagram,
-                }),
-                response: tx,
-            })
-            .await
-            .context("meter stopped")?;
-        rx.await.context("meter stopped")?
+        let deadline = Instant::now() + Duration::from_millis(rule.connect_timeout_ms);
+        loop {
+            let (tx, rx) = oneshot::channel();
+            self.sender
+                .send(MeterMessage {
+                    request: Some(Admission {
+                        rule_id: rule.id.clone(),
+                        meter_epoch: rule.meter_epoch.clone(),
+                        upload,
+                        bytes,
+                        datagram,
+                    }),
+                    response: tx,
+                })
+                .await
+                .context("meter stopped")?;
+            match rx.await.context("meter stopped")?? {
+                AdmissionDecision::Admitted(n) => return Ok(Some(n)),
+                AdmissionDecision::Rejected => return Ok(None),
+                AdmissionDecision::AwaitingBudget => {
+                    if Instant::now() >= deadline {
+                        return Ok(None);
+                    }
+                    tokio::select! {_=self.store.budget_updated()=>{},_=sleep_until((Instant::now()+Duration::from_millis(50)).min(deadline))=>{}}
+                }
+            }
+        }
     }
     async fn barrier(&self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.0
+        self.sender
             .send(MeterMessage {
                 request: None,
                 response: tx,
@@ -544,7 +561,8 @@ impl Engine {
 }
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
-    old.inbound_tls != new.inbound_tls
+    old.budget_ids != new.budget_ids
+        || old.inbound_tls != new.inbound_tls
         || old
             .targets
             .iter()
@@ -690,36 +708,35 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         *activity.lock().unwrap() = Instant::now();
         rule.shared.throttle(read).await;
-        let allowed = meter
-            .admit(&rule.spec, upload, read, false)
-            .await?
-            .unwrap_or(0);
-        if allowed == 0 {
-            bail!("quota exhausted or rule inactive");
-        }
-        let mut written = 0;
-        while written < allowed {
-            let n = writer.write(&buffer[written..allowed]).await?;
-            if n == 0 {
-                return Err(io::Error::from(io::ErrorKind::WriteZero).into());
+        let mut offset = 0;
+        while offset < read {
+            let allowed = meter
+                .admit(&rule.spec, upload, read - offset, false)
+                .await?
+                .unwrap_or(0);
+            if allowed == 0 {
+                bail!("quota exhausted, budget unavailable or rule inactive");
             }
-            written += n;
-            // Tokio-rustls buffers writes. Flush before waiting for the next
-            // application read or a small request/response can deadlock.
-            writer.flush().await?;
-            if upload {
-                stats
-                    .forwarded_upload_bytes
-                    .fetch_add(n as u64, Ordering::Relaxed);
-            } else {
-                stats
-                    .forwarded_download_bytes
-                    .fetch_add(n as u64, Ordering::Relaxed);
+            let end = offset + allowed;
+            while offset < end {
+                let n = writer.write(&buffer[offset..end]).await?;
+                if n == 0 {
+                    return Err(io::Error::from(io::ErrorKind::WriteZero).into());
+                }
+                offset += n;
+                // Flush TLS before waiting for more application input or budget.
+                writer.flush().await?;
+                if upload {
+                    stats
+                        .forwarded_upload_bytes
+                        .fetch_add(n as u64, Ordering::Relaxed);
+                } else {
+                    stats
+                        .forwarded_download_bytes
+                        .fetch_add(n as u64, Ordering::Relaxed);
+                }
+                *activity.lock().unwrap() = Instant::now();
             }
-            *activity.lock().unwrap() = Instant::now();
-        }
-        if allowed < read {
-            bail!("quota exhausted");
         }
     }
 }

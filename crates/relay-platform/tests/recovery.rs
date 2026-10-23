@@ -14,6 +14,7 @@ fn request() -> ReconcileRequest {
 }
 fn sync_request(ledger: &str, usage: Vec<Usage>) -> SyncRequest {
     SyncRequest {
+        budget: None,
         ledger_id: ledger.into(),
         need_config: false,
         applied_revision: 1,

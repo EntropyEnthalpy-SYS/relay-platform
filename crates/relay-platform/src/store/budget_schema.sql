@@ -1,0 +1,11 @@
+ALTER TABLE agent_meters ADD COLUMN budgeted INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE budgets(id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL REFERENCES tenants(id),scope TEXT NOT NULL CHECK(scope IN('user','tenant','node')),scope_id TEXT NOT NULL,name TEXT NOT NULL,limit_bytes INTEGER NOT NULL CHECK(limit_bytes>=0),quantum_bytes INTEGER NOT NULL CHECK(quantum_bytes>0),committed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(committed_bytes>=0),consumed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(consumed_bytes>=0 AND consumed_bytes<=committed_bytes),revision INTEGER NOT NULL DEFAULT 1,UNIQUE(scope,scope_id),CHECK(committed_bytes<=limit_bytes));
+CREATE TABLE budget_grants(id TEXT PRIMARY KEY,budget_id TEXT NOT NULL REFERENCES budgets(id),node_id TEXT NOT NULL REFERENCES nodes(id),ledger_id TEXT NOT NULL,run_id TEXT NOT NULL,request_id TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes>0),consumed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(consumed_bytes>=0 AND consumed_bytes<=bytes),closed INTEGER NOT NULL DEFAULT 0,UNIQUE(node_id,run_id,request_id));
+CREATE INDEX budget_grants_budget ON budget_grants(budget_id);
+CREATE TABLE agent_rule_budgets(rule_id TEXT NOT NULL,meter_epoch TEXT NOT NULL,budget_id TEXT NOT NULL,PRIMARY KEY(rule_id,meter_epoch,budget_id));
+CREATE TABLE agent_budget_requests(budget_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,run_id TEXT NOT NULL,minimum_bytes INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE agent_budget_grants(id TEXT PRIMARY KEY,budget_id TEXT NOT NULL,request_id TEXT NOT NULL,run_id TEXT NOT NULL,bytes INTEGER NOT NULL CHECK(bytes>0),consumed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(consumed_bytes>=0 AND consumed_bytes<=bytes),ack_consumed INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL CHECK(state IN('open','sealed','abandoned')),ack_closed INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX agent_budget_grants_available ON agent_budget_grants(budget_id,run_id,id) WHERE state='open' AND bytes>consumed_bytes;
+CREATE INDEX agent_budget_grants_pending ON agent_budget_grants(id) WHERE consumed_bytes>ack_consumed OR (state='sealed' AND ack_closed=0);
+CREATE INDEX agent_budget_grants_open ON agent_budget_grants(run_id,budget_id) WHERE state='open';
+CREATE TABLE agent_budget_demand(budget_id TEXT PRIMARY KEY,minimum_bytes INTEGER NOT NULL DEFAULT 1);

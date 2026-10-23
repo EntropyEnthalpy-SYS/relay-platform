@@ -1,6 +1,6 @@
 {
-  "version": "0.2.0-development",
-  "verified_at_utc": "2026-10-23T22:05:29.169820+00:00",
+  "version": "0.3.0-development",
+  "verified_at_utc": "2026-10-23T23:05:34.905276+00:00",
   "full_goal_complete": false,
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "machine": "arm64",
@@ -12,8 +12,8 @@
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
   "profile": "release",
-  "binary_sha256": "a165ed33dcf54eededffc76874a1f0f2f22725b9c0526db222faba49979f2073",
-  "source_fingerprint_sha256": "294c5941f620d4d66ed8c0062adaf3d3db1864fe3b61f158a0a3a28be9f3da18",
+  "binary_sha256": "7076f0ac721cb2ec26449c54d53b6cd6415b14c2d0b6561416196330c501a111",
+  "source_fingerprint_sha256": "612a41a709fdfb4e3baf7fd7b0cecc4a7567d12a42c1dada130af44eac534bdf",
   "source_fingerprint_algorithm": "SHA256 of concatenated sorted relative UTF-8 paths, NUL, and raw file SHA256; Cargo.toml, Cargo.lock, rustfmt.toml, crates/, web/, scripts/ (excluding __pycache__), deploy/",
   "source_fingerprint_paths": [
     "Cargo.lock",
@@ -21,14 +21,18 @@
     "crates/relay-platform/Cargo.toml",
     "crates/relay-platform/src/agent.rs",
     "crates/relay-platform/src/api.rs",
+    "crates/relay-platform/src/budget.rs",
     "crates/relay-platform/src/engine.rs",
     "crates/relay-platform/src/lib.rs",
     "crates/relay-platform/src/main.rs",
     "crates/relay-platform/src/model.rs",
     "crates/relay-platform/src/schema.sql",
     "crates/relay-platform/src/store.rs",
+    "crates/relay-platform/src/store/budget_schema.sql",
+    "crates/relay-platform/src/store/budgets.rs",
     "crates/relay-platform/src/store/recovery.rs",
     "crates/relay-platform/src/transport.rs",
+    "crates/relay-platform/tests/budgets.rs",
     "crates/relay-platform/tests/common/mod.rs",
     "crates/relay-platform/tests/common/tls.rs",
     "crates/relay-platform/tests/control_agent.rs",
@@ -41,6 +45,7 @@
     "deploy/relay-agent.service",
     "deploy/relay-controller.service",
     "rustfmt.toml",
+    "scripts/bench_budget.py",
     "scripts/bench_loopback.py",
     "scripts/echo_fixture.py",
     "scripts/probe.py",
@@ -49,9 +54,49 @@
     "web/index.html",
     "web/style.css"
   ],
-  "automated_tests_passed": 44,
+  "automated_tests_passed": 58,
   "automated_tests_failed": 0,
   "test_cases": [
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "failed_meter_transaction_rolls_back_reservation_consumption_as_well"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "invalid_report_rolls_back_other_reports_and_retry_updates_totals_once"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_permissions_revision_conflicts_and_committed_floor_are_enforced"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restored_controller_cannot_reissue_reservations_forgotten_by_its_backup"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "datagram_larger_than_quantum_requests_enough_credit_without_partial_charges"
+    },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
       "name": "api_agent_control_outage_restart_and_reconciliation"
@@ -79,6 +124,22 @@
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
       "name": "interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "two_real_agents_share_user_quota_refill_without_stream_loss_and_return_idle_reservations"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "udp_uses_only_its_reserved_budget_during_outage_and_resumes_when_control_returns"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "udp_larger_than_the_reservation_quantum_preserves_the_whole_datagram"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -257,5 +318,27 @@
   "managed_backup_reconciliation_verified": true,
   "browser_visual_verified": false,
   "linux_deployment_verified": false,
-  "remaining_full_scope": "REQUIREMENTS.md and STATUS.md"
+  "remaining_full_scope": "REQUIREMENTS.md and STATUS.md",
+  "budget_benchmark_files": [
+    "benchmark-budget.json",
+    "benchmark-budget-32m.json"
+  ],
+  "budget_benchmark_ledger": {
+    "expected_admitted_bytes": 4034920448,
+    "controller_bytes": 4034920448,
+    "agent_bytes": 4034920448,
+    "exact_match": true
+  },
+  "global_user_budget_verified": true,
+  "hierarchical_budget_verified": true,
+  "graceful_reservation_return_verified": true,
+  "old_run_reservation_reuse_prevented": true,
+  "restored_controller_allocation_quarantine_verified": true,
+  "complete_budget_disaster_recovery_verified": false,
+  "complete_global_rate_limit_verified": false,
+  "tls_fixture_repair": {
+    "issue": "legacy LibreSSL SEC1 generation emitted a 31-byte P-256 scalar in 1 of 1024 generated keys during diagnosis; observed intermittent fixture parse failure",
+    "change": "generate transient P-256 PKCS#8 with ring, PEM encode with base64, retain OpenSSL certificate signing",
+    "runtime_certificate_validation_relaxed": false
+  }
 }

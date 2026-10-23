@@ -24,6 +24,7 @@ fn rejection<T>(result: anyhow::Result<T>) -> u16 {
 }
 fn sync(db: &Store, node: &str, usage: Vec<Usage>) -> SyncRequest {
     SyncRequest {
+        budget: None,
         ledger_id: db
             .reconcile(
                 node,
