@@ -1,0 +1,11 @@
+/target/
+/state/
+/artifacts/
+*.sqlite*
+*.db*
+*.credentials.json
+*.secret
+.env
+.DS_Store
+__pycache__/
+*.pyc

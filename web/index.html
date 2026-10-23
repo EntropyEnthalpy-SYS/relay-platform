@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Relay · 独立转发平台</title>
+  <link rel="stylesheet" href="/assets/style.css"><script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+<div id="login-screen" class="login-screen">
+  <form id="login-form" class="login-card">
+    <span class="brand-mark">R</span><p class="eyebrow">RELAY PLATFORM</p>
+    <h1>自己的网络，<br>自己的控制台。</h1>
+    <p class="muted">使用控制服务初始化时生成的管理员凭据登录。</p>
+    <label>用户名<input name="username" value="admin" autocomplete="username" required maxlength="80"></label>
+    <label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+    <button type="submit" class="primary">登录控制台 <span aria-hidden="true">→</span></button>
+    <p id="login-error" class="error" role="alert"></p>
+    <p class="fine">首次密码位于控制节点的 <code>admin-password.secret</code>，不会写入运行日志。</p>
+  </form>
+  <div class="login-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="network-core">R</div><span class="network-label">CONTROL / FORWARD / OBSERVE</span></div>
+</div>
+<div id="application" class="application hidden">
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark small">R</span><span>Relay<span class="brand-sub">独立转发平台</span></span></a>
+    <span class="nav-label">工作空间</span>
+    <nav aria-label="主导航">
+      <button data-view="nodes" class="nav-button active"><span>◉</span>节点总览</button>
+      <button data-view="rules" class="nav-button"><span>⇄</span>转发规则</button>
+      <button data-view="usage" class="nav-button"><span>▥</span>流量账本</button>
+      <button data-view="users" class="nav-button"><span>♧</span>用户与权限</button>
+      <button data-view="audit" class="nav-button admin-only"><span>≡</span>操作审计</button>
+      <button data-view="capabilities" class="nav-button"><span>◇</span>功能进度</button>
+    </nav>
+    <div class="sidebar-bottom"><span class="version">DEVELOPMENT 0.1</span><p>完整范围持续开发中<br>数据来自实际节点回报</p><button id="logout" data-logout class="subtle">退出登录</button></div>
+  </aside>
+  <main>
+    <header><div><p class="eyebrow">YOUR INFRASTRUCTURE</p><h1 id="view-title">节点总览</h1></div><div class="header-right"><span id="identity" class="identity"></span><button id="refresh" class="subtle">刷新数据 ↻</button><button data-logout class="subtle mobile-only">退出</button></div></header>
+    <div id="notification" class="notification hidden" role="status"></div>
+    <div id="content"></div>
+    <footer>控制在线仅表示 Agent 可以联系控制服务，业务可用性须另行探测。<span id="refreshed"></span></footer>
+  </main>
+</div>
+<dialog id="dialog"><div class="dialog-head"><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-button" aria-label="关闭对话框">×</button></div><div id="dialog-body"></div></dialog>
+</body></html>

@@ -1,0 +1,24 @@
+[Unit]
+Description=Relay independent controller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=relay-controller
+StateDirectoryMode=0700
+ExecStart=/usr/local/bin/relay server --listen 127.0.0.1:8080 --state /var/lib/relay-controller
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE tenants(id TEXT PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE users(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('system_admin','tenant_admin','viewer')), disabled INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE sessions(hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires_at_ms INTEGER NOT NULL);
+CREATE INDEX sessions_expiry ON sessions(expires_at_ms);
+CREATE TABLE nodes(id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL REFERENCES tenants(id), name TEXT NOT NULL, enrollment_hash TEXT UNIQUE, token_hash TEXT UNIQUE, desired_revision INTEGER NOT NULL DEFAULT 0, applied_revision INTEGER NOT NULL DEFAULT 0, last_seen_ms INTEGER, apply_error TEXT, stats_json TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE config_history(node_id TEXT NOT NULL REFERENCES nodes(id), revision INTEGER NOT NULL, config_json TEXT NOT NULL, actor_id TEXT NOT NULL, created_at_ms INTEGER NOT NULL, PRIMARY KEY(node_id,revision));
+CREATE TABLE rule_bindings(rule_id TEXT PRIMARY KEY, node_id TEXT NOT NULL REFERENCES nodes(id), tenant_id TEXT NOT NULL REFERENCES tenants(id), owner_id TEXT NOT NULL REFERENCES users(id));
+CREATE TABLE rule_epochs(rule_id TEXT NOT NULL REFERENCES rule_bindings(rule_id), meter_epoch TEXT NOT NULL, PRIMARY KEY(rule_id,meter_epoch));
+CREATE TABLE usage(node_id TEXT NOT NULL REFERENCES nodes(id), rule_id TEXT NOT NULL, meter_epoch TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence>0), upload_bytes INTEGER NOT NULL CHECK(upload_bytes>=0), download_bytes INTEGER NOT NULL CHECK(download_bytes>=0), reported_at_ms INTEGER NOT NULL, PRIMARY KEY(node_id,rule_id,meter_epoch), FOREIGN KEY(rule_id,meter_epoch) REFERENCES rule_epochs(rule_id,meter_epoch));
+CREATE TABLE audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at_ms INTEGER NOT NULL, actor_id TEXT NOT NULL, action TEXT NOT NULL, resource TEXT NOT NULL, detail TEXT NOT NULL);
+CREATE TABLE agent_meters(rule_id TEXT NOT NULL, meter_epoch TEXT NOT NULL, enabled INTEGER NOT NULL, quota_bytes INTEGER, expires_at_ms INTEGER, sequence INTEGER NOT NULL DEFAULT 0, ack_sequence INTEGER NOT NULL DEFAULT 0, upload_bytes INTEGER NOT NULL DEFAULT 0, download_bytes INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(rule_id,meter_epoch));

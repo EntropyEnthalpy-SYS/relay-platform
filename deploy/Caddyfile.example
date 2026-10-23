@@ -1,0 +1,4 @@
+# Replace with a domain you control; HTTPS must work before enrolling remote agents.
+relay.example.com {
+    reverse_proxy 127.0.0.1:8080
+}

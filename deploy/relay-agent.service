@@ -1,0 +1,26 @@
+[Unit]
+Description=Relay independent forwarding agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay-agent
+Group=relay-agent
+StateDirectory=relay-agent
+StateDirectoryMode=0700
+EnvironmentFile=/etc/relay/agent.env
+ExecStart=/usr/local/bin/relay agent --controller ${RELAY_CONTROLLER} --node-id ${RELAY_NODE_ID} --state /var/lib/relay-agent --enrollment-token-file /etc/relay/enrollment.secret
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
