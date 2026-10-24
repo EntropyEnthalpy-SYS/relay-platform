@@ -26,15 +26,21 @@ pub struct AppState {
     instance: String,
     login_attempts: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     login_slots: Arc<Semaphore>,
+    sync_queue: crate::sync_queue::SyncQueue,
 }
 impl AppState {
     pub fn new(store: Store) -> Self {
         Self {
+            sync_queue: crate::sync_queue::SyncQueue::new(store.clone(), 16).unwrap(),
             store,
             instance: uuid::Uuid::new_v4().to_string(),
             login_attempts: Arc::new(Mutex::new(HashMap::new())),
             login_slots: Arc::new(Semaphore::new(4)),
         }
+    }
+    pub fn with_sync_batch_size(mut self, size: usize) -> anyhow::Result<Self> {
+        self.sync_queue = crate::sync_queue::SyncQueue::new(self.store.clone(), size)?;
+        Ok(self)
     }
     fn login_allowed(&self, source: String) -> bool {
         let now = Instant::now();
@@ -144,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/budgets/{id}", axum::routing::put(update_budget))
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/recovery", get(recovery_status))
+        .route("/api/v1/control/metrics", get(control_metrics))
         .route("/api/v1/capabilities", get(capabilities))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -461,16 +468,22 @@ async fn sync(
     Json(input): Json<SyncRequest>,
 ) -> ApiResult<SyncResponse> {
     let token = bearer(&headers)?;
-    let instance = state.instance;
-    Ok(Json(
-        database(state.store, move |db| {
-            let node = db.authenticate_node(&token)?;
-            let mut result = db.sync(&node, input)?;
-            result.controller_instance = instance;
-            Ok(result)
-        })
-        .await?,
-    ))
+    let mut result = state.sync_queue.submit(token, input).await?;
+    result.controller_instance = state.instance;
+    Ok(Json(result))
+}
+async fn control_metrics(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::sync_queue::SyncQueueStats> {
+    if actor.role != Role::SystemAdmin {
+        return Err(Rejection {
+            status: 403,
+            message: "control metrics require system administrator access".into(),
+        }
+        .into());
+    }
+    Ok(Json(state.sync_queue.stats()))
 }
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let healthy = database(state.store, |db| db.recovery_log_status())

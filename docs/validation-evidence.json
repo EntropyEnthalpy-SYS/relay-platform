@@ -1,6 +1,6 @@
 {
-  "version": "0.4.0-development",
-  "verified_at_utc": "2026-10-23T23:42:14.835355+00:00",
+  "version": "0.5.0-development",
+  "verified_at_utc": "2026-10-24T00:19:10.884329+00:00",
   "full_goal_complete": false,
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "machine": "arm64",
@@ -12,8 +12,8 @@
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
   "profile": "release",
-  "binary_sha256": "1dacffbba2499d075f12fbf6ade57e10ee29346d8e318b66dca852567e6ad783",
-  "source_fingerprint_sha256": "9078435da6335baee9893663b7d4068ec84ae0f0d3db3b6158bec77429e8f531",
+  "binary_sha256": "d11c77d525893477372d50ee05fb2e915da037875482c7c7564821eccaa4c208",
+  "source_fingerprint_sha256": "889886e38d25b87a4ce66094b48f919ba70a039556e5d16538eaa0ce6669d26b",
   "source_fingerprint_algorithm": "SHA256 of concatenated sorted relative UTF-8 paths, NUL, and raw file SHA256; Cargo.toml, Cargo.lock, rustfmt.toml, crates/, web/, scripts/ (excluding __pycache__), deploy/",
   "source_fingerprint_paths": [
     "Cargo.lock",
@@ -32,6 +32,8 @@
     "crates/relay-platform/src/store/budget_schema.sql",
     "crates/relay-platform/src/store/budgets.rs",
     "crates/relay-platform/src/store/recovery.rs",
+    "crates/relay-platform/src/store/sync.rs",
+    "crates/relay-platform/src/sync_queue.rs",
     "crates/relay-platform/src/transport.rs",
     "crates/relay-platform/tests/budgets.rs",
     "crates/relay-platform/tests/common/mod.rs",
@@ -41,6 +43,7 @@
     "crates/relay-platform/tests/journal.rs",
     "crates/relay-platform/tests/ledger.rs",
     "crates/relay-platform/tests/recovery.rs",
+    "crates/relay-platform/tests/sync_batch.rs",
     "crates/relay-platform/tests/tls_transport.rs",
     "deploy/Caddyfile.example",
     "deploy/agent.env.example",
@@ -49,6 +52,7 @@
     "rustfmt.toml",
     "scripts/bench_budget.py",
     "scripts/bench_loopback.py",
+    "scripts/bench_sync.py",
     "scripts/check_recovery.py",
     "scripts/echo_fixture.py",
     "scripts/probe.py",
@@ -57,7 +61,7 @@
     "web/index.html",
     "web/style.css"
   ],
-  "automated_tests_passed": 68,
+  "automated_tests_passed": 73,
   "automated_tests_failed": 0,
   "test_cases": [
     {
@@ -66,27 +70,7 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "datagram_larger_than_quantum_requests_enough_credit_without_partial_charges"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
       "name": "invalid_report_rolls_back_other_reports_and_retry_updates_totals_once"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -94,11 +78,31 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "restored_controller_cannot_reissue_reservations_forgotten_by_its_backup"
+      "name": "restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "datagram_larger_than_quantum_requests_enough_credit_without_partial_charges"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
       "name": "hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restored_controller_cannot_reissue_reservations_forgotten_by_its_backup"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -118,11 +122,11 @@
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "enrollment_recovers_after_the_controller_commits_but_response_is_lost"
+      "name": "graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat"
+      "name": "enrollment_recovers_after_the_controller_commits_but_response_is_lost"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
@@ -130,11 +134,11 @@
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "restored_backup_waits_for_controller_and_cannot_spend_confirmed_quota_twice"
+      "name": "running_agent_republishes_acknowledged_counters_after_controller_restore"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "running_agent_republishes_acknowledged_counters_after_controller_restore"
+      "name": "restored_backup_waits_for_controller_and_cannot_spend_confirmed_quota_twice"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
@@ -162,6 +166,14 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "deleting_a_rule_terminates_existing_connections"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_config_keeps_old_listener_and_persisted_revision"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "source_acl_denies_before_any_billable_payload"
     },
     {
@@ -174,11 +186,7 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "deleting_a_rule_terminates_existing_connections"
-    },
-    {
-      "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "failed_config_keeps_old_listener_and_persisted_revision"
+      "name": "dual_protocol_listener_and_ipv6_udp_are_independently_verified"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -186,11 +194,7 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "dual_protocol_listener_and_ipv6_udp_are_independently_verified"
-    },
-    {
-      "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled"
+      "name": "ipv6_and_dns_targets_transfer_real_bytes"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -198,19 +202,19 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "ipv6_and_dns_targets_transfer_real_bytes"
-    },
-    {
-      "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "weighted_target_selection_and_connect_failure_fallback"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "tcp_binary_payload_half_close_and_durable_bidirectional_metering"
+      "name": "udp_preserves_datagrams_empty_payloads_and_peer_isolation"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "udp_preserves_datagrams_empty_payloads_and_peer_isolation"
+      "name": "moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "tcp_binary_payload_half_close_and_durable_bidirectional_metering"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -230,11 +234,11 @@
     },
     {
       "file": "crates/relay-platform/tests/journal.rs",
-      "name": "manifest_io_failure_poisons_further_writes_and_restart_reconciles_the_commit"
+      "name": "initialized_database_rejects_writes_without_its_log_and_stale_state_cannot_rebind"
     },
     {
       "file": "crates/relay-platform/tests/journal.rs",
-      "name": "initialized_database_rejects_writes_without_its_log_and_stale_state_cannot_rebind"
+      "name": "manifest_io_failure_poisons_further_writes_and_restart_reconciles_the_commit"
     },
     {
       "file": "crates/relay-platform/tests/journal.rs",
@@ -305,6 +309,26 @@
       "name": "historical_checkpoints_paginate_past_sync_limit_and_revision_changes_invalidate_cursor"
     },
     {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "failed_journal_confirmation_never_returns_partial_batch_success_and_retries_are_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "http_overload_is_bounded_and_duplicate_retries_do_not_multiply_credit"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "batch_isolates_invalid_requests_and_restores_only_confirmed_changes"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "duplicate_requests_share_the_same_grant_and_storage_failure_aborts_the_batch"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "http_coalesces_requests_preserves_response_identity_and_restricts_metrics"
+    },
+    {
       "file": "crates/relay-platform/tests/tls_transport.rs",
       "name": "tls_profiles_reject_paths_mismatched_keys_and_public_private_keys"
     },
@@ -363,6 +387,7 @@
   "linux_deployment_verified": false,
   "remaining_full_scope": "REQUIREMENTS.md and STATUS.md",
   "budget_benchmark_files": [
+    "benchmark-budget-individual.json",
     "benchmark-budget.json",
     "benchmark-budget-32m.json"
   ],
@@ -386,11 +411,11 @@
   },
   "recovery_smoke_file": "recovery-smoke.json",
   "recovery_smoke": {
-    "at_utc": "2026-10-23T23:36:30.833105+00:00",
+    "at_utc": "2026-10-24T00:16:17.823156+00:00",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "binary_sha256": "1dacffbba2499d075f12fbf6ade57e10ee29346d8e318b66dca852567e6ad783",
+    "binary_sha256": "d11c77d525893477372d50ee05fb2e915da037875482c7c7564821eccaa4c208",
     "restore": {
-      "journal_id": "e4ab550c-6fb2-4344-a5b7-5b5fd0e16b88",
+      "journal_id": "918d3f60-72e3-461b-aa14-e817afd115c6",
       "backup_sequence": 4,
       "restored_sequence": 11,
       "replayed_transactions": 7,
@@ -439,7 +464,448 @@
   ],
   "controller_journal_enabled_during_budget_benchmarks": true,
   "performance_regression_open": true,
-  "performance_regression": "Strict per-transaction journal synchronization materially reduces small-quantum refill throughput on this macOS host. No durability barrier was removed. Group commit and refill scheduling remain work.",
+  "performance_regression": "Grouping preserves durable barriers and materially improves concurrent sync and forwarding. Small-quantum goodput remains well below no-budget forwarding; high-latency control links and fairness remain unverified.",
   "actual_power_loss_verified": false,
-  "remote_journal_replication_verified": false
+  "remote_journal_replication_verified": false,
+  "batched_agent_sync_verified": true,
+  "batch_input_isolation_and_restore_verified": true,
+  "batch_storage_failure_atomicity_verified": true,
+  "bounded_sync_overload_and_duplicate_retry_verified": true,
+  "control_metrics_access_verified": true,
+  "control_sync_benchmark_file": "benchmark-control-sync.json",
+  "control_sync_benchmark": {
+    "at_utc": "2026-10-24T00:15:30.794276+00:00",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "binary_sha256": "d11c77d525893477372d50ee05fb2e915da037875482c7c7564821eccaa4c208",
+    "scope": "control API only; simulated node usage; local loopback; two controllers; alternating waves; same binary and durability protocol",
+    "nodes_per_controller": 32,
+    "rounds": 5,
+    "results": {
+      "individual": {
+        "samples": [
+          {
+            "seconds": 0.6153972499887459,
+            "requests_per_second": 51.998932397870156,
+            "request_latency_ms": [
+              158.71266700560227,
+              79.66629200382158,
+              100.89045797940344,
+              60.43433299055323,
+              251.84258300578222,
+              233.53608296019956,
+              214.4953750539571,
+              122.1832919982262,
+              140.8948750467971,
+              195.97683299798518,
+              178.31979197217152,
+              41.461041022557765,
+              25.358290993608534,
+              270.0395410065539,
+              288.2937499671243,
+              307.0053330156952,
+              325.36566705675796,
+              344.0850420156494,
+              362.1705829864368,
+              384.53291601035744,
+              405.0829170155339,
+              423.16608398687094,
+              442.4623329541646,
+              461.6416659555398,
+              481.28008301137015,
+              499.2749579832889,
+              517.5552910077386,
+              536.7158339940943,
+              557.4632079806179,
+              575.5194170051254,
+              593.5390000231564,
+              614.7175829974003
+            ]
+          },
+          {
+            "seconds": 0.5876283750403672,
+            "requests_per_second": 54.45618584671265,
+            "request_latency_ms": [
+              225.0978749943897,
+              97.3680000170134,
+              244.88162499619648,
+              41.550165973603725,
+              24.607874976936728,
+              58.554666000418365,
+              76.68216701131314,
+              191.65229197824374,
+              208.86908401735127,
+              115.92712497804314,
+              262.1088339947164,
+              172.13033302687109,
+              151.39000001363456,
+              134.4329999992624,
+              281.53649996966124,
+              301.7874999786727,
+              320.4359579831362,
+              336.93562500411645,
+              354.78770901681855,
+              372.5678750197403,
+              390.48933394951746,
+              409.60424998775125,
+              427.4472499964759,
+              444.72345896065235,
+              459.6407919889316,
+              477.17425000155345,
+              497.1595410024747,
+              516.8098749709316,
+              534.8066670121625,
+              553.8274589926004,
+              570.8372910157777,
+              587.0136250159703
+            ]
+          },
+          {
+            "seconds": 0.6117887500440702,
+            "requests_per_second": 52.305636541526596,
+            "request_latency_ms": [
+              202.94916699640453,
+              30.82795796217397,
+              221.8039999715984,
+              105.36524996859953,
+              278.60424999380484,
+              67.54266703501344,
+              87.95274997828528,
+              181.839625001885,
+              164.34137499891222,
+              48.412750009447336,
+              145.63966600690037,
+              125.2856669598259,
+              241.20058299740776,
+              259.1916249948554,
+              300.37566600367427,
+              316.5743749705143,
+              333.4162080427632,
+              355.12604197720066,
+              371.6150830150582,
+              390.07174997823313,
+              409.76604202296585,
+              429.23700000392273,
+              446.1062499904074,
+              466.13704098854214,
+              482.27145802229643,
+              500.49108295934275,
+              517.1623330097646,
+              534.2023749835789,
+              555.4005419835448,
+              575.9807080030441,
+              591.9224589597434,
+              610.1561249815859
+            ]
+          },
+          {
+            "seconds": 0.5898320410051383,
+            "requests_per_second": 54.252732600739186,
+            "request_latency_ms": [
+              55.81095797242597,
+              72.91058398550376,
+              109.41425000783056,
+              234.0539160068147,
+              23.66270899074152,
+              90.94179200474173,
+              126.16400001570582,
+              256.74354197690263,
+              39.585000020451844,
+              215.28641699114814,
+              160.70795798441395,
+              180.08454196387902,
+              197.51287502003834,
+              144.72349995048717,
+              274.0219999686815,
+              292.9579169722274,
+              311.74750003265217,
+              329.8564580036327,
+              345.6155000021681,
+              365.06475001806393,
+              382.8708750079386,
+              398.80045800236985,
+              416.46675002994016,
+              436.635208025109,
+              457.5854589929804,
+              478.8148329826072,
+              498.4202079940587,
+              518.9657500013709,
+              534.7437920281664,
+              553.9038749993779,
+              571.8040410429239,
+              589.1644160146825
+            ]
+          },
+          {
+            "seconds": 0.6059936249512248,
+            "requests_per_second": 52.80583603924153,
+            "request_latency_ms": [
+              28.741665999405086,
+              46.52541596442461,
+              159.88554200157523,
+              253.78033402375877,
+              123.03216703003272,
+              234.0390829485841,
+              141.21158298803493,
+              82.73112500319257,
+              195.91329095419496,
+              178.6062920000404,
+              104.37229200033471,
+              215.9411670290865,
+              62.390207953285426,
+              269.93958302773535,
+              287.08766697673127,
+              307.3510410031304,
+              324.1780420066789,
+              346.045459038578,
+              360.6664999970235,
+              379.5130839571357,
+              398.1049589929171,
+              416.03504202794284,
+              434.33050002204254,
+              453.1747080036439,
+              471.88562504015863,
+              491.000542009715,
+              511.6790839820169,
+              529.909958015196,
+              548.2782080071047,
+              566.8892079847865,
+              585.7093750382774,
+              604.3584579601884
+            ]
+          }
+        ],
+        "median_requests_per_second": 52.80583603924153,
+        "median_request_latency_ms": 314.16093750158325,
+        "p95_request_latency_ms": 575.9807080030441,
+        "measured_requests": 160,
+        "durable_commits": 160,
+        "requests_per_commit": 1.0,
+        "control_metrics": {
+          "committed_batches": 192,
+          "processed_requests": 192,
+          "largest_batch": 1,
+          "queue_full_rejections": 0,
+          "failed_batches": 0,
+          "batch_limit": 1,
+          "queue_capacity": 64,
+          "coalesce_window_ms": 0
+        },
+        "synthetic_ledger_expected_bytes": 192,
+        "synthetic_ledger_recorded_bytes": 192
+      },
+      "batched": {
+        "samples": [
+          {
+            "seconds": 0.09355345898075029,
+            "requests_per_second": 342.0504206753528,
+            "request_latency_ms": [
+              41.35875002248213,
+              41.20495804818347,
+              41.212999960407615,
+              41.149458033032715,
+              41.12449998501688,
+              41.079290967900306,
+              36.82037501130253,
+              40.992791997268796,
+              36.760416987817734,
+              36.66470799362287,
+              40.94704199815169,
+              36.65591700701043,
+              36.56579100061208,
+              40.85541603853926,
+              68.4121249942109,
+              68.43833299353719,
+              69.34445799561217,
+              69.32712497655302,
+              70.01520897028968,
+              68.31679202150553,
+              69.94337495416403,
+              69.89891699049622,
+              68.2105419691652,
+              69.14387503638864,
+              68.16158397123218,
+              68.12549999449402,
+              68.0284170084633,
+              69.04516700888053,
+              92.01387502253056,
+              91.93279198370874,
+              91.9126250082627,
+              91.92141599487513
+            ]
+          },
+          {
+            "seconds": 0.08687466598348692,
+            "requests_per_second": 368.34673995848846,
+            "request_latency_ms": [
+              34.064624982420355,
+              38.08837500400841,
+              33.9881670079194,
+              36.58133395947516,
+              33.957499952521175,
+              36.5478330058977,
+              38.667165965307504,
+              33.84508303133771,
+              33.90745900105685,
+              36.49124997900799,
+              33.80433400161564,
+              36.44479200011119,
+              33.75850000884384,
+              33.82391599006951,
+              63.46554099582136,
+              62.94924998655915,
+              62.829333008266985,
+              62.805374967865646,
+              62.79591703787446,
+              62.864917039405555,
+              62.78304202714935,
+              62.76574998628348,
+              62.832666968461126,
+              62.846750020980835,
+              62.8111669793725,
+              62.68945802003145,
+              62.799957988318056,
+              62.78170901350677,
+              86.10266697360203,
+              85.87850001640618,
+              86.08300000196323,
+              86.18129201931879
+            ]
+          },
+          {
+            "seconds": 0.09687479102285579,
+            "requests_per_second": 330.323293213094,
+            "request_latency_ms": [
+              38.956542033702135,
+              38.84208301315084,
+              42.203458957374096,
+              38.72579097514972,
+              38.70470804395154,
+              42.088374961167574,
+              42.032582976389676,
+              42.01537504559383,
+              38.459666015114635,
+              38.536167005077004,
+              38.47779199713841,
+              41.90179199213162,
+              41.8517499929294,
+              38.314250006806105,
+              70.75050001731142,
+              70.7230840343982,
+              70.63791697146371,
+              70.63662499422207,
+              70.56087499950081,
+              70.59650000883266,
+              70.02149999607354,
+              70.48400002531707,
+              70.51024999236688,
+              70.48733398551121,
+              70.86566695943475,
+              70.39787498069927,
+              70.35150000592694,
+              70.30741701601073,
+              95.0988749973476,
+              95.04358301637694,
+              95.1824170188047,
+              95.25899996515363
+            ]
+          },
+          {
+            "seconds": 0.08243037498323247,
+            "requests_per_second": 388.2064106406075,
+            "request_latency_ms": [
+              32.03187504550442,
+              33.46795798279345,
+              32.001249957829714,
+              31.970499956514686,
+              31.973499979358166,
+              31.93541697692126,
+              33.41887501301244,
+              31.906332995276898,
+              31.92258399212733,
+              31.87295899260789,
+              31.77758294623345,
+              31.872916966676712,
+              31.767250038683414,
+              31.873084022663534,
+              59.64408296858892,
+              60.08258298970759,
+              59.614708996377885,
+              59.58974995883182,
+              60.53720798809081,
+              59.59758296376094,
+              60.50795904593542,
+              60.505792032927275,
+              60.48208300489932,
+              59.567750024143606,
+              59.565542032942176,
+              59.53220801893622,
+              59.44541597273201,
+              59.51170896878466,
+              81.91904198611155,
+              81.89070801017806,
+              81.93095796741545,
+              81.88554202206433
+            ]
+          },
+          {
+            "seconds": 0.09841204097028822,
+            "requests_per_second": 325.1634625651264,
+            "request_latency_ms": [
+              39.17858301429078,
+              39.03858398552984,
+              37.35520801274106,
+              41.06145800324157,
+              37.249416986014694,
+              40.15000001527369,
+              40.9216660191305,
+              37.158042017836124,
+              43.28229097882286,
+              37.06783399684355,
+              39.89420796278864,
+              39.861250028479844,
+              36.8436659919098,
+              39.77174998726696,
+              72.3264169646427,
+              72.27058301214129,
+              71.92770898109302,
+              72.17012497130781,
+              72.90916697820649,
+              72.0809159683995,
+              72.02291704015806,
+              72.04308401560411,
+              71.61354197887704,
+              70.03045896999538,
+              71.83745800284669,
+              69.94458299595863,
+              71.79050002014264,
+              71.74854102777317,
+              96.36966703692451,
+              96.23541595647112,
+              96.35195799637586,
+              96.09804098727182
+            ]
+          }
+        ],
+        "median_requests_per_second": 342.0504206753528,
+        "median_request_latency_ms": 60.282332997303456,
+        "p95_request_latency_ms": 92.01387502253056,
+        "measured_requests": 160,
+        "durable_commits": 15,
+        "requests_per_commit": 10.666666666666666,
+        "control_metrics": {
+          "committed_batches": 18,
+          "processed_requests": 192,
+          "largest_batch": 14,
+          "queue_full_rejections": 0,
+          "failed_batches": 0,
+          "batch_limit": 16,
+          "queue_capacity": 64,
+          "coalesce_window_ms": 2
+        },
+        "synthetic_ledger_expected_bytes": 192,
+        "synthetic_ledger_recorded_bytes": 192
+      }
+    },
+    "batched_to_individual_rate_ratio": 6.477511698160888
+  }
 }

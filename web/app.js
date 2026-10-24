@@ -157,7 +157,7 @@ function editBudget(existing, users, nodes) {
 }
 
 async function renderRecovery() {
-  const status = await api('/recovery');
+  const [status, metrics] = await Promise.all([api('/recovery'), api('/control/metrics')]);
   const p = panel('控制器恢复保护', '将数据库备份与最新恢复日志、进度清单一起保管。恢复会重放备份之后已经确认的变更。');
   const body = el('div', undefined, 'panel-body');
   body.append(badge(status.enabled && status.healthy ? '已启用 · 写入正常' : status.enabled ? '写入停止 · 需要检查' : '未启用', status.enabled && status.healthy ? 'green' : ''));
@@ -168,5 +168,9 @@ async function renderRecovery() {
   body.append(el('p', '恢复前停止原控制器，使用完整日志及其最新进度清单，将恢复结果写入一个新的状态目录。原备份和日志保持原样。只有备份而缺少后续日志时，无法推断遗漏的额度分配。', 'fine'));
   const command = el('pre', 'relay restore --backup backups/controller.sqlite --recovery-log state/controller/recovery.log --output state/restored-controller', 'mono');
   body.append(command, el('p', '恢复日志包含身份和配置数据，须按数据库的私有权限保护。当前保护覆盖控制器记录；节点异常退出后的未知消费、密钥目录迁移、自动归档和异地日志复制仍需后续完善。', 'fine'));
+  body.append(el('h3', '节点同步'), el('p', '本次控制器运行期间的同步统计。队列拥塞时节点会稍后重试；提交完成后才确认额度和用量。', 'fine'), table(['项目', '次数'], [
+    ['已处理请求', metrics.processed_requests], ['完成提交批次', metrics.committed_batches],
+    ['最大合并请求数', metrics.largest_batch], ['拥塞退回', metrics.queue_full_rejections], ['提交失败', metrics.failed_batches]
+  ]));
   p.append(body); if (state.view === 'recovery') $('#content').replaceChildren(p);
 }

@@ -1,0 +1,140 @@
+    Checking relay-platform v0.5.0 (<repository>/crates/relay-platform)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.17s
+   Compiling relay-platform v0.5.0 (<repository>/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.43s
+     Running unittests src/lib.rs (target/debug/deps/relay_platform-e48a6a294b309dbc)
+
+running 2 tests
+test journal::tests::crash_worker ... ignored, subprocess helper exercised by abrupt_exit_at_each_durable_boundary
+test journal::tests::abrupt_exit_at_each_durable_boundary ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+     Running unittests src/main.rs (target/debug/deps/relay-11c8bf3848478ec3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/budgets.rs (target/debug/deps/budgets-9df5f80b2a4bfe8c)
+
+running 12 tests
+test invalid_report_rolls_back_other_reports_and_retry_updates_totals_once ... ok
+test failed_meter_transaction_rolls_back_reservation_consumption_as_well ... ok
+test restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant ... ok
+test budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed ... ok
+test datagram_larger_than_quantum_requests_enough_credit_without_partial_charges ... ok
+test hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes ... ok
+test graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent ... ok
+test concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget ... ok
+test restored_controller_cannot_reissue_reservations_forgotten_by_its_backup ... ok
+test settlement_cancels_an_unissued_request_before_a_late_original_can_allocate ... ok
+test settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed ... ok
+test budget_permissions_revision_conflicts_and_committed_floor_are_enforced ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+     Running tests/control_agent.rs (target/debug/deps/control_agent-a569bf1f8661c5ca)
+
+running 12 tests
+test remote_controller_requires_https_and_never_embeds_credentials ... ok
+test graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat ... ok
+test enrollment_recovers_after_the_controller_commits_but_response_is_lost ... ok
+test interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener ... ok
+test running_agent_republishes_acknowledged_counters_after_controller_restore ... ok
+test restored_backup_waits_for_controller_and_cannot_spend_confirmed_quota_twice ... ok
+test journal_restore_recovers_a_post_backup_node_and_refills_its_live_tcp_session ... ok
+test http_auth_role_and_schema_enforcement ... ok
+test api_agent_control_outage_restart_and_reconciliation ... ok
+test udp_uses_only_its_reserved_budget_during_outage_and_resumes_when_control_returns ... ok
+test udp_larger_than_the_reservation_quantum_preserves_the_whole_datagram ... ok
+test two_real_agents_share_user_quota_refill_without_stream_loss_and_return_idle_reservations ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.81s
+
+     Running tests/forwarding.rs (target/debug/deps/forwarding-f35a6c76cfbd585e)
+
+running 16 tests
+test deleting_a_rule_terminates_existing_connections ... ok
+test failed_config_keeps_old_listener_and_persisted_revision ... ok
+test source_acl_denies_before_any_billable_payload ... ok
+test routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations ... ok
+test failed_meter_transaction_never_forwards_uncommitted_payload ... ok
+test dual_protocol_listener_and_ipv6_udp_are_independently_verified ... ok
+test concurrent_tcp_sessions_cannot_multiply_the_rule_quota ... ok
+test ipv6_and_dns_targets_transfer_real_bytes ... ok
+test source_hash_is_stable_and_least_connections_uses_active_sessions ... ok
+test weighted_target_selection_and_connect_failure_fallback ... ok
+test udp_preserves_datagrams_empty_payloads_and_peer_isolation ... ok
+test moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled ... ok
+test tcp_binary_payload_half_close_and_durable_bidirectional_metering ... ok
+test udp_enforces_combined_quota_without_partial_datagrams ... ok
+test udp_session_limit_and_idle_reclamation_are_real ... ok
+test shared_rate_limit_includes_both_directions_and_declares_burst ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+     Running tests/journal.rs (target/debug/deps/journal-5f08c60d9e8d5362)
+
+running 6 tests
+test empty_initialization_can_rebuild_its_head_but_committed_history_cannot ... ok
+test initialized_database_rejects_writes_without_its_log_and_stale_state_cannot_rebind ... ok
+test manifest_io_failure_poisons_further_writes_and_restart_reconciles_the_commit ... ok
+test missing_corrupt_truncated_and_unrelated_logs_never_enable_restored_allocations ... ok
+test recovery_status_is_admin_only_and_failed_logging_is_unhealthy ... ok
+test restore_replays_credentials_configuration_budgets_and_usage_after_an_old_backup ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.40s
+
+     Running tests/ledger.rs (target/debug/deps/ledger-6d2634a1580c4d93)
+
+running 8 tests
+test model_rejects_unknown_options_invalid_targets_and_listener_duplicates ... ok
+test periods_do_not_reset_on_reapply_and_old_periods_cannot_spend ... ok
+test exhausted_expired_and_disabled_rules_reject_empty_datagrams_too ... ok
+test quota_is_shared_across_directions_and_survives_restart ... ok
+test consistent_backup_restores_config_counters_and_private_permissions ... ok
+test enrollment_is_single_use_and_configuration_writes_are_optimistic ... ok
+test controller_replay_is_idempotent_and_counter_regression_is_rejected ... ok
+test authorization_is_enforced_at_store_boundary_and_sessions_revoke ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+
+     Running tests/recovery.rs (target/debug/deps/recovery-7aeaa7901bf23d02)
+
+running 6 tests
+test unrelated_and_future_databases_are_rejected_without_schema_migration ... ok
+test v1_managed_database_migrates_without_silently_reopening_old_quotas ... ok
+test conflicting_page_rolls_back_all_rows_and_never_changes_identity ... ok
+test checkpoint_raises_stale_backup_and_lower_controller_checkpoint_replays_local_totals ... ok
+test only_exported_managed_backup_requires_recovery_and_lock_is_exclusive ... ok
+test historical_checkpoints_paginate_past_sync_limit_and_revision_changes_invalidate_cursor ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/sync_batch.rs (target/debug/deps/sync_batch-af544b74af2698f4)
+
+running 5 tests
+test failed_journal_confirmation_never_returns_partial_batch_success_and_retries_are_idempotent ... ok
+test http_overload_is_bounded_and_duplicate_retries_do_not_multiply_credit ... ok
+test batch_isolates_invalid_requests_and_restores_only_confirmed_changes ... ok
+test duplicate_requests_share_the_same_grant_and_storage_failure_aborts_the_batch ... ok
+test http_coalesces_requests_preserves_response_identity_and_restricts_metrics ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.82s
+
+     Running tests/tls_transport.rs (target/debug/deps/tls_transport-633e20df4f827a80)
+
+running 7 tests
+test tls_profiles_reject_paths_mismatched_keys_and_public_private_keys ... ok
+test tls12_and_tls13_negotiate_explicitly_and_transfer_application_bytes ... ok
+test outbound_tls_failure_does_not_forward_payload_or_fall_back_to_plaintext ... ok
+test invalid_tls_updates_keep_old_listener_and_material_rotation_ends_old_sessions ... ok
+test mutually_authenticated_tls_hop_preserves_binary_half_close_and_payload_accounting ... ok
+test slow_tls_handshake_is_bounded_and_releases_connection_capacity ... ok
+test tls_rejects_missing_client_identity_wrong_authority_and_wrong_server_name ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+
+Release build, Python syntax, controller A/B benchmark, three budget benchmarks, loopback benchmark, real CLI recovery and standalone TCP/UDP probe passed; see matching binary hashes in JSON reports.

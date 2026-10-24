@@ -33,6 +33,9 @@ enum Command {
         /// Append-only controller recovery log (defaults to STATE/recovery.log).
         #[arg(long)]
         recovery_log: Option<PathBuf>,
+        /// Maximum agent sync requests per durable commit; 1 disables coalescing.
+        #[arg(long,default_value_t=16,value_parser=clap::value_parser!(u8).range(1..=16))]
+        sync_batch_size: u8,
         /// Acknowledge that a TLS reverse proxy protects a non-loopback listener.
         #[arg(long)]
         behind_tls_proxy: bool,
@@ -119,6 +122,7 @@ async fn main() -> Result<()> {
             state,
             admin_password_file,
             recovery_log,
+            sync_batch_size,
             behind_tls_proxy,
         } => {
             ensure!(
@@ -145,7 +149,7 @@ async fn main() -> Result<()> {
             tracing::info!(address=%listener.local_addr()?,"controller listening");
             axum::serve(
                 listener,
-                api::router(AppState::new(store))
+                api::router(AppState::new(store).with_sync_batch_size(sync_batch_size as usize)?)
                     .into_make_service_with_connect_info::<SocketAddr>(),
             )
             .with_graceful_shutdown(stop.cancelled_owned())

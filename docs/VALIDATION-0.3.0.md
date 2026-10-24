@@ -1,6 +1,6 @@
 # 本地验证记录
 
-0.3.0 开发版本通过 **58 项自动化测试**、Rust 格式检查、Clippy（警告视为错误）、浏览器脚本语法检查与 Python 脚本语法检查。Release 构建成功。证据摘要见 [validation-evidence.json](validation-evidence.json)，测试代码位于 `crates/relay-platform/tests/`，检查输出见 [verification-0.3.0.txt](verification-0.3.0.txt)。
+0.3.0 开发版本通过 **58 项自动化测试**、Rust 格式检查、Clippy（警告视为错误）、浏览器脚本语法检查与 Python 脚本语法检查。Release 构建成功。证据摘要见 [validation-evidence.json](validation-evidence-0.3.0.json)，测试代码位于 `crates/relay-platform/tests/`，检查输出见 [verification-0.3.0.txt](verification-0.3.0.txt)。
 
 ## 真实验证范围
 
@@ -17,11 +17,11 @@
 
 完整回归曾暴露 TLS 测试材料的偶发解析失败。检查本机 LibreSSL 3.3.6 随机生成的 1024 个测试 EC 密钥，其中 1 个 SEC1 私有标量编码为 31 字节；原测试材料可能触发 ring 对固定长度编码的拒绝。测试改为 ring 生成标准 P-256 PKCS#8，再由 OpenSSL 签发证书；未放宽运行时私钥或证书验证。修复后的全部测试通过。
 
-CLI 另行启动回显目标与 Release 转发进程，探测 TCP/UDP 后核对 176 个接纳字节，并验证在线备份账本一致。记录见 [cli-smoke.json](cli-smoke.json)。验证子进程均已停止。
+CLI 另行启动回显目标与 Release 转发进程，探测 TCP/UDP 后核对 176 个接纳字节，并验证在线备份账本一致。记录见 [cli-smoke.json](cli-smoke-0.3.0.json)。验证子进程均已停止。
 
 ## 无全局额度的回环基准
 
-环境为 macOS arm64、Apple M1 Pro、10 个逻辑 CPU、32 GiB 内存、Rust/Cargo 1.99.1。无 TLS，使用同一 Python 回显目标；预热后直连/转发交替，每连接 32 MiB，5 轮取中位数。吞吐按单方向应用字节计算，账本同时计入上下行。原始记录见 [benchmark-local.json](benchmark-local.json)，内含所测二进制 SHA-256。
+环境为 macOS arm64、Apple M1 Pro、10 个逻辑 CPU、32 GiB 内存、Rust/Cargo 1.99.1。无 TLS，使用同一 Python 回显目标；预热后直连/转发交替，每连接 32 MiB，5 轮取中位数。吞吐按单方向应用字节计算，账本同时计入上下行。原始记录见 [benchmark-local.json](benchmark-local-0.3.0.json)，内含所测二进制 SHA-256。
 
 | 并发 TCP 连接 | 直连中位数 / Mbps | 转发中位数 / Mbps | 转发 / 直连 |
 | --- | ---: | ---: | ---: |
@@ -41,7 +41,7 @@ UDP 每次 1200 字节、100 次回显、0 次失败；直连 RTT 中位数 40.6
 | 32 MiB | 2 | 6124.7 | 4348.1 | 71.0% |
 | 32 MiB | 8 | 10930.8 | 10919.2 | 99.9% |
 
-原始数据见 [4 MiB 批次](benchmark-budget.json) 与 [32 MiB 批次](benchmark-budget-32m.json)。每次完整基准的 Agent 与控制器规则账本均为 **4,034,920,448 bytes**；其中预算组消费 **2,017,460,224 bytes**，正常停止后 `committed_bytes` 与已消费量相等，未用预留为 0。所有 TCP 载荷逐字节验证。
+原始数据见 [4 MiB 批次](benchmark-budget-0.3.0.json) 与 [32 MiB 批次](benchmark-budget-32m-0.3.0.json)。每次完整基准的 Agent 与控制器规则账本均为 **4,034,920,448 bytes**；其中预算组消费 **2,017,460,224 bytes**，正常停止后 `committed_bytes` 与已消费量相等，未用预留为 0。所有 TCP 载荷逐字节验证。
 
 正常补额的合并等待已缩短为 2 ms，额度不足和控制请求失败分别退避。较大预留能减少控制交互，但也会增加节点失联后的保守占额。当前单连接仍有显著计量开销；报告未隔离 Python、内核和磁盘成本，也未测慢控制链路或公平性。单次接近无预算吞吐不代表零开销，更不代表性能优于参考产品。
 

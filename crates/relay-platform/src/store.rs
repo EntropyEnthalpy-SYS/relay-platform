@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod budgets;
 mod recovery;
+mod sync;
 
 #[derive(Debug)]
 pub struct Rejection {
@@ -635,95 +636,9 @@ impl Store {
         Ok(q.query_map([node],|r|Ok(serde_json::json!({"revision":r.get::<_,u64>(0)?,"actor_id":r.get::<_,String>(1)?,"created_at_ms":r.get::<_,i64>(2)?})))?.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn sync(&self, node: &str, request: SyncRequest) -> Result<SyncResponse> {
-        if request.usage.len() > 1024
-            || request.apply_error.as_ref().is_some_and(|e| e.len() > 2048)
-        {
-            return reject(400, "sync payload exceeds limits");
-        }
-        let mut conn = self.0.lock().unwrap();
-        let tx = conn.transaction()?;
-        let ledger: Option<String> =
-            tx.query_row("SELECT ledger_id FROM nodes WHERE id=?1", [node], |r| {
-                r.get(0)
-            })?;
-        if ledger.as_deref() != Some(request.ledger_id.as_str()) || !identifier(&request.ledger_id)
-        {
-            return reject(409, "ledger identity mismatch; reconcile before syncing");
-        }
-        let desired: u64 = tx.query_row(
-            "SELECT desired_revision FROM nodes WHERE id=?1",
-            [node],
-            |r| r.get(0),
-        )?;
-        if request.applied_revision > desired {
-            return reject(
-                409,
-                "agent revision exceeds controller; reconcile restored state",
-            );
-        }
-        let mut acknowledgements = vec![];
-        for usage in request.usage {
-            if usage.sequence == 0
-                || usage.sequence > MAX_COUNTER
-                || usage
-                    .upload_bytes
-                    .checked_add(usage.download_bytes)
-                    .is_none_or(|n| n > MAX_COUNTER)
-            {
-                return reject(400, "invalid usage counters");
-            }
-            let known=tx.query_row("SELECT EXISTS(SELECT 1 FROM rule_epochs e JOIN rule_bindings b ON b.rule_id=e.rule_id WHERE b.node_id=?1 AND e.rule_id=?2 AND e.meter_epoch=?3)",params![node,usage.rule_id,usage.meter_epoch],|r|r.get::<_,bool>(0))?;
-            if !known {
-                return reject(403, "usage does not belong to this node and period");
-            }
-            let old=tx.query_row("SELECT sequence,upload_bytes,download_bytes FROM usage WHERE node_id=?1 AND rule_id=?2 AND meter_epoch=?3",params![node,usage.rule_id,usage.meter_epoch],|r|Ok((r.get::<_,u64>(0)?,r.get::<_,u64>(1)?,r.get::<_,u64>(2)?))).optional()?;
-            if let Some((seq, up, down)) = old
-                && (usage.sequence < seq
-                    || usage.upload_bytes < up
-                    || usage.download_bytes < down
-                    || (usage.sequence == seq
-                        && (usage.upload_bytes != up || usage.download_bytes != down)))
-            {
-                return reject(
-                    409,
-                    "usage history conflicts with controller; restore or reconcile agent ledger",
-                );
-            }
-            tx.execute("INSERT INTO usage(node_id,rule_id,meter_epoch,sequence,upload_bytes,download_bytes,reported_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(node_id,rule_id,meter_epoch) DO UPDATE SET sequence=excluded.sequence,upload_bytes=excluded.upload_bytes,download_bytes=excluded.download_bytes,reported_at_ms=excluded.reported_at_ms",params![node,usage.rule_id,usage.meter_epoch,usage.sequence,usage.upload_bytes,usage.download_bytes,now_ms()])?;
-            acknowledgements.push(UsageAck {
-                rule_id: usage.rule_id,
-                meter_epoch: usage.meter_epoch,
-                sequence: usage.sequence,
-            });
-        }
-        let budget = request
-            .budget
-            .map(|exchange| budgets::exchange(&tx, node, &request.ledger_id, exchange))
-            .transpose()?;
-        tx.execute("UPDATE nodes SET applied_revision=?1,last_seen_ms=?2,apply_error=?3,stats_json=?4 WHERE id=?5",params![request.applied_revision,now_ms(),request.apply_error,serde_json::to_string(&request.stats)?,node])?;
-        let config = if request.need_config || desired != request.applied_revision {
-            Some(serde_json::from_str(&tx.query_row(
-                "SELECT config_json FROM config_history WHERE node_id=?1 AND revision=?2",
-                params![node, desired],
-                |r| r.get::<_, String>(0),
-            )?)?)
-        } else {
-            None
-        };
-        tx.commit()?;
-        Ok(SyncResponse {
-            budget,
-            controller_instance: "store-direct".into(),
-            config,
-            acknowledgements,
-            server_time_ms: now_ms(),
-        })
-    }
-
     pub fn reported_usage(&self, actor: &Actor) -> Result<Vec<serde_json::Value>> {
         let conn = self.0.lock().unwrap();
-        let mut q=conn.prepare("SELECT u.node_id,u.rule_id,u.meter_epoch,u.sequence,u.upload_bytes,u.download_bytes,u.reported_at_ms,b.owner_id,b.tenant_id FROM usage u JOIN rule_bindings b ON b.rule_id=u.rule_id WHERE (?1='system_admin' OR b.tenant_id=?2) ORDER BY u.reported_at_ms DESC LIMIT 2000")?;
+        let mut q=conn.prepare("SELECT u.node_id,u.rule_id,u.meter_epoch,u.sequence,u.upload_bytes,u.download_bytes,u.reported_at_ms,b.owner_id,b.tenant_id FROM usage u JOIN rule_bindings b ON b.rule_id=u.rule_id WHERE (?1='system_admin' OR b.tenant_id=?2) ORDER BY u.reported_at_ms DESC,u.node_id,u.rule_id,u.meter_epoch LIMIT 2000")?;
         Ok(q.query_map(params![actor.role.as_str(),actor.tenant_id],|r|Ok(serde_json::json!({"node_id":r.get::<_,String>(0)?,"rule_id":r.get::<_,String>(1)?,"meter_epoch":r.get::<_,String>(2)?,"sequence":r.get::<_,u64>(3)?,"upload_bytes":r.get::<_,u64>(4)?,"download_bytes":r.get::<_,u64>(5)?,"reported_at_ms":r.get::<_,i64>(6)?,"owner_id":r.get::<_,String>(7)?,"tenant_id":r.get::<_,String>(8)?})))?.collect::<rusqlite::Result<_>>()?)
     }
     pub fn audit_log(&self, actor: &Actor) -> Result<Vec<serde_json::Value>> {

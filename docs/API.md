@@ -22,6 +22,7 @@ API 尚处开发阶段；以 `model.rs` 的严格字段定义为准。未识别�
 | PUT | `/budgets/{id}` | `{expected_revision,limit_bytes,quantum_bytes}`；修改额度，不清零用量 |
 | GET | `/audit` | 最近 200 条全局审计；仅系统管理员 |
 | GET | `/recovery` | `{enabled,healthy,head}`；仅系统管理员，读取控制器恢复日志状态 |
+| GET | `/control/metrics` | 仅系统管理员；返回本次控制器运行的节点同步统计 |
 | GET | `/capabilities` | 实现能力与待实现能力目录，不代表完整发布验收 |
 | POST | `/agent/enroll` | `{node_id,enrollment_token,credential}`；返回 `{enrolled:true}` |
 | POST | `/agent/reconcile` | 节点凭据认证；分页获取权威用量下限和相同修订的配置 |
@@ -69,7 +70,7 @@ API 尚处开发阶段；以 `model.rs` 的严格字段定义为准。未识别�
 
 TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server_name,ca,identity}`，未设置则为普通流量。所有 ID 引用节点本地材料，API 不接收 PEM 私钥；入口/出口 TLS 不接受 UDP 或双协议，也不接受一条规则中明文与加密出口混用。节点材料错误通过 `apply_error` 报告，期望修订和实际修订会保持不同。
 
-0.3.0 的 `scope` 为 `user`、`tenant` 或 `node`，每个对象只允许一个额度。`quantum_bytes` 范围为 1..67108864，单位字节。创建需要相关节点确认停用规则；更新需要修订号一致，且新总额不能低于 `committed_bytes`。`consumed_bytes` 是已上报累计接纳量；`committed_bytes-consumed_bytes` 是包含未上报消费的剩余预留，不等于可重新发放的余额。读取按租户隔离，创建和修改需要写权限，均有审计记录。
+额度的 `scope` 为 `user`、`tenant` 或 `node`，每个对象只允许一个额度。`quantum_bytes` 范围为 1..67108864，单位字节。创建需要相关节点确认停用规则；更新需要修订号一致，且新总额不能低于 `committed_bytes`。`consumed_bytes` 是已上报累计接纳量；`committed_bytes-consumed_bytes` 是包含未上报消费的剩余预留，不等于可重新发放的余额。读取按租户隔离，创建和修改需要写权限，均有审计记录。
 
 规则上的 `budget_ids` 由控制器按当前 owner/tenant/node 自动重算；用户提交和历史回滚无法删除适用的预算。0.4.0 Agent 同步可带 `budget:{run_id,requests,reports,settle_only}`。`requests` 每项为 `{budget_id,request_id,minimum_bytes}`；`reports` 每项为 `{grant_id,consumed_bytes,surrender}`。响应的 `budget` 包含 `grants`、`acknowledgements`、`allocation_paused`、`cancelled_requests`；每项 grant 为 `{grant_id,budget_id,request_id,run_id,bytes}`，确认项与 report 同形，取消项为请求 ID。三个响应集合各最多 1024 项；请求和报告也各最多 1024 项。最小请求最大 65536 字节，用于完整 UDP 包。`request_id` 在节点/运行范围内幂等；报告为单调累计值，封存后不得增加。已发出的预留只有节点先持久化封存，才允许归还未用部分。
 
@@ -80,3 +81,7 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 `/recovery` 的 `head` 包含 `journal_id`、`schema`、`schema_sha256`、`sequence`、`sha256` 和 `committed_bytes`。它不返回日志内容、磁盘路径或凭据。未认证的 `/healthz` 在恢复写入故障后返回 503 及 `status:recovery_log_unavailable`；正常为 200。该检查判断本机日志写入状态，不代表已完成异地备份或业务线路健康。
 
 401 表示凭据失效；403 表示权限或归属错误；不可见节点返回 404；400/422 表示输入不合法；409 表示版本/账本冲突；412 表示恢复分页期间配置变化。内部错误返回通用消息，细节进入本地服务日志。
+
+0.5.0 的 `/agent/sync` 在控制器内最多等待 2 ms 合并，单批最多 16 项，等待队列最多 64 项；不是客户端批量接口。满队列返回 429，未入队请求不执行写入。认证、账本和额度检查仍在每项请求的事务保存点内执行；预期输入错误只回滚该项，磁盘或日志错误使整批不返回成功。响应丢失后继续使用原来的幂等请求 ID。管理员其他写入继续独立提交。
+
+`/control/metrics` 字段为 `committed_batches`、`processed_requests`、`largest_batch`、`queue_full_rejections`、`failed_batches`、`batch_limit`、`queue_capacity`、`coalesce_window_ms`。计数在控制器重启时清零，不是流量账本；`processed_requests` 包含完成校验后返回预期错误的请求，整批提交失败单独计入 `failed_batches`。没有数据变更的批次可以不产生日志记录。`/usage` 在上报时间相同的情况下，再按节点、规则、周期稳定排序。
