@@ -3,3 +3,5 @@
 .mobile-only{display:none}@media(max-width:760px){.mobile-only{display:inline-block}}
 
 .target-editor{min-width:0;border:1px solid var(--line);border-radius:8px;padding:12px;margin:16px 0}.target-editor legend{padding:0 5px;font-size:13px;color:var(--muted)}
+
+.node-tools{flex-wrap:wrap;margin-bottom:0;min-width:0}.node-panel>.panel-head{align-items:flex-start;flex-wrap:wrap}.node-choice{width:auto;padding:0}

@@ -136,6 +136,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/session", get(session))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/nodes", get(nodes).post(create_node))
+        .route("/api/v1/nodes/profiles", post(update_node_profiles))
+        .route(
+            "/api/v1/nodes/{node}/profile",
+            axum::routing::put(update_node_profile),
+        )
         .route("/api/v1/nodes/{node}/config", get(config).put(publish))
         .route("/api/v1/nodes/{node}/history", get(history))
         .route("/api/v1/nodes/{node}/health", get(node_health))
@@ -273,9 +278,10 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
 async fn nodes(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
+    Query(filter): Query<crate::node::NodeFilter>,
 ) -> ApiResult<Vec<crate::store::Node>> {
     Ok(Json(
-        database(state.store, move |db| db.nodes(&actor)).await?,
+        database(state.store, move |db| db.nodes_filtered(&actor, filter)).await?,
     ))
 }
 
@@ -286,6 +292,8 @@ struct NewNode {
     tenant_id: Option<String>,
     #[serde(default = "crate::lease::default_policy")]
     lease_policy: Option<crate::lease::LeasePolicy>,
+    #[serde(default)]
+    settings: crate::node::NodeSettings,
 }
 async fn create_node(
     State(state): State<AppState>,
@@ -294,11 +302,44 @@ async fn create_node(
 ) -> ApiResult<serde_json::Value> {
     let tenant = input.tenant_id.unwrap_or_else(|| actor.tenant_id.clone());
     let (node, token) = database(state.store, move |db| {
-        db.create_node_with_lease(&actor, &tenant, &input.name, input.lease_policy)
+        db.create_node_with_settings(
+            &actor,
+            &tenant,
+            &input.name,
+            input.lease_policy,
+            input.settings,
+        )
     })
     .await?;
     Ok(Json(
         serde_json::json!({"node":node,"enrollment_token":token}),
+    ))
+}
+async fn update_node_profile(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Json(input): Json<crate::node::NodeUpdate>,
+) -> ApiResult<crate::node::NodeUpdateResult> {
+    Ok(Json(
+        database(state.store, move |db| db.update_node(&actor, &node, input)).await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NodeProfileBatch {
+    updates: Vec<crate::node::NodeBatchEntry>,
+}
+async fn update_node_profiles(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NodeProfileBatch>,
+) -> ApiResult<Vec<crate::node::NodeUpdateResult>> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_nodes(&actor, input.updates)
+        })
+        .await?,
     ))
 }
 async fn config(
@@ -582,7 +623,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
 }

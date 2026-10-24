@@ -1,4 +1,6 @@
 mod common;
+#[path = "node_leases/node_profile_integration.rs"]
+mod node_profile_integration;
 use common::*;
 use futures_util::StreamExt;
 use relay_platform::{

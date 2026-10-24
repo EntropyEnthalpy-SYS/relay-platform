@@ -25,13 +25,36 @@ struct Deadline {
 }
 pub(super) struct LeaseClocks {
     started: Instant,
+    started_wall_ms: i64,
+    policy_anchor: Instant,
     nodes: HashMap<String, Deadline>,
 }
 impl Default for LeaseClocks {
     fn default() -> Self {
         Self {
             started: Instant::now(),
+            started_wall_ms: now_ms(),
+            policy_anchor: Instant::now(),
             nodes: HashMap::new(),
+        }
+    }
+}
+impl LeaseClocks {
+    pub(super) fn policy_now_ms(&mut self) -> i64 {
+        self.observe_policy_time(now_ms(), Instant::now())
+    }
+    fn observe_policy_time(&mut self, wall_ms: i64, tick: Instant) -> i64 {
+        let projected = self.started_wall_ms.saturating_add(
+            tick.saturating_duration_since(self.policy_anchor)
+                .as_millis()
+                .min(i64::MAX as u128) as i64,
+        );
+        if wall_ms > projected {
+            self.started_wall_ms = wall_ms;
+            self.policy_anchor = tick;
+            wall_ms
+        } else {
+            projected
         }
     }
 }
@@ -238,6 +261,22 @@ impl Store {
         };
         policy.validate()?;
         let mut clocks = self.3.lock().unwrap();
+        let settings = super::node_profiles::read(&tx, &node)?.settings;
+        let policy_now = clocks.policy_now_ms();
+        match settings.lifecycle(policy_now) {
+            crate::node::NodeLifecycle::Disabled => {
+                return reject(403, "node execution is paused by its operator");
+            }
+            crate::node::NodeLifecycle::Expired => {
+                return reject(410, "node execution has reached its expiry");
+            }
+            crate::node::NodeLifecycle::Active => {}
+        }
+        let lifetime_ms = settings
+            .expires_at_ms
+            .map(|expiry| (expiry - policy_now) as u64)
+            .unwrap_or(policy.ttl_ms)
+            .min(policy.ttl_ms);
         let clock = deadline(&mut clocks, &node, &state);
         let now = Instant::now();
         let same = state
@@ -263,13 +302,13 @@ impl Store {
             if !live || !same || generation != state.generation {
                 return reject(409, "cannot renew a stale node lease");
             }
-            expires = now + Duration::from_millis(policy.ttl_ms);
+            expires = now + Duration::from_millis(lifetime_ms);
         } else if live {
             if !same {
                 return reject(423, "another process holds this node execution lease");
             }
             // Idempotent recovery of a lost reply does not renew the lease.
-            expires = clock.expires;
+            expires = clock.expires.min(now + Duration::from_millis(lifetime_ms));
         } else {
             if now < clock.recovery_until {
                 return reject(423, "node lease recovery quarantine is still active");
@@ -295,7 +334,7 @@ impl Store {
                 &node,
                 &serde_json::json!({"generation":state.generation}).to_string(),
             )?;
-            expires = now + Duration::from_millis(policy.ttl_ms);
+            expires = now + Duration::from_millis(lifetime_ms);
         }
         tx.commit()?;
         *clock = Deadline {

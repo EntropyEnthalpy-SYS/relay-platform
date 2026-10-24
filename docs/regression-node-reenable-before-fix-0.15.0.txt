@@ -1,0 +1,25 @@
+Unpublished 0.15.0 candidate. Re-enabling a paused node with an earlier expiry incorrectly bypassed the existing-window check.
+Expected failing assertion; corrected implementation is covered by the full verification log.
+
+   Compiling relay-platform v0.15.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.69s
+     Running unittests src/lib.rs (target/debug/deps/relay_platform-56393a02702ca1bf)
+
+running 1 test
+test store::node_profiles::tests::expiry_caps_grants_and_live_edits_cannot_retroactively_shorten_issued_windows ... FAILED
+
+failures:
+
+---- store::node_profiles::tests::expiry_caps_grants_and_live_edits_cannot_retroactively_shorten_issued_windows stdout ----
+
+thread 'store::node_profiles::tests::expiry_caps_grants_and_live_edits_cannot_retroactively_shorten_issued_windows' (5034620) panicked at crates/relay-platform/src/store/node_profiles_tests.rs:48:24:
+called `Result::unwrap_err()` on an `Ok` value: NodeUpdateResult { node_id: "fa81929a-6bca-445c-af0c-6fa0127fc092", name: "short-lived", profile: NodeProfile { revision: 3, updated_at_ms: Some(1792835336929), settings: NodeSettings { kinds: [], group: None, tags: [], notes: "", cost: None, enabled: true, expires_at_ms: Some(1792835337028) } }, lifecycle: Active }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    store::node_profiles::tests::expiry_caps_grants_and_live_edits_cannot_retroactively_shorten_issued_windows
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.32s
+
+error: test failed, to rerun pass `--lib`

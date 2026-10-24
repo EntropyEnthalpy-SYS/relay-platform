@@ -128,6 +128,16 @@ impl AgentLease {
                 {
                     return Err(ResumeInterrupted.into());
                 }
+                if status == reqwest::StatusCode::FORBIDDEN {
+                    bail!(
+                        "controller denied node execution (HTTP 403); check the node's pause state and permissions"
+                    );
+                }
+                if status == reqwest::StatusCode::GONE {
+                    bail!(
+                        "controller reports node expiration (HTTP 410); extend or clear the expiry before restarting this Agent"
+                    );
+                }
                 if status == reqwest::StatusCode::LOCKED
                     || status.is_server_error()
                     || status == reqwest::StatusCode::TOO_MANY_REQUESTS

@@ -4,6 +4,30 @@ use crate::budget::BudgetExchange;
 #[path = "budget_recovery_tests.rs"]
 mod budget_recovery_tests;
 
+#[test]
+fn node_policy_clock_does_not_reverse_after_an_observed_forward_then_backward_jump() {
+    let mut clock = LeaseClocks::default();
+    let tick = clock.policy_anchor;
+    let wall = clock.started_wall_ms;
+    assert_eq!(clock.observe_policy_time(wall, tick), wall);
+    assert_eq!(
+        clock.observe_policy_time(wall + 3_600_000, tick + Duration::from_secs(1)),
+        wall + 3_600_000
+    );
+    assert_eq!(
+        clock.observe_policy_time(wall - 30_000, tick + Duration::from_secs(2)),
+        wall + 3_601_000
+    );
+    // Sub-millisecond observations must not discard accumulated elapsed time.
+    for step in 1..=20 {
+        let at = tick + Duration::from_secs(2) + Duration::from_micros(step * 100);
+        assert_eq!(
+            clock.observe_policy_time(wall, at),
+            wall + 3_601_000 + (step / 10) as i64
+        );
+    }
+}
+
 struct Fixture {
     _tmp: tempfile::TempDir,
     store: Store,

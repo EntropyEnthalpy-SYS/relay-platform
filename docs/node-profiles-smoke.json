@@ -1,0 +1,113 @@
+{
+  "at_utc": "2026-10-24T09:55:02.476889+00:00",
+  "version": "relay 0.15.0",
+  "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "inventory": {
+    "nodes": 2,
+    "filters_matched": true,
+    "cost_micros": 12500123,
+    "same_tcp_connection_after_metadata_edit": true,
+    "configuration_revision_unchanged": 1,
+    "stale_edit_status": 409,
+    "batch_conflict_status": 409,
+    "batch_rollback_verified": true,
+    "batch_receipts": [
+      {
+        "node_id": "81ada534-9346-40d6-b79a-185db1ca09f2",
+        "revision": 3
+      },
+      {
+        "node_id": "e6161122-e0e7-498e-a717-7c1aca8920a7",
+        "revision": 2
+      }
+    ]
+  },
+  "pause": {
+    "agent_exit_code": 1,
+    "seconds_until_exit": 0.46345895796548575,
+    "tcp_and_udp_closed": true,
+    "consumed_and_committed_bytes": 448,
+    "profile_revision": 4
+  },
+  "expiry": {
+    "expires_at_ms": 1792835697001,
+    "listener_closed_at_ms": 1792835696533,
+    "closed_before_expiry_ms": 468,
+    "last_capped_lease_remaining_ms": 3587,
+    "controller_was_offline": true,
+    "expired_restart_exit_code": 1,
+    "expired_restart_http_status": 410,
+    "durable_bytes_before_recovery": 928,
+    "unreported_bytes_recovered": 160,
+    "reactivation_wait_seconds": 5.127858916996047,
+    "generation_after_extension": 3
+  },
+  "ledger": {
+    "expected_bytes": 1216,
+    "agent_bytes": 1216,
+    "controller_bytes": 1216,
+    "budget_consumed_bytes": 1216,
+    "budget_committed_bytes": 1216,
+    "exact_match": true
+  },
+  "restore": {
+    "journal_id": "9e494c79-672e-4e8b-b7d2-0111aa57dc6c",
+    "backup_sequence": 11,
+    "restored_sequence": 36,
+    "replayed_transactions": 25,
+    "budget_allocation_paused": false,
+    "ignored_uncommitted_tail": false
+  },
+  "profiles_after_restore": [
+    {
+      "name": "managed-renamed",
+      "profile": {
+        "revision": 6,
+        "updated_at_ms": 1792835697107,
+        "settings": {
+          "kinds": [
+            "ingress",
+            "relay"
+          ],
+          "group": "bulk-group",
+          "tags": [
+            "premium",
+            "Taipei"
+          ],
+          "notes": "metadata changed while one TCP stream remains open",
+          "cost": {
+            "currency": "USD",
+            "amount_micros": 12500123,
+            "period": "monthly"
+          },
+          "enabled": true,
+          "expires_at_ms": null
+        }
+      },
+      "desired_revision": 1
+    },
+    {
+      "name": "standby-inventory",
+      "profile": {
+        "revision": 2,
+        "updated_at_ms": 1792835689492,
+        "settings": {
+          "kinds": [],
+          "group": "bulk-group",
+          "tags": [],
+          "notes": "",
+          "cost": null,
+          "enabled": true,
+          "expires_at_ms": null
+        }
+      },
+      "desired_revision": 0
+    }
+  ],
+  "udp_stop_observations": [
+    "ConnectionRefusedError",
+    "ConnectionRefusedError"
+  ],
+  "all_child_processes_exited": true
+}

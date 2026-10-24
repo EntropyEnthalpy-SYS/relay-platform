@@ -1,5 +1,5 @@
 const $ = (s, root = document) => root.querySelector(s);
-const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'nodes', nodes: [], usage: [], selectedNode: null, config: null, busy: false };
+const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'nodes', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, config: null, busy: false };
 const titles = { nodes: '节点总览', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', budgets: '共享额度', users: '用户与权限', audit: '操作审计', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
@@ -15,7 +15,7 @@ async function api(path, options = {}) {
   const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = { error: text || `HTTP ${response.status}` }; }
   if (!response.ok) { if (response.status === 401 && path !== '/auth/login') loggedOut(); throw new Error(result.error || `请求失败 HTTP ${response.status}`); } return result;
 }
-function loggedOut() { state.token = null; state.actor = null; sessionStorage.removeItem('relay-session'); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); }
+function loggedOut() { state.token = null; state.actor = null; state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); }
 function modal(title, content) { $('#dialog-title').textContent = title; $('#dialog-body').replaceChildren(content); $('#dialog').showModal(); }
 $('#dialog-close').onclick = () => { $('#dialog').close(); $('#dialog-body').replaceChildren(); };
 $('#dialog').addEventListener('close', () => $('#dialog-body').replaceChildren());
@@ -156,13 +156,21 @@ async function refresh() {
 }
 
 async function renderNodes() {
-  const [nodes, usage] = await Promise.all([api('/nodes'), api('/usage')]); state.nodes = nodes; state.usage = usage;
+  const query = new URLSearchParams(state.nodeFilter).toString();
+  const [nodes, usage] = await Promise.all([api('/nodes' + (query ? '?' + query : '')), api('/usage')]); state.nodes = nodes; state.usage = usage;
+  state.selectedNodes = new Set([...state.selectedNodes].filter(id => nodes.some(n => n.id === id)));
   const metric = el('div', undefined, 'metrics');
-  [['节点总数', nodes.length, '当前账号可见的节点'], ['控制在线', nodes.filter(online).length, '最近 30 秒收到心跳'], ['活跃连接', nodes.filter(online).reduce((s, n) => s + n.stats.active_tcp + n.stats.active_udp, 0), '在线节点的 TCP + UDP 会话'], ['近期上报负载', bytes(usage.reduce((s, u) => s + u.upload_bytes + u.download_bytes, 0)), '最近 2,000 个计量周期 · 上下行合计']].forEach(([title, value, foot]) => { const n = el('div', undefined, 'metric'); n.append(el('div', title, 'metric-label'), el('div', String(value), 'metric-value'), el('div', foot, 'metric-foot')); metric.append(n); });
-  const p = panel('节点', '注册节点、确认配置生效，并检查实际回报。', canWrite() ? button('＋ 注册节点', newNode, 'primary') : null);
-  if (!nodes.length) p.append(empty('接入你的第一个节点', '注册生成一次性令牌，在节点启动 Agent 后即可配置转发。', canWrite() ? button('注册节点', newNode, 'primary') : null));
-  else p.append(table(['节点 / ID', '控制连接', '运行保护', '配置修订', '活跃会话', '最近回报', '操作'], nodes.map(node => [namedCell(node.name, node.id), badge(node.enrolled ? online(node) ? '● 控制在线' : '○ 无近期回报' : '待注册', online(node) ? 'green' : ''), nodeLeaseBadge(node), node.apply_error ? namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`, node.apply_error) : badge(`${node.applied_revision} / ${node.desired_revision}`, node.applied_revision === node.desired_revision && node.enrolled && node.last_seen_ms ? 'green' : 'orange'), online(node) ? `${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP` : '—', timestamp(node.last_seen_ms), nodeActions(node)])));
-  if (state.view === 'nodes') $('#content').replaceChildren(metric, p);
+  [['节点数量', nodes.length, query ? '当前筛选范围' : '当前账号可见的节点'], ['控制在线', nodes.filter(online).length, '最近 30 秒收到心跳'], ['活跃连接', nodes.filter(online).reduce((s,n) => s+n.stats.active_tcp+n.stats.active_udp,0), '当前范围的 TCP + UDP 会话'], ['近期上报负载', bytes(usage.reduce((s,u) => s+u.upload_bytes+u.download_bytes,0)), '全部可见节点最近 2,000 个计量周期']].forEach(([title,value,foot]) => { const n=el('div',undefined,'metric'); n.append(el('div',title,'metric-label'),el('div',String(value),'metric-value'),el('div',foot,'metric-foot'));metric.append(n); });
+  const controls=el('div',undefined,'toolbar node-tools'); controls.append(button('筛选节点',filterNodes));
+  if(query) controls.append(button('清除筛选',async()=>{state.nodeFilter={};state.selectedNodes.clear();await renderNodes();}));
+  if(canWrite()) controls.append(button('选择 / 取消本页',async()=>{if(nodes.every(n=>state.selectedNodes.has(n.id)))state.selectedNodes.clear();else nodes.forEach(n=>state.selectedNodes.add(n.id));await renderNodes();}),button('批量编辑已选节点',batchNodeProfiles),button('＋ 注册节点',newNode,'primary'));
+  const p=panel('节点','管理资料、运行许可与实际回报分别显示。',controls); p.classList.add('node-panel');
+  if(!nodes.length) p.append(empty(query?'没有匹配的节点':'接入你的第一个节点',query?'调整筛选条件后重试。':'注册后启动 Agent，再配置转发。'));
+  else p.append(table(['选择','节点 / ID','类型 / 分组 / 成本','运行许可 / 到期','控制连接','运行保护','配置修订','活跃会话','操作'],nodes.map(node=>{
+    let choice='—';if(canWrite()){choice=el('input');choice.className='node-choice';choice.type='checkbox';choice.checked=state.selectedNodes.has(node.id);choice.setAttribute('aria-label','选择 '+node.name);choice.onchange=()=>choice.checked?state.selectedNodes.add(node.id):state.selectedNodes.delete(node.id);}
+    return [choice,namedCell(node.name,node.id),nodeInventoryCell(node),nodeLifecycleCell(node),namedCell(node.enrolled?online(node)?'控制在线':'无近期回报':'待注册',timestamp(node.last_seen_ms)),nodeLeaseBadge(node),node.apply_error?namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`,node.apply_error):`${node.applied_revision} / ${node.desired_revision}`,online(node)?`${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP`:'—',nodeActions(node)];
+  })));
+  if(state.view==='nodes') $('#content').replaceChildren(metric,p);
 }
 function nodeLeaseBadge(node) {
   const lease = node.lease;
@@ -177,7 +185,7 @@ function timingRow(label, value) {
 }
 function nodeActions(node) {
   const actions = el('div');
-  actions.append(button('管理规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button('运行诊断', () => nodeDiagnostics(node), 'table-action'));
+  actions.append(button(canWrite() ? '编辑资料' : '查看资料', () => editNode(node), 'table-action'), button('管理规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button('运行诊断', () => nodeDiagnostics(node), 'table-action'));
   return actions;
 }
 function nodeDiagnostics(node) {
@@ -217,7 +225,83 @@ function nodeDiagnostics(node) {
   }
   modal('节点运行诊断', body);
 }
-function newNode() { const form = el('form'); field(form, 'name', '节点名称', '', 'text').maxLength = 120; const mode = select(form, 'lease_mode', '运行保护策略', [['strict', '严格租约（推荐）'], ['offline', '离线运行']], 'strict'); const ttl = field(form, 'lease_ttl', '租约窗口 / 秒', 30, 'number'); ttl.min = 5; ttl.max = 120; mode.onchange = () => { ttl.disabled = mode.value !== 'strict'; }; form.append(el('p', '严格模式失联超过有效窗口会停止转发，新进程需在线取得租约。离线模式允许缓存启动，不防止复制身份同时运行。策略创建后固定；迁移策略需使用新节点身份。', 'fine')); form.append(el('p', '节点归属当前租户；注册令牌仅显示一次，并在成功注册后失效。', 'fine')); submit(form, '创建节点', async data => { const result = await api('/nodes', { method: 'POST', body: { name: data.get('name'), lease_policy: data.get('lease_mode') === 'strict' ? { ttl_ms: number(data, 'lease_ttl') * 1000 } : null } }); const body = el('div'); body.append(el('p', '请将此令牌保存为节点上的私有文件（权限 0600）。'), el('div', result.enrollment_token, 'secret-box')); const command = `relay agent --controller ${location.origin} --node-id ${result.node.id} --enrollment-token-file /path/to/enrollment.secret --state /var/lib/relay-agent`; body.append(el('p', '节点启动命令', 'fine'), el('pre', command), el('p', '跨机器接入须使用 HTTPS 控制地址。本机 HTTP 地址仅用于本地验收。', 'fine'), button('我已保存令牌', () => $('#dialog').close(), 'primary')); $('#dialog').close(); modal('节点已创建 · 保存一次性令牌', body); state.selectedNode = result.node.id; await renderNodes(); }); modal('注册节点', form); }
+const nodeKindNames = { ingress: '入口', relay: '中转', egress: '出口', ix: 'IX', nat: 'NAT' };
+const costPeriodNames = { monthly: '每月', yearly: '每年', one_time: '一次性' };
+function costAmount(micros) { const value = BigInt(micros), fraction = (value % 1000000n).toString().padStart(6, '0').replace(/0+$/, ''); return (value / 1000000n).toString() + (fraction ? '.' + fraction : ''); }
+function costLabel(cost) { return cost ? `${cost.currency} ${costAmount(cost.amount_micros)} · ${costPeriodNames[cost.period]}` : '未记录'; }
+function localDateTime(value) { if (!value) return ''; const d = new Date(value), pad = (n, size = 2) => String(n).padStart(size, '0'); return `${pad(d.getFullYear(), 4)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`; }
+function nodeSettingsEditor(form, settings = {}, strict = () => true) {
+  const kinds = el('fieldset', undefined, 'target-editor'); kinds.append(el('legend', '节点类型（用途标注，可多选）'));
+  for (const [value, label] of Object.entries(nodeKindNames)) { const item = el('label', label, 'inline-check'), input = el('input'); input.type = 'checkbox'; input.name = 'node_kind'; input.value = value; input.checked = (settings.kinds || []).includes(value); item.prepend(input); kinds.append(item); } form.append(kinds);
+  field(form, 'node_group', '分组', settings.group || '', 'text', false).maxLength = 64;
+  textarea(form, 'node_tags', '标签（每行一个，最多 32 个）', (settings.tags || []).join('\n'));
+  textarea(form, 'node_notes', '备注', settings.notes || '').maxLength = 4096;
+  field(form, 'cost_amount', '成本金额（最多 6 位小数；留空不记录）', settings.cost ? costAmount(settings.cost.amount_micros) : '', 'text', false).inputMode = 'decimal';
+  field(form, 'cost_currency', '成本币种（三个字母，例如 CNY、USD）', settings.cost?.currency || 'CNY', 'text', false).maxLength = 3;
+  select(form, 'cost_period', '成本周期', Object.entries(costPeriodNames), settings.cost?.period || 'monthly');
+  const enabled = select(form, 'node_enabled', '运行许可', [['true', '允许运行'], ['false', '暂停运行']], String(settings.enabled !== false));
+  const expiry = field(form, 'node_expiry', `到期时间（${Intl.DateTimeFormat().resolvedOptions().timeZone}；留空不设）`, localDateTime(settings.expires_at_ms), 'datetime-local', false); expiry.step = '0.001';
+  const originalExpiryText = expiry.value;
+  form.append(el('p', '类型、分组和成本用于管理，不自动改变转发路径或创建 NAT。暂停和到期仅支持严格租约：停止在当前授权窗口内收敛，不清零用量或退款。恢复允许状态后，已退出的 Agent 需要重新启动。', 'fine'));
+  const policy = () => { enabled.disabled = expiry.disabled = !strict(); if (!strict()) { enabled.value = 'true'; expiry.value = ''; } }; policy();
+  return { policy, read(data) {
+    const amount = String(data.get('cost_amount') || '').trim(); let cost = null;
+    if (amount) { if (!/^\d+(\.\d{1,6})?$/.test(amount)) throw new Error('成本必须为非负十进制数，最多 6 位小数'); const [whole, fraction = ''] = amount.split('.'), micros = BigInt(whole) * 1000000n + BigInt(fraction.padEnd(6, '0')); if (micros > 9000000000000000n) throw new Error('成本超出可记录范围'); cost = { currency: String(data.get('cost_currency')).trim().toUpperCase(), amount_micros: Number(micros), period: data.get('cost_period') }; }
+    let expires = null;
+    if (strict() && expiry.value) { expires = expiry.value === originalExpiryText ? settings.expires_at_ms : new Date(expiry.value).getTime(); if (!Number.isSafeInteger(expires) || expires <= 0) throw new Error('请输入有效的到期时间'); }
+    return { kinds: data.getAll('node_kind'), group: String(data.get('node_group') || '').trim() || null, tags: String(data.get('node_tags') || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean), notes: String(data.get('node_notes') || ''), cost, enabled: strict() ? enabled.value === 'true' : true, expires_at_ms: expires };
+  } };
+}
+function editNode(node) {
+  const settings = node.profile.settings;
+  if (!canWrite()) { const body = el('div'); body.append(table(['资料', '当前记录'], [['名称', node.name], ['类型', settings.kinds.map(k => nodeKindNames[k]).join('、') || '未标注'], ['分组', settings.group || '未分组'], ['标签', settings.tags.join('、') || '无'], ['成本', costLabel(settings.cost)], ['到期时间', settings.expires_at_ms ? timestamp(settings.expires_at_ms) : '未设置']])); body.append(el('pre', settings.notes || '无备注')); modal('节点资料', body); return; }
+  const form = el('form'); field(form, 'node_name', '节点名称', node.name).maxLength = 120;
+  const editor = nodeSettingsEditor(form, settings, () => !!node.lease.policy);
+  submit(form, '保存资料', async data => { await api(`/nodes/${node.id}/profile`, { method: 'PUT', body: { expected_revision: node.profile.revision, name: String(data.get('node_name')).trim(), settings: editor.read(data) } }); $('#dialog').close(); await renderNodes(); notify('节点资料已保存；转发配置保持原修订。'); }); modal('编辑节点 · ' + node.name, form);
+}
+function filterNodes() {
+  const form = el('form'), current = state.nodeFilter;
+  field(form, 'q', '搜索名称、ID、标签或备注', current.q || '', 'text', false);
+  select(form, 'kind', '节点类型', [['', '全部类型'], ...Object.entries(nodeKindNames)], current.kind || '');
+  field(form, 'group', '分组（精确匹配）', current.group || '', 'text', false);
+  field(form, 'tag', '标签（精确匹配）', current.tag || '', 'text', false);
+  select(form, 'lifecycle', '运行许可', [['', '全部'], ['active', '允许运行且未到期'], ['disabled', '已暂停'], ['expired', '已到期']], current.lifecycle || '');
+  submit(form, '应用筛选', async data => { state.nodeFilter = Object.fromEntries([...data.entries()].map(([k,v]) => [k,String(v).trim()]).filter(([,v]) => v)); state.selectedNodes.clear(); $('#dialog').close(); await renderNodes(); }); modal('筛选节点', form);
+}
+function batchNodeProfiles() {
+  const selected = state.nodes.filter(node => state.selectedNodes.has(node.id));
+  if (!selected.length) throw new Error('请先勾选要编辑的节点');
+  if (selected.length > 100) throw new Error('每次最多编辑 100 个节点');
+  const form = el('form'); form.append(el('p', `已选择 ${selected.length} 个节点：${selected.map(n => n.name).join('、')}`));
+  const operation = select(form, 'operation', '批量操作', [['group','设置或清空分组'], ['add_tags','增加标签'], ['remove_tags','移除标签'], ['pause','暂停运行'], ['enable','允许运行']], 'group');
+  const value = textarea(form, 'value', '分组名称，或每行一个标签', '');
+  operation.onchange = () => { value.disabled = ['pause','enable'].includes(operation.value); };
+  form.append(el('p', '所有节点验证通过后一起保存。任一节点资料过期或权限不符，整批均不修改；重新打开后再编辑。暂停仅支持严格租约，不自动退款；允许运行后仍须检查到期时间和 Agent 状态。', 'fine'));
+  submit(form, '保存选中节点', async data => {
+    const action = data.get('operation'), text = String(data.get('value') || '').trim(), tags = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const updates = selected.map(node => { const settings = structuredClone(node.profile.settings);
+      if (action === 'group') settings.group = text || null;
+      if (action === 'add_tags') settings.tags = [...new Set([...settings.tags, ...tags])];
+      if (action === 'remove_tags') settings.tags = settings.tags.filter(t => !tags.includes(t));
+      if (action === 'pause') settings.enabled = false;
+      if (action === 'enable') settings.enabled = true;
+      return { node_id: node.id, update: { expected_revision: node.profile.revision, name: node.name, settings } };
+    });
+    const results = await api('/nodes/profiles', { method: 'POST', body: { updates } }); state.selectedNodes.clear(); $('#dialog').close(); await renderNodes(); const body = el('div'); body.append(table(['节点', '资料修订', '运行许可'], results.map(r => [r.name, r.profile.revision, {active:'允许运行',disabled:'已暂停',expired:'已到期'}[r.lifecycle]]))); modal('批量保存完成', body);
+  }); modal('批量编辑节点资料', form);
+}
+function nodeInventoryCell(node) { const s = node.profile.settings, cell = el('div'); cell.append(el('strong', s.kinds.map(k => nodeKindNames[k]).join(' / ') || '未标注'), el('div', [s.group || '未分组', ...s.tags].join(' · '), 'subline'), el('div', costLabel(s.cost), 'subline')); return cell; }
+function nodeLifecycleCell(node) { const cell = el('div'), names = { active: '允许运行', disabled: '已暂停', expired: '已到期' }; cell.append(badge(names[node.lifecycle], node.lifecycle === 'active' ? 'green' : 'orange')); if (node.profile.settings.expires_at_ms) cell.append(el('div', timestamp(node.profile.settings.expires_at_ms), 'subline')); if (node.lifecycle !== 'active' && node.lease.active) cell.append(el('div', '现有租约尚在收敛', 'subline')); return cell; }
+
+function newNode() {
+  const form=el('form');field(form,'name','节点名称','','text').maxLength=120;
+  const mode=select(form,'lease_mode','运行保护策略',[['strict','严格租约（推荐）'],['offline','离线运行']],'strict');
+  const ttl=field(form,'lease_ttl','租约窗口 / 秒',30,'number');ttl.min=5;ttl.max=120;
+  const editor=nodeSettingsEditor(form,{},()=>mode.value==='strict');mode.onchange=()=>{ttl.disabled=mode.value!=='strict';editor.policy();};
+  form.append(el('p','节点归属当前租户。严格模式失联超过授权窗口会停止转发；离线模式不支持暂停或到期。运行策略创建后固定。注册令牌只显示一次。','fine'));
+  submit(form,'创建节点',async data=>{const result=await api('/nodes',{method:'POST',body:{name:String(data.get('name')).trim(),lease_policy:mode.value==='strict'?{ttl_ms:number(data,'lease_ttl')*1000}:null,settings:editor.read(data)}});const body=el('div');body.append(el('p','请将此令牌保存为节点上的私有文件（权限 0600）。'),el('div',result.enrollment_token,'secret-box'));body.append(el('p','节点启动命令','fine'),el('pre',`relay agent --controller ${location.origin} --node-id ${result.node.id} --enrollment-token-file /path/to/enrollment.secret --state /var/lib/relay-agent`),el('p','跨机器接入须使用 HTTPS。本机 HTTP 地址仅用于本地验收。','fine'),button('我已保存令牌',()=>$('#dialog').close(),'primary'));$('#dialog').close();modal('节点已创建 · 保存一次性令牌',body);state.selectedNode=result.node.id;await renderNodes();});modal('注册节点',form);
+}
+
 
 async function renderRules() {
   state.nodes = await api('/nodes'); const content = $('#content');
@@ -296,7 +380,7 @@ async function renderUsage() { const records = await api('/usage'); const p = pa
 async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后已有 Web 会话立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, canWrite() || u.id === state.actor.id ? button('撤销全部会话', async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify('该用户现有会话已撤销。'); }, 'table-action') : '—']))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function newUser() { const form = el('form'); field(form, 'username', '用户名').maxLength = 80; const p = field(form, 'password', '初始密码（至少 12 个字节）', '', 'password'); p.minLength = 12; p.autocomplete = 'new-password'; const roles = [['viewer', '只读用户'], ['tenant_admin', '租户管理员']]; if (state.actor.role === 'system_admin') roles.push(['system_admin', '系统管理员']); select(form, 'role', '角色', roles, 'viewer'); submit(form, '创建用户', async data => { await api('/users', { method: 'POST', body: Object.fromEntries(data) }); $('#dialog').close(); await renderUsers(); }); modal('添加用户', form); }
 async function renderAudit() { const rows = await api('/audit'); const p = panel('操作审计', '记录配置发布、节点注册、身份及会话操作。最近 200 条。'); p.append(table(['时间', '操作者', '操作', '对象', '详情'], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 setInterval(() => { if (state.actor && !document.hidden && !$('#dialog').open && ['nodes', 'usage', 'budgets', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
 if (state.token) { api('/session').then(user => { state.actor = user; return enter(); }).catch(e => { loggedOut(); $('#login-error').textContent = e.message; }); }

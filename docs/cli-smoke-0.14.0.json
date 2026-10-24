@@ -1,0 +1,13 @@
+{
+  "validate": "passed",
+  "probe": {
+    "tcp": "verified",
+    "udp": "verified",
+    "bytes_each_direction_per_protocol": 44
+  },
+  "durable_bytes": 176,
+  "backup_restore": "identical",
+  "child_processes_stopped": true,
+  "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
+  "version": "relay 0.14.0"
+}

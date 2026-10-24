@@ -16,6 +16,7 @@ use uuid::Uuid;
 mod budgets;
 mod health;
 mod leases;
+mod node_profiles;
 mod recovery;
 mod sync;
 mod topology;
@@ -111,6 +112,10 @@ impl Actor {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default)]
+    pub profile: crate::node::NodeProfile,
+    #[serde(default)]
+    pub lifecycle: crate::node::NodeLifecycle,
     #[serde(default)]
     pub lease: crate::lease::LeaseStatus,
     pub id: String,
@@ -471,12 +476,27 @@ impl Store {
         name: &str,
         policy: Option<crate::lease::LeasePolicy>,
     ) -> Result<(Node, String)> {
+        self.create_node_with_settings(actor, tenant, name, policy, Default::default())
+    }
+    pub fn create_node_with_settings(
+        &self,
+        actor: &Actor,
+        tenant: &str,
+        name: &str,
+        policy: Option<crate::lease::LeasePolicy>,
+        settings: crate::node::NodeSettings,
+    ) -> Result<(Node, String)> {
         if !actor.may_write() || !actor.permits_tenant(tenant) {
             return reject(403, "insufficient node scope");
         }
-        if name.trim().is_empty() || name.len() > 120 {
-            return reject(400, "invalid node name");
-        }
+        crate::node::validate_name(name)?;
+        node_profiles::validate_policy(&settings, policy.as_ref())?;
+        let now = self.3.lock().unwrap().policy_now_ms();
+        let profile = crate::node::NodeProfile {
+            revision: 1,
+            updated_at_ms: Some(now),
+            settings,
+        };
         let id = Uuid::new_v4().to_string();
         let token = secret();
         let config = NodeConfig {
@@ -500,11 +520,14 @@ impl Store {
         )?;
         tx.execute("INSERT INTO config_history(node_id,revision,config_json,actor_id,created_at_ms) VALUES(?1,0,?2,?3,?4)",params![id,serde_json::to_string(&config)?,actor.id,now_ms()])?;
         leases::initialize(&tx, &id, policy.clone())?;
+        node_profiles::write(&tx, &id, &profile)?;
         audit(&tx, &actor.id, "node.create", &id, "{}")?;
         tx.commit()?;
         leases::created(&mut self.3.lock().unwrap(), &id);
         Ok((
             Node {
+                lifecycle: profile.settings.lifecycle(now),
+                profile,
                 lease: crate::lease::LeaseStatus {
                     policy,
                     ..Default::default()
@@ -565,6 +588,8 @@ impl Store {
         let mut q=conn.prepare("SELECT id,tenant_id,name,desired_revision,applied_revision,last_seen_ms,apply_error,token_hash IS NOT NULL,stats_json FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY name,id")?;
         let rows = q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
             Ok(Node {
+                profile: Default::default(),
+                lifecycle: Default::default(),
                 lease: crate::lease::LeaseStatus::default(),
                 id: r.get(0)?,
                 tenant_id: r.get(1)?,
@@ -579,8 +604,11 @@ impl Store {
         })?;
         let mut nodes: Vec<Node> = rows.collect::<rusqlite::Result<_>>()?;
         let mut clocks = self.3.lock().unwrap();
+        let now = clocks.policy_now_ms();
         for node in &mut nodes {
             node.lease = leases::status(&conn, &mut clocks, &node.id)?;
+            node.profile = node_profiles::read(&conn, &node.id)?;
+            node.lifecycle = node.profile.settings.lifecycle(now);
         }
         Ok(nodes)
     }

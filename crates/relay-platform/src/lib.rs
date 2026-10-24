@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod model;
 pub mod multipath;
 mod network;
+pub mod node;
 pub mod proxy;
 mod routing;
 pub mod store;

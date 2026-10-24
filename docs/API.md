@@ -9,7 +9,9 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | POST | `/auth/login` | `{username,password}` → `{token,user,expires_in_seconds}` |
 | GET | `/session` | 当前用户与角色 |
 | POST | `/auth/logout` | 撤销当前会话 |
-| GET / POST | `/nodes` | 列出可见节点；`{name,tenant_id?,lease_policy?}` 创建节点并返回一次性注册令牌 |
+| GET / POST | `/nodes` | 按可选 q/kind/group/tag/lifecycle 筛选可见节点；`{name,tenant_id?,lease_policy?,settings?}` 创建节点并返回一次性注册令牌 |
+| PUT | `/nodes/{id}/profile` | `{expected_revision,name,settings}`；更新完整资料，独立于转发修订 |
+| POST | `/nodes/profiles` | `{updates:[{node_id,update}]}`；原子保存 1..100 个节点资料，逐节点返回修订 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |
 | PUT | `/nodes/{id}/config` | `{expected_revision,rules}`；并发冲突返回 409，成功生成下一版本 |
 | GET | `/nodes/{id}/health` | 实际修订对应的目标健康、年龄、候选原因、探测流量与容量；按节点权限过滤 |
@@ -159,3 +161,11 @@ POST /agent/budgets/recover 仅接受节点 Bearer，输入为 {lease,ledger_id,
 GET /budgets/{id}/reservations?after=grant_id 使用用户会话，按预算所属租户检查权限，允许该租户只读角色。每页最多 100 条开放预留，返回 {budget_id,reservations,next}；next 为下一次 after，null 表示本页没有更多。每项包含 grant_id、node_id、node_name、run_id、allocated_bytes、confirmed_consumed_bytes、outstanding_bytes 和当前 node_lease。外租户或不存在的预算返回 404；非法游标、未知查询字段返回 400。列表为实时键集分页，多页不是同一事务快照；outstanding_bytes 包含尚未上报消费，不能直接退款。
 
 节点 stats 新增可选 budget_recovery={run_id,at_ms,validated_grants,recovered_pending_grants,cancelled_requests,open_grants}，表示本次进程启用监听前的恢复结果。open_grants 为当时仍可消费的预留数量，不是当前余额。能力目录新增 durable-budget-run-recovery。schema v4 不变；先升级控制器，再升级 Agent，旧控制器不能直接读取新增恢复租约元数据或接收新诊断字段。
+
+## 0.15.0 节点资料与生命周期
+
+节点列表新增 profile={revision,updated_at_ms,settings} 和 lifecycle=active/disabled/expired。资料字段、成本整数口径、筛选、全量更新和批量事务见 [NODE_MANAGEMENT.md](NODE_MANAGEMENT.md)。读写沿用租户边界；只读角色写入 403，外租户节点 404，资料版本冲突 409。
+
+严格节点暂停后，领取/续租返回 403；到期后返回 410。到期前租约 valid_for_ms 被剩余时间截短，ttl_ms 仍表示策略上限。暂停和到期不阻止尚有效证明的结算，也不自动退还未知余额。离线节点设置暂停/到期返回 400；生效窗口与不能倒改已授截止时间的 409 条件见节点管理文档。
+
+能力目录新增 node-inventory-lifecycle。schema v4 保持不变；旧控制器没有这些生命周期检查，不能直接降级仍在依赖这些约束的状态。
