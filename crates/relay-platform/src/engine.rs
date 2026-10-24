@@ -708,6 +708,33 @@ pub struct Engine {
     tasks: TaskTracker,
     routes: Arc<Routes>,
 }
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Async callers can be aborted before shutdown(). Never detach live
+        // forwarding tasks when the owner of this engine disappears.
+        let inner = self.inner.get_mut();
+        for rule in inner.rules.values() {
+            rule.cancel.cancel();
+            if let Some(health) = &rule.health {
+                health.cancel();
+            }
+        }
+        for listener in inner.listeners.values() {
+            listener.stop.cancel();
+            listener.task.abort();
+        }
+        let runtimes = self
+            .health_runtimes
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        for rule in runtimes.iter() {
+            if let Some(health) = &rule.health {
+                health.cancel();
+            }
+        }
+        self.tasks.close();
+    }
+}
 impl Engine {
     pub fn new(store: Store) -> Self {
         Self::with_tls_directory(store, None)

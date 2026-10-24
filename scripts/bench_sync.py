@@ -79,7 +79,7 @@ async def run(args):
                     'password': (state / 'admin-password.secret').read_text().strip()})
                 group['token'] = session['token']
                 for i in range(args.nodes):
-                    node = await api(group, 'POST', '/nodes', {'name': f'control-benchmark-{i}'})
+                    node = await api(group, 'POST', '/nodes', {'name': f'control-benchmark-{i}', 'lease_policy': None})
                     node_id = node['node']['id']
                     credential = secrets.token_hex(32)
                     await api(group, 'POST', '/agent/enroll', {'node_id': node_id,

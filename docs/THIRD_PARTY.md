@@ -6,7 +6,7 @@
 
 0.7.0 增加 crc32c 0.6.8；Linux/macOS 的 UDP packet-info 使用 nix 0.31.3（间接增加 memoffset 0.9.1）。HAProxy 仅作为外部互通测试程序，没有链接进平台或包含在源码交付包中。
 
-0.8.0 增加 tokio-tungstenite / tungstenite 0.30.0 及其 SHA-1 依赖，用于标准 WebSocket 握手与帧；TLS 仍由既有 rustls 路径处理。共 273 个第三方元数据条目。Python websockets 17.2（BSD-3-Clause）仅用于独立互通测试，单独安装，不链接进平台或打入源码包。0.9.0 没有增加平台依赖；三节点 CLI 验证复用该隔离测试环境中的临时证书工具。0.10.0 没有新增平台依赖，健康检查使用现有传输栈；独立健康服务与性能脚本使用 Python 标准库。0.11.0 使用既有 Tokio 通知和原子计数实现诊断，没有新增依赖。0.12.0 自有聚合协议复用既有 Tokio、rustls、rand 与 SHA256，没有新增平台依赖；独立线格式客户端使用 Python 标准库/OpenSSL，临时证书生成复用既有隔离互通环境。
+0.8.0 增加 tokio-tungstenite / tungstenite 0.30.0 及其 SHA-1 依赖，用于标准 WebSocket 握手与帧；TLS 仍由既有 rustls 路径处理。共 273 个第三方元数据条目。0.13.0 的节点租约复用既有 Tokio、UUID、随机数、SHA256 和 SQLite，没有新增平台依赖；独立 CLI 验收脚本只使用 Python 标准库。Python websockets 17.2（BSD-3-Clause）仅用于独立互通测试，单独安装，不链接进平台或打入源码包。0.9.0 没有增加平台依赖；三节点 CLI 验证复用该隔离测试环境中的临时证书工具。0.10.0 没有新增平台依赖，健康检查使用现有传输栈；独立健康服务与性能脚本使用 Python 标准库。0.11.0 使用既有 Tokio 通知和原子计数实现诊断，没有新增依赖。0.12.0 自有聚合协议复用既有 Tokio、rustls、rand 与 SHA256，没有新增平台依赖；独立线格式客户端使用 Python 标准库/OpenSSL，临时证书生成复用既有隔离互通环境。
 
 | 包 | 版本 | 声明许可 | 源码/项目 |
 | --- | --- | --- | --- |

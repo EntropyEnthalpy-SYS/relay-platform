@@ -96,6 +96,7 @@ impl Fixture {
                 .reconcile(
                     &config.node_id,
                     ReconcileRequest {
+                        lease: None,
                         ledger_id: None,
                         after: None,
                         expected_revision: None,
@@ -106,6 +107,7 @@ impl Fixture {
                 .sync(
                     &config.node_id,
                     SyncRequest {
+                        lease: None,
                         budget: None,
                         ledger_id: page.ledger_id,
                         need_config: false,
@@ -189,6 +191,7 @@ fn multipath_sessions_and_paths_must_drain_even_after_physical_tcp_count_reaches
         .reconcile(
             &first.node_id,
             ReconcileRequest {
+                lease: None,
                 ledger_id: None,
                 after: None,
                 expected_revision: None,
@@ -200,6 +203,7 @@ fn multipath_sessions_and_paths_must_drain_even_after_physical_tcp_count_reaches
             .sync(
                 &first.node_id,
                 SyncRequest {
+                    lease: None,
                     budget: None,
                     ledger_id: page.ledger_id.clone(),
                     need_config: false,
@@ -660,6 +664,7 @@ fn topology_reactivation_waits_for_cancelled_probe_io_to_finish() {
         .reconcile(
             &first.node_id,
             ReconcileRequest {
+                lease: None,
                 ledger_id: None,
                 after: None,
                 expected_revision: None,
@@ -670,6 +675,7 @@ fn topology_reactivation_waits_for_cancelled_probe_io_to_finish() {
         .sync(
             &first.node_id,
             SyncRequest {
+                lease: None,
                 budget: None,
                 ledger_id: page.ledger_id,
                 need_config: false,

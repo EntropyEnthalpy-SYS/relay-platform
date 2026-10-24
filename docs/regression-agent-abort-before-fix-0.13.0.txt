@@ -1,0 +1,22 @@
+   Compiling relay-platform v0.13.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.22s
+     Running tests/node_leases.rs (target/debug/deps/node_leases-7ec757ba68f86b7b)
+
+running 1 test
+test aborting_agent_task_closes_data_plane_without_releasing_ownership_early ... FAILED
+
+failures:
+
+---- aborting_agent_task_closes_data_plane_without_releasing_ownership_early stdout ----
+
+thread 'aborting_agent_task_closes_data_plane_without_releasing_ownership_early' (4897292) panicked at crates/relay-platform/tests/node_leases.rs:545:10:
+aborted Agent left an active forwarding session: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    aborting_agent_task_closes_data_plane_without_releasing_ownership_early
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.36s
+
+error: test failed, to rerun pass `--test node_leases`

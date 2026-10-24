@@ -7,6 +7,7 @@ use relay_platform::{
 
 fn request() -> ReconcileRequest {
     ReconcileRequest {
+        lease: None,
         ledger_id: None,
         after: None,
         expected_revision: None,
@@ -14,6 +15,7 @@ fn request() -> ReconcileRequest {
 }
 fn sync_request(ledger: &str, usage: Vec<Usage>) -> SyncRequest {
     SyncRequest {
+        lease: None,
         budget: None,
         ledger_id: ledger.into(),
         need_config: false,
@@ -166,6 +168,7 @@ fn historical_checkpoints_paginate_past_sync_limit_and_revision_changes_invalida
         }
         assert!(page.config.is_none());
         query = ReconcileRequest {
+            lease: None,
             ledger_id: Some(page.ledger_id),
             after: page.next,
             expected_revision: Some(page.revision),
@@ -194,6 +197,7 @@ fn historical_checkpoints_paginate_past_sync_limit_and_revision_changes_invalida
         .reconcile(
             &node,
             ReconcileRequest {
+                lease: None,
                 ledger_id: Some(ledger),
                 after: first.next,
                 expected_revision: Some(1),

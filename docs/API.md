@@ -2,14 +2,14 @@
 
 基础路径 `/api/v1`，JSON。用户与节点分别使用独立的 256-bit 随机 Bearer 凭据；持久化存储只保存服务端令牌哈希。用户会话八小时过期。Agent 的长期凭据保存在自己的私有状态库。所有跨机器请求须通过 HTTPS。
 
-API 尚处开发阶段；以 `model.rs` 的严格字段定义为准。未识别字段返回错误，不能假装启用尚未实现的功能。单次请求限制 2 MiB。
+API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字段定义为准。未识别字段返回错误，不能假装启用尚未实现的功能。单次请求限制 2 MiB。
 
 | 方法 | 路径 | 请求或用途 |
 | --- | --- | --- |
 | POST | `/auth/login` | `{username,password}` → `{token,user,expires_in_seconds}` |
 | GET | `/session` | 当前用户与角色 |
 | POST | `/auth/logout` | 撤销当前会话 |
-| GET / POST | `/nodes` | 列出可见节点；`{name,tenant_id?}` 创建节点并返回一次性注册令牌 |
+| GET / POST | `/nodes` | 列出可见节点；`{name,tenant_id?,lease_policy?}` 创建节点并返回一次性注册令牌 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |
 | PUT | `/nodes/{id}/config` | `{expected_revision,rules}`；并发冲突返回 409，成功生成下一版本 |
 | GET | `/nodes/{id}/health` | 实际修订对应的目标健康、年龄、候选原因、探测流量与容量；按节点权限过滤 |
@@ -139,3 +139,11 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 规则增加 inbound_multipath / outbound_multipath，参数、默认值及窗口/方向限制见 [MULTIPATH.md](MULTIPATH.md)。继续使用现有单节点配置、多节点预览/发布、历史和回滚接口及权限，没有旁路接口或私钥上传。已声明路径必须通向同一汇聚规则，匹配 mTLS/WS/PROXY、路径上限与复制授权；固定端口段可引用其段内端口。
 
 节点 stats.multipath 提供本次进程聚合会话、子流、负载、复制、重传、重复接收及窗口峰值，8 个槽位在节点各规则间汇总；旧报告没有此字段时视为缺失。排空要求聚合会话/子流也为零。新增诊断会使旧控制器拒绝新 Agent，应先升级控制器。节点有序停止会至少尝试一次最终状态同步，保留最近配置应用错误；超时不意味着服务器已确认。
+
+## 0.13.0 节点执行租约
+
+HTTP 创建节点时省略 lease_policy 默认严格 30 秒；对象 {"ttl_ms":5000} 可指定 5～120 秒，null 明确选择离线。已有节点维持离线策略，策略创建后固定。节点列表新增 lease 状态，active 表示服务端仍保留所有权，不能替代业务健康检查。
+
+Agent 的 POST /agent/lease 接收 run_id、随机 token、generation；generation=null 申请，当前代数续租。POST /agent/lease/release 接收 proof 与零活跃 stats。均使用节点 Bearer。严格节点的同步/对账请求必须增加 lease={run_id,generation,token}，预算 run_id 必须一致。缺少证明返回 423，过期或不匹配返回 409；不改变此前账本去重口径。
+
+能力目录新增 node-execution-leases。详细字段、截止期、恢复等待、异常退出及先升级控制器的约定见 [NODE_LEASES.md](NODE_LEASES.md)。schema 仍为 v4，不代表可以直接将正在使用严格模式的控制器降级。

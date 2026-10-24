@@ -123,8 +123,8 @@ async def run(args):
                 raise RuntimeError(f'CLI {arguments[0]}: {error.decode()}')
             return output
 
-        async def health(label, states):
-            deadline = time.monotonic() + 15
+        async def health(label, states, timeout=15):
+            deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 value = await api('GET', f'/nodes/{node["id"]}/health')
                 reports = {(r['target_index'], r['protocol']): r for r in value['reports']}
@@ -262,10 +262,19 @@ async def run(args):
             await ready(control_port, controller)
             if await api('GET', f'/nodes/{node["id"]}/config') != config or await api('GET', '/usage') != usage:
                 raise RuntimeError('recovered configuration or ledger differs')
+            restored_lease = (await api('GET', '/nodes'))[0]['lease']
+            if not restored_lease['policy'] or restored_lease['recovery_wait_ms'] <= 0:
+                raise RuntimeError('restored strict node did not retain its cold-start quarantine')
             first.tcp_ok = first.udp_ok = False
+            restart_began = time.monotonic()
             agent = await launch('restarted-agent', 'agent', '--controller', origin, '--node-id', node['id'],
                 '--state', agent_state, '--poll-seconds', 1)
-            await health('restart observes changed service', {**all_good, (0, 'tcp'): 'unhealthy', (0, 'udp'): 'unhealthy'})
+            # Ownership acquisition deliberately waits up to a full TTL after a
+            # controller restore; only then can fresh backend probes run.
+            await health('restart observes changed service',
+                {**all_good, (0, 'tcp'): 'unhealthy', (0, 'udp'): 'unhealthy'},
+                timeout=15 + restored_lease['policy']['ttl_ms'] / 1000)
+            restart_seconds = time.monotonic() - restart_began
             await marked('tcp', b'B')
             await stop(agent)
             await check_usage()
@@ -276,6 +285,9 @@ async def run(args):
                 'backend_probe_counts': {'A': first.probes, 'B': second.probes},
                 'ledger': {'by_rule_bytes': expected, 'total_bytes': sum(expected.values()), 'exact_match': True,
                     'source_probes_excluded': True}, 'restore': recovery, 'tcp': measures,
+                'strict_restart': {'ttl_ms': restored_lease['policy']['ttl_ms'],
+                    'initial_recovery_wait_ms': restored_lease['recovery_wait_ms'],
+                    'fresh_health_after_restart_seconds': restart_seconds},
                 'parameters': {'rounds': args.rounds, 'mib_per_connection': args.mib,
                     'probe_endpoints': 4, 'probe_interval_ms': 200, 'priority': [0, 10], 'target_max_sessions': 32},
                 'child_processes_stopped': True,

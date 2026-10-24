@@ -41,6 +41,13 @@ impl Store {
         }
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        leases::validate(
+            &tx,
+            &mut self.3.lock().unwrap(),
+            node,
+            request.lease.as_ref(),
+            None,
+        )?;
         let (revision, known_ledger): (u64, Option<String>) = tx.query_row(
             "SELECT desired_revision,ledger_id FROM nodes WHERE id=?1",
             [node],

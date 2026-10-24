@@ -1,6 +1,6 @@
 {
-  "binary_sha256": "cdc23d66a0403d89d9908715f0770b1de45606f9a0e46ecb81a806dd90ae22f0",
-  "version": "relay 0.12.0",
+  "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+  "version": "relay 0.13.0",
   "hops": 2,
   "proxy": "v2_crc32c",
   "meter_records": 2,

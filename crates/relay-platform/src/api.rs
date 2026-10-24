@@ -165,6 +165,8 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/agent/enroll", post(enroll))
+        .route("/api/v1/agent/lease", post(exchange_lease))
+        .route("/api/v1/agent/lease/release", post(release_lease))
         .route("/api/v1/agent/reconcile", post(reconcile))
         .route("/api/v1/agent/sync", post(sync))
         .route(
@@ -277,6 +279,8 @@ async fn nodes(
 struct NewNode {
     name: String,
     tenant_id: Option<String>,
+    #[serde(default = "crate::lease::default_policy")]
+    lease_policy: Option<crate::lease::LeasePolicy>,
 }
 async fn create_node(
     State(state): State<AppState>,
@@ -285,7 +289,7 @@ async fn create_node(
 ) -> ApiResult<serde_json::Value> {
     let tenant = input.tenant_id.unwrap_or_else(|| actor.tenant_id.clone());
     let (node, token) = database(state.store, move |db| {
-        db.create_node(&actor, &tenant, &input.name)
+        db.create_node_with_lease(&actor, &tenant, &input.name, input.lease_policy)
     })
     .await?;
     Ok(Json(
@@ -503,6 +507,25 @@ async fn reconcile(
         .await?,
     ))
 }
+async fn exchange_lease(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::lease::LeaseRequest>,
+) -> ApiResult<crate::lease::LeaseReply> {
+    let token = bearer(&headers)?;
+    Ok(Json(
+        database(state.store, move |db| db.exchange_lease(&token, input)).await?,
+    ))
+}
+async fn release_lease(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::lease::LeaseRelease>,
+) -> ApiResult<serde_json::Value> {
+    let token = bearer(&headers)?;
+    database(state.store, move |db| db.release_lease(&token, input)).await?;
+    Ok(Json(serde_json::json!({"released":true})))
+}
 async fn sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -544,7 +567,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
 }

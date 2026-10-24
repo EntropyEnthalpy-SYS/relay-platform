@@ -497,7 +497,7 @@ async fn api_agent_control_outage_restart_and_reconciliation() {
     let created: Value = client
         .post(format!("{origin}/api/v1/nodes"))
         .bearer_auth(token)
-        .json(&json!({"name":"local-e2e-agent"}))
+        .json(&json!({"name":"local-e2e-agent","lease_policy":null}))
         .send()
         .await
         .unwrap()

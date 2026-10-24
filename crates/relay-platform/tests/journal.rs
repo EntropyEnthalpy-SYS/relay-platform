@@ -53,6 +53,7 @@ fn restore_replays_credentials_configuration_budgets_and_usage_after_an_old_back
         .reconcile(
             &node.id,
             ReconcileRequest {
+                lease: None,
                 ledger_id: None,
                 after: None,
                 expected_revision: None,
@@ -72,6 +73,7 @@ fn restore_replays_credentials_configuration_budgets_and_usage_after_an_old_back
     local.admit_batch(&[admission(1)]).unwrap();
     for bytes in [40, 0] {
         let request = SyncRequest {
+            lease: None,
             ledger_id: page.ledger_id.clone(),
             budget: Some(local.budget_outbox(&run, true).unwrap()),
             need_config: false,

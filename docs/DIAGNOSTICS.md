@@ -56,3 +56,7 @@ Agent 接收一次同步回复时，用量序号确认、预留写入、取消�
 `scripts/bench_budget.py` 会保存 `node_meter_metrics` 和完整控制器统计。比较旧版时，未提供的节点统计记为 null。脚本仍核对每个应用字节、所有节点账本、控制器账本、预算消费和停止后未使用预留归零。具体版本、原始样本和限制见 [VALIDATION.md](VALIDATION.md)。
 
 数据库 schema v4、请求身份和恢复日志格式保持不变。新 Agent 在 stats 中发送 meter 字段，因此应先升级控制器再升级 Agent；旧控制器会严格拒绝未知字段。本轮没有完成历史监控、系统资源采集、分布式公平性、控制面高可用或完整性能验收。
+
+## 节点执行租约状态
+
+0.13.0 的 GET /api/v1/nodes 新增 lease，节点表和诊断页面展示 policy、generation、holder_run_id、active、remaining_ms、recovery_wait_ms。无策略表示离线模式；active 是控制器的授权保留状态，进程突然退出后也可能维持到截止时间。新持有者会清除旧回执/诊断，直到当前 Agent 重新上报。运行令牌与哈希不向页面返回；租约过期不代表未使用预留已经归还。见 [NODE_LEASES.md](NODE_LEASES.md)。

@@ -749,6 +749,8 @@ impl EngineStats {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SyncRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease: Option<crate::lease::LeaseProof>,
     #[serde(default)]
     pub budget: Option<crate::budget::BudgetExchange>,
     pub ledger_id: String,
@@ -780,6 +782,8 @@ pub struct UsageCursor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReconcileRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease: Option<crate::lease::LeaseProof>,
     pub ledger_id: Option<String>,
     pub after: Option<UsageCursor>,
     pub expected_revision: Option<u64>,

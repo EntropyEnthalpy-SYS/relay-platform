@@ -9,6 +9,7 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+mod lease_client;
 
 pub struct AgentOptions {
     pub controller: String,
@@ -123,7 +124,15 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         credential.pending_enrollment_token = None;
         store.set_metadata("agent_credential", &serde_json::to_string(&credential)?)?;
     }
-    let budget_run = store.start_budget_run()?;
+    let budget_run = uuid::Uuid::new_v4().to_string();
+    let Some(lease) =
+        lease_client::AgentLease::acquire(&client, &base, &credential, &store, &budget_run, &stop)
+            .await?
+    else {
+        return Ok(());
+    };
+    lease.ensure_live()?;
+    store.begin_budget_run(&budget_run)?;
     let engine = Arc::new(Engine::with_tls_directory(
         store.clone(),
         options.tls_directory,
@@ -133,23 +142,27 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     let mut connection_failed = false;
     let mut reconciled = false;
     let mut controller_instance: Option<String> = None;
-    let result: Result<()> = async {
+    let forwarding = async {
         loop {
+            lease.ensure_live()?;
             if !reconciled {
                 let result = tokio::select! {
                     biased;
                     _ = stop.cancelled() => break,
-                    result = reconcile(&client, &base, &credential, &store, active) => result,
+                    result = reconcile(&client, &base, &credential, &store, active, lease.proof.as_ref()) => result,
                 };
                 match result {
                     Ok(config) => {
                         reconciled = true;
+                        lease.ensure_live()?;
                         match engine.apply(config).await {
                             Ok(()) => {
                                 store.finish_reconcile()?;
                                 active = true;
                                 apply_error = None;
-                                tracing::info!("controller ledger reconciled before configuration activation");
+                                tracing::info!(
+                                    "controller ledger reconciled before configuration activation"
+                                );
                             }
                             Err(error) => {
                                 tracing::warn!(%error, "reconciled configuration cannot be activated; recovery remains pending");
@@ -163,14 +176,30 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                         }
                         connection_failed = true;
                     }
-                    Err(error) => return Err(error.context("ledger reconciliation failed; forwarding stopped")),
+                    Err(error) => {
+                        return Err(
+                            error.context("ledger reconciliation failed; forwarding stopped")
+                        );
+                    }
                 }
                 if !reconciled {
-                    if !active && !store.recovery_required()? && let Some(cached) = store.agent_config()? {
-                        ensure!(cached.node_id == credential.node_id, "cached configuration belongs to another node");
-                        engine.apply(cached).await.context("cannot restore last successful configuration")?;
+                    if !active
+                        && !store.recovery_required()?
+                        && let Some(cached) = store.agent_config()?
+                    {
+                        ensure!(
+                            cached.node_id == credential.node_id,
+                            "cached configuration belongs to another node"
+                        );
+                        lease.ensure_live()?;
+                        engine
+                            .apply(cached)
+                            .await
+                            .context("cannot restore last successful configuration")?;
                         active = true;
-                        tracing::info!("ordinary offline restart restored local durable configuration");
+                        tracing::info!(
+                            "ordinary offline restart restored local durable configuration"
+                        );
                     }
                     tokio::select! {
                         biased;
@@ -181,17 +210,24 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 }
             }
             let db = store.clone();
-            let run=budget_run.clone();
-            let stats=engine.stats();let idle=stats.business_idle();
-            let (usage,budget)=tokio::task::spawn_blocking(move || {
-                if idle {db.seal_budget_run(&run)?;}
-                Ok::<_,anyhow::Error>((db.agent_usage(true)?,db.budget_outbox(&run,!idle)?))
-            }).await??;
+            let run = budget_run.clone();
+            let stats = engine.stats();
+            let idle = stats.business_idle();
+            let (usage, budget) = tokio::task::spawn_blocking(move || {
+                if idle {
+                    db.seal_budget_run(&run)?;
+                }
+                Ok::<_, anyhow::Error>((db.agent_usage(true)?, db.budget_outbox(&run, !idle)?))
+            })
+            .await??;
             let requested_budget = !budget.requests.is_empty();
             let mut granted_budget = false;
             let request = SyncRequest {
+                lease: lease.proof.clone(),
                 budget: Some(budget),
-                ledger_id: store.metadata("ledger_id")?.context("missing reconciled ledger identity")?,
+                ledger_id: store
+                    .metadata("ledger_id")?
+                    .context("missing reconciled ledger identity")?,
                 need_config: !active,
                 applied_revision: engine.revision().await,
                 apply_error: apply_error.clone(),
@@ -205,30 +241,59 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     .bearer_auth(&credential.token).json(&request).send() => response,
             };
             match response {
-                Ok(response) if (response.status().is_client_error()
-                    && response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS)
-                    || response.status().is_redirection() => {
-                    bail!("controller rejected agent with HTTP {}; forwarding stopped to protect identity and ledger consistency", response.status());
+                Ok(response)
+                    if (response.status().is_client_error()
+                        && response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS)
+                        || response.status().is_redirection() =>
+                {
+                    bail!(
+                        "controller rejected agent with HTTP {}; forwarding stopped to protect identity and ledger consistency",
+                        response.status()
+                    );
                 }
                 Ok(response) if response.status().is_success() => {
                     match bounded_json::<SyncResponse>(response).await {
                         Ok(synced) => {
-                            ensure!(identifier(&synced.controller_instance), "invalid controller instance identity");
-                            if controller_instance.as_ref().is_some_and(|previous|previous != &synced.controller_instance) {
+                            lease.ensure_live()?;
+                            ensure!(
+                                identifier(&synced.controller_instance),
+                                "invalid controller instance identity"
+                            );
+                            if controller_instance
+                                .as_ref()
+                                .is_some_and(|previous| previous != &synced.controller_instance)
+                            {
                                 reconciled = false;
                             }
                             controller_instance = Some(synced.controller_instance);
-                            granted_budget = synced.budget.as_ref().is_some_and(|reply| !reply.grants.is_empty());
+                            granted_budget = synced
+                                .budget
+                                .as_ref()
+                                .is_some_and(|reply| !reply.grants.is_empty());
                             let db = store.clone();
-                            let run=budget_run.clone();
-                            tokio::task::spawn_blocking(move || db.accept_sync_reply(&run, &synced.acknowledgements, synced.budget)).await??;
+                            let run = budget_run.clone();
+                            tokio::task::spawn_blocking(move || {
+                                db.accept_sync_reply(&run, &synced.acknowledgements, synced.budget)
+                            })
+                            .await??;
                             if let Some(config) = synced.config {
-                                ensure!(config.node_id == credential.node_id, "controller sent a different node identity");
+                                ensure!(
+                                    config.node_id == credential.node_id,
+                                    "controller sent a different node identity"
+                                );
                                 if let Some(cached) = store.agent_config()? {
-                                    ensure!(config.revision >= cached.revision, "controller is behind the local durable configuration; reconcile restored state");
+                                    ensure!(
+                                        config.revision >= cached.revision,
+                                        "controller is behind the local durable configuration; reconcile restored state"
+                                    );
                                 }
+                                lease.ensure_live()?;
                                 match engine.apply(config).await {
-                                    Ok(()) => { store.finish_reconcile()?; active = true; apply_error = None; }
+                                    Ok(()) => {
+                                        store.finish_reconcile()?;
+                                        active = true;
+                                        apply_error = None;
+                                    }
                                     Err(error) => {
                                         let message = error.to_string();
                                         tracing::warn!(%message, "configuration rejected; retaining previous revision");
@@ -236,7 +301,9 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                     }
                                 }
                             }
-                            if connection_failed { tracing::info!("controller connection recovered"); }
+                            if connection_failed {
+                                tracing::info!("controller connection recovered");
+                            }
                             connection_failed = false;
                         }
                         Err(error) => {
@@ -250,23 +317,50 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 response => {
                     if !connection_failed {
                         match response {
-                            Ok(response) => tracing::warn!(status=%response.status(), "controller unavailable; retaining local configuration"),
-                            Err(error) => tracing::warn!(%error, "controller unavailable; retaining local configuration"),
+                            Ok(response) => {
+                                tracing::warn!(status=%response.status(), "controller unavailable; retaining local configuration")
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "controller unavailable; retaining local configuration")
+                            }
                         }
                     }
                     connection_failed = true;
                 }
             }
-            if !active && !store.recovery_required()? && let Some(cached) = store.agent_config()? {
-                ensure!(cached.node_id == credential.node_id, "cached configuration belongs to another node");
-                engine.apply(cached).await.context("cannot restore last successful configuration")?;
+            if !active
+                && !store.recovery_required()?
+                && let Some(cached) = store.agent_config()?
+            {
+                ensure!(
+                    cached.node_id == credential.node_id,
+                    "cached configuration belongs to another node"
+                );
+                lease.ensure_live()?;
+                engine
+                    .apply(cached)
+                    .await
+                    .context("cannot restore last successful configuration")?;
                 active = true;
                 tracing::info!("restored last successful local configuration");
             }
-            let interval=if store.agent_config()?.is_some_and(|c|c.rules.iter().any(|r|!r.budget_ids.is_empty())) {options.poll_interval.min(Duration::from_millis(500))}else{options.poll_interval};
+            let interval = if store
+                .agent_config()?
+                .is_some_and(|c| c.rules.iter().any(|r| !r.budget_ids.is_empty()))
+            {
+                options.poll_interval.min(Duration::from_millis(500))
+            } else {
+                options.poll_interval
+            };
             // Coalesce successful refills briefly. Exhaustion and outages must
             // back off instead of turning each waiting payload into an HTTP poll.
-            let refill_delay = Duration::from_millis(if connection_failed {500} else if requested_budget && !granted_budget {100} else {2});
+            let refill_delay = Duration::from_millis(if connection_failed {
+                500
+            } else if requested_budget && !granted_budget {
+                100
+            } else {
+                2
+            });
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
@@ -275,7 +369,12 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
             }
         }
         Ok(())
-    }.await;
+    };
+    let result: Result<()> = tokio::select! {biased;
+        _=stop.cancelled()=>Ok(()),
+        _=lease.lost.cancelled()=>Err(anyhow::anyhow!("node execution lease lost; forwarding stopped")),
+        result=forwarding=>result,
+    };
     engine.shutdown().await?;
     store.seal_budget_run(&budget_run)?;
     let cleanup = async {
@@ -294,6 +393,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 return Ok::<_, anyhow::Error>(());
             }
             let request = SyncRequest {
+                lease: lease.proof.clone(),
                 budget: Some(budget),
                 ledger_id: store.metadata("ledger_id")?.context("missing ledger")?,
                 need_config: false,
@@ -314,10 +414,21 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
             reported_stopped = true;
         }
     };
-    if !matches!(
+    if matches!(
         tokio::time::timeout(Duration::from_secs(2), cleanup).await,
         Ok(Ok(()))
     ) {
+        if !matches!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                lease.release(&client, &base, &credential, engine.stats())
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            tracing::warn!("node lease release not confirmed; controller expiry remains in force");
+        }
+    } else {
         tracing::warn!(
             "final usage or unused reservation return is pending; durable state remains for retry"
         );
@@ -340,6 +451,7 @@ async fn reconcile(
     credential: &Credential,
     store: &Store,
     active: bool,
+    lease: Option<&crate::lease::LeaseProof>,
 ) -> Result<NodeConfig> {
     let db = store.clone();
     tokio::task::spawn_blocking(move || db.begin_reconcile()).await??;
@@ -352,6 +464,7 @@ async fn reconcile(
             .post(base.join("api/v1/agent/reconcile")?)
             .bearer_auth(&credential.token)
             .json(&ReconcileRequest {
+                lease: lease.cloned(),
                 ledger_id: ledger_id.clone(),
                 after: after.clone(),
                 expected_revision: revision,

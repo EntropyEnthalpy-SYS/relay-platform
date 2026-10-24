@@ -85,6 +85,7 @@ impl Fixture {
                 .reconcile(
                     node,
                     ReconcileRequest {
+                        lease: None,
                         ledger_id: None,
                         after: None,
                         expected_revision: None,
@@ -112,6 +113,7 @@ impl Fixture {
     }
     fn request(&self, n: usize, exchange: BudgetExchange) -> SyncRequest {
         SyncRequest {
+            lease: None,
             budget: Some(exchange),
             ledger_id: self.ledgers[n].clone(),
             need_config: false,

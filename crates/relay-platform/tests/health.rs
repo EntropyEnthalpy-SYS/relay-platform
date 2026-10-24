@@ -584,6 +584,7 @@ async fn controller_health_reports_are_scoped_validated_and_aged_without_changin
         .reconcile(
             &node.id,
             ReconcileRequest {
+                lease: None,
                 ledger_id: None,
                 after: None,
                 expected_revision: None,
@@ -591,6 +592,7 @@ async fn controller_health_reports_are_scoped_validated_and_aged_without_changin
         )
         .unwrap();
     let request = |stats: EngineStats| SyncRequest {
+        lease: None,
         budget: None,
         ledger_id: page.ledger_id.clone(),
         need_config: false,

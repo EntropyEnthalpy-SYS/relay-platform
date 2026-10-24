@@ -6,6 +6,13 @@ impl Store {
     pub fn sync(&self, node: &str, request: SyncRequest) -> Result<SyncResponse> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        leases::validate(
+            &tx,
+            &mut self.3.lock().unwrap(),
+            node,
+            request.lease.as_ref(),
+            request.budget.as_ref().map(|b| b.run_id.as_str()),
+        )?;
         let response = apply_sync(&tx, node, request)?;
         tx.commit()?;
         Ok(response)
@@ -35,6 +42,13 @@ impl Store {
                 let Some(node) = node else {
                     return reject(401, "node credential invalid");
                 };
+                leases::validate(
+                    &tx,
+                    &mut self.3.lock().unwrap(),
+                    &node,
+                    input.lease.as_ref(),
+                    input.budget.as_ref().map(|b| b.run_id.as_str()),
+                )?;
                 apply_sync(&tx, &node, input)
             })();
             if let Err(error) = &result {

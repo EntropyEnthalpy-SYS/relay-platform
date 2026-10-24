@@ -58,6 +58,7 @@ impl Fixture {
                 .reconcile(
                     &node.id,
                     ReconcileRequest {
+                        lease: None,
                         ledger_id: None,
                         after: None,
                         expected_revision: None,

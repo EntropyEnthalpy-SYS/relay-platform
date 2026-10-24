@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod budgets;
 mod health;
+mod leases;
 mod recovery;
 mod sync;
 mod topology;
@@ -60,6 +61,7 @@ pub struct Store(
     Arc<Mutex<crate::journal::LoggedConnection>>,
     Arc<PathBuf>,
     Arc<BudgetSignals>,
+    Arc<Mutex<leases::LeaseClocks>>,
 );
 #[derive(Default)]
 struct BudgetSignals {
@@ -109,6 +111,8 @@ impl Actor {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
+    #[serde(default)]
+    pub lease: crate::lease::LeaseStatus,
     pub id: String,
     pub tenant_id: String,
     pub name: String,
@@ -242,6 +246,7 @@ impl Store {
             Arc::new(Mutex::new(crate::journal::LoggedConnection::new(conn)?)),
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
+            Arc::new(Mutex::new(leases::LeaseClocks::default())),
         ))
     }
 
@@ -457,6 +462,15 @@ impl Store {
     }
 
     pub fn create_node(&self, actor: &Actor, tenant: &str, name: &str) -> Result<(Node, String)> {
+        self.create_node_with_lease(actor, tenant, name, None)
+    }
+    pub fn create_node_with_lease(
+        &self,
+        actor: &Actor,
+        tenant: &str,
+        name: &str,
+        policy: Option<crate::lease::LeasePolicy>,
+    ) -> Result<(Node, String)> {
         if !actor.may_write() || !actor.permits_tenant(tenant) {
             return reject(403, "insufficient node scope");
         }
@@ -485,10 +499,16 @@ impl Store {
             params![id, tenant, name, token_hash(&token)],
         )?;
         tx.execute("INSERT INTO config_history(node_id,revision,config_json,actor_id,created_at_ms) VALUES(?1,0,?2,?3,?4)",params![id,serde_json::to_string(&config)?,actor.id,now_ms()])?;
+        leases::initialize(&tx, &id, policy.clone())?;
         audit(&tx, &actor.id, "node.create", &id, "{}")?;
         tx.commit()?;
+        leases::created(&mut self.3.lock().unwrap(), &id);
         Ok((
             Node {
+                lease: crate::lease::LeaseStatus {
+                    policy,
+                    ..Default::default()
+                },
                 id,
                 tenant_id: tenant.into(),
                 name: name.into(),
@@ -545,6 +565,7 @@ impl Store {
         let mut q=conn.prepare("SELECT id,tenant_id,name,desired_revision,applied_revision,last_seen_ms,apply_error,token_hash IS NOT NULL,stats_json FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY name,id")?;
         let rows = q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
             Ok(Node {
+                lease: crate::lease::LeaseStatus::default(),
                 id: r.get(0)?,
                 tenant_id: r.get(1)?,
                 name: r.get(2)?,
@@ -556,7 +577,12 @@ impl Store {
                 stats: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut nodes: Vec<Node> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut clocks = self.3.lock().unwrap();
+        for node in &mut nodes {
+            node.lease = leases::status(&conn, &mut clocks, &node.id)?;
+        }
+        Ok(nodes)
     }
     pub fn config(&self, actor: &Actor, node: &str, revision: Option<u64>) -> Result<NodeConfig> {
         let conn = self.0.lock().unwrap();

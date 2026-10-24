@@ -209,6 +209,11 @@ impl Store {
     /// reservations remain committed at the controller, even if this disk was copied.
     pub fn start_budget_run(&self) -> Result<String> {
         let id = Uuid::new_v4().to_string();
+        self.begin_budget_run(&id)?;
+        Ok(id)
+    }
+    pub(crate) fn begin_budget_run(&self, id: &str) -> Result<()> {
+        ensure!(identifier(id), "invalid budget run identity");
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         tx.execute(
@@ -219,7 +224,7 @@ impl Store {
         tx.execute("DELETE FROM agent_budget_demand", [])?;
         tx.execute("INSERT INTO metadata(key,value) VALUES('agent_budget_run',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[&id])?;
         tx.commit()?;
-        Ok(id)
+        Ok(())
     }
     pub fn seal_budget_run(&self, run: &str) -> Result<()> {
         let mut conn = self.0.lock().unwrap();

@@ -5,6 +5,7 @@ mod datagram;
 pub mod engine;
 pub mod health;
 pub mod journal;
+pub mod lease;
 pub mod metrics;
 pub mod model;
 pub mod multipath;
