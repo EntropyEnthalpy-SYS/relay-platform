@@ -128,6 +128,8 @@ async fn routing_updates_preserve_existing_connections_and_shutdown_cancels_all_
     c.revision = 3;
     c.rules[0].name = "third-generation".into();
     c.rules[0].targets.push(Target {
+        priority: 0,
+        max_sessions: None,
         address: first.address.to_string(),
         weight: 1,
         tls: None,
@@ -350,6 +352,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
     let mut r = rule(a.address, Protocol::Tcp);
     r.targets = vec![
         Target {
+            priority: 0,
+            max_sessions: None,
             address: a.address.to_string(),
             weight: 2,
             tls: None,
@@ -358,6 +362,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             via: None,
         },
         Target {
+            priority: 0,
+            max_sessions: None,
             address: b.address.to_string(),
             weight: 1,
             tls: None,
@@ -383,6 +389,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
     c.revision = 2;
     c.rules[0].targets = vec![
         Target {
+            priority: 0,
+            max_sessions: None,
             address: free_address().to_string(),
             weight: 1,
             tls: None,
@@ -391,6 +399,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             via: None,
         },
         Target {
+            priority: 0,
+            max_sessions: None,
             address: b.address.to_string(),
             weight: 1,
             tls: None,
@@ -469,6 +479,8 @@ async fn source_hash_is_stable_and_least_connections_uses_active_sessions() {
     let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
     let mut r = rule(a.address, Protocol::Tcp);
     r.targets.push(Target {
+        priority: 0,
+        max_sessions: None,
         address: b.address.to_string(),
         weight: 1,
         tls: None,

@@ -1,0 +1,466 @@
+Relay 0.10.0 local verification (macOS arm64)
+Command: sh scripts/verify.sh; exit 0
+
+    Checking relay-platform v0.10.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.46s
+   Compiling relay-platform v0.10.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.32s
+     Running unittests src/lib.rs (target/debug/deps/relay_platform-61dc2815e5dca82d)
+
+running 5 tests
+test journal::tests::crash_worker ... ignored, subprocess helper exercised by abrupt_exit_at_each_durable_boundary
+test health::tests::thresholds_and_recovery_delay_require_sustained_success ... ok
+test health::tests::stale_success_does_not_immediately_reactivate_a_target ... ok
+test health::tests::stale_or_invalidated_observation_retires_waiting_udp_session ... ok
+test journal::tests::abrupt_exit_at_each_durable_boundary ... ok
+
+test result: ok. 4 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running unittests src/main.rs (target/debug/deps/relay-ec30ee0d7725dd7e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/budgets.rs (target/debug/deps/budgets-017be142de49495d)
+
+running 12 tests
+test datagram_larger_than_quantum_requests_enough_credit_without_partial_charges ... ok
+test hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes ... ok
+test invalid_report_rolls_back_other_reports_and_retry_updates_totals_once ... ok
+test failed_meter_transaction_rolls_back_reservation_consumption_as_well ... ok
+test concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget ... ok
+test budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed ... ok
+test graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent ... ok
+test restored_controller_cannot_reissue_reservations_forgotten_by_its_backup ... ok
+test restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant ... ok
+test settlement_cancels_an_unissued_request_before_a_late_original_can_allocate ... ok
+test settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed ... ok
+test budget_permissions_revision_conflicts_and_committed_floor_are_enforced ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+
+     Running tests/control_agent.rs (target/debug/deps/control_agent-f9a5e685b5c012a4)
+
+running 17 tests
+test remote_controller_requires_https_and_never_embeds_credentials ... ok
+test enrollment_recovers_after_the_controller_commits_but_response_is_lost ... ok
+test graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat ... ok
+test interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener ... ok
+test running_agent_republishes_acknowledged_counters_after_controller_restore ... ok
+test proxy_settings_roundtrip_http_and_managed_agent_enforces_them ... ok
+test restored_backup_waits_for_controller_and_cannot_spend_confirmed_quota_twice ... ok
+test journal_restore_recovers_a_post_backup_node_and_refills_its_live_tcp_session ... ok
+test health_policy_and_observations_roundtrip_http_through_real_managed_agent ... ok
+test http_auth_role_and_schema_enforcement ... ok
+test api_agent_control_outage_restart_and_reconciliation ... ok
+test websocket_configuration_roundtrips_http_and_managed_agent_both_directions ... ok
+test three_real_agents_topology_tcp_udp_and_stopped_direction_change ... ok
+test udp_uses_only_its_reserved_budget_during_outage_and_resumes_when_control_returns ... ok
+test three_real_agents_topology_mutual_wss_proxy_and_stopped_direction_change ... ok
+test udp_larger_than_the_reservation_quantum_preserves_the_whole_datagram ... ok
+test two_real_agents_share_user_quota_refill_without_stream_loss_and_return_idle_reservations ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.44s
+
+     Running tests/forwarding.rs (target/debug/deps/forwarding-f09aca805b38a6ad)
+
+running 16 tests
+test source_acl_denies_before_any_billable_payload ... ok
+test failed_meter_transaction_never_forwards_uncommitted_payload ... ok
+test failed_config_keeps_old_listener_and_persisted_revision ... ok
+test deleting_a_rule_terminates_existing_connections ... ok
+test dual_protocol_listener_and_ipv6_udp_are_independently_verified ... ok
+test concurrent_tcp_sessions_cannot_multiply_the_rule_quota ... ok
+test routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations ... ok
+test ipv6_and_dns_targets_transfer_real_bytes ... ok
+test source_hash_is_stable_and_least_connections_uses_active_sessions ... ok
+test moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled ... ok
+test weighted_target_selection_and_connect_failure_fallback ... ok
+test udp_preserves_datagrams_empty_payloads_and_peer_isolation ... ok
+test tcp_binary_payload_half_close_and_durable_bidirectional_metering ... ok
+test udp_enforces_combined_quota_without_partial_datagrams ... ok
+test udp_session_limit_and_idle_reclamation_are_real ... ok
+test shared_rate_limit_includes_both_directions_and_declares_burst ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+     Running tests/health.rs (target/debug/deps/health-f1906aa450809474)
+
+running 10 tests
+test probe_policy_bounds_protocol_coverage_and_endpoint_cardinality_are_validated ... ok
+test health_probe_concurrency_and_shutdown_are_bounded ... ok
+test target_capacity_survives_target_removal_readdition_and_priority_edit ... ok
+test failed_staging_keeps_old_health_and_disabled_rules_stop_probes ... ok
+test ordinary_restart_does_not_trust_old_healthy_observations ... ok
+test offset_ports_have_independent_health_and_fixed_mapping_shares_one_observation ... ok
+test udp_health_is_independent_and_retires_existing_session_without_replaying_packets ... ok
+test mutual_wss_proxy_probe_checks_end_to_end_reply_and_downstream_metering ... ok
+test controller_health_reports_are_scoped_validated_and_aged_without_changing_saved_samples ... ok
+test tcp_application_health_fails_over_and_holds_recovery_without_killing_established_stream ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
+
+     Running tests/journal.rs (target/debug/deps/journal-0d297cf028f68433)
+
+running 6 tests
+test empty_initialization_can_rebuild_its_head_but_committed_history_cannot ... ok
+test manifest_io_failure_poisons_further_writes_and_restart_reconciles_the_commit ... ok
+test initialized_database_rejects_writes_without_its_log_and_stale_state_cannot_rebind ... ok
+test missing_corrupt_truncated_and_unrelated_logs_never_enable_restored_allocations ... ok
+test recovery_status_is_admin_only_and_failed_logging_is_unhealthy ... ok
+test restore_replays_credentials_configuration_budgets_and_usage_after_an_old_backup ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.52s
+
+     Running tests/ledger.rs (target/debug/deps/ledger-728f084888cf6939)
+
+running 8 tests
+test model_rejects_unknown_options_invalid_targets_and_listener_duplicates ... ok
+test periods_do_not_reset_on_reapply_and_old_periods_cannot_spend ... ok
+test exhausted_expired_and_disabled_rules_reject_empty_datagrams_too ... ok
+test quota_is_shared_across_directions_and_survives_restart ... ok
+test consistent_backup_restores_config_counters_and_private_permissions ... ok
+test controller_replay_is_idempotent_and_counter_regression_is_rejected ... ok
+test enrollment_is_single_use_and_configuration_writes_are_optimistic ... ok
+test authorization_is_enforced_at_store_boundary_and_sessions_revoke ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+
+     Running tests/network_features.rs (target/debug/deps/network_features-f21412f30878f8e2)
+
+running 16 tests
+test bound_source_ip_is_observed_by_target_and_dns_family_falls_back ... ok
+test invalid_bind_rejects_config_without_unbound_fallback ... ok
+test ipv6_wildcard_is_v6_only_and_ipv4_can_share_port ... ok
+test range_limits_overlap_and_static_cycle_validation ... ok
+test dns_two_hop_cycles_stop_but_acyclic_local_chains_forward ... ok
+test fixed_range_quota_and_connection_limits_cannot_multiply ... ok
+test active_old_generation_edges_remain_protected_until_drained ... ok
+test port_ranges_offset_tcp_udp_and_shared_meter ... ok
+test range_stage_failure_releases_new_sockets_and_preserves_old_config ... ok
+test udp_dns_cycle_drops_before_recursive_datagram ... ok
+test outbound_ip_and_loopback_interface_tcp_udp_ipv4_ipv6 ... ok
+test udp_session_limit_is_shared_across_range ... ok
+test dns_rebinding_to_local_listener_is_rejected_after_ttl ... ok
+test dns_cache_uses_authoritative_ttl_and_shares_across_rules ... ok
+test dns_negative_cache_expires_and_failed_target_falls_back ... ok
+test dns_positive_ttl_cap_and_zero_ttl_udp ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.24s
+
+     Running tests/proxy_protocol.rs (target/debug/deps/proxy_protocol-eecd120cbe3f6e95)
+
+running 19 tests
+test maximum_v2_header_is_bounded_and_tlvs_never_become_payload ... ok
+test malformed_truncated_oversized_and_wrong_transport_headers_fail ... ok
+test golden_wire_frames_and_fragmented_parser_preserve_following_payload ... ok
+test tcp_output_without_input_header_uses_actual_client_and_wildcard_destination ... ok
+test moving_proxy_policy_between_existing_targets_cancels_old_sessions ... ok
+test source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4 ... ok
+test tcp_claimed_acl_is_applied_only_after_trusted_peer_and_not_billed_as_payload ... ok
+test inside_tls_proxy_does_not_bypass_required_client_certificate ... ok
+test unknown_local_unspec_and_unsupported_unix_use_real_endpoints ... ok
+test unsupported_proxy_combinations_and_missing_trust_are_rejected ... ok
+test udp_same_claim_from_distinct_proxies_keeps_reply_channels_separate ... ok
+test mismatched_tls_proxy_placement_fails_without_forwarding_payload ... ok
+test tcp_output_matches_independent_v1_v2_and_crc_fixtures_once_per_connection ... ok
+test udp_wildcard_tracks_real_destination_and_reply_source_for_ipv4_ipv6 ... ok
+test slow_headers_release_slots_and_proxy_policy_changes_cancel_old_sessions ... ok
+test proxy_v1_v2_before_and_inside_mutual_tls_preserve_identity_and_payload ... ok
+test udp_headers_are_per_packet_sessions_include_original_identity_and_replies_use_real_peer ... ok
+test udp_malformed_crc_wrong_transport_and_denied_sources_do_not_reach_target ... ok
+test udp_proxy_hop_preserves_empty_datagrams_ipv6_claims_and_shared_quota ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/recovery.rs (target/debug/deps/recovery-36dab5a7b41736b5)
+
+running 6 tests
+test unrelated_and_future_databases_are_rejected_without_schema_migration ... ok
+test v1_managed_database_migrates_without_silently_reopening_old_quotas ... ok
+test conflicting_page_rolls_back_all_rows_and_never_changes_identity ... ok
+test checkpoint_raises_stale_backup_and_lower_controller_checkpoint_replays_local_totals ... ok
+test only_exported_managed_backup_requires_recovery_and_lock_is_exclusive ... ok
+test historical_checkpoints_paginate_past_sync_limit_and_revision_changes_invalidate_cursor ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/sync_batch.rs (target/debug/deps/sync_batch-5236b593b0212d6d)
+
+running 5 tests
+test failed_journal_confirmation_never_returns_partial_batch_success_and_retries_are_idempotent ... ok
+test http_overload_is_bounded_and_duplicate_retries_do_not_multiply_credit ... ok
+test batch_isolates_invalid_requests_and_restores_only_confirmed_changes ... ok
+test duplicate_requests_share_the_same_grant_and_storage_failure_aborts_the_batch ... ok
+test http_coalesces_requests_preserves_response_identity_and_restricts_metrics ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.97s
+
+     Running tests/tls_transport.rs (target/debug/deps/tls_transport-06857e906a23b431)
+
+running 7 tests
+test tls_profiles_reject_paths_mismatched_keys_and_public_private_keys ... ok
+test tls12_and_tls13_negotiate_explicitly_and_transfer_application_bytes ... ok
+test outbound_tls_failure_does_not_forward_payload_or_fall_back_to_plaintext ... ok
+test invalid_tls_updates_keep_old_listener_and_material_rotation_ends_old_sessions ... ok
+test mutually_authenticated_tls_hop_preserves_binary_half_close_and_payload_accounting ... ok
+test slow_tls_handshake_is_bounded_and_releases_connection_capacity ... ok
+test tls_rejects_missing_client_identity_wrong_authority_and_wrong_server_name ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/topology.rs (target/debug/deps/topology-2ddc14fcf25e0b35)
+
+running 12 tests
+test preview_is_read_only_and_batch_publish_preserves_history_and_edges ... ok
+test stale_last_node_and_invalid_reference_do_not_partially_publish ... ok
+test competing_batches_have_one_winner_without_lost_node_updates ... ok
+test range_protocol_and_security_combinations_are_checked_at_both_ends ... ok
+test database_failure_on_last_node_rolls_back_all_rules_and_revisions ... ok
+test new_rule_identity_cannot_reuse_a_stopping_topology_listener ... ok
+test directed_cycles_raw_address_bypass_and_endpoint_aliases_are_rejected ... ok
+test multiple_entrances_and_weighted_candidates_are_distinct_from_sequential_hops ... ok
+test rewire_requires_disabled_revision_ack_and_zero_sessions_then_can_reverse_chain ... ok
+test one_recovery_transaction_restores_the_entire_multi_node_publication ... ok
+test topology_reactivation_waits_for_cancelled_probe_io_to_finish ... ok
+test tenant_read_isolation_and_write_permissions_include_batch_and_topology ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+     Running tests/websocket_transport.rs (target/debug/deps/websocket_transport-da2bba6a3184121d)
+
+running 20 tests
+test invalid_ws_configurations_are_rejected_without_optional_protocol_fallback ... ok
+test bounded_incoming_queue_backpressures_and_drop_stops_the_driver ... ok
+test malformed_records_frames_and_early_close_never_become_payload ... ok
+test coalesced_upgrade_response_and_reverse_half_close_preserve_large_payload ... ok
+test path_policy_change_revokes_open_streams_without_disabling_plain_target_updates ... ok
+test handshake_path_host_origin_subprotocol_key_and_header_limit_reject_before_target ... ok
+test moving_websocket_policy_between_existing_targets_revokes_old_sessions ... ok
+test ping_after_remote_fin_is_served_while_application_reply_is_waiting ... ok
+test blocked_control_flush_cannot_hold_half_closed_stream_indefinitely ... ok
+test raw_client_fragmentation_ping_half_close_and_exact_metering ... ok
+test quotas_count_only_unwrapped_application_bytes_across_sessions ... ok
+test outbound_upgrade_mismatch_never_forwards_application_or_falls_back ... ok
+test raw_server_observes_masking_host_origin_records_and_full_half_close ... ok
+test transport_flush_waits_for_wire_backpressure ... ok
+test missing_close_ack_has_a_bounded_deadline ... ok
+test outbound_wss_rejects_wrong_server_name_missing_identity_and_wrong_http_host ... ok
+test wss_requires_valid_client_certificate_before_http_upgrade ... ok
+test slow_upgrade_releases_connection_slot_and_invalid_update_keeps_old_rule ... ok
+test ws_and_mutual_wss_hops_preserve_payload_with_both_proxy_positions ... ok
+test pings_do_not_extend_application_idle_timeout ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
+
+
+Release build; exit 0
+   Compiling relay-platform v0.10.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `release` profile [optimized] target(s) in 54.71s
+
+Post-addition JS/Python syntax, git diff --check; exit 0
+
+Independent health Release run; exit 0
+{
+  "ledger": {
+    "by_rule_bytes": {
+      "checked": 673185856,
+      "plain": 673185792
+    },
+    "total_bytes": 1346371648,
+    "exact_match": true,
+    "source_probes_excluded": true
+  },
+  "restore": {
+    "journal_id": "fca35395-850f-4835-90c3-34c752e4eb74",
+    "backup_sequence": 3,
+    "restored_sequence": 15,
+    "replayed_transactions": 12,
+    "budget_allocation_paused": false,
+    "ignored_uncommitted_tail": false
+  },
+  "tcp": [
+    {
+      "connections": 1,
+      "median_mbps": {
+        "plain": 4808.696128908,
+        "checked": 5614.020407488804
+      },
+      "checked_to_plain_ratio": 1.1674724825591516
+    },
+    {
+      "connections": 4,
+      "median_mbps": {
+        "plain": 10942.294023076629,
+        "checked": 11090.209680131717
+      },
+      "checked_to_plain_ratio": 1.013517792223746
+    }
+  ]
+}
+
+Release regressions; exit 0
+Running cli 2026-10-24T04:28:32.827024+00:00
+Passed cli
+Running network-cli 2026-10-24T04:28:33.047675+00:00
+Passed network-cli
+Running proxy-cli 2026-10-24T04:28:33.407270+00:00
+Passed proxy-cli
+Running proxy-interop 2026-10-24T04:28:33.655089+00:00
+Passed proxy-interop
+Running websocket-interop 2026-10-24T04:28:35.042150+00:00
+Passed websocket-interop
+Running recovery 2026-10-24T04:28:35.626923+00:00
+Passed recovery
+Running topology 2026-10-24T04:28:37.362375+00:00
+Passed topology
+configuration valid
+configuration valid
+configuration valid
+configuration valid
+configuration valid
+ALL RELEASE REGRESSIONS PASSED
+
+Sequential performance runs; exit 0
+Running local 2026-10-24T04:29:24.609894+00:00
+{
+  "tcp": [
+    {
+      "connections": 1,
+      "direct_median_mbps": 13261.22906516583,
+      "relay_median_mbps": 4129.048326995135,
+      "relay_to_direct_ratio": 0.3113624164626781
+    },
+    {
+      "connections": 4,
+      "direct_median_mbps": 16109.389666586008,
+      "relay_median_mbps": 11341.754082947044,
+      "relay_to_direct_ratio": 0.7040461692023029
+    }
+  ],
+  "udp": {
+    "direct": {
+      "samples": 100,
+      "payload_bytes_per_packet": 1200,
+      "failures": 0,
+      "median_rtt_us": 41.81251279078424,
+      "p95_rtt_us": 46.083005145192146
+    },
+    "relay": {
+      "samples": 100,
+      "payload_bytes_per_packet": 1200,
+      "failures": 0,
+      "median_rtt_us": 174.437474925071,
+      "p95_rtt_us": 191.8749767355621
+    }
+  },
+  "ledger": {
+    "expected_admitted_bytes": 1680058752,
+    "recorded_bytes": 1680058752,
+    "exact_match": true
+  }
+}
+
+Running budget 2026-10-24T04:29:26.040682+00:00
+{
+  "budget": {
+    "expected_bytes": 2017460224,
+    "consumed_bytes": 2017460224,
+    "committed_bytes_after_shutdown": 2017460224,
+    "unused_reserved_bytes_after_shutdown": 0
+  },
+  "ledger": {
+    "expected_admitted_bytes": 4034920448,
+    "controller_bytes": 4034920448,
+    "agent_bytes": 4034920448,
+    "exact_match": true
+  },
+  "tcp": [
+    {
+      "total_connections": 2,
+      "plain_median_mbps": 4736.732307747535,
+      "budgeted_median_mbps": 450.5753816609819,
+      "budgeted_to_plain_ratio": 0.09512367437864452
+    },
+    {
+      "total_connections": 8,
+      "plain_median_mbps": 9704.397279424227,
+      "budgeted_median_mbps": 1230.1971137944192,
+      "budgeted_to_plain_ratio": 0.12676697772902887
+    }
+  ]
+}
+
+Running websocket 2026-10-24T04:29:38.457739+00:00
+{
+  "version": "relay 0.10.0",
+  "medians": [
+    {
+      "connections": 1,
+      "mode": "direct",
+      "goodput_mbps": 13086.561481796267
+    },
+    {
+      "connections": 1,
+      "mode": "tcp",
+      "goodput_mbps": 4116.699880195025
+    },
+    {
+      "connections": 1,
+      "mode": "ws",
+      "goodput_mbps": 3923.8243314977653
+    },
+    {
+      "connections": 1,
+      "mode": "wss-mtls",
+      "goodput_mbps": 3315.6196880274756
+    },
+    {
+      "connections": 4,
+      "mode": "direct",
+      "goodput_mbps": 15068.15805470878
+    },
+    {
+      "connections": 4,
+      "mode": "tcp",
+      "goodput_mbps": 10014.623467262209
+    },
+    {
+      "connections": 4,
+      "mode": "ws",
+      "goodput_mbps": 9412.752384938034
+    },
+    {
+      "connections": 4,
+      "mode": "wss-mtls",
+      "goodput_mbps": 8032.0361355205305
+    }
+  ],
+  "ledgers": {
+    "tcp": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    },
+    "ws": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    },
+    "wss-mtls": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    }
+  },
+  "child_processes_stopped": true
+}
+
+ALL BENCHMARKS COMPLETED

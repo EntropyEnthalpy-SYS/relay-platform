@@ -12,6 +12,7 @@ API 尚处开发阶段；以 `model.rs` 的严格字段定义为准。未识别�
 | GET / POST | `/nodes` | 列出可见节点；`{name,tenant_id?}` 创建节点并返回一次性注册令牌 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |
 | PUT | `/nodes/{id}/config` | `{expected_revision,rules}`；并发冲突返回 409，成功生成下一版本 |
+| GET | `/nodes/{id}/health` | 实际修订对应的目标健康、年龄、候选原因、探测流量与容量；按节点权限过滤 |
 | GET | `/nodes/{id}/history` | 最近 100 次配置修订 |
 | POST | `/nodes/{id}/rollback` | `{revision,expected_revision}`；把历史规则作为新修订发布，账本不回滚 |
 | GET | `/topology` | 当前可见节点、配置、声明边、根规则及应用状态 |
@@ -111,6 +112,16 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 
 预览和发布都返回 `{configs,changes}`。每个 change 包含 `node_id,from_revision,to_revision,added,modified,removed,rule_changes`；每条 rule_change 为 `{rule_id,before,after}`，新增的 before 或删除的 after 为 null。预览不修改修订、绑定、审计或日志；发布重新执行全部检查。节点修订冲突返回 409，非法引用/协议/环路返回 400，HTTP 请求上限 2 MiB。提交完整的规则列表，省略既有规则表示删除。
 
-改变已启用拓扑规则的路由结构必须先按原结构停用，再等节点确认该版本、无应用错误且全部活跃 TCP/UDP 会话归零；在此之前改向、删除、重新启用或换规则 ID 复用监听都返回 409。单节点 PUT 与历史回滚使用相同检查。节点尚未注册时可以提前编辑。
+改变已启用拓扑规则的路由结构必须先按原结构停用，再等节点确认该版本、无应用错误且全部活跃 TCP/UDP 会话及探测数归零；在此之前改向、删除、重新启用或换规则 ID 复用监听都返回 409。单节点 PUT 与历史回滚使用相同检查。节点尚未注册时可以提前编辑。
 
 控制器原子提交配置、历史、绑定和审计，但节点应用是异步的。`/topology` 的 `activation` 固定为 `asynchronous-per-node`，节点列表包含 `desired_revision,applied_revision,apply_error,stats,last_seen_ms,enrolled`。单个节点准备失败仍保留旧版本，必须检查逐节点回执。详细合同和计量方式见 [TOPOLOGY.md](TOPOLOGY.md)。能力目录新增 `declared-multi-node-topology` 和 `atomic-config-batch`；schema v4 不变，先升级所有相关 Agent 再发布新字段。
+
+## 0.10.0 目标健康与选择
+
+规则新增可选 `health_check`，逐目标新增 `priority`（缺省 0，越小越优先）和 `max_sessions`（缺省不设单目标上限）。健康检查必须覆盖规则的实际 TCP/UDP 协议；请求/预期内容使用有界 Base64。状态机、恢复等待、端口映射、目标容量作用域、实际出口和探测计量见 [HEALTH.md](HEALTH.md)。
+
+同步 stats 新增可省略的 `active_probes` 和 `target_health`。控制器将报告与该节点 `applied_revision` 的配置比较，再接受整项同步；无效健康报告返回 400，同项用量也不提交。报告仅供诊断，不承担业务计费或额度归还职责。
+
+`GET /nodes/{id}/health` 返回 `{node_id,applied_revision,desired_revision,apply_error,last_seen_ms,active_probes,expected_endpoints,rule_names,reports}`。报告字段见 HEALTH.md；读取时为采样年龄加上最后心跳后的时间，过期报告显示 stale，不覆盖数据库原始样本。节点未上报或返回空列表时不可推定健康。所有计数表示最后一次节点采样。
+
+能力目录新增 `target-health-checks` 和 `priority-capacity-selection`。目标健康页面与规则编辑器使用相同模型。schema v4 保持不变，需协调升级控制器和 Agent，再启用新字段；成本/延迟自适应调度及跨节点容量租约仍未完成。

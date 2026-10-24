@@ -62,6 +62,11 @@ pub struct Target {
     pub via: Option<RuleRef>,
     #[serde(default = "one")]
     pub weight: u16,
+    /// Lower values are preferred; weights balance targets at the same priority.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub priority: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_sessions: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsClient>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -75,6 +80,9 @@ pub struct Target {
 pub struct RuleRef {
     pub node_id: String,
     pub rule_id: String,
+}
+fn is_zero(value: &u16) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +254,8 @@ pub fn canonical_address(address: SocketAddr) -> SocketAddr {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<crate::health::HealthCheck>,
     /// Address that predecessor nodes use to reach this listener/range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertise: Option<String>,
@@ -330,6 +340,9 @@ impl Rule {
         self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(health) = &self.health_check {
+            health.validate(self.protocol)?;
+        }
         if let Some(address) = &self.advertise {
             validate_target(address)?;
         }
@@ -449,6 +462,12 @@ impl Rule {
         let mut targets = HashSet::new();
         let encrypted_targets = self.targets[0].tls.is_some();
         for target in &self.targets {
+            ensure!(
+                target
+                    .max_sessions
+                    .is_none_or(|n| (1..=1_000_000).contains(&n)),
+                "target session limit must be 1..1000000"
+            );
             if let Some(reference) = &target.via {
                 ensure!(
                     identifier(&reference.node_id) && identifier(&reference.rule_id),
@@ -636,6 +655,14 @@ impl NodeConfig {
             policies.len() <= 16,
             "node exceeds sixteen DNS cache policies"
         );
+        ensure!(
+            self.rules
+                .iter()
+                .map(crate::health::endpoint_count)
+                .sum::<usize>()
+                <= crate::health::MAX_ENDPOINTS,
+            "node exceeds 256 health-check endpoints (target, mapped port and protocol)"
+        );
         crate::routing::validate_static(self)?;
         Ok(())
     }
@@ -661,6 +688,10 @@ pub struct UsageAck {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineStats {
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub active_probes: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_health: Vec<crate::health::TargetHealthReport>,
     pub active_tcp: u64,
     pub active_udp: u64,
     pub accepted_tcp: u64,
@@ -669,6 +700,9 @@ pub struct EngineStats {
     pub dropped_datagrams: u64,
     pub forwarded_upload_bytes: u64,
     pub forwarded_download_bytes: u64,
+}
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Serialize, Deserialize)]

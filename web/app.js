@@ -1,6 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'nodes', nodes: [], usage: [], selectedNode: null, config: null, busy: false };
-const titles = { nodes: '节点总览', rules: '转发规则', topology: '多跳拓扑', usage: '流量账本', budgets: '共享额度', users: '用户与权限', audit: '操作审计', recovery: '恢复保护', capabilities: '功能进度' };
+const titles = { nodes: '节点总览', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', budgets: '共享额度', users: '用户与权限', audit: '操作审计', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
@@ -56,6 +56,8 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule) {
     function chooseEndpoint(update) { address.readOnly = !!via.value; const endpoint = endpoints.find(item => item.key === via.value); if (update && endpoint) address.value = endpoint.rule.advertise; }
     via.addEventListener('change', () => chooseEndpoint(true)); chooseEndpoint(false);
     const weight = field(grid, `target-weight-${id}`, '权重', target.weight, 'number'); weight.min = 1; weight.max = 1000;
+    const priority = field(grid, `target-priority-${id}`, '优先级（越小越优先，同级按均衡策略）', target.priority ?? 0, 'number'); priority.min = 0; priority.max = 65535;
+    const maximum = field(grid, `target-max-${id}`, '目标会话上限（TCP + UDP，留空不限）', target.max_sessions, 'number', false); maximum.min = 1; maximum.max = 1000000;
     const mode = select(grid, `target-mode-${id}`, '连接目标的安全方式', [['plain', '普通 TCP / UDP'], ['tls', 'TLS（验证目标证书）']], target.tls ? 'tls' : 'plain'); box.append(grid);
     const secure = el('div', undefined, 'form-grid');
     const name = field(secure, `target-server-name-${id}`, '证书中的服务名或 IP', target.tls?.server_name || '', 'text', false);
@@ -67,13 +69,13 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule) {
     const proxyCrc = select(proxyFields, `target-proxy-crc-${id}`, 'v2 报头校验和', [['off', '不附加'], ['on', '附加 CRC32C']], target.proxy_protocol?.checksum ? 'on' : 'off');
     function showProxy() { proxyPlacement.disabled = proxyMode.value === 'off'; proxyCrc.disabled = proxyMode.value !== 'v2'; } proxyMode.addEventListener('change', showProxy); showProxy();
     const ws = websocketEditor(`target-ws-${id}`, target.websocket, false, () => address.value.trim());
-    const row = { box, address, via, weight, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws }; rows.push(row);
+    const row = { box, address, via, weight, priority, maximum, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws }; rows.push(row);
     function showSecurity() { const enabled = mode.value === 'tls'; secure.classList.toggle('hidden', !enabled); name.required = enabled; [name, ca, identity].forEach(input => { input.disabled = !enabled; }); }
     mode.onchange = showSecurity; showSecurity(); box.append(secure, proxyFields, ws.box, button('移除此目标', () => { rows.splice(rows.indexOf(row), 1); box.remove(); }, 'table-action danger')); container.append(box);
   }
   targets.forEach(add); form.append(container, button('＋ 添加目标', () => add()));
   return () => { if (!rows.length) throw new Error('至少保留一个转发目标'); return rows.map(row => {
-    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
+    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), max_sessions: row.maximum.value === '' ? null : Number(row.maximum.value), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
     if (row.proxyMode.value !== 'off') {
       if (row.proxyPlacement.value === 'inside_tls' && row.mode.value !== 'tls') throw new Error('将 PROXY 放入加密连接前，请启用目标 TLS');
       target.proxy_protocol = { version: row.proxyMode.value, placement: row.proxyPlacement.value, checksum: row.proxyMode.value === 'v2' && row.proxyCrc.value === 'on' };
@@ -92,8 +94,8 @@ async function enter() { $('#login-screen').classList.add('hidden'); $('#applica
 async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ nodes: renderNodes, rules: renderRules, usage: renderUsage, budgets: renderBudgets, users: renderUsers, audit: renderAudit, recovery: renderRecovery, topology: renderTopology, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
-  finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (requestedView === 'rules' && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
+  try { await ({ nodes: renderNodes, rules: renderRules, usage: renderUsage, budgets: renderBudgets, users: renderUsers, audit: renderAudit, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
 async function renderNodes() {
@@ -123,12 +125,13 @@ async function saveRules(rules, baseConfig) { const expected_revision = baseConf
 async function editRule(existing) {
   const baseConfig = state.config; const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || {};
   field(grid, 'name', '规则名称', r.name || '').maxLength = 120;
-  select(grid, 'protocol', '协议', [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], r.protocol || 'tcp');
+  const protocolControl = select(grid, 'protocol', '协议', [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], r.protocol || 'tcp');
   field(grid, 'listen', '监听地址', r.listen || '127.0.0.1:9000');
   field(grid, 'advertise', '供其他节点连接的地址（跨节点引用时填写）', r.advertise || '', 'text', false);
   const endPort = field(grid, 'listen_end_port', '结束端口（留空只监听一个端口，最多 256 个）', r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
   select(grid, 'port_mapping', '端口段的目标映射', [['fixed', '全部入口连接同一目标端口'], ['offset', '按入口端口偏移目标端口']], r.port_mapping || 'fixed');
   select(grid, 'balance', '目标分配', [['weighted_round_robin', '加权轮询'], ['source_hash', '来源 IP 哈希'], ['least_connections', '最少连接']], r.balance || 'weighted_round_robin'); form.append(grid);
+  const readHealth = healthEditor(form, r.health_check, protocolControl);
   const readTargets = targetEditor(form, r.targets || [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id);
   const routing = el('details'); routing.append(el('summary', '出口绑定与 DNS 缓存')); const routeFields = el('div', undefined, 'form-grid');
   field(routeFields, 'outbound_ip', '出口源 IP（留空由系统选择）', r.outbound_bind?.ip || '', 'text', false);
@@ -160,6 +163,7 @@ async function editRule(existing) {
   submit(form, existing ? '发布修改' : '创建并发布', async data => {
     const node = state.nodes.find(n => n.id === baseConfig.node_id), lines = key => String(data.get(key)).split('\n').map(s => s.trim()).filter(Boolean);
     const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: readTargets(), meter_epoch: r.meter_epoch || crypto.randomUUID(), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
+    rule.health_check = readHealth();
     rule.advertise = String(data.get('advertise')).trim() || null;
     rule.listen_end_port = number(data, 'listen_end_port'); rule.port_mapping = data.get('port_mapping');
     const outboundIp = String(data.get('outbound_ip')).trim(), outboundInterface = String(data.get('outbound_interface')).trim();
@@ -180,9 +184,9 @@ async function renderUsage() { const records = await api('/usage'); const p = pa
 async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后已有 Web 会话立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, canWrite() || u.id === state.actor.id ? button('撤销全部会话', async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify('该用户现有会话已撤销。'); }, 'table-action') : '—']))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function newUser() { const form = el('form'); field(form, 'username', '用户名').maxLength = 80; const p = field(form, 'password', '初始密码（至少 12 个字节）', '', 'password'); p.minLength = 12; p.autocomplete = 'new-password'; const roles = [['viewer', '只读用户'], ['tenant_admin', '租户管理员']]; if (state.actor.role === 'system_admin') roles.push(['system_admin', '系统管理员']); select(form, 'role', '角色', roles, 'viewer'); submit(form, '创建用户', async data => { await api('/users', { method: 'POST', body: Object.fromEntries(data) }); $('#dialog').close(); await renderUsers(); }); modal('添加用户', form); }
 async function renderAudit() { const rows = await api('/audit'); const p = panel('操作审计', '记录配置发布、节点注册、身份及会话操作。最近 200 条。'); p.append(table(['时间', '操作者', '操作', '对象', '详情'], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', mptcp: 'MPTCP', 'multipath-aggregation': '单连接多路径聚合', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', mptcp: 'MPTCP', 'multipath-aggregation': '单连接多路径聚合', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
-setInterval(() => { if (state.actor && !document.hidden && !$('#dialog').open && ['nodes', 'usage', 'budgets', 'recovery', 'topology'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
+setInterval(() => { if (state.actor && !document.hidden && !$('#dialog').open && ['nodes', 'usage', 'budgets', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
 if (state.token) { api('/session').then(user => { state.actor = user; return enter(); }).catch(e => { loggedOut(); $('#login-error').textContent = e.message; }); }
 
 const budgetScopeNames = { user: '用户', tenant: '租户', node: '节点' };
@@ -329,4 +333,63 @@ function editTopologyBatch(snapshot) {
   const form = el('form'); const input = textarea(form, 'batch', '节点配置批次（删除不需要发布的节点）', JSON.stringify({ updates: snapshot.configs.map(config => ({ node_id: config.node_id, expected_revision: config.revision, rules: config.rules })) }, null, 2), true); input.rows = 20;
   form.append(el('p', '保留每个节点的其他规则；省略的规则表示删除。服务器会校验所有引用、修订和停止确认条件。', 'fine'));
   submit(form, '校验并预览', async data => previewTopology(snapshot, JSON.parse(data.get('batch')))); modal('批量编辑配置', form);
+}
+
+function healthEditor(form, spec, protocol) {
+  const box = el('details'); box.open = !!spec; box.append(el('summary', '目标健康、故障摘除与恢复'));
+  const enabled = select(box, 'health_enabled', '主动探测', [['off', '关闭'], ['on', '启用 · 仅选择已通过探测的目标']], spec ? 'on' : 'off');
+  const grid = el('div', undefined, 'form-grid'), numbers = {};
+  for (const [key, label, fallback, min, max] of [['interval_ms', '探测间隔 / 毫秒', 5000, 100, 300000], ['timeout_ms', '单次超时 / 毫秒（不超过间隔）', 2000, 25, 60000], ['unhealthy_threshold', '连续失败几次摘除', 3, 1, 20], ['healthy_threshold', '连续成功几次接纳 / 恢复', 2, 1, 20], ['recovery_delay_ms', '恢复后的持续观察 / 毫秒', 5000, 0, 600000], ['max_age_ms', '结果有效期 / 毫秒（至少间隔 + 超时）', 20000, 125, 3600000]]) { const input = field(grid, `health_${key}`, label, spec?.[key] ?? fallback, 'number'); input.min = min; input.max = max; numbers[key] = input; }
+  const tcp = el('fieldset'); tcp.append(el('legend', 'TCP 目标'));
+  const tcpMode = select(tcp, 'health_tcp_kind', '成功条件', [['connect', '建立传输 · 含 TLS / WS 握手，不验证业务回复'], ['exchange', '发送探测请求，并校验响应前缀']], spec?.tcp?.kind || 'connect');
+  const tcpFields = el('div');
+  const tcpRequest = textarea(tcpFields, 'health_tcp_request', '请求内容 / Base64（最多 1024 字节，可留空等待欢迎消息）', spec?.tcp?.request_base64 || '');
+  const tcpExpected = textarea(tcpFields, 'health_tcp_expected', '预期响应前缀 / Base64（1～1024 字节）', spec?.tcp?.expected_base64 || '', true);
+  const halfClose = select(tcpFields, 'health_tcp_fin', '发送请求后关闭写方向', [['no', '保持写方向'], ['yes', '发送 FIN，继续等待回复']], spec?.tcp?.half_close ? 'yes' : 'no');
+  tcp.append(tcpFields);
+  const udp = el('fieldset'); udp.append(el('legend', 'UDP 目标 · 必须收到完整且匹配的响应包'));
+  const udpRequest = textarea(udp, 'health_udp_request', '请求包 / Base64（1～1024 字节）', spec?.udp?.request_base64 || '', true);
+  const udpExpected = textarea(udp, 'health_udp_expected', '完整预期回复 / Base64（1～1024 字节）', spec?.udp?.expected_base64 || '', true);
+  for (const input of [tcpRequest, tcpExpected, udpRequest, udpExpected]) input.maxLength = 1368;
+  function show() {
+    const on = enabled.value === 'on', hasTcp = protocol.value !== 'udp', hasUdp = protocol.value !== 'tcp';
+    grid.classList.toggle('hidden', !on); Object.values(numbers).forEach(input => { input.disabled = !on; });
+    tcp.classList.toggle('hidden', !on || !hasTcp); tcpMode.disabled = !on || !hasTcp;
+    const exchange = on && hasTcp && tcpMode.value === 'exchange'; tcpFields.classList.toggle('hidden', !exchange); [tcpRequest, tcpExpected, halfClose].forEach(input => { input.disabled = !exchange; });
+    udp.classList.toggle('hidden', !on || !hasUdp); [udpRequest, udpExpected].forEach(input => { input.disabled = !on || !hasUdp; });
+  }
+  for (const input of [enabled, tcpMode, protocol]) input.addEventListener('change', show);
+  box.append(grid, tcp, udp, el('p', '首次通过探测前、结果过期或全部目标不可用时，新业务会被拒绝。探测使用节点实际出口与传输参数，报文应能重复执行。源节点探测统计单列；经过中转时，下游规则仍按收到的应用负载计量。', 'fine')); form.append(box); show();
+  const encoded = input => input.value.replace(/\s/g, '');
+  return () => {
+    if (enabled.value === 'off') return null;
+    const value = Object.fromEntries(Object.entries(numbers).map(([key, input]) => [key, Number(input.value)]));
+    if (protocol.value !== 'udp') value.tcp = tcpMode.value === 'connect' ? { kind: 'connect' } : { kind: 'exchange', request_base64: encoded(tcpRequest), expected_base64: encoded(tcpExpected), half_close: halfClose.value === 'yes' };
+    if (protocol.value !== 'tcp') value.udp = { request_base64: encoded(udpRequest), expected_base64: encoded(udpExpected) };
+    return value;
+  };
+}
+
+async function renderHealth() {
+  const nodes = await api('/nodes');
+  if (!nodes.length) { if (state.view === 'health') $('#content').replaceChildren(empty('还没有节点', '先接入节点，再在规则中设置目标健康探测。')); return; }
+  if (!nodes.some(n => n.id === state.selectedNode)) state.selectedNode = nodes[0].id;
+  const selected = state.selectedNode, toolbar = el('div', undefined, 'toolbar'), selector = el('select'); selector.setAttribute('aria-label', '选择节点');
+  nodes.forEach(node => { const option = el('option', node.name); option.value = node.id; selector.append(option); }); selector.value = selected; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; toolbar.append(selector);
+  const snapshot = await api(`/nodes/${selected}/health`);
+  if (state.view !== 'health' || state.selectedNode !== selected) return;
+  const node = nodes.find(n => n.id === selected);
+  toolbar.append(badge(`生效 v${snapshot.applied_revision} / 期望 v${snapshot.desired_revision}`), badge(online(node) ? '控制在线' : '无近期控制回报', online(node) ? 'green' : 'orange'), button('配置规则', () => navigate('rules')));
+  const panelHealth = panel('目标观测与选路', 'TCP 与 UDP 独立判断；同优先级按规则的均衡策略分配，低优先级目标作为候选后备。已有 TCP 不会因单次健康状态变化被强制迁移。');
+  const kinds = { tcp_connect: '传输建立', tcp_exchange: 'TCP 响应前缀', udp_exchange: 'UDP 完整回复' };
+  const statuses = { unknown: '尚未确认', healthy: '探测通过', unhealthy: '已摘除', recovering: '恢复观察', stale: '结果过期' };
+  const reasons = { eligible: '参与优先池', standby: '后备候选', unknown: '等待探测确认', unhealthy: '故障排除', recovering: '等待持续成功', stale: '等待新结果', at_capacity: '会话已满', expired: '规则已到期' };
+  const errors = { dns: '域名解析失败', transport: '连接、握手或路径检查失败', timeout: '探测超时', io: '收发失败', unexpected_response: '回复不符或提前关闭', expired: '规则已到期' };
+  const info = el('div', undefined, 'panel-body'); info.append(el('p', `最近节点回报：${timestamp(snapshot.last_seen_ms)} · ${snapshot.reports.length} / ${snapshot.expected_endpoints} 个配置端点有记录 · 当前探测 ${snapshot.active_probes} 个`)); if (snapshot.apply_error) info.append(el('p', `配置应用失败：${snapshot.apply_error}`, 'error')); panelHealth.append(info);
+  if (!snapshot.reports.length) panelHealth.append(empty('暂无目标探测结果', snapshot.expected_endpoints ? '节点尚未上报这些端点的结果，不能视为健康。' : '在规则编辑器启用健康探测，填写对应业务的成功条件。'));
+  else panelHealth.append(table(['规则 / 目标', '端口 / 成功条件', '观测状态', '选路原因', '优先级 / 会话', '耗时 EWMA', '结果年龄', '连续成功 / 失败', '诊断'], snapshot.reports.map(r => {
+    const diagnostic = el('details'); diagnostic.append(el('summary', r.last_error ? errors[r.last_error] : '查看探测统计'), el('p', `完成 ${r.completed_checks} 次，成功 ${r.successful_checks} 次`), el('p', `源节点探测应用量：发送 ${bytes(r.probe_sent_bytes)} / 接收 ${bytes(r.probe_received_bytes)}`), el('p', `节点记录时间：${timestamp(r.checked_at_ms)}`));
+    return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), `${r.listen_port} / ${kinds[r.probe_kind]}`, badge(statuses[r.status], r.eligible ? 'green' : 'orange'), reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? '不限'}`, r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.sample_age_ms === null ? '—' : `${(r.sample_age_ms / 1000).toFixed(1)} / ${(r.max_age_ms / 1000).toFixed(1)} s`, `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
+  })));
+  $('#content').replaceChildren(toolbar, panelHealth);
 }

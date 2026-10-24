@@ -1,8 +1,8 @@
 {
-  "at_utc": "2026-10-24T03:09:40.802781+00:00",
+  "at_utc": "2026-10-24T04:28:35.010072+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "version": "relay 0.9.0",
-  "binary_sha256": "7a1223432b79bbf7caa56598c2dfce14c55ea97e4f50952edb0509ea01a5cfbb",
+  "version": "relay 0.10.0",
+  "binary_sha256": "45d52994fa0332ab2dc74d38360447f885b9e7592552e491c4e89bb6e8ab2d8a",
   "haproxy_version": "HAProxy version 3.0.30-47d806b 2026/10/14 - https://haproxy.org/",
   "haproxy_binary_sha256": "4ab39a69650b02df027e4af3daf40006c6925c285a4bfaba8c1512dae4d6108e",
   "topology": "Python client -> HAProxy -> relay -> HAProxy -> Python observer",

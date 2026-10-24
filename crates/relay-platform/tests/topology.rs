@@ -243,6 +243,8 @@ fn directed_cycles_raw_address_bypass_and_endpoint_aliases_are_rejected() {
     let f = Fixture::new();
     let mut configs = f.configs.clone();
     configs[2].rules[0].targets[0] = Target {
+        priority: 0,
+        max_sessions: None,
         address: configs[0].rules[0].advertise.clone().unwrap(),
         via: Some(RuleRef {
             node_id: configs[0].node_id.clone(),
@@ -581,4 +583,56 @@ fn database_failure_on_last_node_rolls_back_all_rules_and_revisions() {
             .unwrap(),
         3
     );
+}
+
+#[test]
+fn topology_reactivation_waits_for_cancelled_probe_io_to_finish() {
+    let mut f = Fixture::new();
+    f.publish();
+    f.enroll();
+    f.acknowledge(0);
+    for c in &mut f.configs {
+        c.rules[0].enabled = false;
+    }
+    f.publish();
+    f.acknowledge(0);
+    let first = &f.configs[0];
+    let page = f
+        .store
+        .reconcile(
+            &first.node_id,
+            ReconcileRequest {
+                ledger_id: None,
+                after: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+    f.store
+        .sync(
+            &first.node_id,
+            SyncRequest {
+                budget: None,
+                ledger_id: page.ledger_id,
+                need_config: false,
+                applied_revision: first.revision,
+                apply_error: None,
+                usage: vec![],
+                stats: EngineStats {
+                    active_probes: 1,
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    let mut enabled = f.configs.clone();
+    for c in &mut enabled {
+        c.rules[0].enabled = true;
+    }
+    assert_eq!(
+        rejection(f.store.publish_configs(&f.admin, batch(&enabled))),
+        409
+    );
+    f.acknowledge(0);
+    f.store.publish_configs(&f.admin, batch(&enabled)).unwrap();
 }

@@ -8,6 +8,7 @@
   "durable_bytes": 176,
   "backup_restore": "identical",
   "child_processes_stopped": true,
-  "version": "relay 0.9.0",
-  "binary_sha256": "7a1223432b79bbf7caa56598c2dfce14c55ea97e4f50952edb0509ea01a5cfbb"
+  "binary_sha256": "45d52994fa0332ab2dc74d38360447f885b9e7592552e491c4e89bb6e8ab2d8a",
+  "version": "relay 0.10.0",
+  "at_utc": "2026-10-24T04:28:58.331122+00:00"
 }

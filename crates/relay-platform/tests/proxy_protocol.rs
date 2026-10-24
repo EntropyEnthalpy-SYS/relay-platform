@@ -879,6 +879,8 @@ async fn source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4() {
     r.inbound_proxy = Some(inbound(ProxyAccept::V1));
     r.balance = Balance::SourceHash;
     r.targets.push(Target {
+        priority: 0,
+        max_sessions: None,
         address: b.address.to_string(),
         weight: 1,
         tls: None,

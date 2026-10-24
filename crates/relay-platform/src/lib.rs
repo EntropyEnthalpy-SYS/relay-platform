@@ -3,6 +3,7 @@ pub mod api;
 pub mod budget;
 mod datagram;
 pub mod engine;
+pub mod health;
 pub mod journal;
 pub mod model;
 mod network;

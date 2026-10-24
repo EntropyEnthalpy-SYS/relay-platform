@@ -73,6 +73,7 @@ fn apply_sync(tx: &Transaction<'_>, node: &str, request: SyncRequest) -> Result<
             "agent revision exceeds controller; reconcile restored state",
         );
     }
+    super::health::validate_reports(tx, node, request.applied_revision, &request.stats)?;
     let mut acknowledgements = vec![];
     for usage in request.usage {
         if usage.sequence == 0

@@ -1,5 +1,6 @@
 use crate::{
     datagram,
+    health::{self, HealthSet, Observation},
     model::*,
     network::{self, TargetResolver},
     proxy::{self, ConnectionInfo},
@@ -16,7 +17,7 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        Arc, Mutex as StdMutex,
+        Arc, Mutex as StdMutex, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
@@ -24,7 +25,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::{Mutex, mpsc, oneshot, watch},
+    sync::{Mutex, Semaphore, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, sleep, sleep_until, timeout_at},
 };
@@ -35,6 +36,7 @@ const UDP_QUEUE: usize = 4;
 
 #[derive(Default)]
 struct Counters {
+    active_probes: AtomicU64,
     active_tcp: AtomicU64,
     active_udp: AtomicU64,
     accepted_tcp: AtomicU64,
@@ -47,6 +49,8 @@ struct Counters {
 impl Counters {
     fn snapshot(&self) -> EngineStats {
         EngineStats {
+            active_probes: self.active_probes.load(Ordering::Relaxed),
+            target_health: vec![],
             active_tcp: self.active_tcp.load(Ordering::Relaxed),
             active_udp: self.active_udp.load(Ordering::Relaxed),
             accepted_tcp: self.accepted_tcp.load(Ordering::Relaxed),
@@ -168,10 +172,12 @@ struct SharedRule {
     tcp: Arc<AtomicUsize>,
     udp: Arc<AtomicUsize>,
     bucket: StdMutex<Bucket>,
+    target_counts: StdMutex<HashMap<String, Weak<AtomicUsize>>>,
 }
 impl SharedRule {
     fn new(rate: Option<u64>) -> Self {
         Self {
+            target_counts: StdMutex::new(HashMap::new()),
             tcp: Arc::new(AtomicUsize::new(0)),
             udp: Arc::new(AtomicUsize::new(0)),
             bucket: StdMutex::new(Bucket {
@@ -180,6 +186,23 @@ impl SharedRule {
                 updated: Instant::now(),
             }),
         }
+    }
+    fn target_counters(&self, targets: &[Target]) -> Vec<Arc<AtomicUsize>> {
+        let mut counts = self.target_counts.lock().unwrap();
+        counts.retain(|_, weak| weak.strong_count() > 0);
+        targets
+            .iter()
+            .map(|target| {
+                let entry = counts.entry(target.address.clone()).or_default();
+                if let Some(count) = entry.upgrade() {
+                    count
+                } else {
+                    let count = Arc::new(AtomicUsize::new(0));
+                    *entry = Arc::downgrade(&count);
+                    count
+                }
+            })
+            .collect()
     }
     fn set_rate(&self, rate: Option<u64>) {
         let mut b = self.bucket.lock().unwrap();
@@ -266,6 +289,7 @@ impl Drop for TargetGuard {
 }
 
 struct RuntimeRule {
+    health: Option<Arc<HealthSet>>,
     spec: Rule,
     resolver: Arc<TargetResolver>,
     routes: Arc<Routes>,
@@ -283,13 +307,10 @@ impl RuntimeRule {
         resolver: Arc<TargetResolver>,
         routes: Arc<Routes>,
     ) -> Self {
-        let target_active = spec
-            .targets
-            .iter()
-            .map(|_| Arc::new(AtomicUsize::new(0)))
-            .collect();
         let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(spec.rate_bytes_per_sec)));
+        let target_active = shared.target_counters(&spec.targets);
         Self {
+            health: HealthSet::new(&spec),
             spec,
             resolver,
             routes,
@@ -300,12 +321,32 @@ impl RuntimeRule {
             target_active,
         }
     }
-    fn order(&self, source: SocketAddr) -> Vec<usize> {
+    fn order(&self, source: SocketAddr, inlet: ListenerKey) -> Vec<usize> {
         let targets = &self.spec.targets;
+        let mut eligible: Vec<_> = (0..targets.len())
+            .filter(|&index| {
+                self.health.as_ref().is_none_or(|health| {
+                    health
+                        .point(index, inlet.address.port(), inlet.tcp)
+                        .eligible()
+                }) && targets[index].max_sessions.is_none_or(|limit| {
+                    self.target_active[index].load(Ordering::Relaxed) < limit as usize
+                })
+            })
+            .collect();
+        eligible.sort_by_key(|&index| targets[index].priority);
+        if eligible.is_empty() {
+            return eligible;
+        }
+        let preferred = eligible
+            .iter()
+            .take_while(|&&index| targets[index].priority == targets[eligible[0]].priority)
+            .count();
+        let primary = &eligible[..preferred];
         let next = self.cursor.fetch_add(1, Ordering::Relaxed);
         let first = match self.spec.balance {
             Balance::WeightedRoundRobin | Balance::SourceHash => {
-                let sum: u64 = targets.iter().map(|t| t.weight as u64).sum();
+                let sum: u64 = primary.iter().map(|&i| targets[i].weight as u64).sum();
                 let value = if self.spec.balance == Balance::SourceHash {
                     let hash = Sha256::digest(
                         format!("{}:{}", self.spec.id, canonical_ip(source.ip())).as_bytes(),
@@ -316,7 +357,8 @@ impl RuntimeRule {
                 };
                 let mut position = value % sum;
                 let mut selected = 0;
-                for (i, t) in targets.iter().enumerate() {
+                for (i, &index) in primary.iter().enumerate() {
+                    let t = &targets[index];
                     if position < t.weight as u64 {
                         selected = i;
                         break;
@@ -326,24 +368,46 @@ impl RuntimeRule {
                 selected
             }
             Balance::LeastConnections => {
-                let offset = (next % targets.len() as u64) as usize;
-                (0..targets.len())
-                    .map(|i| (i + offset) % targets.len())
+                let offset = (next % primary.len() as u64) as usize;
+                (0..primary.len())
+                    .map(|i| (i + offset) % primary.len())
                     .min_by(|&a, &b| {
-                        let ca = self.target_active[a].load(Ordering::Relaxed) as u64;
-                        let cb = self.target_active[b].load(Ordering::Relaxed) as u64;
-                        (ca * targets[b].weight as u64).cmp(&(cb * targets[a].weight as u64))
+                        let ia = primary[a];
+                        let ib = primary[b];
+                        let ca = self.target_active[ia].load(Ordering::Relaxed) as u64;
+                        let cb = self.target_active[ib].load(Ordering::Relaxed) as u64;
+                        (ca * targets[ib].weight as u64).cmp(&(cb * targets[ia].weight as u64))
                     })
                     .unwrap()
             }
         };
-        (0..targets.len())
-            .map(|i| (first + i) % targets.len())
+        (0..primary.len())
+            .map(|i| primary[(first + i) % primary.len()])
+            .chain(eligible[preferred..].iter().copied())
             .collect()
     }
-    fn target_guard(&self, index: usize) -> TargetGuard {
-        self.target_active[index].fetch_add(1, Ordering::Relaxed);
-        TargetGuard(self.target_active[index].clone())
+    fn target_guard(&self, index: usize) -> Option<TargetGuard> {
+        let count = &self.target_active[index];
+        if let Some(limit) = self.spec.targets[index].max_sessions {
+            let mut current = count.load(Ordering::Relaxed);
+            loop {
+                if current >= limit as usize {
+                    return None;
+                }
+                match count.compare_exchange_weak(
+                    current,
+                    current + 1,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(next) => current = next,
+                }
+            }
+        } else {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(TargetGuard(count.clone()))
     }
     fn accepts(&self, peer: SocketAddr) -> bool {
         self.spec.permits(peer.ip())
@@ -363,6 +427,157 @@ impl RuntimeRule {
             self.accepts(peer)
         }
     }
+}
+
+struct ProbeGuard(Arc<Counters>);
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        self.0.active_probes.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+fn start_health(
+    rule: Arc<RuntimeRule>,
+    slots: Arc<Semaphore>,
+    stats: Arc<Counters>,
+    tasks: TaskTracker,
+) {
+    let health = rule.health.as_ref().expect("health worker has policy");
+    for (&key, point) in &health.points {
+        let rule = rule.clone();
+        let stop = health.stop.clone();
+        let point = point.clone();
+        let slots = slots.clone();
+        let stats = stats.clone();
+        tasks.spawn(async move {
+            let policy=rule.spec.health_check.as_ref().unwrap();
+            let mut interval=tokio::time::interval(Duration::from_millis(policy.interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select!{biased;_=stop.cancelled()=>break,_=interval.tick()=>{}}
+                let permit=tokio::select!{biased;_=stop.cancelled()=>break,permit=slots.clone().acquire_owned()=>match permit{Ok(p)=>p,Err(_)=>break}};
+                stats.active_probes.fetch_add(1,Ordering::Relaxed);let guard=ProbeGuard(stats.clone());
+                let began=Instant::now();
+                let result=tokio::select!{biased;_=stop.cancelled()=>break,result=tokio::time::timeout(Duration::from_millis(policy.timeout_ms),probe_target(&rule,key,&point))=>result};
+                let outcome=match result{Ok(Ok(()))=>Ok(began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64),Ok(Err(error))=>Err(error),Err(_)=>Err(health::Failure::Timeout)};
+                point.observe(outcome);drop(guard);drop(permit);
+            }
+        });
+    }
+}
+async fn probe_target(
+    rule: &RuntimeRule,
+    key: health::Key,
+    point: &Observation,
+) -> std::result::Result<(), health::Failure> {
+    use health::{Failure as F, StreamProbe};
+    if rule.spec.expires_at_ms.is_some_and(|at| at <= now_ms()) {
+        return Err(F::Expired);
+    }
+    let policy = rule.spec.health_check.as_ref().unwrap();
+    let mut inlet = ListenerKey {
+        address: rule.spec.listen,
+        tcp: key.tcp,
+    };
+    inlet.address.set_port(key.port);
+    let target = rule
+        .spec
+        .target_address(key.index, key.port)
+        .map_err(|_| F::Transport)?;
+    let addresses = rule.resolver.resolve(&target).await.map_err(|_| F::Dns)?;
+    let mut failure = F::Transport;
+    for address in addresses {
+        let result = async {
+            if key.tcp {
+                let (mut stream, _route) = open_tcp_target(rule, key.index, address, inlet, None)
+                    .await
+                    .map_err(|_| F::Transport)?;
+                if let Some(StreamProbe::Exchange {
+                    request_base64,
+                    expected_base64,
+                    half_close,
+                }) = &policy.tcp
+                {
+                    let request = health::payload(request_base64, false).expect("validated probe");
+                    let expected = health::payload(expected_base64, true).expect("validated probe");
+                    let mut written = 0;
+                    while written < request.len() {
+                        let n = stream.write(&request[written..]).await.map_err(|_| F::Io)?;
+                        if n == 0 {
+                            return Err(F::Io);
+                        }
+                        written += n;
+                        point.traffic(true, n);
+                    }
+                    stream.flush().await.map_err(|_| F::Io)?;
+                    if *half_close {
+                        stream.shutdown().await.map_err(|_| F::Io)?;
+                    }
+                    let mut reply = vec![0; expected.len()];
+                    let mut read = 0;
+                    while read < reply.len() {
+                        let n = stream.read(&mut reply[read..]).await.map_err(|_| F::Io)?;
+                        if n == 0 {
+                            return Err(F::UnexpectedResponse);
+                        }
+                        read += n;
+                        point.traffic(false, n);
+                    }
+                    if reply != expected {
+                        return Err(F::UnexpectedResponse);
+                    }
+                }
+                // Success depends on setup/response, not on a peer agreeing to close.
+                // Dropping the stream also cancels the bounded WS driver.
+            } else {
+                let _route = rule
+                    .routes
+                    .reserve(inlet, address)
+                    .map_err(|_| F::Transport)?;
+                let socket =
+                    network::outbound_udp(rule.spec.outbound_bind.as_ref(), address.is_ipv4())
+                        .map_err(|_| F::Transport)?;
+                socket.connect(address).await.map_err(|_| F::Transport)?;
+                let probe = policy.udp.as_ref().unwrap();
+                let request =
+                    health::payload(&probe.request_base64, true).expect("validated probe");
+                let expected =
+                    health::payload(&probe.expected_base64, true).expect("validated probe");
+                let mut wire = if let Some(proxy) = &rule.spec.targets[key.index].proxy_protocol {
+                    proxy::encode(
+                        proxy,
+                        false,
+                        ConnectionInfo {
+                            source: socket.local_addr().map_err(|_| F::Transport)?,
+                            destination: address,
+                        },
+                    )
+                    .map_err(|_| F::Transport)?
+                } else {
+                    vec![]
+                };
+                let header = wire.len();
+                wire.extend_from_slice(&request);
+                let n = socket.send(&wire).await.map_err(|_| F::Io)?;
+                point.traffic(true, n.saturating_sub(header));
+                if n != wire.len() {
+                    return Err(F::Io);
+                }
+                let mut reply = vec![0; health::MAX_PROBE_BYTES + 1];
+                let n = socket.recv(&mut reply).await.map_err(|_| F::Io)?;
+                point.traffic(false, n);
+                if reply[..n] != expected {
+                    return Err(F::UnexpectedResponse);
+                }
+            }
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
 }
 
 struct ListenerHandle {
@@ -385,6 +600,8 @@ struct EngineInner {
 }
 
 pub struct Engine {
+    health_runtimes: StdMutex<Vec<Arc<RuntimeRule>>>,
+    probe_slots: Arc<Semaphore>,
     store: Store,
     tls_directory: Option<PathBuf>,
     meter: Meter,
@@ -399,6 +616,8 @@ impl Engine {
     }
     pub fn with_tls_directory(store: Store, tls_directory: Option<PathBuf>) -> Self {
         Self {
+            health_runtimes: StdMutex::new(vec![]),
+            probe_slots: Arc::new(Semaphore::new(health::MAX_CONCURRENT)),
             tls_directory,
             meter: Meter::new(store.clone()),
             store,
@@ -409,7 +628,44 @@ impl Engine {
         }
     }
     pub fn stats(&self) -> EngineStats {
-        self.stats.snapshot()
+        let mut stats = self.stats.snapshot();
+        for runtime in self.health_runtimes.lock().unwrap().iter() {
+            if let Some(health) = &runtime.health {
+                stats
+                    .target_health
+                    .extend(health.reports(&runtime.spec, &runtime.target_active));
+            }
+        }
+        for report in &mut stats.target_health {
+            if report.eligible {
+                report.selection_reason = "eligible".into();
+            }
+        }
+        let preferred: HashMap<_, _> =
+            stats
+                .target_health
+                .iter()
+                .filter(|r| r.eligible)
+                .fold(HashMap::new(), |mut map, r| {
+                    map.entry((r.rule_id.clone(), r.listen_port, r.protocol.tcp()))
+                        .and_modify(|p: &mut u16| *p = (*p).min(r.priority))
+                        .or_insert(r.priority);
+                    map
+                });
+        for report in &mut stats.target_health {
+            if report.eligible
+                && preferred
+                    .get(&(
+                        report.rule_id.clone(),
+                        report.listen_port,
+                        report.protocol.tcp(),
+                    ))
+                    .is_some_and(|&priority| report.priority > priority)
+            {
+                report.selection_reason = "standby".into();
+            }
+        }
+        stats
     }
     pub async fn revision(&self) -> u64 {
         self.inner
@@ -473,6 +729,15 @@ impl Engine {
                     resolver,
                     self.routes.clone(),
                 );
+                if let Some(old) = inner.rules.get(&spec.id)
+                    && old.spec.health_check == spec.health_check
+                    && old.spec.expires_at_ms == spec.expires_at_ms
+                    && crate::topology::route_signature(&old.spec)
+                        == crate::topology::route_signature(spec)
+                    && old.tls.fingerprint == new.tls.fingerprint
+                {
+                    new.health = old.health.clone();
+                }
                 if let Some(old) = inner.rules.get(&spec.id).filter(|old| {
                     !security_policy_changed(&old.spec, spec)
                         && old.tls.fingerprint == new.tls.fingerprint
@@ -516,6 +781,14 @@ impl Engine {
         tokio::task::spawn_blocking(move || db.save_agent_config(&saved)).await??;
         self.routes.install(topology);
         for (id, old) in &inner.rules {
+            if let Some(health) = &old.health
+                && !rules
+                    .get(id)
+                    .and_then(|new| new.health.as_ref())
+                    .is_some_and(|next| Arc::ptr_eq(health, next))
+            {
+                health.cancel();
+            }
             match rules.get(id) {
                 None => old.cancel.cancel(),
                 Some(new)
@@ -529,6 +802,20 @@ impl Engine {
         }
         for runtime in rules.values() {
             runtime.shared.set_rate(runtime.spec.rate_bytes_per_sec);
+            if let Some(health) = &runtime.health
+                && !inner
+                    .rules
+                    .get(&runtime.spec.id)
+                    .and_then(|old| old.health.as_ref())
+                    .is_some_and(|old| Arc::ptr_eq(old, health))
+            {
+                start_health(
+                    runtime.clone(),
+                    self.probe_slots.clone(),
+                    self.stats.clone(),
+                    self.tasks.clone(),
+                );
+            }
         }
         let removed: Vec<_> = inner
             .listeners
@@ -577,6 +864,13 @@ impl Engine {
                 },
             );
         }
+        let mut health_runtimes: Vec<_> = rules
+            .values()
+            .filter(|r| r.health.is_some())
+            .cloned()
+            .collect();
+        health_runtimes.sort_by(|a, b| a.spec.id.cmp(&b.spec.id));
+        *self.health_runtimes.lock().unwrap() = health_runtimes;
         inner.rules = rules;
         inner.resolvers = resolvers;
         inner.config = Some(config);
@@ -588,6 +882,9 @@ impl Engine {
         inner.stopped = true;
         for runtime in inner.rules.values() {
             runtime.cancel.cancel();
+            if let Some(health) = &runtime.health {
+                health.cancel();
+            }
         }
         for listener in inner.listeners.values() {
             listener.stop.cancel();
@@ -597,6 +894,7 @@ impl Engine {
         }
         self.tasks.close();
         self.tasks.wait().await;
+        self.health_runtimes.lock().unwrap().clear();
         self.meter.barrier().await?;
         Ok(())
     }
@@ -711,6 +1009,45 @@ async fn tcp_listener(
     }
 }
 
+async fn open_tcp_target(
+    rule: &RuntimeRule,
+    index: usize,
+    address: SocketAddr,
+    inlet: ListenerKey,
+    info: Option<ConnectionInfo>,
+) -> Result<(BoxStream, LoopGuard)> {
+    let route = rule.routes.reserve(inlet, address)?;
+    let mut stream = network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await?;
+    stream.set_nodelay(true)?;
+    let info = info.unwrap_or(ConnectionInfo {
+        source: stream.local_addr()?,
+        destination: address,
+    });
+    let policy = rule.spec.targets[index].proxy_protocol.as_ref();
+    if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::BeforeTls) {
+        stream
+            .write_all(&proxy::encode(policy, true, info)?)
+            .await?;
+    }
+    let mut stream = rule.tls.connect(index, stream).await?;
+    if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::InsideTls) {
+        stream
+            .write_all(&proxy::encode(policy, true, info)?)
+            .await?;
+        stream.flush().await?;
+    }
+    if let Some(spec) = &rule.spec.targets[index].websocket {
+        stream = websocket::connect(
+            stream,
+            spec,
+            rule.spec.targets[index].tls.is_some(),
+            Duration::from_millis(rule.spec.connect_timeout_ms),
+        )
+        .await?;
+    }
+    Ok((stream, route))
+}
+
 async fn connect_tcp(
     rule: &RuntimeRule,
     info: ConnectionInfo,
@@ -718,8 +1055,10 @@ async fn connect_tcp(
 ) -> Result<(BoxStream, TargetGuard, LoopGuard)> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     let mut last = None;
-    for index in rule.order(info.source) {
-        let guard = rule.target_guard(index);
+    for index in rule.order(info.source, inlet) {
+        let Some(guard) = rule.target_guard(index) else {
+            continue;
+        };
         let target = rule.spec.target_address(index, inlet.address.port())?;
         let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
             Ok(Ok(addresses)) => addresses,
@@ -730,35 +1069,10 @@ async fn connect_tcp(
             Err(_) => bail!("target resolution timed out"),
         };
         for address in addresses {
-            match timeout_at(deadline, async {
-                let route = rule.routes.reserve(inlet, address)?;
-                let mut stream =
-                    network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await?;
-                stream.set_nodelay(true)?;
-                let policy = rule.spec.targets[index].proxy_protocol.as_ref();
-                if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::BeforeTls) {
-                    stream
-                        .write_all(&proxy::encode(policy, true, info)?)
-                        .await?;
-                }
-                let mut stream = rule.tls.connect(index, stream).await?;
-                if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::InsideTls) {
-                    stream
-                        .write_all(&proxy::encode(policy, true, info)?)
-                        .await?;
-                    stream.flush().await?;
-                }
-                if let Some(spec) = &rule.spec.targets[index].websocket {
-                    stream = websocket::connect(
-                        stream,
-                        spec,
-                        rule.spec.targets[index].tls.is_some(),
-                        Duration::from_millis(rule.spec.connect_timeout_ms),
-                    )
-                    .await?;
-                }
-                Ok::<_, anyhow::Error>((stream, route))
-            })
+            match timeout_at(
+                deadline,
+                open_tcp_target(rule, index, address, inlet, Some(info)),
+            )
             .await
             {
                 Ok(Ok((stream, route))) => return Ok((stream, guard, route)),
@@ -968,6 +1282,7 @@ async fn udp_listener(
 }
 
 struct UdpTarget {
+    health: Option<Arc<Observation>>,
     socket: UdpSocket,
     header: Vec<u8>,
     wire_limit: usize,
@@ -981,8 +1296,10 @@ async fn udp_target(
 ) -> Result<UdpTarget> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     let mut last = None;
-    for index in rule.order(info.source) {
-        let guard = rule.target_guard(index);
+    for index in rule.order(info.source, inlet) {
+        let Some(guard) = rule.target_guard(index) else {
+            continue;
+        };
         let target = rule.spec.target_address(index, inlet.address.port())?;
         let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
             Ok(Ok(a)) => a,
@@ -1010,6 +1327,10 @@ async fn udp_target(
             {
                 Ok(Ok((socket, route, header))) => {
                     return Ok(UdpTarget {
+                        health: rule
+                            .health
+                            .as_ref()
+                            .map(|h| h.point(index, inlet.address.port(), false).clone()),
                         socket,
                         header,
                         wire_limit: if address.is_ipv4() { 65507 } else { 65527 },
@@ -1053,6 +1374,7 @@ async fn udp_session(
             .unwrap_or(deadline);
         tokio::select! {
             biased;
+            _=async {if let Some(health)=&target.health{health.wait_unavailable().await;}else{std::future::pending::<()>().await;}}=>bail!("UDP target is no longer healthy; session retired without replay"),
             _=sleep_until(deadline)=>return Ok(()),
             message=incoming.recv()=>{
                 let Some(payload)=message else{return Ok(());};

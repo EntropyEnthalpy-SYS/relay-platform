@@ -1,9 +1,9 @@
 {
-  "at_utc": "2026-10-24T03:09:40.535885+00:00",
+  "at_utc": "2026-10-24T04:28:37.315809+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "binary_sha256": "7a1223432b79bbf7caa56598c2dfce14c55ea97e4f50952edb0509ea01a5cfbb",
+  "binary_sha256": "45d52994fa0332ab2dc74d38360447f885b9e7592552e491c4e89bb6e8ab2d8a",
   "restore": {
-    "journal_id": "ee9e381f-c1c4-4485-969e-1ea1aeec79c2",
+    "journal_id": "065baf66-6d44-4337-8268-6e186a7720b7",
     "backup_sequence": 4,
     "restored_sequence": 11,
     "replayed_transactions": 7,

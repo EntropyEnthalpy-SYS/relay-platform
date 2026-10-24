@@ -29,7 +29,11 @@ fn quiescent(conn: &Connection, node: &str) -> Result<bool> {
     let Ok(stats) = serde_json::from_str::<EngineStats>(&stats) else {
         return Ok(false);
     };
-    Ok(desired == applied && error.is_none() && stats.active_tcp == 0 && stats.active_udp == 0)
+    Ok(desired == applied
+        && error.is_none()
+        && stats.active_tcp == 0
+        && stats.active_udp == 0
+        && stats.active_probes == 0)
 }
 fn retirement_barrier(conn: &Connection, old: &NodeConfig, new: &NodeConfig) -> Result<()> {
     for previous in &old.rules {

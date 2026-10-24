@@ -1,0 +1,17 @@
+{
+  "binary_sha256": "7a1223432b79bbf7caa56598c2dfce14c55ea97e4f50952edb0509ea01a5cfbb",
+  "version": "relay 0.9.0",
+  "hops": 2,
+  "proxy": "v2_crc32c",
+  "meter_records": 2,
+  "headers_excluded": true,
+  "validate": "passed",
+  "probe": {
+    "tcp": "verified",
+    "udp": "verified",
+    "bytes_each_direction_per_protocol": 44
+  },
+  "durable_bytes": 352,
+  "backup_restore": "identical",
+  "child_processes_stopped": true
+}

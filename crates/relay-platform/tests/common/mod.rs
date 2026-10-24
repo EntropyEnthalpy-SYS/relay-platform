@@ -27,6 +27,7 @@ pub fn free_address() -> SocketAddr {
 }
 pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
     Rule {
+        health_check: None,
         budget_ids: vec![],
         id: "rule-one".into(),
         tenant_id: "default".into(),
@@ -43,6 +44,8 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         inbound_websocket: None,
         advertise: None,
         targets: vec![Target {
+            priority: 0,
+            max_sessions: None,
             address: target.to_string(),
             weight: 1,
             tls: None,

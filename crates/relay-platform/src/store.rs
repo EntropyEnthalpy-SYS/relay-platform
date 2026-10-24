@@ -14,6 +14,7 @@ use std::{
 use uuid::Uuid;
 
 mod budgets;
+mod health;
 mod recovery;
 mod sync;
 mod topology;

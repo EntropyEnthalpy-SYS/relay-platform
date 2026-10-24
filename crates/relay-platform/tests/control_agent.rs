@@ -23,6 +23,132 @@ struct Server {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn health_policy_and_observations_roundtrip_http_through_real_managed_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut echo = Some(tcp_echo().await);
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    control.set_kind("controller").unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (node, enrollment) = control
+        .create_node(&admin, "default", "health-agent")
+        .unwrap();
+    let (token, _) = control.login("admin", PASSWORD).unwrap();
+    let server_instance = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", server_instance.address);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("{origin}/api/v1/nodes/{}/config", node.id);
+    let health_url = format!("{origin}/api/v1/nodes/{}/health", node.id);
+    assert_eq!(client.get(&health_url).send().await.unwrap().status(), 401);
+    let mut r = rule(echo.as_ref().unwrap().address, Protocol::Tcp);
+    r.targets[0].priority = 3;
+    r.targets[0].max_sessions = Some(4);
+    r.health_check = Some(serde_json::from_value(json!({
+        "interval_ms":100, "timeout_ms":60, "healthy_threshold":2,
+        "unhealthy_threshold":2, "recovery_delay_ms":250, "max_age_ms":1000,
+        "tcp":{"kind":"exchange","request_base64":"UElORw==","expected_base64":"UElORw==","half_close":true}
+    })).unwrap());
+    let published: NodeConfig = client
+        .put(&url)
+        .bearer_auth(&token)
+        .json(&json!({"expected_revision":0,"rules":[r.clone()]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&published.rules[0].health_check).unwrap(),
+        serde_json::to_value(&r.health_check).unwrap()
+    );
+    assert_eq!(published.rules[0].targets[0].priority, 3);
+    let mut bad = r.clone();
+    bad.health_check.as_mut().unwrap().timeout_ms = 101;
+    assert_eq!(
+        client
+            .put(&url)
+            .bearer_auth(&token)
+            .json(&json!({"expected_revision":1,"rules":[bad]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let secret_path = temp.path().join("enroll.secret");
+    write_secret(&secret_path, enrollment.as_bytes()).unwrap();
+    let agent_db = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        agent_db.clone(),
+        options(&origin, &node.id, Some(secret_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    for expected in ["healthy", "unhealthy"] {
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let snapshot: Value = client
+                    .get(&health_url)
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                if snapshot["reports"][0]["status"] == expected {
+                    assert_eq!(snapshot["reports"][0]["probe_kind"], "tcp_exchange");
+                    assert_eq!(snapshot["reports"][0]["eligible"], expected == "healthy");
+                    assert_eq!(snapshot["reports"][0]["priority"], 3);
+                    assert_eq!(snapshot["reports"][0]["max_sessions"], 4);
+                    assert_eq!(snapshot["expected_endpoints"], 1);
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        if expected == "healthy" {
+            let mut stream = TcpStream::connect(r.listen).await.unwrap();
+            stream.write_all(b"health-api").await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut reply = Vec::new();
+            timeout(Duration::from_secs(2), stream.read_to_end(&mut reply))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(reply, b"health-api");
+            wait_usage(&control, &admin, 20).await;
+            // Stop the backend while retaining its address for future probes.
+            drop(echo.take());
+        }
+    }
+    wait_usage(&control, &admin, 20).await;
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        agent_db
+            .agent_usage(false)
+            .unwrap()
+            .iter()
+            .map(|r| r.upload_bytes + r.download_bytes)
+            .sum::<u64>(),
+        20
+    );
+    stop_server(server_instance).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn websocket_configuration_roundtrips_http_and_managed_agent_both_directions() {
     use relay_platform::{engine::Engine, websocket};
     let temp = tempfile::tempdir().unwrap();

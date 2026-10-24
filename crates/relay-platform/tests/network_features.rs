@@ -415,6 +415,8 @@ async fn dns_negative_cache_expires_and_failed_target_falls_back() {
     c.revision = 2;
     c.rules[0].targets[0].address = format!("never.relay.test.:{}", echo.address.port());
     c.rules[0].targets.push(Target {
+        priority: 0,
+        max_sessions: None,
         address: echo.address.to_string(),
         weight: 1,
         tls: None,
