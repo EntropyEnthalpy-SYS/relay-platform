@@ -1,5 +1,7 @@
 use crate::{
     model::*,
+    network::{self, TargetResolver},
+    routing::{Endpoint as ListenerKey, LoopGuard, Routes, Topology, local_ips},
     store::{Admission, AdmissionDecision, Store},
     transport::{BoxStream, PreparedTls},
 };
@@ -18,7 +20,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UdpSocket, lookup_host},
+    net::{TcpListener, TcpStream, UdpSocket},
     sync::{Mutex, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, sleep, sleep_until, timeout_at},
@@ -262,6 +264,8 @@ impl Drop for TargetGuard {
 
 struct RuntimeRule {
     spec: Rule,
+    resolver: Arc<TargetResolver>,
+    routes: Arc<Routes>,
     tls: PreparedTls,
     shared: Arc<SharedRule>,
     cancel: CancellationToken,
@@ -269,7 +273,13 @@ struct RuntimeRule {
     target_active: Vec<Arc<AtomicUsize>>,
 }
 impl RuntimeRule {
-    fn new(spec: Rule, shared: Option<Arc<SharedRule>>, tls: PreparedTls) -> Self {
+    fn new(
+        spec: Rule,
+        shared: Option<Arc<SharedRule>>,
+        tls: PreparedTls,
+        resolver: Arc<TargetResolver>,
+        routes: Arc<Routes>,
+    ) -> Self {
         let target_active = spec
             .targets
             .iter()
@@ -278,6 +288,8 @@ impl RuntimeRule {
         let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(spec.rate_bytes_per_sec)));
         Self {
             spec,
+            resolver,
+            routes,
             tls,
             shared,
             cancel: CancellationToken::new(),
@@ -338,11 +350,6 @@ impl RuntimeRule {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct ListenerKey {
-    address: SocketAddr,
-    tcp: bool,
-}
 struct ListenerHandle {
     rule_id: String,
     update: watch::Sender<Arc<RuntimeRule>>,
@@ -358,6 +365,7 @@ struct EngineInner {
     config: Option<NodeConfig>,
     listeners: HashMap<ListenerKey, ListenerHandle>,
     rules: HashMap<String, Arc<RuntimeRule>>,
+    resolvers: HashMap<Option<DnsCache>, Arc<TargetResolver>>,
     stopped: bool,
 }
 
@@ -368,6 +376,7 @@ pub struct Engine {
     inner: Mutex<EngineInner>,
     stats: Arc<Counters>,
     tasks: TaskTracker,
+    routes: Arc<Routes>,
 }
 impl Engine {
     pub fn new(store: Store) -> Self {
@@ -381,6 +390,7 @@ impl Engine {
             inner: Mutex::new(EngineInner::default()),
             stats: Arc::new(Counters::default()),
             tasks: TaskTracker::new(),
+            routes: Arc::new(Routes::default()),
         }
     }
     pub fn stats(&self) -> EngineStats {
@@ -414,7 +424,20 @@ impl Engine {
         let mut wanted = HashMap::new();
         let mut rules = HashMap::new();
         let mut staged = HashMap::new();
+        let mut resolvers = HashMap::new();
+        let topology = Topology::build(&config, local_ips()?)?;
         for spec in config.rules.iter().filter(|r| r.enabled) {
+            network::preflight(spec)
+                .with_context(|| format!("outbound binding preflight failed for {}", spec.id))?;
+            let resolver = if let Some(existing) = resolvers
+                .get(&spec.dns_cache)
+                .or_else(|| inner.resolvers.get(&spec.dns_cache))
+            {
+                Arc::clone(existing)
+            } else {
+                Arc::new(TargetResolver::new(spec.dns_cache.as_ref())?)
+            };
+            resolvers.insert(spec.dns_cache.clone(), resolver.clone());
             let runtime = if let Some(old) = inner
                 .rules
                 .get(&spec.id)
@@ -432,6 +455,8 @@ impl Engine {
                     spec.clone(),
                     inner.rules.get(&spec.id).map(|old| old.shared.clone()),
                     tls,
+                    resolver,
+                    self.routes.clone(),
                 );
                 if let Some(old) = inner.rules.get(&spec.id).filter(|old| {
                     !security_policy_changed(&old.spec, spec)
@@ -446,27 +471,27 @@ impl Engine {
                 if (tcp && !spec.protocol.tcp()) || (!tcp && !spec.protocol.udp()) {
                     continue;
                 }
-                let key = ListenerKey {
-                    address: spec.listen,
-                    tcp,
-                };
-                wanted.insert(key, runtime.clone());
-                if let Some(existing) = inner.listeners.get(&key) {
-                    ensure!(
-                        existing.rule_id == spec.id,
-                        "listener ownership change requires removing the old listener first"
-                    );
-                } else {
-                    let socket = if tcp {
-                        StagedSocket::Tcp(TcpListener::bind(spec.listen).await.with_context(
-                            || format!("cannot stage TCP listener {}", spec.listen),
-                        )?)
+                for address in spec.listen_addresses() {
+                    let key = ListenerKey { address, tcp };
+                    wanted.insert(key, runtime.clone());
+                    if let Some(existing) = inner.listeners.get(&key) {
+                        ensure!(
+                            existing.rule_id == spec.id,
+                            "listener ownership change requires removing the old listener first"
+                        );
                     } else {
-                        StagedSocket::Udp(UdpSocket::bind(spec.listen).await.with_context(
-                            || format!("cannot stage UDP listener {}", spec.listen),
-                        )?)
-                    };
-                    staged.insert(key, socket);
+                        let socket =
+                            if tcp {
+                                StagedSocket::Tcp(network::tcp_listener(address).with_context(
+                                    || format!("cannot stage TCP listener {address}"),
+                                )?)
+                            } else {
+                                StagedSocket::Udp(network::udp_listener(address).with_context(
+                                    || format!("cannot stage UDP listener {address}"),
+                                )?)
+                            };
+                        staged.insert(key, socket);
+                    }
                 }
             }
         }
@@ -474,6 +499,7 @@ impl Engine {
         let db = self.store.clone();
         let saved = config.clone();
         tokio::task::spawn_blocking(move || db.save_agent_config(&saved)).await??;
+        self.routes.install(topology);
         for (id, old) in &inner.rules {
             match rules.get(id) {
                 None => old.cancel.cancel(),
@@ -537,6 +563,7 @@ impl Engine {
             );
         }
         inner.rules = rules;
+        inner.resolvers = resolvers;
         inner.config = Some(config);
         Ok(())
     }
@@ -562,6 +589,9 @@ impl Engine {
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
     old.budget_ids != new.budget_ids
+        || old.outbound_bind != new.outbound_bind
+        || old.dns_cache != new.dns_cache
+        || old.port_mapping != new.port_mapping
         || old.inbound_tls != new.inbound_tls
         || old
             .targets
@@ -591,6 +621,10 @@ async fn tcp_listener(
     stats: Arc<Counters>,
     tasks: TaskTracker,
 ) {
+    let inlet = ListenerKey {
+        address: listener.local_addr().expect("bound TCP listener"),
+        tcp: true,
+    };
     loop {
         let accepted =
             tokio::select! {biased;_=stop.cancelled()=>break,result=listener.accept()=>result};
@@ -621,27 +655,44 @@ async fn tcp_listener(
         let stats = stats.clone();
         tasks.spawn(async move {
             let _guard=guard;
-            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,peer,rule.clone(),meter,stats.clone())=>result};
+            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,peer,inlet,rule.clone(),meter,stats.clone())=>result};
             if let Err(error)=outcome {stats.failed_connections.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%rule.spec.id,%error,"TCP session ended");}
         });
     }
 }
 
-async fn connect_tcp(rule: &RuntimeRule, peer: SocketAddr) -> Result<(BoxStream, TargetGuard)> {
+async fn connect_tcp(
+    rule: &RuntimeRule,
+    peer: SocketAddr,
+    inlet: ListenerKey,
+) -> Result<(BoxStream, TargetGuard, LoopGuard)> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     let mut last = None;
     for index in rule.order(peer) {
         let guard = rule.target_guard(index);
-        match timeout_at(deadline, async {
-            let stream = TcpStream::connect(&rule.spec.targets[index].address).await?;
-            stream.set_nodelay(true)?;
-            rule.tls.connect(index, stream).await
-        })
-        .await
-        {
-            Ok(Ok(stream)) => return Ok((stream, guard)),
-            Ok(Err(error)) => last = Some(error.to_string()),
-            Err(_) => bail!("target connection timed out"),
+        let target = rule.spec.target_address(index, inlet.address.port())?;
+        let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
+            Ok(Ok(addresses)) => addresses,
+            Ok(Err(error)) => {
+                last = Some(error.to_string());
+                continue;
+            }
+            Err(_) => bail!("target resolution timed out"),
+        };
+        for address in addresses {
+            match timeout_at(deadline, async {
+                let route = rule.routes.reserve(inlet, address)?;
+                let stream =
+                    network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await?;
+                stream.set_nodelay(true)?;
+                Ok::<_, anyhow::Error>((rule.tls.connect(index, stream).await?, route))
+            })
+            .await
+            {
+                Ok(Ok((stream, route))) => return Ok((stream, guard, route)),
+                Ok(Err(error)) => last = Some(error.to_string()),
+                Err(_) => bail!("target connection timed out"),
+            }
         }
     }
     bail!("all targets failed: {}", last.unwrap_or_default())
@@ -650,6 +701,7 @@ async fn connect_tcp(rule: &RuntimeRule, peer: SocketAddr) -> Result<(BoxStream,
 async fn tcp_session(
     client: TcpStream,
     peer: SocketAddr,
+    inlet: ListenerKey,
     rule: Arc<RuntimeRule>,
     meter: Meter,
     stats: Arc<Counters>,
@@ -661,7 +713,7 @@ async fn tcp_session(
     )
     .await
     .context("inbound TLS handshake timed out")??;
-    let (target, _target_guard) = connect_tcp(&rule, peer).await?;
+    let (target, _target_guard, _route_guard) = connect_tcp(&rule, peer, inlet).await?;
     let activity = Arc::new(StdMutex::new(Instant::now()));
     let (cr, cw) = tokio::io::split(client);
     let (tr, tw) = tokio::io::split(target);
@@ -791,24 +843,33 @@ async fn udp_listener(
     // Dropping senders also ends sessions when the listener is removed.
 }
 
-async fn udp_target(rule: &RuntimeRule, peer: SocketAddr) -> Result<(UdpSocket, TargetGuard)> {
+async fn udp_target(
+    rule: &RuntimeRule,
+    peer: SocketAddr,
+    inlet: ListenerKey,
+) -> Result<(UdpSocket, TargetGuard, LoopGuard)> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     for index in rule.order(peer) {
         let guard = rule.target_guard(index);
-        let addresses =
-            match timeout_at(deadline, lookup_host(&rule.spec.targets[index].address)).await {
-                Ok(Ok(a)) => a,
-                _ => continue,
-            };
+        let target = rule.spec.target_address(index, inlet.address.port())?;
+        let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
+            Ok(Ok(a)) => a,
+            Ok(Err(_)) => continue,
+            Err(_) => bail!("UDP target resolution timed out"),
+        };
         for address in addresses {
-            let bind = if address.is_ipv4() {
-                "0.0.0.0:0"
-            } else {
-                "[::]:0"
-            };
-            let socket = UdpSocket::bind(bind).await?;
-            if socket.connect(address).await.is_ok() {
-                return Ok((socket, guard));
+            match timeout_at(deadline, async {
+                let route = rule.routes.reserve(inlet, address)?;
+                let socket =
+                    network::outbound_udp(rule.spec.outbound_bind.as_ref(), address.is_ipv4())?;
+                socket.connect(address).await?;
+                Ok::<_, anyhow::Error>((socket, route))
+            })
+            .await
+            {
+                Ok(Ok((socket, route))) => return Ok((socket, guard, route)),
+                Ok(Err(_)) => continue,
+                Err(_) => bail!("UDP target connection timed out"),
             }
         }
     }
@@ -823,7 +884,11 @@ async fn udp_session(
     meter: Meter,
     stats: Arc<Counters>,
 ) -> Result<()> {
-    let (target, _target_guard) = udp_target(&rule, peer).await?;
+    let inlet = ListenerKey {
+        address: listener.local_addr()?,
+        tcp: false,
+    };
+    let (target, _target_guard, _route_guard) = udp_target(&rule, peer, inlet).await?;
     let mut buffer = vec![0u8; BUFFER_SIZE];
     loop {
         let deadline = Instant::now() + Duration::from_secs(rule.spec.idle_timeout_secs);

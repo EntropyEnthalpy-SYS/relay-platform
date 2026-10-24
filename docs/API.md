@@ -85,3 +85,7 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 0.5.0 的 `/agent/sync` 在控制器内最多等待 2 ms 合并，单批最多 16 项，等待队列最多 64 项；不是客户端批量接口。满队列返回 429，未入队请求不执行写入。认证、账本和额度检查仍在每项请求的事务保存点内执行；预期输入错误只回滚该项，磁盘或日志错误使整批不返回成功。响应丢失后继续使用原来的幂等请求 ID。管理员其他写入继续独立提交。
 
 `/control/metrics` 字段为 `committed_batches`、`processed_requests`、`largest_batch`、`queue_full_rejections`、`failed_batches`、`batch_limit`、`queue_capacity`、`coalesce_window_ms`。计数在控制器重启时清零，不是流量账本；`processed_requests` 包含完成校验后返回预期错误的请求，整批提交失败单独计入 `failed_batches`。没有数据变更的批次可以不产生日志记录。`/usage` 在上报时间相同的情况下，再按节点、规则、周期稳定排序。
+
+## 0.6.0 路由字段
+
+规则新增可选 `listen_end_port`、`port_mapping`、`outbound_bind`、`dns_cache`；完整合同及示例见 [ROUTING.md](ROUTING.md)。旧字段默认值保持兼容，SQLite schema 仍为 v4。0.5 Agent 会拒绝带新字段的配置，因此先升级节点，再发布新能力。IPv6 监听现在明确设为仅 IPv6，双栈需要两条监听规则。

@@ -4,6 +4,8 @@ pub mod budget;
 pub mod engine;
 pub mod journal;
 pub mod model;
+mod network;
+mod routing;
 pub mod store;
 mod sync_queue;
 pub mod transport;

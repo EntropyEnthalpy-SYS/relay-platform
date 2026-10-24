@@ -3,12 +3,13 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 pub const API_VERSION: u32 = 1;
 pub const MAX_RULES: usize = 512;
+pub const MAX_LISTENERS: usize = 4096;
 pub const MAX_COUNTER: u64 = i64::MAX as u64;
 
 pub fn now_ms() -> i64 {
@@ -100,6 +101,62 @@ fn enabled() -> bool {
     true
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortMapping {
+    #[default]
+    Fixed,
+    Offset,
+}
+impl PortMapping {
+    fn fixed(&self) -> bool {
+        *self == Self::Fixed
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboundBind {
+    pub ip: Option<IpAddr>,
+    pub interface: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsCache {
+    #[serde(default)]
+    pub servers: Vec<SocketAddr>,
+    #[serde(default = "dns_capacity")]
+    pub capacity: u32,
+    #[serde(default = "dns_max_ttl")]
+    pub max_ttl_secs: u32,
+    #[serde(default = "dns_negative_ttl")]
+    pub negative_max_ttl_secs: u32,
+}
+fn dns_capacity() -> u32 {
+    1024
+}
+fn dns_max_ttl() -> u32 {
+    300
+}
+fn dns_negative_ttl() -> u32 {
+    5
+}
+
+pub fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v) => v.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        _ => ip,
+    }
+}
+pub fn canonical_address(address: SocketAddr) -> SocketAddr {
+    if address.ip() != canonical_ip(address.ip()) {
+        SocketAddr::new(canonical_ip(address.ip()), address.port())
+    } else {
+        address
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
@@ -111,6 +168,14 @@ pub struct Rule {
     pub owner_id: String,
     pub name: String,
     pub listen: SocketAddr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_end_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "PortMapping::fixed")]
+    pub port_mapping: PortMapping,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound_bind: Option<OutboundBind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_cache: Option<DnsCache>,
     pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_tls: Option<TlsServer>,
@@ -142,6 +207,32 @@ pub struct Rule {
 }
 
 impl Rule {
+    pub fn listen_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
+        (self.listen.port()..=self.listen_end_port.unwrap_or(self.listen.port())).map(|port| {
+            let mut address = self.listen;
+            address.set_port(port);
+            address
+        })
+    }
+    pub fn target_address(&self, index: usize, listen_port: u16) -> Result<String> {
+        let target = &self.targets[index].address;
+        if self.port_mapping == PortMapping::Fixed {
+            return Ok(target.clone());
+        }
+        ensure!(
+            (self.listen.port()..=self.listen_end_port.unwrap_or(self.listen.port()))
+                .contains(&listen_port),
+            "incoming port lies outside its rule"
+        );
+        let (host, port) = target
+            .rsplit_once(':')
+            .ok_or_else(|| anyhow::anyhow!("invalid target"))?;
+        let port = port
+            .parse::<u16>()?
+            .checked_add(listen_port - self.listen.port())
+            .ok_or_else(|| anyhow::anyhow!("mapped target port exceeds 65535"))?;
+        Ok(format!("{host}:{port}"))
+    }
     pub fn uses_tls(&self) -> bool {
         self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
     }
@@ -183,6 +274,52 @@ impl Rule {
             "multicast listeners are unsupported"
         );
         ensure!(
+            self.listen.ip() == canonical_ip(self.listen.ip()),
+            "use an IPv4 listener instead of an IPv4-mapped IPv6 address"
+        );
+        let end = self.listen_end_port.unwrap_or(self.listen.port());
+        ensure!(
+            end >= self.listen.port() && end - self.listen.port() < 256,
+            "a listener range must contain 1..256 ports"
+        );
+        if let Some(bind) = &self.outbound_bind {
+            ensure!(
+                bind.ip.is_some() || bind.interface.is_some(),
+                "outbound binding requires an IP or interface"
+            );
+            if let Some(ip) = bind.ip {
+                ensure!(
+                    !ip.is_unspecified() && !ip.is_multicast() && canonical_ip(ip) == ip,
+                    "outbound IP must be a specific unicast address"
+                );
+            }
+            if let Some(name) = &bind.interface {
+                ensure!(
+                    !name.is_empty()
+                        && name.len() <= 64
+                        && name
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(&c)),
+                    "invalid outbound interface name"
+                );
+            }
+        }
+        if let Some(dns) = &self.dns_cache {
+            ensure!(
+                dns.servers.len() <= 4
+                    && dns.servers.iter().all(|s| s.port() != 0
+                        && !s.ip().is_unspecified()
+                        && !s.ip().is_multicast()),
+                "DNS requires at most four unicast resolver addresses"
+            );
+            ensure!(
+                (1..=4096).contains(&dns.capacity)
+                    && dns.max_ttl_secs <= 3600
+                    && dns.negative_max_ttl_secs <= 60,
+                "DNS cache limits exceeded"
+            );
+        }
+        ensure!(
             !self.targets.is_empty() && self.targets.len() <= 32,
             "requires 1..32 targets"
         );
@@ -203,6 +340,24 @@ impl Rule {
                     .map_err(|_| anyhow::anyhow!("invalid TLS server name"))?;
             }
             validate_target(&target.address)?;
+            let (_, port) = target.address.rsplit_once(':').unwrap();
+            ensure!(
+                self.port_mapping != PortMapping::Offset
+                    || port
+                        .parse::<u16>()?
+                        .checked_add(end - self.listen.port())
+                        .is_some(),
+                "mapped target port range exceeds 65535"
+            );
+            if let (Some(ip), Ok(address)) = (
+                self.outbound_bind.as_ref().and_then(|b| b.ip),
+                target.address.parse::<SocketAddr>(),
+            ) {
+                ensure!(
+                    ip.is_ipv4() == canonical_address(address).is_ipv4(),
+                    "outbound IP and literal target must use the same address family"
+                );
+            }
             ensure!(
                 target.weight > 0 && target.weight <= 1000,
                 "target weight must be 1..1000"
@@ -310,20 +465,32 @@ impl NodeConfig {
         ensure!(self.rules.len() <= MAX_RULES, "too many rules");
         let mut ids = HashSet::new();
         let mut listeners = HashSet::new();
+        let mut policies = HashSet::new();
         for rule in &self.rules {
             rule.validate()?;
             ensure!(ids.insert(&rule.id), "duplicate rule id");
             if rule.enabled {
-                for protocol in [true, false] {
-                    if (protocol && rule.protocol.tcp()) || (!protocol && rule.protocol.udp()) {
-                        ensure!(
-                            listeners.insert((rule.listen, protocol)),
-                            "duplicate listener"
-                        );
+                if let Some(policy) = &rule.dns_cache {
+                    policies.insert(policy);
+                }
+                for address in rule.listen_addresses() {
+                    for protocol in [true, false] {
+                        if (protocol && rule.protocol.tcp()) || (!protocol && rule.protocol.udp()) {
+                            ensure!(listeners.insert((address, protocol)), "duplicate listener");
+                        }
                     }
                 }
             }
         }
+        ensure!(
+            listeners.len() <= MAX_LISTENERS,
+            "node exceeds 4096 TCP/UDP listeners"
+        );
+        ensure!(
+            policies.len() <= 16,
+            "node exceeds sixteen DNS cache policies"
+        );
+        crate::routing::validate_static(self)?;
         Ok(())
     }
 }

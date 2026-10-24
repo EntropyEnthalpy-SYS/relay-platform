@@ -1,0 +1,47 @@
+{
+  "api_version": 1,
+  "node_id": "standalone-local",
+  "revision": 1,
+  "rules": [
+    {
+      "id": "local-echo",
+      "tenant_id": "default",
+      "owner_id": "admin",
+      "name": "Two ports with shared quota and offset mapping",
+      "listen": "127.0.0.1:19100",
+      "protocol": "both",
+      "targets": [
+        {
+          "address": "127.0.0.1:19200",
+          "weight": 1
+        }
+      ],
+      "balance": "weighted_round_robin",
+      "enabled": true,
+      "connect_timeout_ms": 5000,
+      "idle_timeout_secs": 120,
+      "max_connections": 4096,
+      "udp_max_sessions": 1024,
+      "quota_bytes": 1073741824,
+      "rate_bytes_per_sec": null,
+      "expires_at_ms": null,
+      "meter_epoch": "initial-period",
+      "allow_sources": [
+        "127.0.0.0/8"
+      ],
+      "deny_sources": [],
+      "listen_end_port": 19101,
+      "port_mapping": "offset",
+      "outbound_bind": {
+        "ip": "127.0.0.1",
+        "interface": null
+      },
+      "dns_cache": {
+        "servers": [],
+        "capacity": 1024,
+        "max_ttl_secs": 300,
+        "negative_max_ttl_secs": 5
+      }
+    }
+  ]
+}

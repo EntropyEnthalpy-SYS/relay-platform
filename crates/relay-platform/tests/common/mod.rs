@@ -10,8 +10,15 @@ use tokio_util::sync::CancellationToken;
 
 pub const PASSWORD: &str = "test-password-only-29x!";
 pub fn free_address() -> SocketAddr {
+    use rand::Rng;
     loop {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        // Keep test listeners outside the usual ephemeral client-port range.
+        // A concurrent outbound connect could otherwise claim a just-released port.
+        let port = rand::thread_rng().gen_range(12_000..30_000);
+        let Ok(listener) = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+        else {
+            continue;
+        };
         let address = listener.local_addr().unwrap();
         if let Ok(_udp) = std::net::UdpSocket::bind(address) {
             return address;
@@ -26,6 +33,10 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         owner_id: "admin".into(),
         name: "Test rule".into(),
         listen: free_address(),
+        listen_end_port: None,
+        port_mapping: PortMapping::Fixed,
+        outbound_bind: None,
+        dns_cache: None,
         protocol,
         inbound_tls: None,
         targets: vec![Target {
