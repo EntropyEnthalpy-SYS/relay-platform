@@ -7,6 +7,8 @@ use std::{collections::HashMap, time::Instant};
 struct Holder {
     run_id: String,
     token_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resumed_from: Option<u64>,
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,6 +60,9 @@ fn read(conn: &Connection, node: &str) -> Result<State> {
         ensure!(
             state.policy.is_some()
                 && state.generation > 0
+                && holder
+                    .resumed_from
+                    .is_none_or(|g| g > 0 && g < state.generation)
                 && identifier(&holder.run_id)
                 && secret_valid(&holder.token_hash),
             "invalid stored lease holder"
@@ -103,7 +108,7 @@ fn matches(state: &State, proof: &LeaseProof) -> bool {
             .as_ref()
             .is_some_and(|h| h.run_id == proof.run_id && h.token_hash == token_hash(&proof.token))
 }
-fn authenticated(tx: &Transaction<'_>, credential: &str) -> Result<String> {
+pub(super) fn authenticated(tx: &Transaction<'_>, credential: &str) -> Result<String> {
     tx.query_row(
         "SELECT id FROM nodes WHERE token_hash=?1",
         [token_hash(credential)],
@@ -169,6 +174,18 @@ pub(super) fn validate(
     }
     Ok(())
 }
+pub(super) fn require_budget_resumption(conn: &Connection, node: &str) -> Result<()> {
+    if !read(conn, node)?
+        .holder
+        .is_some_and(|h| h.resumed_from.is_some())
+    {
+        return reject(
+            409,
+            "this execution lease did not authorize budget run resumption",
+        );
+    }
+    Ok(())
+}
 pub(super) fn status(
     conn: &Connection,
     clocks: &mut LeaseClocks,
@@ -200,7 +217,11 @@ pub(super) fn status(
 
 impl Store {
     pub fn exchange_lease(&self, credential: &str, input: LeaseRequest) -> Result<LeaseReply> {
-        if !identifier(&input.run_id) || !secret_valid(&input.token) {
+        if !identifier(&input.run_id)
+            || !secret_valid(&input.token)
+            || input.resume_generation == Some(0)
+            || (input.generation.is_some() && input.resume_generation.is_some())
+        {
             return reject(400, "invalid node lease request");
         }
         let mut conn = self.0.lock().unwrap();
@@ -223,6 +244,19 @@ impl Store {
             .holder
             .as_ref()
             .is_some_and(|h| h.run_id == input.run_id && h.token_hash == token_hash(&input.token));
+        if let Some(previous) = input.resume_generation
+            && !same
+            && (state.generation != previous
+                || !state
+                    .holder
+                    .as_ref()
+                    .is_some_and(|h| h.run_id == input.run_id))
+        {
+            return reject(
+                412,
+                "budget run continuity was interrupted; start a fresh isolated run",
+            );
+        }
         let live = state.holder.is_some() && now < clock.expires;
         let expires;
         if let Some(generation) = input.generation {
@@ -248,6 +282,7 @@ impl Store {
             state.holder = Some(Holder {
                 run_id: input.run_id,
                 token_hash: token_hash(&input.token),
+                resumed_from: input.resume_generation,
             });
             write(&tx, &node, &state)?;
             // A new owner's lease is not evidence that its listeners or

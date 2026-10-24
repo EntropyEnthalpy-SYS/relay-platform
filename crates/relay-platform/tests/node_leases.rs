@@ -121,6 +121,396 @@ fn strict(db: &Store, admin: &Actor) -> (String, String) {
     (node.id, token)
 }
 
+fn recovery_budget(db: &Store, admin: &Actor, limit: u64) -> relay_platform::budget::Budget {
+    db.create_budget(
+        admin,
+        relay_platform::budget::NewBudget {
+            scope: relay_platform::budget::BudgetScope::User,
+            scope_id: admin.id.clone(),
+            name: "crash recovery".into(),
+            limit_bytes: limit,
+            quantum_bytes: 64,
+        },
+    )
+    .unwrap()
+}
+
+async fn persistent_exchange(stream: &mut TcpStream, payload: &[u8]) {
+    stream.write_all(payload).await.unwrap();
+    let mut reply = vec![0; payload.len()];
+    timeout(Duration::from_secs(3), stream.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn budget_reservation_api_enforces_tenant_session_and_node_recovery_credentials() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("controller.sqlite")).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    let budget = recovery_budget(&db, &admin, 64);
+    let viewer = db
+        .create_user(&admin, "default", "reserve-viewer", PASSWORD, Role::Viewer)
+        .unwrap();
+    let (viewer_token, _) = db.login(&viewer.username, PASSWORD).unwrap();
+    let tenant = db.create_tenant(&admin, "separate").unwrap();
+    let outsider = db
+        .create_user(&admin, &tenant, "outsider", PASSWORD, Role::TenantAdmin)
+        .unwrap();
+    let (outside_token, _) = db.login(&outsider.username, PASSWORD).unwrap();
+    let mut http = server(
+        api::router(AppState::new(db)),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://{}/api/v1", http.address);
+    let url = format!("{base}/budgets/{}/reservations", budget.id);
+    assert_eq!(client.get(&url).send().await.unwrap().status(), 401);
+    let page: relay_platform::budget::ReservationPage = client
+        .get(&url)
+        .bearer_auth(&viewer_token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(page.reservations.is_empty());
+    assert_eq!(page.budget_id, budget.id);
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(&outside_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    assert_eq!(
+        client
+            .get(format!("{url}?after=invalid%20cursor"))
+            .bearer_auth(&viewer_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(
+        client
+            .get(format!("{url}?ignored=true"))
+            .bearer_auth(&viewer_token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    assert_eq!(client.post(format!("{base}/agent/budgets/recover")).bearer_auth(&viewer_token).json(&json!({
+        "lease":{"run_id":"run","generation":1,"token":secret()},"run_id":"run","ledger_id":"ledger","claims":[],"requests":[]
+    })).send().await.unwrap().status(),401);
+    stop_server(&mut http).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_udp_activation() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("controller.sqlite")).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    let (node, enrollment) = strict(&db, &admin);
+    recovery_budget(&db, &admin, 64);
+    let token = temp.path().join("enrollment.secret");
+    write_secret(&token, enrollment.as_bytes()).unwrap();
+    let echo = tcp_echo().await;
+    let _udp_echo = udp_echo_at(&echo.address.to_string()).await;
+    let mut r = rule(echo.address, Protocol::Both);
+    r.owner_id = admin.id.clone();
+    let listen = r.listen;
+    db.set_config(&admin, &node, 0, vec![r]).unwrap();
+    let recovery_calls = Arc::new(AtomicUsize::new(0));
+    let calls = recovery_calls.clone();
+    let block_sync = Arc::new(AtomicBool::new(false));
+    let sync_gate = block_sync.clone();
+    let router = api::router(AppState::new(db.clone())).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let calls = calls.clone();
+            let sync_gate = sync_gate.clone();
+            async move {
+                if request.uri().path() == "/api/v1/agent/sync" && sync_gate.load(Ordering::SeqCst)
+                {
+                    use axum::response::IntoResponse;
+                    return (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "injected sync outage",
+                    )
+                        .into_response();
+                }
+                let recovering = request.uri().path() == "/api/v1/agent/budgets/recover";
+                let response = next.run(request).await;
+                if recovering && calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    assert!(response.status().is_success());
+                    use axum::response::IntoResponse;
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "lost successful recovery reply",
+                    )
+                        .into_response()
+                } else {
+                    response
+                }
+            }
+        },
+    ));
+    let mut http = server(router, "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", http.address);
+    let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
+    let mut a = agent(local.clone(), &origin, &node, Some(token));
+    until(|| db.nodes(&admin).unwrap()[0].applied_revision == 1).await;
+    let first_run = db.nodes(&admin).unwrap()[0].lease.holder_run_id.clone();
+    let mut stream = TcpStream::connect(listen).await.unwrap();
+    persistent_exchange(&mut stream, b"p").await;
+    until(|| total(&db, &admin) == 2).await;
+    block_sync.store(true, Ordering::SeqCst);
+    persistent_exchange(&mut stream, b"live").await;
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut packet = [0; 32];
+    udp.send_to(b"ping", listen).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), udp.recv_from(&mut packet))
+            .await
+            .unwrap()
+            .unwrap()
+            .0,
+        4
+    );
+    assert_eq!(&packet[..4], b"ping");
+    assert_eq!(
+        local
+            .agent_usage(false)
+            .unwrap()
+            .iter()
+            .map(|u| u.upload_bytes + u.download_bytes)
+            .sum::<u64>(),
+        18
+    );
+    assert_eq!(total(&db, &admin), 2);
+    assert_eq!(db.budgets(&admin).unwrap().budgets[0].committed_bytes, 64);
+    a.task.abort();
+    assert!((&mut a.task).await.unwrap_err().is_cancelled());
+    block_sync.store(false, Ordering::SeqCst);
+    let mut b = agent(local.clone(), &origin, &node, None);
+    until(|| recovery_calls.load(Ordering::SeqCst) == 1).await;
+    assert_eq!(db.budgets(&admin).unwrap().budgets[0].consumed_bytes, 18);
+    assert!(
+        TcpStream::connect(listen).await.is_err(),
+        "recovery reply loss must not activate cached listeners"
+    );
+    until(|| {
+        let n = &db.nodes(&admin).unwrap()[0];
+        n.lease.generation == 2 && n.applied_revision == 1 && n.stats.budget_recovery.is_some()
+    })
+    .await;
+    assert_eq!(db.nodes(&admin).unwrap()[0].lease.holder_run_id, first_run);
+    assert_eq!(recovery_calls.load(Ordering::SeqCst), 2);
+    let stats = db.nodes(&admin).unwrap()[0]
+        .stats
+        .budget_recovery
+        .clone()
+        .unwrap();
+    assert_eq!(stats.validated_grants, 1);
+    let mut stream = TcpStream::connect(listen).await.unwrap();
+    persistent_exchange(&mut stream, &[7; 15]).await;
+    udp.send_to(&[9; 8], listen).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(2), udp.recv_from(&mut packet))
+            .await
+            .unwrap()
+            .unwrap()
+            .0,
+        8
+    );
+    assert_eq!(&packet[..8], &[9; 8]);
+    until(|| total(&db, &admin) == 64).await;
+    stream.write_all(b"x").await.unwrap();
+    let mut extra = [0; 1];
+    let reply = timeout(Duration::from_millis(300), stream.read(&mut extra)).await;
+    assert!(
+        !matches!(reply, Ok(Ok(1))),
+        "resumption bypassed the shared limit"
+    );
+    stop_agent(&mut b).await;
+    assert_eq!(
+        json!(db.nodes(&admin).unwrap()[0].stats.budget_recovery),
+        json!(Some(stats)),
+        "final stopped heartbeat must retain this process's recovery result"
+    );
+    let budget = &db.budgets(&admin).unwrap().budgets[0];
+    assert_eq!((budget.consumed_bytes, budget.committed_bytes), (64, 64));
+    assert_eq!(
+        local
+            .agent_usage(false)
+            .unwrap()
+            .iter()
+            .map(|r| r.upload_bytes + r.download_bytes)
+            .sum::<u64>(),
+        64
+    );
+    stop_server(&mut http).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_budget_recovery_keeps_listeners_and_cleanup_refunds_stopped() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("controller.sqlite")).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    let (node, enrollment) = strict(&db, &admin);
+    let budget = recovery_budget(&db, &admin, 64);
+    let token = temp.path().join("enrollment.secret");
+    write_secret(&token, enrollment.as_bytes()).unwrap();
+    let echo = tcp_echo().await;
+    let mut r = rule(echo.address, Protocol::Tcp);
+    r.owner_id = admin.id.clone();
+    let listen = r.listen;
+    db.set_config(&admin, &node, 0, vec![r]).unwrap();
+    let reject = Arc::new(AtomicBool::new(false));
+    let gate = reject.clone();
+    let router = api::router(AppState::new(db.clone())).layer(axum::middleware::from_fn(
+        move |request: axum::extract::Request, next: axum::middleware::Next| {
+            let gate = gate.clone();
+            async move {
+                if request.uri().path() == "/api/v1/agent/budgets/recover"
+                    && gate.load(Ordering::SeqCst)
+                {
+                    use axum::response::IntoResponse;
+                    (
+                        axum::http::StatusCode::CONFLICT,
+                        "injected contradictory reservation",
+                    )
+                        .into_response()
+                } else {
+                    next.run(request).await
+                }
+            }
+        },
+    ));
+    let mut http = server(router, "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", http.address);
+    let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
+    let mut a = agent(local.clone(), &origin, &node, Some(token));
+    until(|| db.nodes(&admin).unwrap()[0].applied_revision == 1).await;
+    let mut stream = TcpStream::connect(listen).await.unwrap();
+    persistent_exchange(&mut stream, b"unsettled").await;
+    until(|| total(&db, &admin) == 18).await;
+    reject.store(true, Ordering::SeqCst);
+    a.task.abort();
+    assert!((&mut a.task).await.unwrap_err().is_cancelled());
+    let mut b = agent(local.clone(), &origin, &node, None);
+    let error = timeout(Duration::from_secs(8), &mut b.task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("rejected budget recovery"));
+    assert!(TcpStream::connect(listen).await.is_err());
+    assert_eq!(db.budgets(&admin).unwrap().budgets[0].committed_bytes, 64);
+    assert_eq!(
+        db.budget_reservations(&admin, &budget.id, None)
+            .unwrap()
+            .reservations
+            .len(),
+        1
+    );
+    let state = &db.nodes(&admin).unwrap()[0];
+    assert_eq!(state.lease.generation, 2);
+    assert!(state.lease.active);
+    assert!(state.last_seen_ms.is_none());
+    reject.store(false, Ordering::SeqCst);
+    let mut c = agent(local, &origin, &node, None);
+    until(|| {
+        let n = &db.nodes(&admin).unwrap()[0];
+        n.lease.generation == 3 && n.applied_revision == 1
+    })
+    .await;
+    assert_eq!(exchange(listen, b"ok").await, b"ok");
+    stop_agent(&mut c).await;
+    let final_budget = &db.budgets(&admin).unwrap().budgets[0];
+    assert_eq!(
+        (final_budget.consumed_bytes, final_budget.committed_bytes),
+        (22, 22)
+    );
+    stop_server(&mut http).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn intervening_backup_takeover_prevents_original_state_from_reclaiming_old_reservations() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("controller.sqlite")).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    let (node, enrollment) = strict(&db, &admin);
+    let budget = recovery_budget(&db, &admin, 128);
+    let token = temp.path().join("enrollment.secret");
+    write_secret(&token, enrollment.as_bytes()).unwrap();
+    let echo = tcp_echo().await;
+    let mut r = rule(echo.address, Protocol::Tcp);
+    r.owner_id = admin.id.clone();
+    let listen = r.listen;
+    db.set_config(&admin, &node, 0, vec![r]).unwrap();
+    let mut http = server(
+        api::router(AppState::new(db.clone())),
+        "127.0.0.1:0".parse().unwrap(),
+    )
+    .await;
+    let origin = format!("http://{}", http.address);
+    let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
+    let mut a = agent(local.clone(), &origin, &node, Some(token));
+    until(|| db.nodes(&admin).unwrap()[0].applied_revision == 1).await;
+    let first_run = db.nodes(&admin).unwrap()[0].lease.holder_run_id.clone();
+    let mut stream = TcpStream::connect(listen).await.unwrap();
+    persistent_exchange(&mut stream, b"original").await;
+    until(|| total(&db, &admin) == 16 && local.agent_usage(true).unwrap().is_empty()).await;
+    let copy_path = temp.path().join("copy.sqlite");
+    local.backup(&copy_path).unwrap();
+    let copied = Store::open(&copy_path).unwrap();
+    a.task.abort();
+    assert!((&mut a.task).await.unwrap_err().is_cancelled());
+    let mut b = agent(copied, &origin, &node, None);
+    until(|| {
+        let n = &db.nodes(&admin).unwrap()[0];
+        n.lease.generation == 2 && n.applied_revision == 1
+    })
+    .await;
+    assert_ne!(db.nodes(&admin).unwrap()[0].lease.holder_run_id, first_run);
+    assert_eq!(exchange(listen, b"ten-bytes!").await, b"ten-bytes!");
+    stop_agent(&mut b).await;
+    let mut c = agent(local.clone(), &origin, &node, None);
+    until(|| {
+        let n = &db.nodes(&admin).unwrap()[0];
+        n.lease.generation == 3 && n.applied_revision == 1
+    })
+    .await;
+    assert_ne!(db.nodes(&admin).unwrap()[0].lease.holder_run_id, first_run);
+    assert!(db.nodes(&admin).unwrap()[0].stats.budget_recovery.is_none());
+    assert_eq!(exchange(listen, b"last").await, b"last");
+    stop_agent(&mut c).await;
+    assert_eq!(total(&db, &admin), 44);
+    let final_budget = &db.budgets(&admin).unwrap().budgets[0];
+    assert_eq!(
+        (final_budget.consumed_bytes, final_budget.committed_bytes),
+        (44, 92)
+    );
+    let remaining = db.budget_reservations(&admin, &budget.id, None).unwrap();
+    assert_eq!(remaining.reservations.len(), 1);
+    assert_eq!(remaining.reservations[0].outstanding_bytes, 48);
+    assert_eq!(Some(remaining.reservations[0].run_id.clone()), first_run);
+    stop_server(&mut http).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn strict_node_api_defaults_permissions_and_proof_enforcement_are_visible() {
     let temp = tempfile::tempdir().unwrap();

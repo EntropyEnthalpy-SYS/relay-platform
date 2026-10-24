@@ -1,6 +1,9 @@
 use super::*;
 use crate::budget::BudgetExchange;
 
+#[path = "budget_recovery_tests.rs"]
+mod budget_recovery_tests;
+
 struct Fixture {
     _tmp: tempfile::TempDir,
     store: Store,
@@ -39,6 +42,7 @@ impl Fixture {
             .exchange_lease(
                 &self.credential,
                 LeaseRequest {
+                    resume_generation: None,
                     run_id: run.into(),
                     token: token.clone(),
                     generation: None,
@@ -162,6 +166,7 @@ fn concurrent_claims_have_one_owner_and_retries_do_not_renew_or_expose_the_secre
         let barrier = barrier.clone();
         threads.push(std::thread::spawn(move || {
             let request = LeaseRequest {
+                resume_generation: None,
                 run_id: format!("process-{n}"),
                 token: secret(),
                 generation: None,
@@ -250,6 +255,7 @@ fn restart_and_pre_grant_backup_quarantine_takeover_without_using_wall_time() {
         .exchange_lease(
             &f.credential,
             LeaseRequest {
+                resume_generation: None,
                 run_id: proof.run_id.clone(),
                 token: proof.token.clone(),
                 generation: Some(proof.generation),
@@ -261,6 +267,7 @@ fn restart_and_pre_grant_backup_quarantine_takeover_without_using_wall_time() {
         reopened.exchange_lease(
             &f.credential,
             LeaseRequest {
+                resume_generation: None,
                 run_id: "contender".into(),
                 token: secret(),
                 generation: None,
@@ -270,6 +277,7 @@ fn restart_and_pre_grant_backup_quarantine_takeover_without_using_wall_time() {
     );
     let restored = Store::open(&backup).unwrap();
     let contender = LeaseRequest {
+        resume_generation: None,
         run_id: "new-process".into(),
         token: secret(),
         generation: None,
@@ -309,6 +317,7 @@ fn failed_grant_or_release_commit_does_not_publish_a_runtime_owner_change() {
             .exchange_lease(
                 &f.credential,
                 LeaseRequest {
+                    resume_generation: None,
                     run_id: "failed".into(),
                     token: secret(),
                     generation: None
@@ -343,6 +352,7 @@ fn failed_grant_or_release_commit_does_not_publish_a_runtime_owner_change() {
         f.store.exchange_lease(
             &f.credential,
             LeaseRequest {
+                resume_generation: None,
                 run_id: "blocked".into(),
                 token: secret(),
                 generation: None,
@@ -391,6 +401,7 @@ fn complete_recovery_log_restores_policy_and_owner_without_logging_the_secret() 
         .exchange_lease(
             &f.credential,
             LeaseRequest {
+                resume_generation: None,
                 run_id: proof.run_id.clone(),
                 token: proof.token.clone(),
                 generation: Some(proof.generation),

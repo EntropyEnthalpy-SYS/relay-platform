@@ -92,3 +92,53 @@ pub struct BudgetReply {
     pub acknowledgements: Vec<GrantReport>,
     pub allocation_paused: bool,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryClaim {
+    pub grant: Grant,
+    pub consumed_bytes: u64,
+    pub sealed: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetRecoveryRequest {
+    pub lease: crate::lease::LeaseProof,
+    pub ledger_id: String,
+    pub run_id: String,
+    pub claims: Vec<RecoveryClaim>,
+    pub requests: Vec<GrantRequest>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetRecoveryStats {
+    pub run_id: String,
+    pub at_ms: i64,
+    pub validated_grants: u64,
+    pub recovered_pending_grants: u64,
+    pub cancelled_requests: u64,
+    pub open_grants: u64,
+}
+
+pub(crate) struct RecoveryBatch {
+    pub claims: Vec<RecoveryClaim>,
+    pub requests: Vec<GrantRequest>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReservationView {
+    pub grant_id: String,
+    pub node_id: String,
+    pub node_name: String,
+    pub run_id: String,
+    pub allocated_bytes: u64,
+    pub confirmed_consumed_bytes: u64,
+    pub outstanding_bytes: u64,
+    pub node_lease: crate::lease::LeaseStatus,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReservationPage {
+    pub budget_id: String,
+    pub reservations: Vec<ReservationView>,
+    pub next: Option<String>,
+}

@@ -1,7 +1,7 @@
 {
-  "at_utc": "2026-10-24T08:07:21.424811+00:00",
-  "version": "relay 0.13.0",
-  "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+  "at_utc": "2026-10-24T09:13:27.750304+00:00",
+  "version": "relay 0.14.0",
+  "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "python": "3.14.4",
   "mode_order": "rotates each round",
@@ -20,9 +20,104 @@
       "mode": "single-fast",
       "round": 1,
       "application_connections": 1,
-      "seconds": 2.3247050420031883,
+      "seconds": 2.3541561670135707,
       "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 14.433844893753184,
+      "goodput_mbps": 14.25327362312008,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4228516,
+          "download_bytes": 4228399
+        }
+      ]
+    },
+    {
+      "mode": "stripe",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 1.5347355830017477,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 21.863330968303867,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 2783894,
+          "download_bytes": 2814965
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 1466485,
+          "download_bytes": 1432641
+        }
+      ]
+    },
+    {
+      "mode": "replicate",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 3.1308525829808787,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 10.71734650887104,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4241575,
+          "download_bytes": 4241529
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 3097158,
+          "download_bytes": 3080759
+        }
+      ]
+    },
+    {
+      "mode": "stripe",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 1.5095318329986185,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 22.228369926684884,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 2798690,
+          "download_bytes": 2798401
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 1449519,
+          "download_bytes": 1449155
+        }
+      ]
+    },
+    {
+      "mode": "replicate",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 3.299929875007365,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 10.168225771744654,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4242586,
+          "download_bytes": 4242399
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 3236353,
+          "download_bytes": 3228185
+        }
+      ]
+    },
+    {
+      "mode": "single-fast",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 2.3271441670367494,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 14.418716500373188,
       "path_stream_bytes_during_sample": [
         {
           "slot": 0,
@@ -32,162 +127,67 @@
       ]
     },
     {
-      "mode": "stripe",
-      "round": 1,
+      "mode": "replicate",
+      "round": 3,
       "application_connections": 1,
-      "seconds": 1.531013041967526,
+      "seconds": 3.2905477919848636,
       "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 21.916489984225564,
+      "goodput_mbps": 10.197217643132882,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4243076,
+          "download_bytes": 4242189
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 3228161,
+          "download_bytes": 3211839
+        }
+      ]
+    },
+    {
+      "mode": "single-fast",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 2.3185640000156127,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 14.472074956643013,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4227326,
+          "download_bytes": 4228399
+        }
+      ]
+    },
+    {
+      "mode": "stripe",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 1.5210459170048125,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 22.06010457992889,
       "path_stream_bytes_during_sample": [
         {
           "slot": 0,
           "upload_bytes": 2799638,
-          "download_bytes": 2815255
+          "download_bytes": 2831251
         },
         {
           "slot": 1,
-          "upload_bytes": 1449481,
-          "download_bytes": 1432851
-        }
-      ]
-    },
-    {
-      "mode": "replicate",
-      "round": 1,
-      "application_connections": 1,
-      "seconds": 3.3135989159927703,
-      "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 10.126280473491441,
-      "path_stream_bytes_during_sample": [
-        {
-          "slot": 0,
-          "upload_bytes": 4242366,
-          "download_bytes": 4242319
-        },
-        {
-          "slot": 1,
-          "upload_bytes": 3236353,
-          "download_bytes": 3219993
-        }
-      ]
-    },
-    {
-      "mode": "stripe",
-      "round": 2,
-      "application_connections": 1,
-      "seconds": 1.5576087080407888,
-      "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 21.542272989861402,
-      "path_stream_bytes_during_sample": [
-        {
-          "slot": 0,
-          "upload_bytes": 2798830,
-          "download_bytes": 2814963
-        },
-        {
-          "slot": 1,
-          "upload_bytes": 1449379,
-          "download_bytes": 1432983
-        }
-      ]
-    },
-    {
-      "mode": "replicate",
-      "round": 2,
-      "application_connections": 1,
-      "seconds": 3.355935750005301,
-      "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 9.998532302040346,
-      "path_stream_bytes_during_sample": [
-        {
-          "slot": 0,
-          "upload_bytes": 4240906,
-          "download_bytes": 4242539
-        },
-        {
-          "slot": 1,
-          "upload_bytes": 3252737,
-          "download_bytes": 3244569
-        }
-      ]
-    },
-    {
-      "mode": "single-fast",
-      "round": 2,
-      "application_connections": 1,
-      "seconds": 2.4111009160405956,
-      "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 13.916643545182513,
-      "path_stream_bytes_during_sample": [
-        {
-          "slot": 0,
-          "upload_bytes": 4225366,
-          "download_bytes": 4228399
-        }
-      ]
-    },
-    {
-      "mode": "replicate",
-      "round": 3,
-      "application_connections": 1,
-      "seconds": 2.678025666042231,
-      "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 12.529540857459004,
-      "path_stream_bytes_during_sample": [
-        {
-          "slot": 0,
-          "upload_bytes": 4239685,
-          "download_bytes": 4239429
-        },
-        {
-          "slot": 1,
-          "upload_bytes": 2646598,
-          "download_bytes": 2630199
-        }
-      ]
-    },
-    {
-      "mode": "single-fast",
-      "round": 3,
-      "application_connections": 1,
-      "seconds": 2.350792833021842,
-      "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 14.273666113260706,
-      "path_stream_bytes_during_sample": [
-        {
-          "slot": 0,
-          "upload_bytes": 4225576,
-          "download_bytes": 4228399
-        }
-      ]
-    },
-    {
-      "mode": "stripe",
-      "round": 3,
-      "application_connections": 1,
-      "seconds": 1.5393937500193715,
-      "one_way_payload_bytes": 4194304,
-      "goodput_mbps": 21.797173075165308,
-      "path_stream_bytes_during_sample": [
-        {
-          "slot": 0,
-          "upload_bytes": 2799110,
-          "download_bytes": 2798401
-        },
-        {
-          "slot": 1,
-          "upload_bytes": 1449589,
-          "download_bytes": 1449225
+          "upload_bytes": 1449691,
+          "download_bytes": 1416375
         }
       ]
     }
   ],
   "median_goodput_mbps": {
-    "single-fast": 14.273666113260706,
-    "stripe": 21.797173075165308,
-    "replicate": 10.126280473491441
+    "single-fast": 14.418716500373188,
+    "stripe": 22.06010457992889,
+    "replicate": 10.197217643132882
   },
-  "stripe_to_single_fast_ratio": 1.5270900203357718,
+  "stripe_to_single_fast_ratio": 1.5299631267011822,
   "single_connection_gain_observed": true,
   "path_cut_same_application_connection": "all bytes verified",
   "ledgers": [
@@ -236,18 +236,18 @@
         "active_paths": 0,
         "sessions": 14,
         "failed_paths": 1,
-        "sent_payload_bytes": 61308928,
+        "sent_payload_bytes": 62717952,
         "replicated_payload_bytes": 12845056,
-        "retransmitted_payload_bytes": 5734400,
-        "received_payload_bytes": 56605056,
-        "duplicate_payload_bytes": 13875584,
+        "retransmitted_payload_bytes": 7143424,
+        "received_payload_bytes": 58327040,
+        "duplicate_payload_bytes": 15597568,
         "delivered_payload_bytes": 42729472,
-        "framing_sent_bytes": 296064,
-        "peak_reorder_bytes": 81920,
+        "framing_sent_bytes": 319872,
+        "peak_reorder_bytes": 65536,
         "peak_send_window_bytes": 1048576,
         "path_sent_payload_bytes": [
-          34947072,
-          26361856,
+          34930688,
+          27787264,
           0,
           0,
           0,
@@ -264,18 +264,18 @@
         "active_paths": 0,
         "sessions": 14,
         "failed_paths": 1,
-        "sent_payload_bytes": 61358080,
+        "sent_payload_bytes": 63242240,
         "replicated_payload_bytes": 12845056,
-        "retransmitted_payload_bytes": 5783552,
-        "received_payload_bytes": 56981888,
-        "duplicate_payload_bytes": 14252416,
+        "retransmitted_payload_bytes": 7667712,
+        "received_payload_bytes": 58671104,
+        "duplicate_payload_bytes": 15941632,
         "delivered_payload_bytes": 42729472,
-        "framing_sent_bytes": 303600,
-        "peak_reorder_bytes": 360448,
+        "framing_sent_bytes": 297760,
+        "peak_reorder_bytes": 344064,
         "peak_send_window_bytes": 1048576,
         "path_sent_payload_bytes": [
-          34291608,
-          27066472,
+          34308096,
+          28934144,
           0,
           0,
           0,

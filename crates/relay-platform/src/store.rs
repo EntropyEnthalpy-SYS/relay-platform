@@ -796,6 +796,9 @@ impl Store {
         )?;
         if managed_agent {
             dest.execute("INSERT INTO metadata(key,value) VALUES('recovery_required','true') ON CONFLICT(key) DO UPDATE SET value=excluded.value", [])?;
+            // A snapshot cannot certify consumption after it was taken. Only
+            // the retained original durable state may resume an execution run.
+            dest.execute("DELETE FROM metadata WHERE key='agent_budget_resume'", [])?;
         }
         let original_pause: Option<String> = dest
             .query_row(

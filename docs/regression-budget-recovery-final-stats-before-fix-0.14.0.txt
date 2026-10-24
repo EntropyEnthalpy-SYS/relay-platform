@@ -1,0 +1,27 @@
+Unpublished 0.14.0 candidate, before preserving recovery diagnostics in the stopped heartbeat.
+Expected failing assertion in an existing HTTP/Agent integration test. Final implementation is verified by the full suite and independent Release fixture.
+
+   Compiling relay-platform v0.14.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.64s
+     Running tests/node_leases.rs (target/debug/deps/node_leases-6e5941fbd6376588)
+
+running 1 test
+test original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_udp_activation ... FAILED
+
+failures:
+
+---- original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_udp_activation stdout ----
+
+thread 'original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_udp_activation' (4981624) panicked at crates/relay-platform/tests/node_leases.rs:348:5:
+assertion `left == right` failed: final stopped heartbeat must retain this process's recovery result
+  left: Null
+ right: Object {"at_ms": Number(1792832869503), "cancelled_requests": Number(0), "open_grants": Number(1), "recovered_pending_grants": Number(0), "run_id": String("4e87ed7e-9283-4267-b5a0-06e850c1ae8a"), "validated_grants": Number(1)}
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_udp_activation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 6.38s
+
+error: test failed, to rerun pass `--test node_leases`

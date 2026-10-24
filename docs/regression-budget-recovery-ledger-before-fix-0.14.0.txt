@@ -1,0 +1,26 @@
+Unpublished 0.14.0 candidate, before pending recovery grant ledger validation.
+The new endpoint did not exist in released 0.13.0.
+Expected failing test; fixed version passes in verification-0.14.0.txt.
+
+   Compiling relay-platform v0.14.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.74s
+     Running unittests src/lib.rs (target/debug/deps/relay_platform-5bad464a58e57cf5)
+
+running 1 test
+test store::leases::tests::budget_recovery_tests::pending_recovery_grant_must_belong_to_the_reconciled_ledger ... FAILED
+
+failures:
+
+---- store::leases::tests::budget_recovery_tests::pending_recovery_grant_must_belong_to_the_reconciled_ledger stdout ----
+
+thread 'store::leases::tests::budget_recovery_tests::pending_recovery_grant_must_belong_to_the_reconciled_ledger' (4957823) panicked at crates/relay-platform/src/store/leases_tests.rs:71:24:
+called `Result::unwrap_err()` on an `Ok` value: BudgetReply { cancelled_requests: [], grants: [Grant { grant_id: "53aa1e20-7f0d-4bdb-86cd-66a26509dd88", budget_id: "b07b2836-1127-4927-b5a8-698f759b3918", request_id: "9e67abbe-60bd-403c-9510-8fc76256659f", run_id: "durable-budget-run", bytes: 64 }], acknowledgements: [], allocation_paused: false }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    store::leases::tests::budget_recovery_tests::pending_recovery_grant_must_belong_to_the_reconciled_ledger
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.33s
+
+error: test failed, to rerun pass `--lib`

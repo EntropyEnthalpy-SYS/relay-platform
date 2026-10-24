@@ -716,6 +716,8 @@ pub struct UsageAck {
 #[serde(deny_unknown_fields)]
 pub struct EngineStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_recovery: Option<crate::budget::BudgetRecoveryStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meter: Option<crate::metrics::MeterStats>,

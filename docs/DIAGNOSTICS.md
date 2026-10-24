@@ -60,3 +60,9 @@ Agent 接收一次同步回复时，用量序号确认、预留写入、取消�
 ## 节点执行租约状态
 
 0.13.0 的 GET /api/v1/nodes 新增 lease，节点表和诊断页面展示 policy、generation、holder_run_id、active、remaining_ms、recovery_wait_ms。无策略表示离线模式；active 是控制器的授权保留状态，进程突然退出后也可能维持到截止时间。新持有者会清除旧回执/诊断，直到当前 Agent 重新上报。运行令牌与哈希不向页面返回；租约过期不代表未使用预留已经归还。见 [NODE_LEASES.md](NODE_LEASES.md)。
+
+## 0.14.0 原状态恢复诊断
+
+节点最近一次 stats.budget_recovery 可包含恢复 run_id、完成时间 at_ms、validated_grants、recovered_pending_grants、cancelled_requests、open_grants。这些计数来自本次进程启用监听前的完整恢复；正常停止的最后一次心跳保留该记录。open_grants 是当时仍开放且有余额的预留数量，不是余额字节数，也不会随之后业务变化更新。没有字段表示本次进程未报告这类恢复，不能推断以前从未崩溃。
+
+额度页面提供只读预留明细，按 grant_id 每页最多 100 条，显示所属节点、预算运行、已分配、控制器确认消费、尚占用量和当前节点租约。页面说明尚占用量包括未上报消费；租约状态属于该节点现在的持有者，不证明每条旧预留仍由当前 run_id 使用。多页读取不是固定快照，不应当作结算凭据。API 权限测试已覆盖，浏览器视觉和点击仍未验收。

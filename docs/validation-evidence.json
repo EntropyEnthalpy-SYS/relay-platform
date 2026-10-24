@@ -1,6 +1,6 @@
 {
-  "version": "0.13.0-development",
-  "verified_at_utc": "2026-10-24T08:08:06.554745+00:00",
+  "version": "0.14.0-development",
+  "verified_at_utc": "2026-10-24T09:14:39.944831+00:00",
   "full_goal_complete": false,
   "profile": "release",
   "controller_schema": 4,
@@ -15,14 +15,15 @@
   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
   "python": "3.14.4",
   "declared_rust_minimum": "1.89; not tested in this environment",
-  "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+  "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
   "source_fingerprint_algorithm": "SHA256 of concatenated sorted relative UTF-8 paths, NUL, and raw file SHA256; Cargo.toml, Cargo.lock, rustfmt.toml, crates/, web/, scripts/ (excluding __pycache__), deploy/, examples/ (examples added to scope in 0.8.0)",
-  "source_fingerprint_sha256": "3c26d95bdb50c8f8a59c1b4bd206f571080852dea6c1387739b0a4499d0eb147",
+  "source_fingerprint_sha256": "9cbd62b5e637dca65bbcdb87cd0e0e75aab1266fd2f0c483863be5f4800b4739",
   "source_fingerprint_paths": [
     "Cargo.lock",
     "Cargo.toml",
     "crates/relay-platform/Cargo.toml",
     "crates/relay-platform/src/agent.rs",
+    "crates/relay-platform/src/agent/budget_recovery.rs",
     "crates/relay-platform/src/agent/lease_client.rs",
     "crates/relay-platform/src/api.rs",
     "crates/relay-platform/src/budget.rs",
@@ -45,8 +46,10 @@
     "crates/relay-platform/src/routing.rs",
     "crates/relay-platform/src/schema.sql",
     "crates/relay-platform/src/store.rs",
+    "crates/relay-platform/src/store/budget_recovery_tests.rs",
     "crates/relay-platform/src/store/budget_schema.sql",
     "crates/relay-platform/src/store/budgets.rs",
+    "crates/relay-platform/src/store/budgets/recovery.rs",
     "crates/relay-platform/src/store/health.rs",
     "crates/relay-platform/src/store/leases.rs",
     "crates/relay-platform/src/store/leases_tests.rs",
@@ -90,6 +93,7 @@
     "scripts/bench_multipath.py",
     "scripts/bench_sync.py",
     "scripts/bench_websocket.py",
+    "scripts/check_budget_recovery.py",
     "scripts/check_health.py",
     "scripts/check_multipath_interop.py",
     "scripts/check_node_leases.py",
@@ -105,7 +109,7 @@
     "web/index.html",
     "web/style.css"
   ],
-  "automated_tests_passed": 187,
+  "automated_tests_passed": 199,
   "automated_tests_failed": 0,
   "test_cases": [
     {
@@ -114,11 +118,11 @@
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
-      "name": "health::tests::stale_success_does_not_immediately_reactivate_a_target"
+      "name": "health::tests::thresholds_and_recovery_delay_require_sustained_success"
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
-      "name": "health::tests::thresholds_and_recovery_delay_require_sustained_success"
+      "name": "health::tests::stale_success_does_not_immediately_reactivate_a_target"
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
@@ -142,19 +146,51 @@
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
-      "name": "store::leases::tests::concurrent_claims_have_one_owner_and_retries_do_not_renew_or_expose_the_secret"
-    },
-    {
-      "file": "crates/relay-platform/src/lib.rs",
       "name": "multipath::tests::selective_receipts_retransmit_only_the_gap_and_reject_out_of_window_bits"
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
-      "name": "store::leases::tests::failed_grant_or_release_commit_does_not_publish_a_runtime_owner_change"
+      "name": "store::leases::tests::budget_recovery_tests::invalid_inventory_or_failed_commit_cannot_partially_report_or_refund"
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
-      "name": "store::leases::tests::restart_and_pre_grant_backup_quarantine_takeover_without_using_wall_time"
+      "name": "store::leases::tests::budget_recovery_tests::managed_backup_removes_resume_authority_and_fresh_runs_keep_unknown_credit_isolated"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::pending_recovery_grant_must_belong_to_the_reconciled_ledger"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::reservation_inventory_is_paginated_tenant_scoped_and_never_contains_credentials"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::resume_recovers_a_lost_grant_reply_and_cancels_requests_never_allocated"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "journal::tests::abrupt_exit_at_each_durable_boundary"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::resume_requires_continuous_ownership_and_lost_acquisition_reply_is_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::retained_grants_report_unconfirmed_consumption_then_resume_without_stranding_credit"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::stale_claims_paused_controller_and_wrong_identity_never_authorize_reuse"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::concurrent_claims_have_one_owner_and_retries_do_not_renew_or_expose_the_secret"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::failed_grant_or_release_commit_does_not_publish_a_runtime_owner_change"
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
@@ -166,7 +202,7 @@
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
-      "name": "journal::tests::abrupt_exit_at_each_durable_boundary"
+      "name": "store::leases::tests::restart_and_pre_grant_backup_quarantine_takeover_without_using_wall_time"
     },
     {
       "file": "crates/relay-platform/src/lib.rs",
@@ -178,7 +214,7 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
+      "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -186,7 +222,19 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "committed_refill_between_admission_and_wait_is_visible_to_every_waiter"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
       "name": "hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -194,23 +242,11 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "committed_refill_between_admission_and_wait_is_visible_to_every_waiter"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
       "name": "failed_meter_transaction_rolls_back_reservation_consumption_as_well"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant"
+      "name": "concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -222,11 +258,11 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "sync_reply_storage_failure_does_not_acknowledge_usage_or_lose_pending_request"
+      "name": "settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed"
+      "name": "sync_reply_storage_failure_does_not_acknowledge_usage_or_lose_pending_request"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -242,11 +278,11 @@
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "enrollment_recovers_after_the_controller_commits_but_response_is_lost"
+      "name": "graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat"
+      "name": "enrollment_recovers_after_the_controller_commits_but_response_is_lost"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
@@ -274,11 +310,11 @@
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "http_auth_role_and_schema_enforcement"
+      "name": "running_agent_republishes_acknowledged_counters_after_controller_restore"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "running_agent_republishes_acknowledged_counters_after_controller_restore"
+      "name": "http_auth_role_and_schema_enforcement"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
@@ -310,19 +346,19 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "deleting_a_rule_terminates_existing_connections"
-    },
-    {
-      "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "source_acl_denies_before_any_billable_payload"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "failed_config_keeps_old_listener_and_persisted_revision"
+      "name": "deleting_a_rule_terminates_existing_connections"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations"
+      "name": "concurrent_tcp_sessions_cannot_multiply_the_rule_quota"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_config_keeps_old_listener_and_persisted_revision"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -334,7 +370,11 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "concurrent_tcp_sessions_cannot_multiply_the_rule_quota"
+      "name": "routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "ipv6_and_dns_targets_transfer_real_bytes"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -342,7 +382,7 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "ipv6_and_dns_targets_transfer_real_bytes"
+      "name": "moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -351,10 +391,6 @@
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "udp_preserves_datagrams_empty_payloads_and_peer_isolation"
-    },
-    {
-      "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -390,11 +426,11 @@
     },
     {
       "file": "crates/relay-platform/tests/health.rs",
-      "name": "offset_ports_have_independent_health_and_fixed_mapping_shares_one_observation"
+      "name": "ordinary_restart_does_not_trust_old_healthy_observations"
     },
     {
       "file": "crates/relay-platform/tests/health.rs",
-      "name": "ordinary_restart_does_not_trust_old_healthy_observations"
+      "name": "offset_ports_have_independent_health_and_fixed_mapping_shares_one_observation"
     },
     {
       "file": "crates/relay-platform/tests/health.rs",
@@ -442,10 +478,6 @@
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
-      "name": "exhausted_expired_and_disabled_rules_reject_empty_datagrams_too"
-    },
-    {
-      "file": "crates/relay-platform/tests/ledger.rs",
       "name": "periods_do_not_reset_on_reapply_and_old_periods_cannot_spend"
     },
     {
@@ -454,15 +486,19 @@
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "exhausted_expired_and_disabled_rules_reject_empty_datagrams_too"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
       "name": "consistent_backup_restores_config_counters_and_private_permissions"
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
-      "name": "enrollment_is_single_use_and_configuration_writes_are_optimistic"
+      "name": "controller_replay_is_idempotent_and_counter_regression_is_rejected"
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
-      "name": "controller_replay_is_idempotent_and_counter_regression_is_rejected"
+      "name": "enrollment_is_single_use_and_configuration_writes_are_optimistic"
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
@@ -498,11 +534,11 @@
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "ipv6_wildcard_is_v6_only_and_ipv4_can_share_port"
+      "name": "dns_two_hop_cycles_stop_but_acyclic_local_chains_forward"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "invalid_bind_rejects_config_without_unbound_fallback"
+      "name": "ipv6_wildcard_is_v6_only_and_ipv4_can_share_port"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
@@ -510,7 +546,7 @@
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "dns_two_hop_cycles_stop_but_acyclic_local_chains_forward"
+      "name": "invalid_bind_rejects_config_without_unbound_fallback"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
@@ -522,19 +558,19 @@
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "port_ranges_offset_tcp_udp_and_shared_meter"
-    },
-    {
-      "file": "crates/relay-platform/tests/network_features.rs",
       "name": "range_stage_failure_releases_new_sockets_and_preserves_old_config"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "outbound_ip_and_loopback_interface_tcp_udp_ipv4_ipv6"
+      "name": "port_ranges_offset_tcp_udp_and_shared_meter"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
       "name": "udp_dns_cycle_drops_before_recursive_datagram"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "outbound_ip_and_loopback_interface_tcp_udp_ipv4_ipv6"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
@@ -562,6 +598,10 @@
     },
     {
       "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "budget_reservation_api_enforces_tenant_session_and_node_recovery_credentials"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
       "name": "stalled_renewal_response_cannot_extend_tcp_or_udp_deadline"
     },
     {
@@ -574,7 +614,19 @@
     },
     {
       "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "intervening_backup_takeover_prevents_original_state_from_reclaiming_old_reservations"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_udp_activation"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
       "name": "cloned_state_waits_through_renewals_then_reconciles_and_takes_over_after_clean_stop"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "failed_budget_recovery_keeps_listeners_and_cleanup_refunds_stopped"
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
@@ -598,11 +650,11 @@
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
-      "name": "tcp_claimed_acl_is_applied_only_after_trusted_peer_and_not_billed_as_payload"
+      "name": "moving_proxy_policy_between_existing_targets_cancels_old_sessions"
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
-      "name": "moving_proxy_policy_between_existing_targets_cancels_old_sessions"
+      "name": "tcp_claimed_acl_is_applied_only_after_trusted_peer_and_not_billed_as_payload"
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
@@ -734,7 +786,7 @@
     },
     {
       "file": "crates/relay-platform/tests/topology.rs",
-      "name": "multiple_entrances_and_weighted_candidates_are_distinct_from_sequential_hops"
+      "name": "preview_is_read_only_and_batch_publish_preserves_history_and_edges"
     },
     {
       "file": "crates/relay-platform/tests/topology.rs",
@@ -742,11 +794,11 @@
     },
     {
       "file": "crates/relay-platform/tests/topology.rs",
-      "name": "range_protocol_and_security_combinations_are_checked_at_both_ends"
+      "name": "multiple_entrances_and_weighted_candidates_are_distinct_from_sequential_hops"
     },
     {
       "file": "crates/relay-platform/tests/topology.rs",
-      "name": "rewire_requires_disabled_revision_ack_and_zero_sessions_then_can_reverse_chain"
+      "name": "range_protocol_and_security_combinations_are_checked_at_both_ends"
     },
     {
       "file": "crates/relay-platform/tests/topology.rs",
@@ -754,7 +806,7 @@
     },
     {
       "file": "crates/relay-platform/tests/topology.rs",
-      "name": "preview_is_read_only_and_batch_publish_preserves_history_and_edges"
+      "name": "rewire_requires_disabled_revision_ack_and_zero_sessions_then_can_reverse_chain"
     },
     {
       "file": "crates/relay-platform/tests/topology.rs",
@@ -786,10 +838,6 @@
     },
     {
       "file": "crates/relay-platform/tests/websocket_transport.rs",
-      "name": "path_policy_change_revokes_open_streams_without_disabling_plain_target_updates"
-    },
-    {
-      "file": "crates/relay-platform/tests/websocket_transport.rs",
       "name": "malformed_records_frames_and_early_close_never_become_payload"
     },
     {
@@ -798,11 +846,15 @@
     },
     {
       "file": "crates/relay-platform/tests/websocket_transport.rs",
-      "name": "moving_websocket_policy_between_existing_targets_revokes_old_sessions"
+      "name": "path_policy_change_revokes_open_streams_without_disabling_plain_target_updates"
     },
     {
       "file": "crates/relay-platform/tests/websocket_transport.rs",
       "name": "handshake_path_host_origin_subprotocol_key_and_header_limit_reject_before_target"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "moving_websocket_policy_between_existing_targets_revokes_old_sessions"
     },
     {
       "file": "crates/relay-platform/tests/websocket_transport.rs",
@@ -826,11 +878,11 @@
     },
     {
       "file": "crates/relay-platform/tests/websocket_transport.rs",
-      "name": "quotas_count_only_unwrapped_application_bytes_across_sessions"
+      "name": "transport_flush_waits_for_wire_backpressure"
     },
     {
       "file": "crates/relay-platform/tests/websocket_transport.rs",
-      "name": "transport_flush_waits_for_wire_backpressure"
+      "name": "quotas_count_only_unwrapped_application_bytes_across_sessions"
     },
     {
       "file": "crates/relay-platform/tests/websocket_transport.rs",
@@ -858,7 +910,7 @@
     }
   ],
   "test_groups": {
-    "crates/relay-platform/src/lib.rs": 17,
+    "crates/relay-platform/src/lib.rs": 25,
     "crates/relay-platform/tests/budgets.rs": 15,
     "crates/relay-platform/tests/control_agent.rs": 18,
     "crates/relay-platform/tests/forwarding.rs": 16,
@@ -867,7 +919,7 @@
     "crates/relay-platform/tests/ledger.rs": 8,
     "crates/relay-platform/tests/multipath_transport.rs": 6,
     "crates/relay-platform/tests/network_features.rs": 16,
-    "crates/relay-platform/tests/node_leases.rs": 5,
+    "crates/relay-platform/tests/node_leases.rs": 9,
     "crates/relay-platform/tests/proxy_protocol.rs": 19,
     "crates/relay-platform/tests/recovery.rs": 6,
     "crates/relay-platform/tests/sync_batch.rs": 5,
@@ -881,7 +933,7 @@
       "reason": "Explicitly executed four times by the parent crash test"
     }
   ],
-  "verification_log_file": "docs/verification-0.13.0.txt",
+  "verification_log_file": "docs/verification-0.14.0.txt",
   "format_check": "passed",
   "clippy_warnings_as_errors": "passed",
   "javascript_syntax": "passed",
@@ -898,13 +950,14 @@
     "docs/topology-smoke.json",
     "docs/health-smoke.json",
     "docs/node-leases-smoke.json",
+    "docs/budget-recovery-smoke.json",
     "docs/benchmark-local.json",
     "docs/benchmark-budget.json",
     "docs/benchmark-websocket.json",
     "docs/benchmark-multipath.json"
   ],
   "release_evidence_same_binary": true,
-  "verification_sequence_note": "Full checks and Release build, independent node-lease fixture, sequential CLI/interop/recovery/topology/health and other benchmarks, then the multipath benchmark. Python syntax rechecked after adding the independent fixture. No compiler or performance scripts ran concurrently with benchmarks.",
+  "verification_sequence_note": "Full checks and Release build completed before all 15 sequential Release fixtures and benchmarks. Python syntax rechecked after adding the independent SIGKILL fixture. No compiler or performance scripts ran concurrently with benchmarks.",
   "example_configurations_validated": [
     "examples/health-echo.json",
     "examples/multipath-hop.json",
@@ -924,12 +977,12 @@
     "durable_bytes": 176,
     "backup_restore": "identical",
     "child_processes_stopped": true,
-    "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
-    "version": "relay 0.13.0"
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
+    "version": "relay 0.14.0"
   },
   "network_cli_smoke": {
-    "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
-    "version": "relay 0.13.0",
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
+    "version": "relay 0.14.0",
     "ports": 2,
     "mapping": "offset",
     "outbound_ip": "127.0.0.1",
@@ -947,8 +1000,8 @@
     "child_processes_stopped": true
   },
   "proxy_cli_smoke": {
-    "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
-    "version": "relay 0.13.0",
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
+    "version": "relay 0.14.0",
     "hops": 2,
     "proxy": "v2_crc32c",
     "meter_records": 2,
@@ -991,11 +1044,11 @@
   "multipath_benchmark_file": "docs/benchmark-multipath.json",
   "multipath_benchmark": {
     "median_goodput_mbps": {
-      "single-fast": 14.273666113260706,
-      "stripe": 21.797173075165308,
-      "replicate": 10.126280473491441
+      "single-fast": 14.418716500373188,
+      "stripe": 22.06010457992889,
+      "replicate": 10.197217643132882
     },
-    "stripe_to_single_fast_ratio": 1.5270900203357718,
+    "stripe_to_single_fast_ratio": 1.5299631267011822,
     "single_connection_gain_observed": true,
     "path_cut_same_application_connection": "all bytes verified",
     "ledgers": [
@@ -1044,18 +1097,18 @@
           "active_paths": 0,
           "sessions": 14,
           "failed_paths": 1,
-          "sent_payload_bytes": 61308928,
+          "sent_payload_bytes": 62717952,
           "replicated_payload_bytes": 12845056,
-          "retransmitted_payload_bytes": 5734400,
-          "received_payload_bytes": 56605056,
-          "duplicate_payload_bytes": 13875584,
+          "retransmitted_payload_bytes": 7143424,
+          "received_payload_bytes": 58327040,
+          "duplicate_payload_bytes": 15597568,
           "delivered_payload_bytes": 42729472,
-          "framing_sent_bytes": 296064,
-          "peak_reorder_bytes": 81920,
+          "framing_sent_bytes": 319872,
+          "peak_reorder_bytes": 65536,
           "peak_send_window_bytes": 1048576,
           "path_sent_payload_bytes": [
-            34947072,
-            26361856,
+            34930688,
+            27787264,
             0,
             0,
             0,
@@ -1072,18 +1125,18 @@
           "active_paths": 0,
           "sessions": 14,
           "failed_paths": 1,
-          "sent_payload_bytes": 61358080,
+          "sent_payload_bytes": 63242240,
           "replicated_payload_bytes": 12845056,
-          "retransmitted_payload_bytes": 5783552,
-          "received_payload_bytes": 56981888,
-          "duplicate_payload_bytes": 14252416,
+          "retransmitted_payload_bytes": 7667712,
+          "received_payload_bytes": 58671104,
+          "duplicate_payload_bytes": 15941632,
           "delivered_payload_bytes": 42729472,
-          "framing_sent_bytes": 303600,
-          "peak_reorder_bytes": 360448,
+          "framing_sent_bytes": 297760,
+          "peak_reorder_bytes": 344064,
           "peak_send_window_bytes": 1048576,
           "path_sent_payload_bytes": [
-            34291608,
-            27066472,
+            34308096,
+            28934144,
             0,
             0,
             0,
@@ -1122,22 +1175,22 @@
   },
   "controller_sync_metrics": {
     "queue_time": {
-      "samples": 1005,
-      "total_us": 9689486,
-      "max_us": 29337
+      "samples": 1018,
+      "total_us": 7873346,
+      "max_us": 30938
     },
     "storage_batch_time": {
-      "samples": 674,
-      "total_us": 11575136,
-      "max_us": 34728
+      "samples": 632,
+      "total_us": 11550923,
+      "max_us": 738791
     },
     "request_time": {
-      "samples": 1005,
-      "total_us": 26577360,
-      "max_us": 56281
+      "samples": 1018,
+      "total_us": 26614920,
+      "max_us": 742360
     },
-    "committed_batches": 674,
-    "processed_requests": 1005,
+    "committed_batches": 632,
+    "processed_requests": 1018,
     "largest_batch": 4,
     "queue_full_rejections": 0,
     "failed_batches": 0,
@@ -1150,16 +1203,16 @@
       "name": "budgeted-0",
       "meter": {
         "admission_batches": {
-          "samples": 9366,
-          "total_us": 2832632,
-          "max_us": 9081
+          "samples": 9414,
+          "total_us": 2959271,
+          "max_us": 7798
         },
-        "admission_requests": 28894,
+        "admission_requests": 28974,
         "failed_batches": 0,
         "budget_wait": {
-          "samples": 2881,
-          "total_us": 70523339,
-          "max_us": 52527
+          "samples": 2904,
+          "total_us": 69656065,
+          "max_us": 52974
         },
         "budget_waiting": 0,
         "budget_timeouts": 0
@@ -1169,16 +1222,16 @@
       "name": "budgeted-1",
       "meter": {
         "admission_batches": {
-          "samples": 9422,
-          "total_us": 2923940,
-          "max_us": 7501
+          "samples": 9452,
+          "total_us": 3071113,
+          "max_us": 8619
         },
-        "admission_requests": 28918,
+        "admission_requests": 28980,
         "failed_batches": 0,
         "budget_wait": {
-          "samples": 2857,
-          "total_us": 69774325,
-          "max_us": 51477
+          "samples": 2907,
+          "total_us": 69552578,
+          "max_us": 52187
         },
         "budget_waiting": 0,
         "budget_timeouts": 0
@@ -1188,11 +1241,11 @@
       "name": "plain-0",
       "meter": {
         "admission_batches": {
-          "samples": 13943,
-          "total_us": 1458973,
-          "max_us": 5996
+          "samples": 13821,
+          "total_us": 1431966,
+          "max_us": 6092
         },
-        "admission_requests": 25881,
+        "admission_requests": 25866,
         "failed_batches": 0,
         "budget_wait": {
           "samples": 0,
@@ -1207,11 +1260,11 @@
       "name": "plain-1",
       "meter": {
         "admission_batches": {
-          "samples": 14529,
-          "total_us": 1465000,
-          "max_us": 6078
+          "samples": 15051,
+          "total_us": 1503006,
+          "max_us": 6102
         },
-        "admission_requests": 25941,
+        "admission_requests": 25867,
         "failed_batches": 0,
         "budget_wait": {
           "samples": 0,
@@ -1251,50 +1304,50 @@
     {
       "connections": 1,
       "mode": "direct",
-      "goodput_mbps": 12579.810430219775
+      "goodput_mbps": 12885.571239773726
     },
     {
       "connections": 1,
       "mode": "tcp",
-      "goodput_mbps": 3411.8601037995413
+      "goodput_mbps": 3770.2995304627493
     },
     {
       "connections": 1,
       "mode": "ws",
-      "goodput_mbps": 3387.7650933801942
+      "goodput_mbps": 3711.2635488237524
     },
     {
       "connections": 1,
       "mode": "wss-mtls",
-      "goodput_mbps": 2932.3219473299123
+      "goodput_mbps": 3072.6003837774106
     },
     {
       "connections": 4,
       "mode": "direct",
-      "goodput_mbps": 11681.349821461541
+      "goodput_mbps": 12513.769238123095
     },
     {
       "connections": 4,
       "mode": "tcp",
-      "goodput_mbps": 9311.31182124737
+      "goodput_mbps": 9839.753069193248
     },
     {
       "connections": 4,
       "mode": "ws",
-      "goodput_mbps": 8577.566210066667
+      "goodput_mbps": 8776.287998552862
     },
     {
       "connections": 4,
       "mode": "wss-mtls",
-      "goodput_mbps": 6946.431062476382
+      "goodput_mbps": 7652.50216654028
     }
   ],
   "recovery_smoke": {
-    "at_utc": "2026-10-24T08:03:40.614389+00:00",
+    "at_utc": "2026-10-24T09:11:32.207528+00:00",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
     "restore": {
-      "journal_id": "c183ab2d-afb5-4d34-bf49-3e0ac08c4cc8",
+      "journal_id": "c0d6ff9c-7302-44a7-b33c-d1bc3eaaa460",
       "backup_sequence": 4,
       "restored_sequence": 12,
       "replayed_transactions": 8,
@@ -1324,14 +1377,14 @@
       "local macOS loopback only",
       "no power-loss or remote storage durability test"
     ],
-    "version": "relay 0.13.0"
+    "version": "relay 0.14.0"
   },
   "topology_smoke_file": "docs/topology-smoke.json",
   "topology_smoke": {
-    "at_utc": "2026-10-24T08:04:01.898452+00:00",
+    "at_utc": "2026-10-24T09:11:53.280154+00:00",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "version": "relay 0.13.0",
-    "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+    "version": "relay 0.14.0",
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
     "cases": [
       {
         "transport": "both",
@@ -1347,7 +1400,7 @@
         "binary_half_close_verified": true,
         "restored_topology_usage_and_old_session": true,
         "restore": {
-          "journal_id": "0859edc7-10c8-4881-a641-98ea16bcac30",
+          "journal_id": "9f9367a8-176e-4c56-af7e-3d79b3ad1253",
           "backup_sequence": 8,
           "restored_sequence": 45,
           "replayed_transactions": 37,
@@ -1369,7 +1422,7 @@
         "binary_half_close_verified": true,
         "restored_topology_usage_and_old_session": true,
         "restore": {
-          "journal_id": "e3cbcd33-26d5-46cb-b3ec-a486f0fcd652",
+          "journal_id": "045b464f-70b1-4e9b-bc0d-5e77d4e2e3e4",
           "backup_sequence": 8,
           "restored_sequence": 45,
           "replayed_transactions": 37,
@@ -1391,7 +1444,7 @@
         "binary_half_close_verified": true,
         "restored_topology_usage_and_old_session": true,
         "restore": {
-          "journal_id": "d0b7e3e8-e6bb-4a80-95a2-4d7aadbdb3bf",
+          "journal_id": "1133b2a7-6ccc-434d-b3c9-3e4ca070fcd9",
           "backup_sequence": 8,
           "restored_sequence": 45,
           "replayed_transactions": 37,
@@ -1412,24 +1465,24 @@
   },
   "health_smoke_file": "docs/health-smoke.json",
   "health_smoke": {
-    "at_utc": "2026-10-24T08:06:04.736225+00:00",
+    "at_utc": "2026-10-24T09:12:32.043066+00:00",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "version": "relay 0.13.0",
-    "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+    "version": "relay 0.14.0",
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
     "observations": [
       {
         "phase": "initial application replies",
         "reports": [
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829127409,
+            "checked_at_ms": 1792833114672,
             "completed_checks": 6,
             "consecutive_failures": 0,
             "consecutive_successes": 6,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 811,
-            "listen_port": 59142,
+            "latency_ewma_us": 893,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1438,23 +1491,23 @@
             "probe_sent_bytes": 24,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 46,
+            "sample_age_ms": 41,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829127409,
+            "checked_at_ms": 1792833114672,
             "completed_checks": 6,
             "consecutive_failures": 0,
             "consecutive_successes": 6,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1403,
-            "listen_port": 59142,
+            "latency_ewma_us": 1320,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1463,23 +1516,23 @@
             "probe_sent_bytes": 24,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 45,
+            "sample_age_ms": 41,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829127409,
+            "checked_at_ms": 1792833114672,
             "completed_checks": 6,
             "consecutive_failures": 0,
             "consecutive_successes": 6,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 920,
-            "listen_port": 59142,
+            "latency_ewma_us": 693,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1488,23 +1541,23 @@
             "probe_sent_bytes": 24,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 46,
+            "sample_age_ms": 41,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829127409,
+            "checked_at_ms": 1792833114672,
             "completed_checks": 6,
             "consecutive_failures": 0,
             "consecutive_successes": 6,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1520,
-            "listen_port": 59142,
+            "latency_ewma_us": 1481,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1513,11 +1566,11 @@
             "probe_sent_bytes": 24,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 45,
+            "sample_age_ms": 41,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -1527,14 +1580,14 @@
         "reports": [
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829128409,
+            "checked_at_ms": 1792833115671,
             "completed_checks": 11,
             "consecutive_failures": 0,
             "consecutive_successes": 11,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 898,
-            "listen_port": 59142,
+            "latency_ewma_us": 1497,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1543,23 +1596,23 @@
             "probe_sent_bytes": 44,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 80,
+            "sample_age_ms": 72,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 11,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829128410,
+            "checked_at_ms": 1792833115672,
             "completed_checks": 11,
             "consecutive_failures": 5,
             "consecutive_successes": 0,
             "eligible": false,
             "last_error": "unexpected_response",
-            "latency_ewma_us": 1403,
-            "listen_port": 59142,
+            "latency_ewma_us": 1320,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1568,23 +1621,23 @@
             "probe_sent_bytes": 44,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 80,
+            "sample_age_ms": 71,
             "selection_reason": "unhealthy",
             "status": "unhealthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829128409,
+            "checked_at_ms": 1792833115671,
             "completed_checks": 11,
             "consecutive_failures": 0,
             "consecutive_successes": 11,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 864,
-            "listen_port": 59142,
+            "latency_ewma_us": 1328,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1593,23 +1646,23 @@
             "probe_sent_bytes": 44,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 80,
+            "sample_age_ms": 72,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 11,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829128410,
+            "checked_at_ms": 1792833115672,
             "completed_checks": 11,
             "consecutive_failures": 0,
             "consecutive_successes": 11,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1498,
-            "listen_port": 59142,
+            "latency_ewma_us": 2080,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1618,11 +1671,11 @@
             "probe_sent_bytes": 44,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 80,
+            "sample_age_ms": 71,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 11,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -1632,14 +1685,14 @@
         "reports": [
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829129409,
+            "checked_at_ms": 1792833116672,
             "completed_checks": 16,
             "consecutive_failures": 5,
             "consecutive_successes": 0,
             "eligible": false,
             "last_error": "unexpected_response",
-            "latency_ewma_us": 898,
-            "listen_port": 59142,
+            "latency_ewma_us": 1497,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1648,23 +1701,23 @@
             "probe_sent_bytes": 64,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 147,
+            "sample_age_ms": 99,
             "selection_reason": "unhealthy",
             "status": "unhealthy",
             "successful_checks": 11,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829129409,
+            "checked_at_ms": 1792833116673,
             "completed_checks": 16,
             "consecutive_failures": 10,
             "consecutive_successes": 0,
             "eligible": false,
             "last_error": "unexpected_response",
-            "latency_ewma_us": 1403,
-            "listen_port": 59142,
+            "latency_ewma_us": 1320,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1673,23 +1726,23 @@
             "probe_sent_bytes": 64,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 146,
+            "sample_age_ms": 98,
             "selection_reason": "unhealthy",
             "status": "unhealthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829129409,
+            "checked_at_ms": 1792833116672,
             "completed_checks": 16,
             "consecutive_failures": 0,
             "consecutive_successes": 16,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1149,
-            "listen_port": 59142,
+            "latency_ewma_us": 1286,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1698,23 +1751,23 @@
             "probe_sent_bytes": 64,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 147,
+            "sample_age_ms": 99,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 16,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829129409,
+            "checked_at_ms": 1792833116673,
             "completed_checks": 16,
             "consecutive_failures": 0,
             "consecutive_successes": 16,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1850,
-            "listen_port": 59142,
+            "latency_ewma_us": 2025,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1723,11 +1776,11 @@
             "probe_sent_bytes": 64,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 146,
+            "sample_age_ms": 98,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 16,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -1737,14 +1790,14 @@
         "reports": [
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829130410,
+            "checked_at_ms": 1792833117672,
             "completed_checks": 21,
             "consecutive_failures": 0,
             "consecutive_successes": 5,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1150,
-            "listen_port": 59142,
+            "latency_ewma_us": 1582,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1753,23 +1806,23 @@
             "probe_sent_bytes": 84,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 162,
+            "sample_age_ms": 153,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 16,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829130410,
+            "checked_at_ms": 1792833117672,
             "completed_checks": 21,
             "consecutive_failures": 0,
             "consecutive_successes": 5,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1717,
-            "listen_port": 59142,
+            "latency_ewma_us": 2115,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1778,23 +1831,23 @@
             "probe_sent_bytes": 84,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 162,
+            "sample_age_ms": 153,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 11,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829130410,
+            "checked_at_ms": 1792833117672,
             "completed_checks": 21,
             "consecutive_failures": 0,
             "consecutive_successes": 21,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1146,
-            "listen_port": 59142,
+            "latency_ewma_us": 1533,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1803,23 +1856,23 @@
             "probe_sent_bytes": 84,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 163,
+            "sample_age_ms": 153,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 21,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829130410,
+            "checked_at_ms": 1792833117672,
             "completed_checks": 21,
             "consecutive_failures": 0,
             "consecutive_successes": 21,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1839,
-            "listen_port": 59142,
+            "latency_ewma_us": 2373,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1828,11 +1881,11 @@
             "probe_sent_bytes": 84,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 162,
+            "sample_age_ms": 153,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 21,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -1842,14 +1895,14 @@
         "reports": [
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829131410,
+            "checked_at_ms": 1792833118671,
             "completed_checks": 26,
             "consecutive_failures": 0,
             "consecutive_successes": 10,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1301,
-            "listen_port": 59142,
+            "latency_ewma_us": 1584,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1858,23 +1911,23 @@
             "probe_sent_bytes": 104,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 166,
+            "sample_age_ms": 155,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 21,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829131410,
+            "checked_at_ms": 1792833118671,
             "completed_checks": 26,
             "consecutive_failures": 5,
             "consecutive_successes": 0,
             "eligible": false,
             "last_error": "unexpected_response",
-            "latency_ewma_us": 1717,
-            "listen_port": 59142,
+            "latency_ewma_us": 2115,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1883,23 +1936,23 @@
             "probe_sent_bytes": 104,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 165,
+            "sample_age_ms": 155,
             "selection_reason": "unhealthy",
             "status": "unhealthy",
             "successful_checks": 11,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829131410,
+            "checked_at_ms": 1792833118671,
             "completed_checks": 26,
             "consecutive_failures": 0,
             "consecutive_successes": 26,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1243,
-            "listen_port": 59142,
+            "latency_ewma_us": 1313,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1908,23 +1961,23 @@
             "probe_sent_bytes": 104,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 166,
+            "sample_age_ms": 155,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 26,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829131410,
+            "checked_at_ms": 1792833118671,
             "completed_checks": 26,
             "consecutive_failures": 5,
             "consecutive_successes": 0,
             "eligible": false,
             "last_error": "unexpected_response",
-            "latency_ewma_us": 1839,
-            "listen_port": 59142,
+            "latency_ewma_us": 2373,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -1933,11 +1986,11 @@
             "probe_sent_bytes": 104,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 165,
+            "sample_age_ms": 155,
             "selection_reason": "unhealthy",
             "status": "unhealthy",
             "successful_checks": 21,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -1947,14 +2000,14 @@
         "reports": [
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119671,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 15,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1357,
-            "listen_port": 59142,
+            "latency_ewma_us": 1448,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1963,23 +2016,23 @@
             "probe_sent_bytes": 124,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 216,
+            "sample_age_ms": 214,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 26,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119672,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 5,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 2169,
-            "listen_port": 59142,
+            "latency_ewma_us": 2145,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -1988,23 +2041,23 @@
             "probe_sent_bytes": 124,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 216,
+            "sample_age_ms": 214,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 16,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119671,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 31,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1522,
-            "listen_port": 59142,
+            "latency_ewma_us": 1231,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -2013,23 +2066,23 @@
             "probe_sent_bytes": 124,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 216,
+            "sample_age_ms": 214,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 31,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119672,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 5,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 2590,
-            "listen_port": 59142,
+            "latency_ewma_us": 2070,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -2038,11 +2091,11 @@
             "probe_sent_bytes": 124,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 216,
+            "sample_age_ms": 214,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 26,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -2052,14 +2105,14 @@
         "reports": [
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119671,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 15,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1357,
-            "listen_port": 59142,
+            "latency_ewma_us": 1448,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -2068,23 +2121,23 @@
             "probe_sent_bytes": 124,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 846,
+            "sample_age_ms": 851,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 26,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119672,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 5,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 2169,
-            "listen_port": 59142,
+            "latency_ewma_us": 2145,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -2093,23 +2146,23 @@
             "probe_sent_bytes": 124,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 846,
+            "sample_age_ms": 851,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 16,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119671,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 31,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1522,
-            "listen_port": 59142,
+            "latency_ewma_us": 1231,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -2118,23 +2171,23 @@
             "probe_sent_bytes": 124,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 846,
+            "sample_age_ms": 851,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 31,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 1,
-            "checked_at_ms": 1792829132411,
+            "checked_at_ms": 1792833119672,
             "completed_checks": 31,
             "consecutive_failures": 0,
             "consecutive_successes": 5,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 2590,
-            "listen_port": 59142,
+            "latency_ewma_us": 2070,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -2143,11 +2196,11 @@
             "probe_sent_bytes": 124,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 846,
+            "sample_age_ms": 851,
             "selection_reason": "standby",
             "status": "healthy",
             "successful_checks": 26,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -2157,14 +2210,14 @@
         "reports": [
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829164596,
+            "checked_at_ms": 1792833151889,
             "completed_checks": 6,
             "consecutive_failures": 6,
             "consecutive_successes": 0,
             "eligible": false,
             "last_error": "unexpected_response",
             "latency_ewma_us": null,
-            "listen_port": 59142,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -2173,23 +2226,23 @@
             "probe_sent_bytes": 24,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 68,
+            "sample_age_ms": 72,
             "selection_reason": "unhealthy",
             "status": "unhealthy",
             "successful_checks": 0,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829164597,
+            "checked_at_ms": 1792833151890,
             "completed_checks": 6,
             "consecutive_failures": 6,
             "consecutive_successes": 0,
             "eligible": false,
             "last_error": "unexpected_response",
             "latency_ewma_us": null,
-            "listen_port": 59142,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 0,
@@ -2198,23 +2251,23 @@
             "probe_sent_bytes": 24,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 67,
+            "sample_age_ms": 71,
             "selection_reason": "unhealthy",
             "status": "unhealthy",
             "successful_checks": 0,
-            "target_address": "127.0.0.1:59134",
+            "target_address": "127.0.0.1:51711",
             "target_index": 0
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829164596,
+            "checked_at_ms": 1792833151889,
             "completed_checks": 6,
             "consecutive_failures": 0,
             "consecutive_successes": 6,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 619,
-            "listen_port": 59142,
+            "latency_ewma_us": 1267,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -2223,23 +2276,23 @@
             "probe_sent_bytes": 24,
             "protocol": "udp",
             "rule_id": "checked",
-            "sample_age_ms": 68,
+            "sample_age_ms": 72,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           },
           {
             "active_sessions": 0,
-            "checked_at_ms": 1792829164597,
+            "checked_at_ms": 1792833151890,
             "completed_checks": 6,
             "consecutive_failures": 0,
             "consecutive_successes": 6,
             "eligible": true,
             "last_error": null,
-            "latency_ewma_us": 1208,
-            "listen_port": 59142,
+            "latency_ewma_us": 2246,
+            "listen_port": 51719,
             "max_age_ms": 1500,
             "max_sessions": 32,
             "priority": 10,
@@ -2248,11 +2301,11 @@
             "probe_sent_bytes": 24,
             "protocol": "tcp",
             "rule_id": "checked",
-            "sample_age_ms": 67,
+            "sample_age_ms": 71,
             "selection_reason": "eligible",
             "status": "healthy",
             "successful_checks": 6,
-            "target_address": "127.0.0.1:59135",
+            "target_address": "127.0.0.1:51712",
             "target_index": 1
           }
         ]
@@ -2278,7 +2331,7 @@
       "source_probes_excluded": true
     },
     "restore": {
-      "journal_id": "b2de40df-fc58-4df6-b44c-afa30cf8d8cf",
+      "journal_id": "f3ac49e4-b94a-4063-9fe3-253d58c60de8",
       "backup_sequence": 3,
       "restored_sequence": 17,
       "replayed_transactions": 14,
@@ -2291,114 +2344,114 @@
         "samples": {
           "plain": [
             {
-              "seconds": 0.03956166701391339,
+              "seconds": 0.03826595901045948,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 3392.620638376971
+              "goodput_mbps": 3507.496779665535
             },
             {
-              "seconds": 0.02620258298702538,
+              "seconds": 0.026726624986622483,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 5122.309051228271
+              "goodput_mbps": 5021.873433970065
             },
             {
-              "seconds": 0.026114000007510185,
+              "seconds": 0.025917458988260478,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 5139.684765313626
+              "goodput_mbps": 5178.660765347213
             },
             {
-              "seconds": 0.026283624989446253,
+              "seconds": 0.028510582982562482,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 5106.515104133957
+              "goodput_mbps": 4707.645861962545
             }
           ],
           "checked": [
             {
-              "seconds": 0.028862582985311747,
+              "seconds": 0.03077750001102686,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 4650.232727552617
+              "goodput_mbps": 4360.904165442707
             },
             {
-              "seconds": 0.0256988339824602,
+              "seconds": 0.026280625024810433,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 5222.716645105587
+              "goodput_mbps": 5107.098018912818
             },
             {
-              "seconds": 0.0284861660329625,
+              "seconds": 0.026188875024672598,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 4711.6810259650665
+              "goodput_mbps": 5124.990205709607
             },
             {
-              "seconds": 0.018903832999058068,
+              "seconds": 0.026414500025566667,
               "one_way_payload_bytes": 16777216,
-              "goodput_mbps": 7100.027174736878
+              "goodput_mbps": 5081.214025254701
             }
           ]
         },
         "median_mbps": {
-          "plain": 5114.412077681114,
-          "checked": 4967.198835535327
+          "plain": 4864.759647966304,
+          "checked": 5094.156022083759
         },
-        "checked_to_plain_ratio": 0.9712159990415684
+        "checked_to_plain_ratio": 1.0471547189825408
       },
       {
         "connections": 4,
         "samples": {
           "plain": [
             {
-              "seconds": 0.048984625027514994,
+              "seconds": 0.050054458959493786,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 10959.988194222902
+              "goodput_mbps": 10725.735991561889
             },
             {
-              "seconds": 0.05419654096476734,
+              "seconds": 0.0482696249964647,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 9905.99957936457
+              "goodput_mbps": 11122.334429557322
             },
             {
-              "seconds": 0.04764087498188019,
+              "seconds": 0.046445832995232195,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 11269.123671725056
+              "goodput_mbps": 11559.075968238345
             },
             {
-              "seconds": 0.04836170800263062,
+              "seconds": 0.04874483298044652,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 11101.15697259487
+              "goodput_mbps": 11013.904021691082
             }
           ],
           "checked": [
             {
-              "seconds": 0.048828332975972444,
+              "seconds": 0.04981383302947506,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 10995.069445933872
+              "goodput_mbps": 10777.546704392958
             },
             {
-              "seconds": 0.04876487498404458,
+              "seconds": 0.05163412500405684,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 11009.377388451405
+              "goodput_mbps": 10397.598719021938
             },
             {
-              "seconds": 0.04875029198592529,
+              "seconds": 0.048187042004428804,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 11012.670696516037
+              "goodput_mbps": 11141.395895408083
             },
             {
-              "seconds": 0.04801987501559779,
+              "seconds": 0.04981158301234245,
               "one_way_payload_bytes": 67108864,
-              "goodput_mbps": 11180.181369185444
+              "goodput_mbps": 10778.033532220259
             }
           ]
         },
         "median_mbps": {
-          "plain": 11030.572583408886,
-          "checked": 11011.024042483721
+          "plain": 11068.119225624203,
+          "checked": 10777.79011830661
         },
-        "checked_to_plain_ratio": 0.9982277854773769
+        "checked_to_plain_ratio": 0.9737688850834347
       }
     ],
     "strict_restart": {
       "ttl_ms": 30000,
       "initial_recovery_wait_ms": 29950,
-      "fresh_health_after_restart_seconds": 31.267070708039682
+      "fresh_health_after_restart_seconds": 31.299173292005435
     },
     "parameters": {
       "rounds": 4,
@@ -2420,13 +2473,15 @@
       "downstream relay probe metering verified separately by Rust mTLS/WSS test"
     ]
   },
-  "regression_before_fix_file": "docs/regression-agent-abort-before-fix-0.13.0.txt",
-  "regression_before_fix_scope": "An intermediate 0.13.0 candidate before Engine drop cancellation; the active TCP connection survived Agent task abort. The regression passes after the fix. Not a test of the shipped 0.12.0 binary.",
+  "regression_before_fix_file": "docs/regression-budget-recovery-ledger-before-fix-0.14.0.txt",
+  "regression_before_fix_scope": "An unpublished 0.14.0 candidate omitted the ledger ownership check when recovering a pending grant. A deliberately conflicting ledger reproduced the error; the check now rejects it atomically. This new endpoint did not exist in shipped 0.13.0.",
+  "final_recovery_diagnostics_before_fix_file": "docs/regression-budget-recovery-final-stats-before-fix-0.14.0.txt",
+  "final_recovery_diagnostics_before_fix_scope": "Unpublished 0.14.0 candidate cleared the recovery result in the final stopped heartbeat. Existing HTTP/Agent test gained a failing assertion; final implementation preserves the stopped snapshot. Release fixture also asserts preservation.",
   "node_execution_lease_file": "docs/node-leases-smoke.json",
   "node_execution_lease": {
-    "at_utc": "2026-10-24T08:02:53.581030+00:00",
-    "version": "relay 0.13.0",
-    "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+    "at_utc": "2026-10-24T09:11:26.910905+00:00",
+    "version": "relay 0.14.0",
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
     "machine": "arm64",
     "python": "3.14.4",
@@ -2437,8 +2492,8 @@
     },
     "clean_handoff": {
       "generation": 2,
-      "clone_wait_seconds": 6.150461292010732,
-      "clean_takeover_seconds": 0.46273004199611023,
+      "clone_wait_seconds": 6.131114125018939,
+      "clean_takeover_seconds": 0.44748891599010676,
       "copied_snapshot_bytes": 3168,
       "controller_bytes": 30912,
       "agent_bytes": 30912,
@@ -2451,7 +2506,7 @@
     "control_loss": {
       "generation": 3,
       "agent_exit_code": 1,
-      "agent_exit_after_control_stop_seconds": 4.336841415963136,
+      "agent_exit_after_control_stop_seconds": 4.366921708045993,
       "tcp_connection_closed": true,
       "tcp_listener_closed": true,
       "udp_echo_stopped": true,
@@ -2464,18 +2519,69 @@
     },
     "all_child_processes_exited": true
   },
+  "budget_run_recovery_file": "docs/budget-recovery-smoke.json",
+  "budget_run_recovery": {
+    "at_utc": "2026-10-24T09:11:14.999468+00:00",
+    "version": "relay 0.14.0",
+    "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "python": "3.14.4",
+    "scope": "real SIGKILL; separate local Release processes; original Agent and controller databases; TCP/UDP; single controller; not physical power loss or snapshot completeness",
+    "policy": {
+      "ttl_ms": 5000,
+      "shared_limit_bytes": 65536,
+      "quantum_bytes": 65536
+    },
+    "kill_boundary": {
+      "agent_exit_code": -9,
+      "offline_payload_seconds": 0.006067416979931295,
+      "controller_confirmed_bytes": 256,
+      "agent_durable_bytes": 24832,
+      "unreported_bytes": 24576,
+      "controller_outstanding_bytes": 65280
+    },
+    "recovery": {
+      "seconds_from_controller_restart": 5.203360957966652,
+      "generation": 2,
+      "same_durable_run": true,
+      "listeners_waited": true,
+      "stats": {
+        "run_id": "121866a6-d652-4f2c-9907-167d927e001b",
+        "at_ms": 1792833074453,
+        "validated_grants": 1,
+        "recovered_pending_grants": 0,
+        "cancelled_requests": 0,
+        "open_grants": 1
+      },
+      "consumed_bytes_after_recovery": 24832,
+      "diagnostics_preserved_after_stop": true
+    },
+    "ledger": {
+      "expected_bytes": 65536,
+      "agent_bytes": 65536,
+      "controller_bytes": 65536,
+      "budget_consumed_bytes": 65536,
+      "budget_committed_bytes": 65536,
+      "open_reservations_after_stop": 0,
+      "extra_payload_rejected": true,
+      "exact_match": true
+    },
+    "all_child_processes_exited": true
+  },
   "verified_capabilities": [
-    "HTTP-created nodes default to strict 30-second execution leases; explicit and legacy offline policies retained",
-    "Single-controller grant/renew/release, monotonic expiry, persisted identity/hash and conservative cold-start quarantine",
-    "Transactional proof fencing of reconcile, single/batched sync and budget run before writes",
-    "Concurrent claims, non-extending idempotent acquisition, stale proofs and failed commits verified",
-    "Agent deadline monitoring independent of stalled HTTP bodies, with conservative request/clock margins",
-    "New ownership precedes budget run mutation, reconciliation and listener activation",
-    "Copied state waits through renewals and takes over after clean settlement without duplicate usage",
-    "Agent task abort cancels data-plane listeners/connections; ownership is not prematurely released",
-    "Strict offline restart keeps cached listeners closed until reacquisition; controller restart uses full TTL quarantine",
-    "Release processes verify TCP/UDP clean handoff, shared budget settlement and stopped-control deadline exit",
-    "All pre-existing TCP/UDP, mTLS, WS/WSS, PROXY, topology, health, multipath, ledger, quota and recovery checks retained"
+    "Strict-node original-state budget run resumes only after continuous controller ownership is verified",
+    "Every resumed process obtains a new random execution token and higher generation; run_id may persist",
+    "Managed Agent backups remove resume eligibility without modifying the live original database",
+    "Intervening takeover forces a fresh budget run while unknown old reservations remain committed",
+    "Preactivation checks bind retained and pending grants to node, run, budget, request and reconciled ledger",
+    "Local consumption is bounded by allocation and must not be below controller confirmation",
+    "Lost recovery responses retry idempotently; pending requests recover existing grants or cancel without new allocation",
+    "Failed preactivation recovery keeps listeners closed and does not refund unverified reservations",
+    "Read-only tenant-scoped reservation inventory uses 100-item keyset pages and exposes no lease secrets",
+    "Recovery diagnostics report preactivation results and persist in the final stopped heartbeat; UI syntax checked, browser interaction pending",
+    "Release SIGKILL fixture recovers 24576 unreported TCP/UDP bytes, consumes exactly 65536 total, and rejects excess payload",
+    "All pre-existing TCP/UDP, mTLS, WS/WSS, PROXY, topology, health, multipath, leases, quotas and recovery regressions retained"
   ],
   "not_verified_or_pending": [
     "Linux servers, real interfaces/routing and Linux UDP packet-info; user will supply OS, architecture and node count",
@@ -2483,13 +2589,13 @@
     "Real multi-WAN paths, RTT/loss matrix, kernel MPTCP, automatic subflow rejoin and latency-adaptive scheduling",
     "Independent multipath server fixture or third-party proprietary protocol interoperability",
     "High concurrency, long-duration load, maximum throughput, 72-hour stability or same-condition competitor comparisons",
-    "Multi-controller consensus, live node policy migration, credential rotation, anomalous reservation recovery, global fairness/rates and full disaster recovery",
+    "Multi-controller consensus, live node policy migration, credential rotation, recovery of reservations with unknown consumption or arbitrary snapshot rollback, global fairness/rates and full disaster recovery",
     "Historical metrics, controller HA, log rotation/offsite storage, key migration and signed Linux release packages",
     "Remaining 22-module requirements including protocols, commerce, subscriptions, NAT/WireGuard, DNS and sharing"
   ],
   "historical_performance_references": [
     {
-      "file": "docs/VALIDATION-0.12.0.md",
+      "file": "docs/VALIDATION-0.13.0.md",
       "scope": "Shipped historical version; source and evidence archived separately."
     },
     {

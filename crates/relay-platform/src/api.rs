@@ -5,7 +5,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, DefaultBodyLimit, Path, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -152,6 +152,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/usage", get(usage))
         .route("/api/v1/budgets", get(budgets).post(create_budget))
         .route("/api/v1/budgets/{id}", axum::routing::put(update_budget))
+        .route(
+            "/api/v1/budgets/{id}/reservations",
+            get(budget_reservations),
+        )
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/recovery", get(recovery_status))
         .route("/api/v1/control/metrics", get(control_metrics))
@@ -167,6 +171,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agent/enroll", post(enroll))
         .route("/api/v1/agent/lease", post(exchange_lease))
         .route("/api/v1/agent/lease/release", post(release_lease))
+        .route("/api/v1/agent/budgets/recover", post(recover_agent_budget))
         .route("/api/v1/agent/reconcile", post(reconcile))
         .route("/api/v1/agent/sync", post(sync))
         .route(
@@ -526,6 +531,16 @@ async fn release_lease(
     database(state.store, move |db| db.release_lease(&token, input)).await?;
     Ok(Json(serde_json::json!({"released":true})))
 }
+async fn recover_agent_budget(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::budget::BudgetRecoveryRequest>,
+) -> ApiResult<crate::budget::BudgetReply> {
+    let token = bearer(&headers)?;
+    Ok(Json(
+        database(state.store, move |db| db.recover_budget_run(&token, input)).await?,
+    ))
+}
 async fn sync(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -567,7 +582,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
 }
@@ -596,6 +611,24 @@ async fn budgets(
 ) -> ApiResult<BudgetOverview> {
     Ok(Json(
         database(state.store, move |db| db.budgets(&actor)).await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReservationQuery {
+    after: Option<String>,
+}
+async fn budget_reservations(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Query(query): Query<ReservationQuery>,
+) -> ApiResult<crate::budget::ReservationPage> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.budget_reservations(&actor, &id, query.after.as_deref())
+        })
+        .await?,
     ))
 }
 async fn create_budget(

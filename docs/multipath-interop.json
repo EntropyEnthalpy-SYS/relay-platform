@@ -1,7 +1,7 @@
 {
-  "at_utc": "2026-10-24T08:03:38.855783+00:00",
-  "version": "relay 0.13.0",
-  "binary_sha256": "ce60c49a14ec7399ee66abc6132b6ac4f76d413c2f8aafcdd79c0eb81c8c59dc",
+  "at_utc": "2026-10-24T09:11:30.475809+00:00",
+  "version": "relay 0.14.0",
+  "binary_sha256": "1854781b56d049649adde1150d09913a9c85f880b76655e285e441dd3d69d37b",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "python": "3.14.4",
   "tls": "OpenSSL 3.0.19 27 Jan 2026",
@@ -18,7 +18,7 @@
       "mode": "replicate",
       "payload_bytes_each_direction": 49591,
       "sent_duplicate_bytes": 19,
-      "received_duplicate_bytes": 32403,
+      "received_duplicate_bytes": 49591,
       "out_of_order_and_half_close": "verified",
       "sha256": "d94913479c6b277781962fb03353ba95930851859bd024df7028fa21288daf88"
     }

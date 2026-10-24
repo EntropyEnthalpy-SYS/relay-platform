@@ -62,6 +62,7 @@ pub(super) struct AgentLease {
     stop: CancellationToken,
     worker: Option<JoinHandle<()>>,
     window: Option<Arc<Mutex<Window>>>,
+    pub resuming_budget: bool,
 }
 impl Drop for AgentLease {
     fn drop(&mut self) {
@@ -79,6 +80,7 @@ impl AgentLease {
             stop: CancellationToken::new(),
             worker: None,
             window: None,
+            resuming_budget: false,
         }
     }
     pub fn ensure_live(&self) -> Result<()> {
@@ -99,9 +101,11 @@ impl AgentLease {
         credential: &Credential,
         store: &Store,
         run_id: &str,
+        resume_generation: Option<u64>,
         stop: &CancellationToken,
     ) -> Result<Option<Self>> {
-        let request = LeaseRequest {
+        let mut request = LeaseRequest {
+            resume_generation,
             run_id: run_id.into(),
             token: secret(),
             generation: None,
@@ -119,6 +123,11 @@ impl AgentLease {
                     .send()
                     .await?;
                 let status = response.status();
+                if status == reqwest::StatusCode::PRECONDITION_FAILED
+                    && request.resume_generation.is_some()
+                {
+                    return Err(ResumeInterrupted.into());
+                }
                 if status == reqwest::StatusCode::LOCKED
                     || status.is_server_error()
                     || status == reqwest::StatusCode::TOO_MANY_REQUESTS
@@ -156,18 +165,28 @@ impl AgentLease {
                     };
                     store.set_metadata("agent_lease_mode", "strict")?;
                     let proof = LeaseProof {
-                        run_id: run_id.into(),
+                        run_id: request.run_id.clone(),
                         generation: reply.generation.unwrap(),
                         token: request.token.clone(),
                     };
-                    return Ok(Some(Self::start(
+                    let mut lease = Self::start(
                         client.clone(),
                         base.clone(),
                         credential.token.clone(),
                         proof,
                         window,
                         reply.ttl_ms,
-                    )));
+                    );
+                    lease.resuming_budget = request.resume_generation.is_some();
+                    return Ok(Some(lease));
+                }
+                Err(error) if error.is::<ResumeInterrupted>() => {
+                    tracing::warn!(
+                        "budget ownership continuity was interrupted; isolating prior reservations"
+                    );
+                    request.run_id = uuid::Uuid::new_v4().to_string();
+                    request.token = secret();
+                    request.resume_generation = None;
                 }
                 Err(error)
                     if error.is::<ReconcileRetry>()
@@ -229,6 +248,7 @@ impl AgentLease {
                             .post(base.join("api/v1/agent/lease")?)
                             .bearer_auth(&token)
                             .json(&LeaseRequest {
+                                resume_generation: None,
                                 run_id: renewal.run_id.clone(),
                                 token: renewal.token.clone(),
                                 generation: Some(renewal.generation),
@@ -290,6 +310,7 @@ impl AgentLease {
             stop,
             worker: Some(worker),
             window: Some(current_window),
+            resuming_budget: false,
         }
     }
     pub async fn release(
@@ -314,6 +335,15 @@ impl AgentLease {
         Ok(())
     }
 }
+
+#[derive(Debug)]
+struct ResumeInterrupted;
+impl std::fmt::Display for ResumeInterrupted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("budget run ownership continuity was interrupted")
+    }
+}
+impl std::error::Error for ResumeInterrupted {}
 
 #[cfg(test)]
 mod tests {

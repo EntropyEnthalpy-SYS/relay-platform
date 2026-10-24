@@ -9,6 +9,7 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
+mod budget_recovery;
 mod lease_client;
 
 pub struct AgentOptions {
@@ -124,15 +125,37 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         credential.pending_enrollment_token = None;
         store.set_metadata("agent_credential", &serde_json::to_string(&credential)?)?;
     }
-    let budget_run = uuid::Uuid::new_v4().to_string();
-    let Some(lease) =
-        lease_client::AgentLease::acquire(&client, &base, &credential, &store, &budget_run, &stop)
-            .await?
+    let resume = store.budget_resume_candidate()?;
+    let proposed_run = resume
+        .as_ref()
+        .map(|r| r.0.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let Some(lease) = lease_client::AgentLease::acquire(
+        &client,
+        &base,
+        &credential,
+        &store,
+        &proposed_run,
+        resume.map(|r| r.1),
+        &stop,
+    )
+    .await?
     else {
         return Ok(());
     };
     lease.ensure_live()?;
-    store.begin_budget_run(&budget_run)?;
+    let budget_run = lease
+        .proof
+        .as_ref()
+        .map(|p| p.run_id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if lease.resuming_budget {
+        store.resume_budget_run(&budget_run, lease.proof.as_ref().unwrap().generation)?;
+    } else {
+        store.begin_budget_run_mode(&budget_run, lease.proof.as_ref().map(|p| p.generation))?;
+    }
+    let mut resume_pending = lease.resuming_budget;
+    let mut budget_recovery = None;
     let engine = Arc::new(Engine::with_tls_directory(
         store.clone(),
         options.tls_directory,
@@ -153,6 +176,19 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 };
                 match result {
                     Ok(config) => {
+                        if resume_pending {
+                            budget_recovery = Some(
+                                budget_recovery::recover(
+                                    &client,
+                                    &base,
+                                    &credential,
+                                    &store,
+                                    &lease,
+                                )
+                                .await?,
+                            );
+                            resume_pending = false;
+                        }
                         reconciled = true;
                         lease.ensure_live()?;
                         match engine.apply(config).await {
@@ -184,6 +220,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 }
                 if !reconciled {
                     if !active
+                        && !resume_pending
                         && !store.recovery_required()?
                         && let Some(cached) = store.agent_config()?
                     {
@@ -232,7 +269,11 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 applied_revision: engine.revision().await,
                 apply_error: apply_error.clone(),
                 usage,
-                stats: engine.stats(),
+                stats: {
+                    let mut stats = engine.stats();
+                    stats.budget_recovery = budget_recovery.clone();
+                    stats
+                },
             };
             let response = tokio::select! {
                 biased;
@@ -329,6 +370,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 }
             }
             if !active
+                && !resume_pending
                 && !store.recovery_required()?
                 && let Some(cached) = store.agent_config()?
             {
@@ -376,7 +418,15 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         result=forwarding=>result,
     };
     engine.shutdown().await?;
+    if resume_pending {
+        tracing::warn!(
+            "budget recovery did not complete; retained reservations preserved without settlement or release"
+        );
+        return result;
+    }
     store.seal_budget_run(&budget_run)?;
+    let mut stopped_stats = engine.stats();
+    stopped_stats.budget_recovery = budget_recovery;
     let cleanup = async {
         let mut reported_stopped = false;
         loop {
@@ -400,7 +450,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 applied_revision: engine.revision().await,
                 apply_error: apply_error.clone(),
                 usage,
-                stats: engine.stats(),
+                stats: stopped_stats.clone(),
             };
             let response = client
                 .post(base.join("api/v1/agent/sync")?)
@@ -421,7 +471,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         if !matches!(
             tokio::time::timeout(
                 Duration::from_secs(2),
-                lease.release(&client, &base, &credential, engine.stats())
+                lease.release(&client, &base, &credential, stopped_stats)
             )
             .await,
             Ok(Ok(()))

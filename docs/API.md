@@ -23,6 +23,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | POST | `/tenants` | `{name}`；仅系统管理员 |
 | GET | `/usage` | 最近 2,000 条已上报的规则/周期累计记录，不是全库聚合接口 |
 | GET / POST | `/budgets` | 返回 `{allocation_paused,budgets}`；创建 `{scope,scope_id,name,limit_bytes,quantum_bytes}` |
+| GET | `/budgets/{id}/reservations` | 按所属租户只读分页查看开放预留；可选 `after` 游标，每页最多 100 条 |
 | PUT | `/budgets/{id}` | `{expected_revision,limit_bytes,quantum_bytes}`；修改额度，不清零用量 |
 | GET | `/audit` | 最近 200 条全局审计；仅系统管理员 |
 | GET | `/recovery` | `{enabled,healthy,head}`；仅系统管理员，读取控制器恢复日志状态 |
@@ -30,6 +31,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/capabilities` | 实现能力与待实现能力目录，不代表完整发布验收 |
 | POST | `/agent/enroll` | `{node_id,enrollment_token,credential}`；返回 `{enrolled:true}` |
 | POST | `/agent/reconcile` | 节点凭据认证；分页获取权威用量下限和相同修订的配置 |
+| POST | `/agent/budgets/recover` | 严格节点在开启监听前验证原状态预留、补报消费和处理待确认请求 |
 | POST | `/agent/sync` | 节点凭据认证，上报用量/状态并获取期望配置 |
 
 注册时 Agent 先在本地生成并持久化独立 `credential`，然后请求控制器绑定。一次性令牌只允许首次绑定；相同已绑定凭据可以重试确认，原注册令牌不能绑定第二个凭据。控制器不需要保存可还原的节点秘密。Node 注册后的令牌复制或凭据轮换属于后续身份生命周期功能。
@@ -147,3 +149,13 @@ HTTP 创建节点时省略 lease_policy 默认严格 30 秒；对象 {"ttl_ms":5
 Agent 的 POST /agent/lease 接收 run_id、随机 token、generation；generation=null 申请，当前代数续租。POST /agent/lease/release 接收 proof 与零活跃 stats。均使用节点 Bearer。严格节点的同步/对账请求必须增加 lease={run_id,generation,token}，预算 run_id 必须一致。缺少证明返回 423，过期或不匹配返回 409；不改变此前账本去重口径。
 
 能力目录新增 node-execution-leases。详细字段、截止期、恢复等待、异常退出及先升级控制器的约定见 [NODE_LEASES.md](NODE_LEASES.md)。schema 仍为 v4，不代表可以直接将正在使用严格模式的控制器降级。
+
+## 0.14.0 原状态额度恢复与预留明细
+
+POST /agent/lease 新增可选 resume_generation；只有 generation=null 且原 run_id/代数仍是控制器最后持有者时才允许恢复领取。历史不连续返回 412，Agent 使用新的 run_id 和 token 申请普通租约，旧预留保守保留。
+
+POST /agent/budgets/recover 仅接受节点 Bearer，输入为 {lease,ledger_id,run_id,claims,requests}。claims 每项为 {grant,consumed_bytes,sealed}，grant 仍为完整的 {grant_id,budget_id,request_id,run_id,bytes}；requests 使用原 GrantRequest。每项请求最多 512 份 claim 和 512 个待确认请求，仍受 2 MiB HTTP 上限约束。它要求有效严格租约、此次所有权具有恢复来源、匹配对账账本、未隔离的控制器和连续的消费边界。全部本页校验通过才在一个事务内补报；返回 BudgetReply，不发放新的预留。已发放但回复丢失的请求返回原 grant，未发放的请求被取消。详见 [BUDGET_RECOVERY.md](BUDGET_RECOVERY.md)。
+
+GET /budgets/{id}/reservations?after=grant_id 使用用户会话，按预算所属租户检查权限，允许该租户只读角色。每页最多 100 条开放预留，返回 {budget_id,reservations,next}；next 为下一次 after，null 表示本页没有更多。每项包含 grant_id、node_id、node_name、run_id、allocated_bytes、confirmed_consumed_bytes、outstanding_bytes 和当前 node_lease。外租户或不存在的预算返回 404；非法游标、未知查询字段返回 400。列表为实时键集分页，多页不是同一事务快照；outstanding_bytes 包含尚未上报消费，不能直接退款。
+
+节点 stats 新增可选 budget_recovery={run_id,at_ms,validated_grants,recovered_pending_grants,cancelled_requests,open_grants}，表示本次进程启用监听前的恢复结果。open_grants 为当时仍可消费的预留数量，不是当前余额。能力目录新增 durable-budget-run-recovery。schema v4 不变；先升级控制器，再升级 Agent，旧控制器不能直接读取新增恢复租约元数据或接收新诊断字段。

@@ -54,6 +54,9 @@ pub struct LeaseRequest {
     pub token: String,
     /// None acquires (or recovers a lost acquisition response); Some renews.
     pub generation: Option<u64>,
+    /// Resume only an uninterrupted durable budget run from this prior owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_generation: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

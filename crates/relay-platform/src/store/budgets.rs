@@ -1,4 +1,5 @@
 use super::*;
+mod recovery;
 use crate::budget::*;
 use std::collections::HashSet;
 
@@ -213,6 +214,9 @@ impl Store {
         Ok(id)
     }
     pub(crate) fn begin_budget_run(&self, id: &str) -> Result<()> {
+        self.begin_budget_run_mode(id, None)
+    }
+    pub(crate) fn begin_budget_run_mode(&self, id: &str, generation: Option<u64>) -> Result<()> {
         ensure!(identifier(id), "invalid budget run identity");
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
@@ -223,6 +227,14 @@ impl Store {
         tx.execute("DELETE FROM agent_budget_requests", [])?;
         tx.execute("DELETE FROM agent_budget_demand", [])?;
         tx.execute("INSERT INTO metadata(key,value) VALUES('agent_budget_run',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[&id])?;
+        tx.execute("DELETE FROM metadata WHERE key='agent_budget_resume'", [])?;
+        if let Some(generation) = generation {
+            ensure!(generation > 0, "invalid budget resume generation");
+            tx.execute(
+                "INSERT INTO metadata(key,value) VALUES('agent_budget_resume',?1)",
+                [serde_json::to_string(&(id, generation))?],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
