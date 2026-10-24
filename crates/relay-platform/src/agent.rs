@@ -182,7 +182,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
             }
             let db = store.clone();
             let run=budget_run.clone();
-            let stats=engine.stats();let idle=stats.active_tcp==0&&stats.active_udp==0;
+            let stats=engine.stats();let idle=stats.business_idle();
             let (usage,budget)=tokio::task::spawn_blocking(move || {
                 if idle {db.seal_budget_run(&run)?;}
                 Ok::<_,anyhow::Error>((db.agent_usage(true)?,db.budget_outbox(&run,!idle)?))
@@ -279,13 +279,18 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     engine.shutdown().await?;
     store.seal_budget_run(&budget_run)?;
     let cleanup = async {
+        let mut reported_stopped = false;
         loop {
             // Recover replies lost in flight without issuing new reservations.
             // Seal each recovered grant before returning its unused balance.
             store.seal_budget_run(&budget_run)?;
             let budget = store.budget_outbox(&budget_run, false)?;
             let usage = store.agent_usage(true)?;
-            if budget.reports.is_empty() && budget.requests.is_empty() && usage.is_empty() {
+            if reported_stopped
+                && budget.reports.is_empty()
+                && budget.requests.is_empty()
+                && usage.is_empty()
+            {
                 return Ok::<_, anyhow::Error>(());
             }
             let request = SyncRequest {
@@ -293,7 +298,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 ledger_id: store.metadata("ledger_id")?.context("missing ledger")?,
                 need_config: false,
                 applied_revision: engine.revision().await,
-                apply_error: None,
+                apply_error: apply_error.clone(),
                 usage,
                 stats: engine.stats(),
             };
@@ -306,6 +311,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 .error_for_status()?;
             let reply: SyncResponse = bounded_json(response).await?;
             store.accept_sync_reply(&budget_run, &reply.acknowledgements, reply.budget)?;
+            reported_stopped = true;
         }
     };
     if !matches!(

@@ -67,6 +67,22 @@ fn width(rule: &Rule) -> u16 {
 }
 fn compatible(source: &Rule, target: &Target, destination: &Rule) -> Result<()> {
     ensure!(
+        source.outbound_multipath.is_some() == destination.inbound_multipath.is_some(),
+        "next-hop multipath settings do not match"
+    );
+    if let (Some(client), Some(server)) =
+        (&source.outbound_multipath, &destination.inbound_multipath)
+    {
+        ensure!(
+            client.paths.len() <= usize::from(server.max_paths),
+            "next-hop multipath path limit is too small"
+        );
+        ensure!(
+            client.mode != crate::multipath::Mode::Replicate || server.allow_replication,
+            "next hop rejects multipath replication"
+        );
+    }
+    ensure!(
         (!source.protocol.tcp() || destination.protocol.tcp())
             && (!source.protocol.udp() || destination.protocol.udp()),
         "next hop does not accept the source protocol"
@@ -200,8 +216,15 @@ pub fn validate(configs: &[NodeConfig]) -> Result<Graph> {
                     .advertise
                     .as_deref()
                     .ok_or_else(|| anyhow::anyhow!("next hop has no advertised endpoint"))?;
+                let (advertised_host, advertised_port) = endpoint(advertised)?;
+                let matches = if rule.outbound_multipath.is_some() {
+                    host == advertised_host
+                        && (advertised_port..=advertised_port + width(destination)).contains(&port)
+                } else {
+                    (advertised_host, advertised_port) == (host, port)
+                };
                 ensure!(
-                    endpoint(advertised)? == (host, port),
+                    matches,
                     "target address differs from the referenced endpoint; update all affected rules together"
                 );
                 compatible(rule, target, destination)?;
@@ -275,5 +298,5 @@ pub fn participates(rule: &Rule) -> bool {
 }
 /// Weights and balancing can change without changing the directed graph.
 pub fn route_signature(rule: &Rule) -> serde_json::Value {
-    serde_json::json!({"listen":rule.listen,"listen_end_port":rule.listen_end_port,"port_mapping":rule.port_mapping,"advertise":rule.advertise,"protocol":rule.protocol,"inbound_tls":rule.inbound_tls,"inbound_proxy":rule.inbound_proxy,"inbound_websocket":rule.inbound_websocket,"outbound_bind":rule.outbound_bind,"dns_cache":rule.dns_cache,"targets":rule.targets.iter().map(|t|serde_json::json!({"address":t.address,"via":t.via,"tls":t.tls,"proxy":t.proxy_protocol,"websocket":t.websocket})).collect::<Vec<_>>()})
+    serde_json::json!({"listen":rule.listen,"listen_end_port":rule.listen_end_port,"port_mapping":rule.port_mapping,"advertise":rule.advertise,"protocol":rule.protocol,"inbound_tls":rule.inbound_tls,"inbound_proxy":rule.inbound_proxy,"inbound_websocket":rule.inbound_websocket,"inbound_multipath":rule.inbound_multipath,"outbound_multipath":rule.outbound_multipath,"outbound_bind":rule.outbound_bind,"dns_cache":rule.dns_cache,"targets":rule.targets.iter().map(|t|serde_json::json!({"address":t.address,"via":t.via,"tls":t.tls,"proxy":t.proxy_protocol,"websocket":t.websocket})).collect::<Vec<_>>()})
 }

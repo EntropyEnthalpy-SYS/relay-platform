@@ -1,0 +1,203 @@
+{
+  "at_utc": "2026-10-24T06:14:58.092121+00:00",
+  "version": "relay 0.12.0",
+  "binary_sha256": "02ef4b57ca90ab92e5ea3bd581cd59ed32fada3d7ecd0e482fc2e42c0c57a75b",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "python": "3.14.4",
+  "mode_order": "rotates each round",
+  "rounds": 3,
+  "payload_bytes_per_connection": 4194304,
+  "warmup_bytes_per_mode": 262144,
+  "topology": "one TCP application -> entry Agent -> independent capped mTLS paths -> exit Agent -> echo",
+  "configured_path_mib_per_second_each_direction": [
+    2,
+    1
+  ],
+  "shaper_block_bytes": 8192,
+  "rate_definition": "one-way verified application bytes * 8 / elapsed round-trip seconds / 1e6",
+  "samples": [
+    {
+      "mode": "single-fast",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 2.393436999991536,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 14.019350415372813
+    },
+    {
+      "mode": "stripe",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 2.1738322079763748,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 15.435612682929147
+    },
+    {
+      "mode": "replicate",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 3.387445000000298,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 9.905528207837188
+    },
+    {
+      "mode": "stripe",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 2.140871874988079,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 15.673255551636801
+    },
+    {
+      "mode": "replicate",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 2.920041208039038,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 11.491081669540401
+    },
+    {
+      "mode": "single-fast",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 2.3331556250341237,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 14.381566167284383
+    },
+    {
+      "mode": "replicate",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 2.71655087498948,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 12.35185113186218
+    },
+    {
+      "mode": "single-fast",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 2.3384229579824023,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 14.34917147279073
+    },
+    {
+      "mode": "stripe",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 1.9486719589913264,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 17.21912805548271
+    }
+  ],
+  "median_goodput_mbps": {
+    "single-fast": 14.34917147279073,
+    "stripe": 15.673255551636801,
+    "replicate": 11.491081669540401
+  },
+  "stripe_to_single_fast_ratio": 1.0922759952626417,
+  "single_connection_gain_observed": false,
+  "path_cut_same_application_connection": "all bytes verified",
+  "ledgers": [
+    {
+      "rule": "single-fast-entry",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    },
+    {
+      "rule": "single-fast-exit",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    },
+    {
+      "rule": "stripe-entry",
+      "upload_bytes": 17039360,
+      "download_bytes": 17039360,
+      "exact_match": true
+    },
+    {
+      "rule": "stripe-exit",
+      "upload_bytes": 17039360,
+      "download_bytes": 17039360,
+      "exact_match": true
+    },
+    {
+      "rule": "replicate-entry",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    },
+    {
+      "rule": "replicate-exit",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    }
+  ],
+  "node_metrics": [
+    {
+      "name": "entry",
+      "multipath": {
+        "active_sessions": 0,
+        "active_paths": 0,
+        "sessions": 14,
+        "failed_paths": 1,
+        "sent_payload_bytes": 61997056,
+        "replicated_payload_bytes": 12845056,
+        "retransmitted_payload_bytes": 6422528,
+        "received_payload_bytes": 57507840,
+        "duplicate_payload_bytes": 14778368,
+        "delivered_payload_bytes": 42729472,
+        "framing_sent_bytes": 128608,
+        "peak_reorder_bytes": 180224,
+        "peak_send_window_bytes": 1048576,
+        "path_sent_payload_bytes": [
+          33112064,
+          28884992,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "name": "exit",
+      "multipath": {
+        "active_sessions": 0,
+        "active_paths": 0,
+        "sessions": 14,
+        "failed_paths": 1,
+        "sent_payload_bytes": 62111744,
+        "replicated_payload_bytes": 12845056,
+        "retransmitted_payload_bytes": 6537216,
+        "received_payload_bytes": 57491456,
+        "duplicate_payload_bytes": 14761984,
+        "delivered_payload_bytes": 42729472,
+        "framing_sent_bytes": 127744,
+        "peak_reorder_bytes": 622592,
+        "peak_send_window_bytes": 1048576,
+        "path_sent_payload_bytes": [
+          32571704,
+          29540040,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    }
+  ],
+  "child_processes_stopped": true,
+  "limits": [
+    "synthetic Python pacing on local loopback, timer and process overhead included",
+    "same-machine Agents; no claim about independent WAN links or Linux kernel MPTCP",
+    "wire caps include TLS and relay framing, exclude IP/TCP headers",
+    "no high-concurrency, long-duration, maximum throughput or third-party comparison"
+  ]
+}

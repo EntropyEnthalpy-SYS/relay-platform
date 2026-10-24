@@ -1,8 +1,8 @@
 {
-  "at_utc": "2026-10-24T04:51:09.277256+00:00",
+  "at_utc": "2026-10-24T07:09:19.987009+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "version": "relay 0.11.0",
-  "binary_sha256": "ad9ea149cec50ab1c6c25bd26fe23b0d54cdfc88fe465fe3cd6ef299c08c0946",
+  "version": "relay 0.12.0",
+  "binary_sha256": "cdc23d66a0403d89d9908715f0770b1de45606f9a0e46ecb81a806dd90ae22f0",
   "cases": [
     {
       "transport": "both",
@@ -18,7 +18,7 @@
       "binary_half_close_verified": true,
       "restored_topology_usage_and_old_session": true,
       "restore": {
-        "journal_id": "93bef5e8-8d9c-418e-b7a6-7e872c6ca954",
+        "journal_id": "babee538-6f91-4e6b-9118-ee2778ba31b1",
         "backup_sequence": 8,
         "restored_sequence": 39,
         "replayed_transactions": 31,
@@ -40,10 +40,10 @@
       "binary_half_close_verified": true,
       "restored_topology_usage_and_old_session": true,
       "restore": {
-        "journal_id": "7f872bfc-4a3e-4294-afff-1d2f7c9bcb7d",
-        "backup_sequence": 9,
+        "journal_id": "bc59209b-64cf-437d-8a3a-a2d5b139b9be",
+        "backup_sequence": 8,
         "restored_sequence": 39,
-        "replayed_transactions": 30,
+        "replayed_transactions": 31,
         "budget_allocation_paused": false,
         "ignored_uncommitted_tail": false
       }
@@ -62,7 +62,7 @@
       "binary_half_close_verified": true,
       "restored_topology_usage_and_old_session": true,
       "restore": {
-        "journal_id": "20d21398-44ba-41b8-b453-62f625c28fee",
+        "journal_id": "84cca129-2ad9-4945-a350-0df8c0162b66",
         "backup_sequence": 8,
         "restored_sequence": 39,
         "replayed_transactions": 31,

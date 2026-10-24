@@ -1331,6 +1331,64 @@ async fn graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn graceful_shutdown_reports_zero_active_sessions_even_with_no_pending_usage() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let (node, token) = control
+        .create_node(&admin, "default", "final diagnostics")
+        .unwrap();
+    let echo = tcp_echo().await;
+    let r = rule(echo.address, Protocol::Tcp);
+    let forwarding = r.listen;
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        local.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    let connection = TcpStream::connect(forwarding).await.unwrap();
+    timeout(Duration::from_secs(3), async {
+        while control.nodes(&admin).unwrap()[0].stats.active_tcp != 1 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let occupied = TcpListener::bind(free_address()).await.unwrap();
+    let mut bad = local.agent_config().unwrap().unwrap().rules.remove(0);
+    bad.listen = occupied.local_addr().unwrap();
+    control.set_config(&admin, &node.id, 1, vec![bad]).unwrap();
+    timeout(Duration::from_secs(3), async {
+        while control.nodes(&admin).unwrap()[0].apply_error.is_none() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let apply_error = control.nodes(&admin).unwrap()[0].apply_error.clone();
+    assert!(local.agent_usage(true).unwrap().is_empty());
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(control.nodes(&admin).unwrap()[0].stats.business_idle());
+    assert!(local.agent_usage(true).unwrap().is_empty());
+    assert_eq!(control.nodes(&admin).unwrap()[0].apply_error, apply_error);
+    drop(connection);
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn journal_restore_recovers_a_post_backup_node_and_refills_its_live_tcp_session() {
     use relay_platform::{
         budget::{BudgetScope, NewBudget},

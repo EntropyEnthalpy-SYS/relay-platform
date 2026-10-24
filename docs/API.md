@@ -133,3 +133,9 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 `meter` 包含 `admission_batches,admission_requests,failed_batches,budget_wait,budget_waiting,budget_timeouts`。其中 admission_batches 与 budget_wait 是 `{samples,total_us,max_us}`。控制器 `/control/metrics` 新增相同计时结构的 `queue_time,storage_batch_time,request_time`，仍仅允许系统管理员访问。完整边界、失败采样、并发快照和计时单位见 [DIAGNOSTICS.md](DIAGNOSTICS.md)。
 
 这些数据用于运行诊断，不能替代累计业务账本或触发退款。接收同步回复时，Agent 将用量确认与预算回复在一次本地事务内提交，非法后续回执不会提前确认前面的用量；失败请求可按原身份重试。
+
+## 0.12.0 多路径字段与诊断
+
+规则增加 inbound_multipath / outbound_multipath，参数、默认值及窗口/方向限制见 [MULTIPATH.md](MULTIPATH.md)。继续使用现有单节点配置、多节点预览/发布、历史和回滚接口及权限，没有旁路接口或私钥上传。已声明路径必须通向同一汇聚规则，匹配 mTLS/WS/PROXY、路径上限与复制授权；固定端口段可引用其段内端口。
+
+节点 stats.multipath 提供本次进程聚合会话、子流、负载、复制、重传、重复接收及窗口峰值，8 个槽位在节点各规则间汇总；旧报告没有此字段时视为缺失。排空要求聚合会话/子流也为零。新增诊断会使旧控制器拒绝新 Agent，应先升级控制器。节点有序停止会至少尝试一次最终状态同步，保留最近配置应用错误；超时不意味着服务器已确认。

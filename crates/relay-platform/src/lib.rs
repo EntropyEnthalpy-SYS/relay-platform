@@ -7,6 +7,7 @@ pub mod health;
 pub mod journal;
 pub mod metrics;
 pub mod model;
+pub mod multipath;
 mod network;
 pub mod proxy;
 mod routing;

@@ -1,0 +1,22 @@
+   Compiling relay-platform v0.12.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.57s
+     Running tests/control_agent.rs (target/debug/deps/control_agent-60145c1fd3dd3760)
+
+running 1 test
+test graceful_shutdown_reports_zero_active_sessions_even_with_no_pending_usage ... FAILED
+
+failures:
+
+---- graceful_shutdown_reports_zero_active_sessions_even_with_no_pending_usage stdout ----
+
+thread 'graceful_shutdown_reports_zero_active_sessions_even_with_no_pending_usage' (4824333) panicked at crates/relay-platform/tests/control_agent.rs:1360:5:
+assertion failed: control.nodes(&admin).unwrap()[0].stats.business_idle()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    graceful_shutdown_reports_zero_active_sessions_even_with_no_pending_usage
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.41s
+
+error: test failed, to rerun pass `--test control_agent`

@@ -169,6 +169,64 @@ fn preview_is_read_only_and_batch_publish_preserves_history_and_edges() {
 }
 
 #[test]
+fn multipath_sessions_and_paths_must_drain_even_after_physical_tcp_count_reaches_zero() {
+    let mut f = Fixture::new();
+    f.publish();
+    f.enroll();
+    f.acknowledge(0);
+    for c in &mut f.configs {
+        c.rules[0].enabled = false;
+    }
+    f.publish();
+    f.acknowledge(0);
+    let mut enabled = f.configs.clone();
+    for c in &mut enabled {
+        c.rules[0].enabled = true;
+    }
+    let first = &f.configs[0];
+    let page = f
+        .store
+        .reconcile(
+            &first.node_id,
+            ReconcileRequest {
+                ledger_id: None,
+                after: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+    for (sessions, paths) in [(1, 0), (0, 1)] {
+        f.store
+            .sync(
+                &first.node_id,
+                SyncRequest {
+                    budget: None,
+                    ledger_id: page.ledger_id.clone(),
+                    need_config: false,
+                    applied_revision: first.revision,
+                    apply_error: None,
+                    usage: vec![],
+                    stats: EngineStats {
+                        multipath: Some(relay_platform::multipath::Stats {
+                            active_sessions: sessions,
+                            active_paths: paths,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            rejection(f.store.publish_configs(&f.admin, batch(&enabled))),
+            409
+        );
+    }
+    f.acknowledge(0);
+    f.store.publish_configs(&f.admin, batch(&enabled)).unwrap();
+}
+
+#[test]
 fn stale_last_node_and_invalid_reference_do_not_partially_publish() {
     let f = Fixture::new();
     let mut input = batch(&f.configs);

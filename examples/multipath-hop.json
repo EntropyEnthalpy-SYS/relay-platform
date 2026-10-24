@@ -1,0 +1,48 @@
+{
+  "api_version": 1,
+  "node_id": "standalone-multipath",
+  "revision": 1,
+  "rules": [
+    {
+      "id": "mp-entry",
+      "tenant_id": "default",
+      "owner_id": "admin",
+      "name": "TCP to two authenticated subflows",
+      "listen": "127.0.0.1:19101",
+      "protocol": "tcp",
+      "targets": [
+        {"address": "127.0.0.1:19102", "weight": 1, "tls": {"server_name": "localhost", "ca": "root", "identity": "client"}},
+        {"address": "127.0.0.1:19103", "weight": 1, "tls": {"server_name": "localhost", "ca": "root", "identity": "client"}}
+      ],
+      "outbound_multipath": {
+        "mode": "stripe",
+        "min_paths": 2,
+        "limits": {"window_frames": 64, "max_sessions": 8, "retransmit_ms": 500, "stall_timeout_ms": 30000},
+        "paths": [
+          {"upload_weight": 1, "download_weight": 1},
+          {"upload_weight": 1, "download_weight": 1}
+        ]
+      },
+      "meter_epoch": "initial-period",
+      "allow_sources": ["127.0.0.0/8"]
+    },
+    {
+      "id": "mp-exit",
+      "tenant_id": "default",
+      "owner_id": "admin",
+      "name": "Authenticated aggregation to TCP",
+      "listen": "127.0.0.1:19102",
+      "listen_end_port": 19103,
+      "protocol": "tcp",
+      "inbound_tls": {"identity": "server", "client_ca": "root"},
+      "inbound_multipath": {
+        "max_paths": 2,
+        "allow_replication": false,
+        "limits": {"window_frames": 64, "max_sessions": 8, "retransmit_ms": 500, "stall_timeout_ms": 30000}
+      },
+      "targets": [{"address": "127.0.0.1:19100", "weight": 1}],
+      "meter_epoch": "initial-period",
+      "allow_sources": ["127.0.0.0/8"]
+    }
+  ]
+}

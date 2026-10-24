@@ -177,32 +177,49 @@ pub(crate) fn outbound_udp(bind: Option<&OutboundBind>, ipv4: bool) -> Result<Ud
 }
 
 pub(crate) fn preflight(rule: &Rule) -> Result<()> {
-    let Some(bind) = &rule.outbound_bind else {
-        return Ok(());
-    };
+    if let Some(bind) = &rule.outbound_bind {
+        preflight_bind(
+            bind,
+            &rule
+                .targets
+                .iter()
+                .map(|t| t.address.as_str())
+                .collect::<Vec<_>>(),
+            rule.protocol.tcp(),
+            rule.protocol.udp(),
+        )?;
+    }
+    if let Some(spec) = &rule.outbound_multipath {
+        for (path, target) in spec.paths.iter().zip(&rule.targets) {
+            if let Some(bind) = &path.outbound_bind {
+                preflight_bind(bind, &[&target.address], true, false)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn preflight_bind(bind: &OutboundBind, addresses: &[&str], tcp: bool, udp: bool) -> Result<()> {
     let families = if let Some(ip) = bind.ip {
         vec![ip.is_ipv4()]
-    } else if rule
-        .targets
+    } else if addresses
         .iter()
-        .any(|t| t.address.parse::<SocketAddr>().is_err())
+        .any(|address| address.parse::<SocketAddr>().is_err())
     {
         vec![true, false]
     } else {
-        let mut families: Vec<_> = rule
-            .targets
+        let mut families: Vec<_> = addresses
             .iter()
-            .map(|t| canonical_address(t.address.parse().unwrap()).is_ipv4())
+            .map(|address| canonical_address(address.parse().unwrap()).is_ipv4())
             .collect();
         families.sort();
         families.dedup();
         families
     };
     for ipv4 in families {
-        if rule.protocol.tcp() {
+        if tcp {
             tcp_socket(Some(bind), ipv4)?;
         }
-        if rule.protocol.udp() {
+        if udp {
             outbound_udp(Some(bind), ipv4)?;
         }
     }

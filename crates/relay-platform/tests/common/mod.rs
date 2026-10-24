@@ -27,6 +27,8 @@ pub fn free_address() -> SocketAddr {
 }
 pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
     Rule {
+        inbound_multipath: None,
+        outbound_multipath: None,
         health_check: None,
         budget_ids: vec![],
         id: "rule-one".into(),

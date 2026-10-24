@@ -3,14 +3,16 @@ use crate::{
     health::{self, HealthSet, Observation},
     metrics::{MeterStats, Timing},
     model::*,
+    multipath,
     network::{self, TargetResolver},
     proxy::{self, ConnectionInfo},
     routing::{Endpoint as ListenerKey, LoopGuard, Routes, Topology, local_ips},
     store::{Admission, AdmissionDecision, Store},
-    transport::{BoxStream, PreparedTls},
+    transport::{self, BoxStream, PreparedTls},
     websocket,
 };
 use anyhow::{Context, Result, bail, ensure};
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -37,6 +39,7 @@ const UDP_QUEUE: usize = 4;
 
 #[derive(Default)]
 struct Counters {
+    multipath: Arc<multipath::Counters>,
     active_probes: AtomicU64,
     active_tcp: AtomicU64,
     active_udp: AtomicU64,
@@ -50,6 +53,7 @@ struct Counters {
 impl Counters {
     fn snapshot(&self) -> EngineStats {
         EngineStats {
+            multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),
             target_health: vec![],
@@ -337,6 +341,8 @@ impl Drop for TargetGuard {
 }
 
 struct RuntimeRule {
+    multipath_server: Option<Arc<multipath::Server>>,
+    multipath_client: Option<Arc<Semaphore>>,
     health: Option<Arc<HealthSet>>,
     spec: Rule,
     resolver: Arc<TargetResolver>,
@@ -358,6 +364,14 @@ impl RuntimeRule {
         let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(spec.rate_bytes_per_sec)));
         let target_active = shared.target_counters(&spec.targets);
         Self {
+            multipath_server: spec
+                .inbound_multipath
+                .clone()
+                .map(|s| Arc::new(multipath::Server::new(s))),
+            multipath_client: spec
+                .outbound_multipath
+                .as_ref()
+                .map(|s| Arc::new(Semaphore::new(usize::from(s.limits.max_sessions)))),
             health: HealthSet::new(&spec),
             spec,
             resolver,
@@ -496,6 +510,7 @@ fn start_health(
         let point = point.clone();
         let slots = slots.clone();
         let stats = stats.clone();
+        let probe_tasks = tasks.clone();
         tasks.spawn(async move {
             let policy=rule.spec.health_check.as_ref().unwrap();
             let mut interval=tokio::time::interval(Duration::from_millis(policy.interval_ms));
@@ -505,7 +520,7 @@ fn start_health(
                 let permit=tokio::select!{biased;_=stop.cancelled()=>break,permit=slots.clone().acquire_owned()=>match permit{Ok(p)=>p,Err(_)=>break}};
                 stats.active_probes.fetch_add(1,Ordering::Relaxed);let guard=ProbeGuard(stats.clone());
                 let began=Instant::now();
-                let result=tokio::select!{biased;_=stop.cancelled()=>break,result=tokio::time::timeout(Duration::from_millis(policy.timeout_ms),probe_target(&rule,key,&point))=>result};
+                let result=tokio::select!{biased;_=stop.cancelled()=>break,result=tokio::time::timeout(Duration::from_millis(policy.timeout_ms),probe_target(&rule,key,&point,&stats,&probe_tasks))=>result};
                 let outcome=match result{Ok(Ok(()))=>Ok(began.elapsed().as_micros().min(u128::from(u64::MAX)) as u64),Ok(Err(error))=>Err(error),Err(_)=>Err(health::Failure::Timeout)};
                 point.observe(outcome);drop(guard);drop(permit);
             }
@@ -516,6 +531,8 @@ async fn probe_target(
     rule: &RuntimeRule,
     key: health::Key,
     point: &Observation,
+    stats: &Counters,
+    tasks: &TaskTracker,
 ) -> std::result::Result<(), health::Failure> {
     use health::{Failure as F, StreamProbe};
     if rule.spec.expires_at_ms.is_some_and(|at| at <= now_ms()) {
@@ -536,9 +553,42 @@ async fn probe_target(
     for address in addresses {
         let result = async {
             if key.tcp {
-                let (mut stream, _route) = open_tcp_target(rule, key.index, address, inlet, None)
+                let (stream, route) = open_tcp_target(rule, key.index, address, inlet, None)
                     .await
                     .map_err(|_| F::Transport)?;
+                let mut stream = transport::hold(stream, route);
+                if rule.spec.outbound_multipath.is_some() {
+                    let spec = multipath::ClientConfig {
+                        limits: multipath::Limits {
+                            window_frames: 4,
+                            max_sessions: 1,
+                            ..Default::default()
+                        },
+                        mode: multipath::Mode::Stripe,
+                        min_paths: 1,
+                        paths: vec![],
+                    };
+                    let (session, path) = multipath::Client::create(
+                        multipath::Path {
+                            stream,
+                            slot: key.index,
+                            send_weight: 1,
+                            receive_weight: 1,
+                        },
+                        &spec,
+                    )
+                    .await
+                    .map_err(|_| F::Transport)?;
+                    stream = session
+                        .finish(
+                            vec![path],
+                            stats.multipath.clone(),
+                            tasks.clone(),
+                            Box::new(()),
+                        )
+                        .await
+                        .map_err(|_| F::Transport)?;
+                }
                 if let Some(StreamProbe::Exchange {
                     request_base64,
                     expected_base64,
@@ -792,6 +842,8 @@ impl Engine {
                         && old.tls.fingerprint == new.tls.fingerprint
                 }) {
                     new.cancel = old.cancel.clone();
+                    new.multipath_server = old.multipath_server.clone();
+                    new.multipath_client = old.multipath_client.clone();
                 }
                 Arc::new(new)
             };
@@ -950,7 +1002,9 @@ impl Engine {
 }
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
-    old.budget_ids != new.budget_ids
+    old.inbound_multipath != new.inbound_multipath
+        || old.outbound_multipath != new.outbound_multipath
+        || old.budget_ids != new.budget_ids
         || ((crate::topology::participates(old) || crate::topology::participates(new))
             && crate::topology::route_signature(old) != crate::topology::route_signature(new))
         || old.inbound_websocket != new.inbound_websocket
@@ -1050,9 +1104,9 @@ async fn tcp_listener(
         stats.accepted_tcp.fetch_add(1, Ordering::Relaxed);
         let meter = meter.clone();
         let stats = stats.clone();
+        let session_tasks = tasks.clone();
         tasks.spawn(async move {
-            let _guard=guard;
-            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,peer,inlet,rule.clone(),meter,stats.clone())=>result};
+            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,inlet,rule.clone(),meter,stats.clone(),guard,session_tasks)=>result};
             if let Err(error)=outcome {stats.failed_connections.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%rule.spec.id,%error,"TCP session ended");}
         });
     }
@@ -1066,7 +1120,13 @@ async fn open_tcp_target(
     info: Option<ConnectionInfo>,
 ) -> Result<(BoxStream, LoopGuard)> {
     let route = rule.routes.reserve(inlet, address)?;
-    let mut stream = network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await?;
+    let bind = rule
+        .spec
+        .outbound_multipath
+        .as_ref()
+        .and_then(|spec| spec.paths[index].outbound_bind.as_ref())
+        .or(rule.spec.outbound_bind.as_ref());
+    let mut stream = network::connect_tcp(bind, address).await?;
     stream.set_nodelay(true)?;
     let info = info.unwrap_or(ConnectionInfo {
         source: stream.local_addr()?,
@@ -1133,31 +1193,118 @@ async fn connect_tcp(
     bail!("all targets failed: {}", last.unwrap_or_default())
 }
 
+async fn open_multipath_path(
+    rule: &RuntimeRule,
+    index: usize,
+    info: ConnectionInfo,
+    inlet: ListenerKey,
+) -> Result<multipath::Path> {
+    let target_guard = rule
+        .target_guard(index)
+        .context("multipath target capacity reached")?;
+    let target = rule.spec.target_address(index, inlet.address.port())?;
+    let addresses = rule.resolver.resolve(&target).await?;
+    let mut last = None;
+    for address in addresses {
+        match open_tcp_target(rule, index, address, inlet, Some(info)).await {
+            Ok((stream, route)) => {
+                let path = &rule.spec.outbound_multipath.as_ref().unwrap().paths[index];
+                return Ok(multipath::Path {
+                    stream: transport::hold(stream, (target_guard, route)),
+                    slot: index,
+                    send_weight: path.upload_weight,
+                    receive_weight: path.download_weight,
+                });
+            }
+            Err(error) => last = Some(error.to_string()),
+        }
+    }
+    bail!("multipath path failed: {}", last.unwrap_or_default())
+}
+
+async fn connect_multipath(
+    rule: &RuntimeRule,
+    info: ConnectionInfo,
+    inlet: ListenerKey,
+    stats: Arc<multipath::Counters>,
+    tasks: TaskTracker,
+) -> Result<BoxStream> {
+    let spec = rule.spec.outbound_multipath.as_ref().unwrap();
+    let permit = rule
+        .multipath_client
+        .as_ref()
+        .unwrap()
+        .clone()
+        .try_acquire_owned()
+        .context("multipath client session limit reached")?;
+    let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
+    // Leave 20% of the common setup budget for the start barrier if a candidate stalls.
+    let path_deadline = deadline - Duration::from_millis(rule.spec.connect_timeout_ms / 5);
+    timeout_at(deadline, async {
+        let mut opens: FuturesUnordered<_> = rule
+            .order(info.source, inlet)
+            .into_iter()
+            .map(|index| timeout_at(path_deadline, open_multipath_path(rule, index, info, inlet)))
+            .collect();
+        let first = loop {
+            match opens.next().await.context("no multipath path connected")? {
+                Ok(Ok(path)) => break path,
+                Ok(Err(_)) | Err(_) => continue,
+            }
+        };
+        // CREATE is attempted once. An ambiguous result must not open another backend.
+        let (session, first) = timeout_at(path_deadline, multipath::Client::create(first, spec))
+            .await
+            .context("multipath create timed out")??;
+        let mut paths = vec![first];
+        {
+            let mut joins = FuturesUnordered::new();
+            while !opens.is_empty() || !joins.is_empty() {
+                tokio::select! {
+                    opened = opens.next(), if !opens.is_empty() => {
+                        if let Some(Ok(Ok(path))) = opened {
+                            joins.push(timeout_at(path_deadline, session.join(path)));
+                        }
+                    }
+                    joined = joins.next(), if !joins.is_empty() => {
+                        if let Some(Ok(Ok(path))) = joined { paths.push(path); }
+                    }
+                }
+            }
+        }
+        session.finish(paths, stats, tasks, Box::new(permit)).await
+    })
+    .await
+    .context("multipath outbound setup timed out")?
+}
+
 async fn tcp_session(
     mut client: TcpStream,
-    peer: SocketAddr,
     inlet: ListenerKey,
     rule: Arc<RuntimeRule>,
     meter: Meter,
     stats: Arc<Counters>,
+    guard: CountGuard,
+    tasks: TaskTracker,
 ) -> Result<()> {
     client.set_nodelay(true)?;
+    let peer = client.peer_addr()?;
     let original = ConnectionInfo {
         source: peer,
         destination: client.local_addr()?,
     };
     let handshake_deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
-    let (client, info) = timeout_at(handshake_deadline, async {
+    let (client, info, certificate) = timeout_at(handshake_deadline, async {
         let mut info = original;
         let policy = rule.spec.inbound_proxy.as_ref();
         if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::BeforeTls) {
             info = proxy::read_tcp(&mut client, policy, original).await?;
         }
-        let mut client = rule.tls.accept(client).await?;
+        let (mut client, certificate) = rule.tls.accept_authenticated(client).await?;
         if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::InsideTls) {
             info = proxy::read_tcp(&mut client, policy, original).await?;
         }
-        Ok::<_, anyhow::Error>((client, info))
+        Ok::<_, anyhow::Error>((client, info, certificate))
     })
     .await
     .context("inbound TLS/PROXY handshake timed out")??;
@@ -1179,7 +1326,35 @@ async fn tcp_session(
     } else {
         client
     };
-    let (target, _target_guard, _route_guard) = connect_tcp(&rule, info, inlet).await?;
+    let client = transport::hold(client, guard);
+    let client = if let Some(server) = &rule.multipath_server {
+        let identity =
+            certificate.context("multipath requires a verified TLS client certificate")?;
+        let accepted = timeout_at(
+            handshake_deadline,
+            server.accept(
+                client,
+                identity,
+                rule.spec.inbound_proxy.as_ref().map(|_| info),
+                stats.multipath.clone(),
+                tasks.clone(),
+            ),
+        )
+        .await
+        .context("multipath inbound setup timed out")??;
+        let Some(client) = accepted else {
+            return Ok(());
+        };
+        client
+    } else {
+        client
+    };
+    let target = if rule.spec.outbound_multipath.is_some() {
+        connect_multipath(&rule, info, inlet, stats.multipath.clone(), tasks).await?
+    } else {
+        let (target, target_guard, route_guard) = connect_tcp(&rule, info, inlet).await?;
+        transport::hold(target, (target_guard, route_guard))
+    };
     let activity = Arc::new(StdMutex::new(Instant::now()));
     let (cr, cw) = tokio::io::split(client);
     let (tr, tw) = tokio::io::split(target);

@@ -1,9 +1,9 @@
 {
-  "at_utc": "2026-10-24T04:50:48.295620+00:00",
+  "at_utc": "2026-10-24T07:08:59.077744+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "binary_sha256": "ad9ea149cec50ab1c6c25bd26fe23b0d54cdfc88fe465fe3cd6ef299c08c0946",
+  "binary_sha256": "cdc23d66a0403d89d9908715f0770b1de45606f9a0e46ecb81a806dd90ae22f0",
   "restore": {
-    "journal_id": "b6cd5bf8-7acb-4bd6-958a-aebb0647e247",
+    "journal_id": "4032568c-6bdf-48da-9df7-f4e9bb188344",
     "backup_sequence": 4,
     "restored_sequence": 11,
     "replayed_transactions": 7,
@@ -32,5 +32,6 @@
   "limits": [
     "local macOS loopback only",
     "no power-loss or remote storage durability test"
-  ]
+  ],
+  "version": "relay 0.12.0"
 }

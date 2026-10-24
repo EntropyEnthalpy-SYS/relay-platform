@@ -215,6 +215,30 @@ pub struct OutboundBind {
     pub interface: Option<String>,
 }
 
+pub(crate) fn validate_bind(bind: &OutboundBind) -> Result<()> {
+    ensure!(
+        bind.ip.is_some() || bind.interface.is_some(),
+        "outbound binding requires an IP or interface"
+    );
+    if let Some(ip) = bind.ip {
+        ensure!(
+            !ip.is_unspecified() && !ip.is_multicast() && canonical_ip(ip) == ip,
+            "outbound IP must be a specific unicast address"
+        );
+    }
+    if let Some(name) = &bind.interface {
+        ensure!(
+            !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(&c)),
+            "invalid outbound interface name"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsCache {
@@ -254,6 +278,10 @@ pub fn canonical_address(address: SocketAddr) -> SocketAddr {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_multipath: Option<crate::multipath::ServerConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outbound_multipath: Option<crate::multipath::ClientConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<crate::health::HealthCheck>,
     /// Address that predecessor nodes use to reach this listener/range.
@@ -340,6 +368,7 @@ impl Rule {
         self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
     }
     pub fn validate(&self) -> Result<()> {
+        crate::multipath::validate_rule(self)?;
         if let Some(health) = &self.health_check {
             health.validate(self.protocol)?;
         }
@@ -419,26 +448,7 @@ impl Rule {
             "a listener range must contain 1..256 ports"
         );
         if let Some(bind) = &self.outbound_bind {
-            ensure!(
-                bind.ip.is_some() || bind.interface.is_some(),
-                "outbound binding requires an IP or interface"
-            );
-            if let Some(ip) = bind.ip {
-                ensure!(
-                    !ip.is_unspecified() && !ip.is_multicast() && canonical_ip(ip) == ip,
-                    "outbound IP must be a specific unicast address"
-                );
-            }
-            if let Some(name) = &bind.interface {
-                ensure!(
-                    !name.is_empty()
-                        && name.len() <= 64
-                        && name
-                            .bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || b"_.:-".contains(&c)),
-                    "invalid outbound interface name"
-                );
-            }
+            validate_bind(bind)?;
         }
         if let Some(dns) = &self.dns_cache {
             ensure!(
@@ -628,6 +638,23 @@ impl NodeConfig {
         ensure!(identifier(&self.node_id), "invalid node_id");
         ensure!(self.revision <= MAX_COUNTER, "revision out of range");
         ensure!(self.rules.len() <= MAX_RULES, "too many rules");
+        let multipath_payload: u64 = self
+            .rules
+            .iter()
+            .filter(|r| r.enabled)
+            .map(|r| {
+                r.inbound_multipath
+                    .as_ref()
+                    .map_or(0, |s| s.limits.payload_bound())
+                    + r.outbound_multipath
+                        .as_ref()
+                        .map_or(0, |s| s.limits.payload_bound())
+            })
+            .sum();
+        ensure!(
+            multipath_payload <= 512 * 1024 * 1024,
+            "node multipath send/reorder reservation exceeds 512 MiB"
+        );
         let mut ids = HashSet::new();
         let mut listeners = HashSet::new();
         let mut policies = HashSet::new();
@@ -689,6 +716,8 @@ pub struct UsageAck {
 #[serde(deny_unknown_fields)]
 pub struct EngineStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multipath: Option<crate::multipath::Stats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meter: Option<crate::metrics::MeterStats>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub active_probes: u64,
@@ -705,6 +734,16 @@ pub struct EngineStats {
 }
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
+}
+impl EngineStats {
+    pub fn business_idle(&self) -> bool {
+        self.active_tcp == 0
+            && self.active_udp == 0
+            && self
+                .multipath
+                .as_ref()
+                .is_none_or(|stats| stats.active_sessions == 0 && stats.active_paths == 0)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

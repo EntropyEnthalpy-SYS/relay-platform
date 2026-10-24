@@ -3,9 +3,16 @@
 use crate::model::{Rule, identifier};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read, path::Path, sync::Arc};
+use std::{
+    fs,
+    io::{self, Read},
+    path::Path,
+    pin::Pin,
+    sync::Arc,
+    task::{Context as PollContext, Poll},
+};
 use tokio::{
-    io::{AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpStream,
 };
 use tokio_rustls::{
@@ -19,6 +26,40 @@ use tokio_rustls::{
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Stream for T {}
 pub type BoxStream = Box<dyn Stream>;
+struct Held<T> {
+    stream: BoxStream,
+    _guard: T,
+}
+pub(crate) fn hold<T: Send + Unpin + 'static>(stream: BoxStream, guard: T) -> BoxStream {
+    Box::new(Held {
+        stream,
+        _guard: guard,
+    })
+}
+impl<T: Unpin> AsyncRead for Held<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut PollContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
+    }
+}
+impl<T: Unpin> AsyncWrite for Held<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut PollContext<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut PollContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut PollContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(cx)
+    }
+}
 struct Outbound {
     connector: TlsConnector,
     name: ServerName<'static>,
@@ -176,10 +217,23 @@ impl PreparedTls {
         })
     }
     pub async fn accept(&self, stream: TcpStream) -> Result<BoxStream> {
+        Ok(self.accept_authenticated(stream).await?.0)
+    }
+    pub(crate) async fn accept_authenticated(
+        &self,
+        stream: TcpStream,
+    ) -> Result<(BoxStream, Option<[u8; 32]>)> {
         Ok(if let Some(tls) = &self.inbound {
-            Box::new(tls.accept(stream).await?)
+            let accepted = tls.accept(stream).await?;
+            let identity = accepted
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|chain| chain.first())
+                .map(|cert| Sha256::digest(cert.as_ref()).into());
+            (Box::new(accepted), identity)
         } else {
-            Box::new(stream)
+            (Box::new(stream), None)
         })
     }
     pub async fn connect(&self, index: usize, stream: TcpStream) -> Result<BoxStream> {
