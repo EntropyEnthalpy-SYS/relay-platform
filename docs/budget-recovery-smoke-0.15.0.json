@@ -1,0 +1,49 @@
+{
+  "at_utc": "2026-10-24T09:55:09.149704+00:00",
+  "version": "relay 0.15.0",
+  "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.14.4",
+  "scope": "real SIGKILL; separate local Release processes; original Agent and controller databases; TCP/UDP; single controller; not physical power loss or snapshot completeness",
+  "policy": {
+    "ttl_ms": 5000,
+    "shared_limit_bytes": 65536,
+    "quantum_bytes": 65536
+  },
+  "kill_boundary": {
+    "agent_exit_code": -9,
+    "offline_payload_seconds": 0.005682417016942054,
+    "controller_confirmed_bytes": 256,
+    "agent_durable_bytes": 24832,
+    "unreported_bytes": 24576,
+    "controller_outstanding_bytes": 65280
+  },
+  "recovery": {
+    "seconds_from_controller_restart": 5.181180084007792,
+    "generation": 2,
+    "same_durable_run": true,
+    "listeners_waited": true,
+    "stats": {
+      "run_id": "3dc0d8c9-d99c-4503-80cf-cacf08312d38",
+      "at_ms": 1792835708663,
+      "validated_grants": 1,
+      "recovered_pending_grants": 0,
+      "cancelled_requests": 0,
+      "open_grants": 1
+    },
+    "consumed_bytes_after_recovery": 24832,
+    "diagnostics_preserved_after_stop": true
+  },
+  "ledger": {
+    "expected_bytes": 65536,
+    "agent_bytes": 65536,
+    "controller_bytes": 65536,
+    "budget_consumed_bytes": 65536,
+    "budget_committed_bytes": 65536,
+    "open_reservations_after_stop": 0,
+    "extra_payload_rejected": true,
+    "exact_match": true
+  },
+  "all_child_processes_exited": true
+}

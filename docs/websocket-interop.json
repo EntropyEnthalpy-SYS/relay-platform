@@ -1,8 +1,8 @@
 {
-  "at_utc": "2026-10-24T09:55:24.274196+00:00",
+  "at_utc": "2026-10-24T10:23:09.394700+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "version": "relay 0.15.0",
-  "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+  "version": "relay 0.16.0",
+  "binary_sha256": "43df5a27ee54b7d812e91246d17be3d56a7030e78f79f6fbdc3631c8c6c2afc1",
   "python_version": "3.14.4",
   "websockets_version": "17.2",
   "openssl_version": "OpenSSL 3.0.19 27 Jan 2026",

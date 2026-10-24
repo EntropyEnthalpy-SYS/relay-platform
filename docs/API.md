@@ -14,6 +14,8 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | POST | `/nodes/profiles` | `{updates:[{node_id,update}]}`；原子保存 1..100 个节点资料，逐节点返回修订 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |
 | PUT | `/nodes/{id}/config` | `{expected_revision,rules}`；并发冲突返回 409，成功生成下一版本 |
+| GET | `/nodes/{id}/credential` | 可见节点的凭据版本、待执行任务及上次完成回执；不返回秘密或哈希 |
+| POST | `/nodes/{id}/credential/rotate` | `{expected_revision}` 请求 Agent 自行生成并轮换凭据；权限与版本检查 |
 | GET | `/nodes/{id}/health` | 实际修订对应的目标健康、年龄、候选原因、探测流量与容量；按节点权限过滤 |
 | GET | `/nodes/{id}/history` | 最近 100 次配置修订 |
 | POST | `/nodes/{id}/rollback` | `{revision,expected_revision}`；把历史规则作为新修订发布，账本不回滚 |
@@ -32,11 +34,12 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/control/metrics` | 仅系统管理员；返回本次控制器运行的节点同步统计 |
 | GET | `/capabilities` | 实现能力与待实现能力目录，不代表完整发布验收 |
 | POST | `/agent/enroll` | `{node_id,enrollment_token,credential}`；返回 `{enrolled:true}` |
+| POST | `/agent/credential/rotate` | `{request_id,expected_revision,credential,lease}`；事务换钥并返回可重试回执 |
 | POST | `/agent/reconcile` | 节点凭据认证；分页获取权威用量下限和相同修订的配置 |
 | POST | `/agent/budgets/recover` | 严格节点在开启监听前验证原状态预留、补报消费和处理待确认请求 |
 | POST | `/agent/sync` | 节点凭据认证，上报用量/状态并获取期望配置 |
 
-注册时 Agent 先在本地生成并持久化独立 `credential`，然后请求控制器绑定。一次性令牌只允许首次绑定；相同已绑定凭据可以重试确认，原注册令牌不能绑定第二个凭据。控制器不需要保存可还原的节点秘密。Node 注册后的令牌复制或凭据轮换属于后续身份生命周期功能。
+注册时 Agent 先在本地生成并持久化独立 `credential`，然后请求控制器绑定。一次性令牌只允许首次绑定；相同已绑定凭据可以重试确认，原注册令牌不能绑定第二个凭据。控制器不需要保存可还原的节点秘密。0.16.0 支持管理员发起、Agent 自行执行和中断恢复的常规凭据轮换；完整合同见 [NODE_CREDENTIALS.md](NODE_CREDENTIALS.md)。身份替换与紧急撤销仍未完成。
 
 同步请求：
 
@@ -66,7 +69,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 }
 ```
 
-响应包含 `controller_instance`、可选 `config`、`acknowledgements`、`server_time_ms`。`controller_instance` 每次 API 服务启动变化，在线 Agent 据此重新对账并补报曾确认的数据。每批最多 1,024 条累计用量；只有规则/周期属于该节点才可入账。同序号与同累计值可以重放；序号或字节倒退、同序号改值返回 409。确认到旧序号不会清除后来新增长的未确认字节。
+响应包含 `controller_instance`、可选 `config` 和 `credential_rotation`、`acknowledgements`、`server_time_ms`。`controller_instance` 每次 API 服务启动变化，在线 Agent 据此重新对账并补报曾确认的数据。每批最多 1,024 条累计用量；只有规则/周期属于该节点才可入账。同序号与同累计值可以重放；序号或字节倒退、同序号改值返回 409。确认到旧序号不会清除后来新增长的未确认字节。
 
 规则、流量与配置修订的数据库整数上限为有符号 64 位范围。API 使用 JSON 整数，精确处理超过 `2^53-1` 的数值时，客户端须使用无损整数解析；浏览器配额输入仅接受 JavaScript 安全整数，界面显示经过单位换算的近似值。
 

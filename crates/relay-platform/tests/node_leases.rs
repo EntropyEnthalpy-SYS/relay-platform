@@ -1,4 +1,6 @@
 mod common;
+#[path = "node_leases/credential_integration.rs"]
+mod credential_integration;
 #[path = "node_leases/node_profile_integration.rs"]
 mod node_profile_integration;
 use common::*;

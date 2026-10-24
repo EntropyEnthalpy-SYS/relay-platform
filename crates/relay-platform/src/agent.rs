@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 mod budget_recovery;
+mod credentials;
 mod lease_client;
+use credentials::SharedCredential;
 
 pub struct AgentOptions {
     pub controller: String,
@@ -20,13 +22,17 @@ pub struct AgentOptions {
     pub tls_directory: Option<PathBuf>,
     pub poll_interval: Duration,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Credential {
     controller: String,
     node_id: String,
     token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_enrollment_token: Option<String>,
+    #[serde(default = "credentials::initial_revision")]
+    revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_rotation: Option<credentials::PendingRotation>,
 }
 
 pub fn controller_url(input: &str) -> Result<Url> {
@@ -100,6 +106,8 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
             node_id: options.node_id,
             token: secret(),
             pending_enrollment_token: Some(token.into()),
+            revision: 1,
+            pending_rotation: None,
         };
         // Persist the proposed secret before sending a single-use enrollment request.
         store.set_metadata("agent_credential", &serde_json::to_string(&credential)?)?;
@@ -125,6 +133,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         credential.pending_enrollment_token = None;
         store.set_metadata("agent_credential", &serde_json::to_string(&credential)?)?;
     }
+    let credential = SharedCredential::new(credential)?;
     let resume = store.budget_resume_candidate()?;
     let proposed_run = resume
         .as_ref()
@@ -278,8 +287,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
             let response = tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
-                response = client.post(base.join("api/v1/agent/sync")?)
-                    .bearer_auth(&credential.token).json(&request).send() => response,
+                response = credential.send(client.post(base.join("api/v1/agent/sync")?).json(&request)) => response,
             };
             match response {
                 Ok(response)
@@ -295,6 +303,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 Ok(response) if response.status().is_success() => {
                     match bounded_json::<SyncResponse>(response).await {
                         Ok(synced) => {
+                            let rotation = synced.credential_rotation;
                             lease.ensure_live()?;
                             ensure!(
                                 identifier(&synced.controller_instance),
@@ -341,6 +350,18 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                         apply_error = Some(message.chars().take(512).collect());
                                     }
                                 }
+                            }
+                            if let Err(error) = credential
+                                .rotate_if_requested(
+                                    &client,
+                                    &base,
+                                    &store,
+                                    rotation,
+                                    lease.proof.as_ref(),
+                                )
+                                .await
+                            {
+                                tracing::warn!(%error,"node credential rotation will retry; durable transition retained");
                             }
                             if connection_failed {
                                 tracing::info!("controller connection recovered");
@@ -452,11 +473,8 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 usage,
                 stats: stopped_stats.clone(),
             };
-            let response = client
-                .post(base.join("api/v1/agent/sync")?)
-                .bearer_auth(&credential.token)
-                .json(&request)
-                .send()
+            let response = credential
+                .send(client.post(base.join("api/v1/agent/sync")?).json(&request))
                 .await?
                 .error_for_status()?;
             let reply: SyncResponse = bounded_json(response).await?;
@@ -498,7 +516,7 @@ impl std::error::Error for ReconcileRetry {}
 async fn reconcile(
     client: &Client,
     base: &Url,
-    credential: &Credential,
+    credential: &SharedCredential,
     store: &Store,
     active: bool,
     lease: Option<&crate::lease::LeaseProof>,
@@ -510,16 +528,17 @@ async fn reconcile(
     let mut revision = None;
     // Bound a faulty controller's pagination while retaining up to a million periods.
     for _ in 0..4096 {
-        let response = client
-            .post(base.join("api/v1/agent/reconcile")?)
-            .bearer_auth(&credential.token)
-            .json(&ReconcileRequest {
-                lease: lease.cloned(),
-                ledger_id: ledger_id.clone(),
-                after: after.clone(),
-                expected_revision: revision,
-            })
-            .send()
+        let response = credential
+            .send(
+                client
+                    .post(base.join("api/v1/agent/reconcile")?)
+                    .json(&ReconcileRequest {
+                        lease: lease.cloned(),
+                        ledger_id: ledger_id.clone(),
+                        after: after.clone(),
+                        expected_revision: revision,
+                    }),
+            )
             .await
             .map_err(|error| ReconcileRetry(format!("checkpoint request failed: {error}")))?;
         let status = response.status();

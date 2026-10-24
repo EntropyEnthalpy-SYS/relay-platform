@@ -14,6 +14,7 @@ use std::{
 use uuid::Uuid;
 
 mod budgets;
+mod credentials;
 mod health;
 mod leases;
 mod node_profiles;
@@ -555,6 +556,14 @@ impl Store {
         }
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        let eligible: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=?1 AND enrollment_hash=?2)",
+            params![node, token_hash(token)],
+            |row| row.get(0),
+        )?;
+        if eligible {
+            credentials::require_fresh(&tx, &token_hash(credential))?;
+        }
         let changed=tx.execute("UPDATE nodes SET token_hash=?1,enrollment_hash=NULL WHERE id=?2 AND enrollment_hash=?3",params![token_hash(credential),node,token_hash(token)])?;
         if changed != 1 {
             let same_credential = tx.query_row(

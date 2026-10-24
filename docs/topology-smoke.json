@@ -1,8 +1,8 @@
 {
-  "at_utc": "2026-10-24T09:55:47.986615+00:00",
+  "at_utc": "2026-10-24T10:23:32.947371+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "version": "relay 0.15.0",
-  "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+  "version": "relay 0.16.0",
+  "binary_sha256": "43df5a27ee54b7d812e91246d17be3d56a7030e78f79f6fbdc3631c8c6c2afc1",
   "cases": [
     {
       "transport": "both",
@@ -18,7 +18,7 @@
       "binary_half_close_verified": true,
       "restored_topology_usage_and_old_session": true,
       "restore": {
-        "journal_id": "e42aef9a-41de-49f4-ab8a-f3a4fdd02c99",
+        "journal_id": "93917246-1987-47b9-bc47-0c77b80c9cbe",
         "backup_sequence": 8,
         "restored_sequence": 45,
         "replayed_transactions": 37,
@@ -40,7 +40,7 @@
       "binary_half_close_verified": true,
       "restored_topology_usage_and_old_session": true,
       "restore": {
-        "journal_id": "a68f462f-93a1-4db7-baae-e824b24ecdaa",
+        "journal_id": "77fa809f-3064-4baf-a504-5e9df2fd569a",
         "backup_sequence": 8,
         "restored_sequence": 45,
         "replayed_transactions": 37,
@@ -62,7 +62,7 @@
       "binary_half_close_verified": true,
       "restored_topology_usage_and_old_session": true,
       "restore": {
-        "journal_id": "33e82c7b-021e-4fb7-bd0a-5966dd8885ee",
+        "journal_id": "ca77bb58-fa0b-415d-b442-c5094dfc8a6d",
         "backup_sequence": 9,
         "restored_sequence": 45,
         "replayed_transactions": 36,

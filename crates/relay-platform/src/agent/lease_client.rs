@@ -98,7 +98,7 @@ impl AgentLease {
     pub async fn acquire(
         client: &Client,
         base: &Url,
-        credential: &Credential,
+        credential: &SharedCredential,
         store: &Store,
         run_id: &str,
         resume_generation: Option<u64>,
@@ -115,12 +115,13 @@ impl AgentLease {
         loop {
             let began = Stamp::now();
             let attempt = async {
-                let response = client
-                    .post(base.join("api/v1/agent/lease")?)
-                    .bearer_auth(&credential.token)
-                    .timeout(Duration::from_secs(5))
-                    .json(&request)
-                    .send()
+                let response = credential
+                    .send(
+                        client
+                            .post(base.join("api/v1/agent/lease")?)
+                            .timeout(Duration::from_secs(5))
+                            .json(&request),
+                    )
                     .await?;
                 let status = response.status();
                 if status == reqwest::StatusCode::PRECONDITION_FAILED
@@ -182,7 +183,7 @@ impl AgentLease {
                     let mut lease = Self::start(
                         client.clone(),
                         base.clone(),
-                        credential.token.clone(),
+                        credential.clone(),
                         proof,
                         window,
                         reply.ttl_ms,
@@ -221,7 +222,7 @@ impl AgentLease {
     fn start(
         client: Client,
         base: Url,
-        token: String,
+        credential: SharedCredential,
         proof: LeaseProof,
         window: Window,
         ttl_ms: u64,
@@ -254,16 +255,15 @@ impl AgentLease {
                     );
                     let began = Stamp::now();
                     let attempt = async {
-                        let response = client
-                            .post(base.join("api/v1/agent/lease")?)
-                            .bearer_auth(&token)
-                            .json(&LeaseRequest {
-                                resume_generation: None,
-                                run_id: renewal.run_id.clone(),
-                                token: renewal.token.clone(),
-                                generation: Some(renewal.generation),
-                            })
-                            .send()
+                        let response = credential
+                            .send(client.post(base.join("api/v1/agent/lease")?).json(
+                                &LeaseRequest {
+                                    resume_generation: None,
+                                    run_id: renewal.run_id.clone(),
+                                    token: renewal.token.clone(),
+                                    generation: Some(renewal.generation),
+                                },
+                            ))
                             .await?;
                         let status = response.status();
                         if status.is_server_error()
@@ -327,18 +327,19 @@ impl AgentLease {
         &self,
         client: &Client,
         base: &Url,
-        credential: &Credential,
+        credential: &SharedCredential,
         stats: EngineStats,
     ) -> Result<()> {
         if let Some(proof) = &self.proof {
-            client
-                .post(base.join("api/v1/agent/lease/release")?)
-                .bearer_auth(&credential.token)
-                .json(&LeaseRelease {
-                    proof: proof.clone(),
-                    stats,
-                })
-                .send()
+            credential
+                .send(
+                    client
+                        .post(base.join("api/v1/agent/lease/release")?)
+                        .json(&LeaseRelease {
+                            proof: proof.clone(),
+                            stats,
+                        }),
+                )
                 .await?
                 .error_for_status()?;
         }

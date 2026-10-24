@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod api;
 pub mod budget;
+pub mod credential;
 mod datagram;
 pub mod engine;
 pub mod health;

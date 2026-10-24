@@ -765,6 +765,8 @@ pub struct SyncRequest {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_rotation: Option<crate::credential::RotationRequest>,
     pub budget: Option<crate::budget::BudgetReply>,
     /// Changes on each controller process start; prompts already-running agents
     /// to replay counters that a restored controller may have forgotten.

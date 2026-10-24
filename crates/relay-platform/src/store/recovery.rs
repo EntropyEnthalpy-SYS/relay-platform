@@ -28,6 +28,21 @@ impl Store {
 
     /// Controller-side stable keyset pagination. Config changes invalidate the walk.
     pub fn reconcile(&self, node: &str, request: ReconcileRequest) -> Result<ReconcileResponse> {
+        self.reconcile_identity(node, None, request)
+    }
+    pub fn reconcile_authenticated(
+        &self,
+        credential: &str,
+        request: ReconcileRequest,
+    ) -> Result<ReconcileResponse> {
+        self.reconcile_identity("", Some(credential), request)
+    }
+    fn reconcile_identity(
+        &self,
+        node: &str,
+        credential: Option<&str>,
+        request: ReconcileRequest,
+    ) -> Result<ReconcileResponse> {
         if request.ledger_id.as_ref().is_some_and(|id| !identifier(id))
             || request
                 .after
@@ -41,6 +56,10 @@ impl Store {
         }
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        let authenticated = credential
+            .map(|token| leases::authenticated(&tx, token))
+            .transpose()?;
+        let node = authenticated.as_deref().unwrap_or(node);
         leases::validate(
             &tx,
             &mut self.3.lock().unwrap(),

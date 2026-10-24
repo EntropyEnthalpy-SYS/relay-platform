@@ -1,7 +1,7 @@
 {
-  "at_utc": "2026-10-24T09:55:21.137219+00:00",
-  "version": "relay 0.15.0",
-  "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+  "at_utc": "2026-10-24T10:23:06.287630+00:00",
+  "version": "relay 0.16.0",
+  "binary_sha256": "43df5a27ee54b7d812e91246d17be3d56a7030e78f79f6fbdc3631c8c6c2afc1",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "machine": "arm64",
   "python": "3.14.4",
@@ -12,8 +12,8 @@
   },
   "clean_handoff": {
     "generation": 2,
-    "clone_wait_seconds": 6.133601500012446,
-    "clean_takeover_seconds": 0.48763041698839515,
+    "clone_wait_seconds": 6.154097167018335,
+    "clean_takeover_seconds": 0.4523764579789713,
     "copied_snapshot_bytes": 3168,
     "controller_bytes": 30912,
     "agent_bytes": 30912,
@@ -26,7 +26,7 @@
   "control_loss": {
     "generation": 3,
     "agent_exit_code": 1,
-    "agent_exit_after_control_stop_seconds": 4.375115750008263,
+    "agent_exit_after_control_stop_seconds": 4.380762916000094,
     "tcp_connection_closed": true,
     "tcp_listener_closed": true,
     "udp_echo_stopped": true,

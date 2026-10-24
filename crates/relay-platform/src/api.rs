@@ -143,6 +143,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/nodes/{node}/config", get(config).put(publish))
         .route("/api/v1/nodes/{node}/history", get(history))
+        .route("/api/v1/nodes/{node}/credential", get(node_credential))
+        .route(
+            "/api/v1/nodes/{node}/credential/rotate",
+            post(request_rotation),
+        )
         .route("/api/v1/nodes/{node}/health", get(node_health))
         .route("/api/v1/nodes/{node}/rollback", post(rollback))
         .route("/api/v1/topology", get(topology))
@@ -174,6 +179,7 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(health))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/agent/enroll", post(enroll))
+        .route("/api/v1/agent/credential/rotate", post(rotate_credential))
         .route("/api/v1/agent/lease", post(exchange_lease))
         .route("/api/v1/agent/lease/release", post(release_lease))
         .route("/api/v1/agent/budgets/recover", post(recover_agent_budget))
@@ -547,8 +553,50 @@ async fn reconcile(
     let token = bearer(&headers)?;
     Ok(Json(
         database(state.store, move |db| {
-            let node = db.authenticate_node(&token)?;
-            db.reconcile(&node, input)
+            db.reconcile_authenticated(&token, input)
+        })
+        .await?,
+    ))
+}
+async fn node_credential(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+) -> ApiResult<crate::credential::CredentialStatus> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.node_credential_status(&actor, &node)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestRotation {
+    expected_revision: u64,
+}
+async fn request_rotation(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Json(input): Json<RequestRotation>,
+) -> ApiResult<crate::credential::CredentialStatus> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.request_credential_rotation(&actor, &node, input.expected_revision)
+        })
+        .await?,
+    ))
+}
+async fn rotate_credential(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::credential::RotateCredential>,
+) -> ApiResult<crate::credential::RotationReceipt> {
+    let token = bearer(&headers)?;
+    Ok(Json(
+        database(state.store, move |db| {
+            db.rotate_node_credential(&token, input)
         })
         .await?,
     ))
@@ -623,7 +671,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
 }

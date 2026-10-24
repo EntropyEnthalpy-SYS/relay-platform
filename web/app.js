@@ -186,7 +186,31 @@ function timingRow(label, value) {
 function nodeActions(node) {
   const actions = el('div');
   actions.append(button(canWrite() ? '编辑资料' : '查看资料', () => editNode(node), 'table-action'), button('管理规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button('运行诊断', () => nodeDiagnostics(node), 'table-action'));
+  if (node.enrolled) actions.append(button('节点凭据', () => nodeCredential(node), 'table-action'));
   return actions;
+}
+async function nodeCredential(node) {
+  const status = await api(`/nodes/${node.id}/credential`), body = el('div');
+  body.append(el('p', node.name), table(['项目', '状态'], [
+    ['当前凭据版本', status.revision],
+    ['轮换任务', status.pending ? '等待节点执行' : '无待执行任务'],
+    ['请求时间', status.pending ? timestamp(status.pending.requested_at_ms) : '—'],
+    ['上次完成', status.last_rotation ? timestamp(status.last_rotation.completed_at_ms) : '—']
+  ]), el('p', '节点自行生成并保存新凭据，控制器确认后旧凭据失效。在线节点自动处理，离线或暂停的节点恢复运行后处理；旧版本 Agent 需要先升级。这里不会显示密钥。', 'fine'),
+  el('p', '轮换保留当前转发配置和租约。它用于常规换钥；丢失节点状态或怀疑节点已被控制时，仍需独立的身份替换与撤销流程。', 'fine'));
+  if (status.pending) body.append(el('p', `任务编号：${status.pending.id}`, 'fine'));
+  if (canWrite() && !status.pending) {
+    const action = button('发起凭据轮换', async () => {
+      action.disabled = true;
+      try {
+        await api(`/nodes/${node.id}/credential/rotate`, { method: 'POST', body: { expected_revision: status.revision } });
+        await nodeCredential(node);
+      } finally { action.disabled = false; }
+    }, 'primary');
+    body.append(action);
+  }
+  body.append(button('刷新状态', () => nodeCredential(node)));
+  modal('节点凭据轮换', body);
 }
 function nodeDiagnostics(node) {
   const body = el('div'), stats = node.stats, meter = stats.meter;

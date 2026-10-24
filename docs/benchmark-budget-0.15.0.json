@@ -1,0 +1,263 @@
+{
+  "at_utc": "2026-10-24T09:56:44.932862+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.14.4",
+  "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+  "scope": "two managed agents on local loopback; shared user budget versus no global budget; both use durable admission; controller recovery logging enabled; no TLS; Python echo",
+  "controller_recovery_log": {
+    "enabled": true,
+    "healthy": true,
+    "head": {
+      "journal_id": "052e7faa-adfe-4af4-b3d9-489a262ca26e",
+      "schema": 4,
+      "schema_sha256": "6fd18b19dee0d9f636cad7d687c5a2eb61aeb9f9bc5bc4f81e23a70caf37de4c",
+      "sequence": 625,
+      "sha256": "2fe4cb0c49d4c6179d17edba84e9f1f8b7e93f92d1afd9bf813f82848561636d",
+      "committed_bytes": 2357223
+    }
+  },
+  "controller_sync_metrics": {
+    "queue_time": {
+      "samples": 1033,
+      "total_us": 6174346,
+      "max_us": 30292
+    },
+    "storage_batch_time": {
+      "samples": 596,
+      "total_us": 10679338,
+      "max_us": 261591
+    },
+    "request_time": {
+      "samples": 1033,
+      "total_us": 24593100,
+      "max_us": 264806
+    },
+    "committed_batches": 596,
+    "processed_requests": 1033,
+    "largest_batch": 3,
+    "queue_full_rejections": 0,
+    "failed_batches": 0,
+    "batch_limit": 16,
+    "queue_capacity": 64,
+    "coalesce_window_ms": 2
+  },
+  "node_meter_metrics": [
+    {
+      "name": "budgeted-0",
+      "meter": {
+        "admission_batches": {
+          "samples": 9608,
+          "total_us": 2719091,
+          "max_us": 9733
+        },
+        "admission_requests": 29157,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 3024,
+          "total_us": 72764428,
+          "max_us": 52186
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    },
+    {
+      "name": "budgeted-1",
+      "meter": {
+        "admission_batches": {
+          "samples": 9674,
+          "total_us": 2723388,
+          "max_us": 6823
+        },
+        "admission_requests": 29061,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 2979,
+          "total_us": 71317305,
+          "max_us": 52456
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    },
+    {
+      "name": "plain-0",
+      "meter": {
+        "admission_batches": {
+          "samples": 14406,
+          "total_us": 1427430,
+          "max_us": 6366
+        },
+        "admission_requests": 25845,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 0,
+          "total_us": 0,
+          "max_us": 0
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    },
+    {
+      "name": "plain-1",
+      "meter": {
+        "admission_batches": {
+          "samples": 14937,
+          "total_us": 1439695,
+          "max_us": 6448
+        },
+        "admission_requests": 25929,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 0,
+          "total_us": 0,
+          "max_us": 0
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    }
+  ],
+  "rounds": 5,
+  "mib_per_connection": 32,
+  "reservation_quantum_bytes": 4194304,
+  "tcp": [
+    {
+      "connections_per_agent": 1,
+      "total_connections": 2,
+      "plain": [
+        {
+          "seconds": 0.09641429199837148,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 5568.374780048876
+        },
+        {
+          "seconds": 0.12576466699829325,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 4268.853286172068
+        },
+        {
+          "seconds": 0.08567745803156868,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 6266.186279735152
+        },
+        {
+          "seconds": 0.10642100003315136,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 5044.783565581592
+        },
+        {
+          "seconds": 0.10569183295592666,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 5079.587485476522
+        }
+      ],
+      "budgeted": [
+        {
+          "seconds": 0.7464699159609154,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 719.2130593888664
+        },
+        {
+          "seconds": 0.8111074159969576,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 661.898660290407
+        },
+        {
+          "seconds": 0.7801622090046294,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 688.1529325612519
+        },
+        {
+          "seconds": 0.8186053340323269,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 655.8360783644721
+        },
+        {
+          "seconds": 0.9007249999558553,
+          "one_way_payload_bytes": 67108864,
+          "goodput_mbps": 596.0430897624826
+        }
+      ],
+      "plain_median_mbps": 5079.587485476522,
+      "budgeted_median_mbps": 661.898660290407,
+      "budgeted_to_plain_ratio": 0.13030559315749507
+    },
+    {
+      "connections_per_agent": 4,
+      "total_connections": 8,
+      "plain": [
+        {
+          "seconds": 0.23287341702962294,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 9221.677920098655
+        },
+        {
+          "seconds": 0.22460287500871345,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 9561.24737012689
+        },
+        {
+          "seconds": 0.21215137501712888,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 10122.41211176036
+        },
+        {
+          "seconds": 0.2092902079457417,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 10260.793704007085
+        },
+        {
+          "seconds": 0.20356029202230275,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 10549.6196073678
+        }
+      ],
+      "budgeted": [
+        {
+          "seconds": 2.0400416670017876,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 1052.6665620296462
+        },
+        {
+          "seconds": 3.055720750009641,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 702.7748356891658
+        },
+        {
+          "seconds": 1.5858479170128703,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 1354.1548498831062
+        },
+        {
+          "seconds": 1.6968863750225864,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 1265.5435741661936
+        },
+        {
+          "seconds": 1.6220735420356505,
+          "one_way_payload_bytes": 268435456,
+          "goodput_mbps": 1323.9126293281233
+        }
+      ],
+      "plain_median_mbps": 10122.41211176036,
+      "budgeted_median_mbps": 1265.5435741661936,
+      "budgeted_to_plain_ratio": 0.12502391329195808
+    }
+  ],
+  "budget": {
+    "expected_bytes": 3359637504,
+    "consumed_bytes": 3359637504,
+    "committed_bytes_after_shutdown": 3359637504,
+    "unused_reserved_bytes_after_shutdown": 0
+  },
+  "ledger": {
+    "expected_admitted_bytes": 6719275008,
+    "controller_bytes": 6719275008,
+    "agent_bytes": 6719275008,
+    "exact_match": true
+  },
+  "version": "relay 0.15.0"
+}

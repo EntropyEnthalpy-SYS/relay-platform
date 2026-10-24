@@ -5,7 +5,7 @@ use std::collections::HashSet;
 pub(super) async fn recover(
     client: &Client,
     base: &Url,
-    credential: &Credential,
+    credential: &SharedCredential,
     store: &Store,
     lease: &lease_client::AgentLease,
 ) -> Result<BudgetRecoveryStats> {
@@ -34,11 +34,12 @@ pub(super) async fn recover(
         let reply = loop {
             lease.ensure_live()?;
             let attempt = async {
-                let response = client
-                    .post(base.join("api/v1/agent/budgets/recover")?)
-                    .bearer_auth(&credential.token)
-                    .json(&input)
-                    .send()
+                let response = credential
+                    .send(
+                        client
+                            .post(base.join("api/v1/agent/budgets/recover")?)
+                            .json(&input),
+                    )
                     .await?;
                 let status = response.status();
                 if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {

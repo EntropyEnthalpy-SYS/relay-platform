@@ -1,0 +1,2783 @@
+{
+  "version": "0.15.0-development",
+  "verified_at_utc": "2026-10-24T09:58:56.372452+00:00",
+  "full_goal_complete": false,
+  "profile": "release",
+  "controller_schema": 4,
+  "hardware": {
+    "cpu": "Apple M1 Pro",
+    "logical_cpus": 10,
+    "memory_bytes": 34359738368
+  },
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "python": "3.14.4",
+  "declared_rust_minimum": "1.89; not tested in this environment",
+  "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+  "source_fingerprint_algorithm": "SHA256 of concatenated sorted relative UTF-8 paths, NUL, and raw file SHA256; Cargo.toml, Cargo.lock, rustfmt.toml, crates/, web/, scripts/ (excluding __pycache__), deploy/, examples/ (examples added to scope in 0.8.0)",
+  "source_fingerprint_sha256": "a224b9e9f62dcc73d77f9b7e6ae7dcc6eb5c70e88bdfb9b880b9c0a9f917e847",
+  "source_fingerprint_paths": [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/relay-platform/Cargo.toml",
+    "crates/relay-platform/src/agent.rs",
+    "crates/relay-platform/src/agent/budget_recovery.rs",
+    "crates/relay-platform/src/agent/lease_client.rs",
+    "crates/relay-platform/src/api.rs",
+    "crates/relay-platform/src/budget.rs",
+    "crates/relay-platform/src/datagram.rs",
+    "crates/relay-platform/src/engine.rs",
+    "crates/relay-platform/src/health.rs",
+    "crates/relay-platform/src/journal.rs",
+    "crates/relay-platform/src/lease.rs",
+    "crates/relay-platform/src/lib.rs",
+    "crates/relay-platform/src/main.rs",
+    "crates/relay-platform/src/metrics.rs",
+    "crates/relay-platform/src/model.rs",
+    "crates/relay-platform/src/multipath/driver.rs",
+    "crates/relay-platform/src/multipath/handshake.rs",
+    "crates/relay-platform/src/multipath/mod.rs",
+    "crates/relay-platform/src/multipath/tests.rs",
+    "crates/relay-platform/src/multipath/wire.rs",
+    "crates/relay-platform/src/network.rs",
+    "crates/relay-platform/src/node.rs",
+    "crates/relay-platform/src/proxy.rs",
+    "crates/relay-platform/src/routing.rs",
+    "crates/relay-platform/src/schema.sql",
+    "crates/relay-platform/src/store.rs",
+    "crates/relay-platform/src/store/budget_recovery_tests.rs",
+    "crates/relay-platform/src/store/budget_schema.sql",
+    "crates/relay-platform/src/store/budgets.rs",
+    "crates/relay-platform/src/store/budgets/recovery.rs",
+    "crates/relay-platform/src/store/health.rs",
+    "crates/relay-platform/src/store/leases.rs",
+    "crates/relay-platform/src/store/leases_tests.rs",
+    "crates/relay-platform/src/store/node_profiles.rs",
+    "crates/relay-platform/src/store/node_profiles_tests.rs",
+    "crates/relay-platform/src/store/recovery.rs",
+    "crates/relay-platform/src/store/sync.rs",
+    "crates/relay-platform/src/store/topology.rs",
+    "crates/relay-platform/src/sync_queue.rs",
+    "crates/relay-platform/src/topology.rs",
+    "crates/relay-platform/src/transport.rs",
+    "crates/relay-platform/src/websocket.rs",
+    "crates/relay-platform/tests/budgets.rs",
+    "crates/relay-platform/tests/common/mod.rs",
+    "crates/relay-platform/tests/common/tls.rs",
+    "crates/relay-platform/tests/control_agent.rs",
+    "crates/relay-platform/tests/forwarding.rs",
+    "crates/relay-platform/tests/health.rs",
+    "crates/relay-platform/tests/journal.rs",
+    "crates/relay-platform/tests/ledger.rs",
+    "crates/relay-platform/tests/multipath_transport.rs",
+    "crates/relay-platform/tests/network_features.rs",
+    "crates/relay-platform/tests/node_leases.rs",
+    "crates/relay-platform/tests/node_leases/node_profile_integration.rs",
+    "crates/relay-platform/tests/proxy_protocol.rs",
+    "crates/relay-platform/tests/recovery.rs",
+    "crates/relay-platform/tests/sync_batch.rs",
+    "crates/relay-platform/tests/tls_transport.rs",
+    "crates/relay-platform/tests/topology.rs",
+    "crates/relay-platform/tests/websocket_transport.rs",
+    "deploy/Caddyfile.example",
+    "deploy/agent.env.example",
+    "deploy/relay-agent.service",
+    "deploy/relay-controller.service",
+    "examples/health-echo.json",
+    "examples/multipath-hop.json",
+    "examples/port-range.json",
+    "examples/proxy-hop.json",
+    "examples/standalone.json",
+    "examples/websocket-hop.json",
+    "rustfmt.toml",
+    "scripts/bench_budget.py",
+    "scripts/bench_loopback.py",
+    "scripts/bench_multipath.py",
+    "scripts/bench_sync.py",
+    "scripts/bench_websocket.py",
+    "scripts/check_budget_recovery.py",
+    "scripts/check_health.py",
+    "scripts/check_multipath_interop.py",
+    "scripts/check_node_leases.py",
+    "scripts/check_node_profiles.py",
+    "scripts/check_proxy_interop.py",
+    "scripts/check_recovery.py",
+    "scripts/check_topology.py",
+    "scripts/check_websocket_interop.py",
+    "scripts/echo_fixture.py",
+    "scripts/probe.py",
+    "scripts/requirements-interop.txt",
+    "scripts/verify.sh",
+    "web/app.js",
+    "web/index.html",
+    "web/style.css"
+  ],
+  "automated_tests_passed": 210,
+  "automated_tests_failed": 0,
+  "test_cases": [
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "agent::lease_client::tests::lease_window_rejects_delayed_replies_suspend_and_backward_wall_time"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "health::tests::thresholds_and_recovery_delay_require_sustained_success"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "health::tests::stale_success_does_not_immediately_reactivate_a_target"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "multipath::tests::invalid_or_out_of_window_frames_fail_instead_of_allocating_or_returning_clean_eof"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "multipath::tests::lost_path_replays_unacknowledged_chunks_without_corrupting_one_connection"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "multipath::tests::stripes_and_replicates_one_stream_with_bounded_windows_and_half_close"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "health::tests::stale_or_invalidated_observation_retires_waiting_udp_session"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "multipath::tests::selective_receipts_do_not_release_the_bounded_window_before_cumulative_delivery"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "multipath::tests::selective_receipts_retransmit_only_the_gap_and_reject_out_of_window_bits"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::invalid_inventory_or_failed_commit_cannot_partially_report_or_refund"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::managed_backup_removes_resume_authority_and_fresh_runs_keep_unknown_credit_isolated"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::pending_recovery_grant_must_belong_to_the_reconciled_ledger"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::reservation_inventory_is_paginated_tenant_scoped_and_never_contains_credentials"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "journal::tests::abrupt_exit_at_each_durable_boundary"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::node_policy_clock_does_not_reverse_after_an_observed_forward_then_backward_jump"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::resume_recovers_a_lost_grant_reply_and_cancels_requests_never_allocated"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::resume_requires_continuous_ownership_and_lost_acquisition_reply_is_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::stale_claims_paused_controller_and_wrong_identity_never_authorize_reuse"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::budget_recovery_tests::retained_grants_report_unconfirmed_consumption_then_resume_without_stranding_credit"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::concurrent_claims_have_one_owner_and_retries_do_not_renew_or_expose_the_secret"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::failed_grant_or_release_commit_does_not_publish_a_runtime_owner_change"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::strict_lease_fences_reconciliation_sync_and_budget_run_before_any_write"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::restart_and_pre_grant_backup_quarantine_takeover_without_using_wall_time"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::node_profiles::tests::batch_conflicts_duplicate_ids_and_storage_failures_roll_back_every_node_and_audit"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::leases::tests::complete_recovery_log_restores_policy_and_owner_without_logging_the_secret"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::node_profiles::tests::concurrent_profile_writers_have_exactly_one_winner"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::node_profiles::tests::expiry_caps_grants_and_live_edits_cannot_retroactively_shorten_issued_windows"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::node_profiles::tests::invalid_inventory_and_offline_lifecycle_controls_are_rejected_without_writes"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::node_profiles::tests::profile_roundtrip_keeps_exact_cost_and_configuration_revision_and_handles_legacy_nodes"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::node_profiles::tests::old_backup_plus_complete_journal_restores_names_profiles_and_lifecycle_exactly"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "multipath::tests::stopped_reader_bounds_payload_and_all_path_loss_is_an_error"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "store::node_profiles::tests::filters_and_profile_updates_preserve_tenant_and_read_only_permissions"
+    },
+    {
+      "file": "crates/relay-platform/src/lib.rs",
+      "name": "multipath::tests::a_live_but_blocked_preferred_path_cannot_starve_the_other_path"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "committed_refill_between_admission_and_wait_is_visible_to_every_waiter"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "failed_meter_transaction_rolls_back_reservation_consumption_as_well"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "invalid_report_rolls_back_other_reports_and_retry_updates_totals_once"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "datagram_larger_than_quantum_requests_enough_credit_without_partial_charges"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restored_controller_cannot_reissue_reservations_forgotten_by_its_backup"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "settlement_cancels_an_unissued_request_before_a_late_original_can_allocate"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "sync_reply_storage_failure_does_not_acknowledge_usage_or_lose_pending_request"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "sync_reply_rolls_back_usage_and_grants_on_invalid_later_grant_then_retries_once"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_permissions_revision_conflicts_and_committed_floor_are_enforced"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "remote_controller_requires_https_and_never_embeds_credentials"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "enrollment_recovers_after_the_controller_commits_but_response_is_lost"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "graceful_shutdown_reports_zero_active_sessions_even_with_no_pending_usage"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "proxy_settings_roundtrip_http_and_managed_agent_enforces_them"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "restored_backup_waits_for_controller_and_cannot_spend_confirmed_quota_twice"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "journal_restore_recovers_a_post_backup_node_and_refills_its_live_tcp_session"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "health_policy_and_observations_roundtrip_http_through_real_managed_agent"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "running_agent_republishes_acknowledged_counters_after_controller_restore"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "http_auth_role_and_schema_enforcement"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "api_agent_control_outage_restart_and_reconciliation"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "websocket_configuration_roundtrips_http_and_managed_agent_both_directions"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "three_real_agents_topology_mutual_wss_proxy_and_stopped_direction_change"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "udp_uses_only_its_reserved_budget_during_outage_and_resumes_when_control_returns"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "three_real_agents_topology_tcp_udp_and_stopped_direction_change"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "udp_larger_than_the_reservation_quantum_preserves_the_whole_datagram"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "two_real_agents_share_user_quota_refill_without_stream_loss_and_return_idle_reservations"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "dual_protocol_listener_and_ipv6_udp_are_independently_verified"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_meter_transaction_never_forwards_uncommitted_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "source_acl_denies_before_any_billable_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "failed_config_keeps_old_listener_and_persisted_revision"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "deleting_a_rule_terminates_existing_connections"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "concurrent_tcp_sessions_cannot_multiply_the_rule_quota"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "source_hash_is_stable_and_least_connections_uses_active_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "ipv6_and_dns_targets_transfer_real_bytes"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "weighted_target_selection_and_connect_failure_fallback"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "moving_udp_listener_releases_the_old_port_even_while_a_session_is_throttled"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "tcp_binary_payload_half_close_and_durable_bidirectional_metering"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_preserves_datagrams_empty_payloads_and_peer_isolation"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_enforces_combined_quota_without_partial_datagrams"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "udp_session_limit_and_idle_reclamation_are_real"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "shared_rate_limit_includes_both_directions_and_declares_burst"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "probe_policy_bounds_protocol_coverage_and_endpoint_cardinality_are_validated"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "health_probe_concurrency_and_shutdown_are_bounded"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "target_capacity_survives_target_removal_readdition_and_priority_edit"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "failed_staging_keeps_old_health_and_disabled_rules_stop_probes"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "ordinary_restart_does_not_trust_old_healthy_observations"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "offset_ports_have_independent_health_and_fixed_mapping_shares_one_observation"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "udp_health_is_independent_and_retires_existing_session_without_replaying_packets"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "mutual_wss_proxy_probe_checks_end_to_end_reply_and_downstream_metering"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "controller_health_reports_are_scoped_validated_and_aged_without_changing_saved_samples"
+    },
+    {
+      "file": "crates/relay-platform/tests/health.rs",
+      "name": "tcp_application_health_fails_over_and_holds_recovery_without_killing_established_stream"
+    },
+    {
+      "file": "crates/relay-platform/tests/journal.rs",
+      "name": "empty_initialization_can_rebuild_its_head_but_committed_history_cannot"
+    },
+    {
+      "file": "crates/relay-platform/tests/journal.rs",
+      "name": "manifest_io_failure_poisons_further_writes_and_restart_reconciles_the_commit"
+    },
+    {
+      "file": "crates/relay-platform/tests/journal.rs",
+      "name": "initialized_database_rejects_writes_without_its_log_and_stale_state_cannot_rebind"
+    },
+    {
+      "file": "crates/relay-platform/tests/journal.rs",
+      "name": "missing_corrupt_truncated_and_unrelated_logs_never_enable_restored_allocations"
+    },
+    {
+      "file": "crates/relay-platform/tests/journal.rs",
+      "name": "recovery_status_is_admin_only_and_failed_logging_is_unhealthy"
+    },
+    {
+      "file": "crates/relay-platform/tests/journal.rs",
+      "name": "restore_replays_credentials_configuration_budgets_and_usage_after_an_old_backup"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "model_rejects_unknown_options_invalid_targets_and_listener_duplicates"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "periods_do_not_reset_on_reapply_and_old_periods_cannot_spend"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "quota_is_shared_across_directions_and_survives_restart"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "exhausted_expired_and_disabled_rules_reject_empty_datagrams_too"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "consistent_backup_restores_config_counters_and_private_permissions"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "enrollment_is_single_use_and_configuration_writes_are_optimistic"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "controller_replay_is_idempotent_and_counter_regression_is_rejected"
+    },
+    {
+      "file": "crates/relay-platform/tests/ledger.rs",
+      "name": "authorization_is_enforced_at_store_boundary_and_sessions_revoke"
+    },
+    {
+      "file": "crates/relay-platform/tests/multipath_transport.rs",
+      "name": "multipath_validation_preserves_graph_identity_security_and_resource_limits"
+    },
+    {
+      "file": "crates/relay-platform/tests/multipath_transport.rs",
+      "name": "health_checks_use_the_aggregation_protocol_and_keep_source_probe_bytes_out_of_business_usage"
+    },
+    {
+      "file": "crates/relay-platform/tests/multipath_transport.rs",
+      "name": "directional_path_selection_is_observable_and_policy_change_cancels_active_groups"
+    },
+    {
+      "file": "crates/relay-platform/tests/multipath_transport.rs",
+      "name": "initial_path_minimum_and_session_capacity_fail_without_leaking_backend_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/multipath_transport.rs",
+      "name": "real_mtls_and_wss_multipath_preserve_one_connection_and_count_logical_payload_once_per_hop"
+    },
+    {
+      "file": "crates/relay-platform/tests/multipath_transport.rs",
+      "name": "join_is_bound_to_verified_tls_identity_and_bad_joins_never_open_a_backend"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "bound_source_ip_is_observed_by_target_and_dns_family_falls_back"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "ipv6_wildcard_is_v6_only_and_ipv4_can_share_port"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "invalid_bind_rejects_config_without_unbound_fallback"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "dns_two_hop_cycles_stop_but_acyclic_local_chains_forward"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "range_limits_overlap_and_static_cycle_validation"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "fixed_range_quota_and_connection_limits_cannot_multiply"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "active_old_generation_edges_remain_protected_until_drained"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "range_stage_failure_releases_new_sockets_and_preserves_old_config"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "port_ranges_offset_tcp_udp_and_shared_meter"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "udp_dns_cycle_drops_before_recursive_datagram"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "outbound_ip_and_loopback_interface_tcp_udp_ipv4_ipv6"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "udp_session_limit_is_shared_across_range"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "dns_rebinding_to_local_listener_is_rejected_after_ttl"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "dns_cache_uses_authoritative_ttl_and_shares_across_rules"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "dns_negative_cache_expires_and_failed_target_falls_back"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "dns_positive_ttl_cap_and_zero_ttl_udp"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "budget_reservation_api_enforces_tenant_session_and_node_recovery_credentials"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "node_profile_integration::profile_http_filter_bulk_and_permissions_preserve_configuration"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "node_profile_integration::pause_closes_active_tcp_udp_without_configuration_republish_and_enable_allows_restart"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "strict_node_api_defaults_permissions_and_proof_enforcement_are_visible"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "stalled_renewal_response_cannot_extend_tcp_or_udp_deadline"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "aborting_agent_task_closes_data_plane_without_releasing_ownership_early"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "intervening_backup_takeover_prevents_original_state_from_reclaiming_old_reservations"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_udp_activation"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "cloned_state_waits_through_renewals_then_reconciles_and_takes_over_after_clean_stop"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "node_profile_integration::expiry_stops_tcp_udp_during_control_outage_and_rejects_expired_restarts"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "strict_offline_restart_keeps_cached_listeners_closed_until_new_ownership"
+    },
+    {
+      "file": "crates/relay-platform/tests/node_leases.rs",
+      "name": "failed_budget_recovery_keeps_listeners_and_cleanup_refunds_stopped"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "maximum_v2_header_is_bounded_and_tlvs_never_become_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "malformed_truncated_oversized_and_wrong_transport_headers_fail"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "golden_wire_frames_and_fragmented_parser_preserve_following_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "tcp_output_without_input_header_uses_actual_client_and_wildcard_destination"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "moving_proxy_policy_between_existing_targets_cancels_old_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "tcp_claimed_acl_is_applied_only_after_trusted_peer_and_not_billed_as_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "inside_tls_proxy_does_not_bypass_required_client_certificate"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "unknown_local_unspec_and_unsupported_unix_use_real_endpoints"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "unsupported_proxy_combinations_and_missing_trust_are_rejected"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "mismatched_tls_proxy_placement_fails_without_forwarding_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "udp_same_claim_from_distinct_proxies_keeps_reply_channels_separate"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "tcp_output_matches_independent_v1_v2_and_crc_fixtures_once_per_connection"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "udp_wildcard_tracks_real_destination_and_reply_source_for_ipv4_ipv6"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "slow_headers_release_slots_and_proxy_policy_changes_cancel_old_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "proxy_v1_v2_before_and_inside_mutual_tls_preserve_identity_and_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "udp_headers_are_per_packet_sessions_include_original_identity_and_replies_use_real_peer"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "udp_malformed_crc_wrong_transport_and_denied_sources_do_not_reach_target"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "udp_proxy_hop_preserves_empty_datagrams_ipv6_claims_and_shared_quota"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "unrelated_and_future_databases_are_rejected_without_schema_migration"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "v1_managed_database_migrates_without_silently_reopening_old_quotas"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "conflicting_page_rolls_back_all_rows_and_never_changes_identity"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "checkpoint_raises_stale_backup_and_lower_controller_checkpoint_replays_local_totals"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "only_exported_managed_backup_requires_recovery_and_lock_is_exclusive"
+    },
+    {
+      "file": "crates/relay-platform/tests/recovery.rs",
+      "name": "historical_checkpoints_paginate_past_sync_limit_and_revision_changes_invalidate_cursor"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "failed_journal_confirmation_never_returns_partial_batch_success_and_retries_are_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "http_overload_is_bounded_and_duplicate_retries_do_not_multiply_credit"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "batch_isolates_invalid_requests_and_restores_only_confirmed_changes"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "duplicate_requests_share_the_same_grant_and_storage_failure_aborts_the_batch"
+    },
+    {
+      "file": "crates/relay-platform/tests/sync_batch.rs",
+      "name": "http_coalesces_requests_preserves_response_identity_and_restricts_metrics"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "tls_profiles_reject_paths_mismatched_keys_and_public_private_keys"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "tls12_and_tls13_negotiate_explicitly_and_transfer_application_bytes"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "outbound_tls_failure_does_not_forward_payload_or_fall_back_to_plaintext"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "invalid_tls_updates_keep_old_listener_and_material_rotation_ends_old_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "mutually_authenticated_tls_hop_preserves_binary_half_close_and_payload_accounting"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "slow_tls_handshake_is_bounded_and_releases_connection_capacity"
+    },
+    {
+      "file": "crates/relay-platform/tests/tls_transport.rs",
+      "name": "tls_rejects_missing_client_identity_wrong_authority_and_wrong_server_name"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "competing_batches_have_one_winner_without_lost_node_updates"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "multipath_sessions_and_paths_must_drain_even_after_physical_tcp_count_reaches_zero"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "multiple_entrances_and_weighted_candidates_are_distinct_from_sequential_hops"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "database_failure_on_last_node_rolls_back_all_rules_and_revisions"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "preview_is_read_only_and_batch_publish_preserves_history_and_edges"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "range_protocol_and_security_combinations_are_checked_at_both_ends"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "directed_cycles_raw_address_bypass_and_endpoint_aliases_are_rejected"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "new_rule_identity_cannot_reuse_a_stopping_topology_listener"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "rewire_requires_disabled_revision_ack_and_zero_sessions_then_can_reverse_chain"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "one_recovery_transaction_restores_the_entire_multi_node_publication"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "stale_last_node_and_invalid_reference_do_not_partially_publish"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "topology_reactivation_waits_for_cancelled_probe_io_to_finish"
+    },
+    {
+      "file": "crates/relay-platform/tests/topology.rs",
+      "name": "tenant_read_isolation_and_write_permissions_include_batch_and_topology"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "invalid_ws_configurations_are_rejected_without_optional_protocol_fallback"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "bounded_incoming_queue_backpressures_and_drop_stops_the_driver"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "malformed_records_frames_and_early_close_never_become_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "coalesced_upgrade_response_and_reverse_half_close_preserve_large_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "moving_websocket_policy_between_existing_targets_revokes_old_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "path_policy_change_revokes_open_streams_without_disabling_plain_target_updates"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "handshake_path_host_origin_subprotocol_key_and_header_limit_reject_before_target"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "blocked_control_flush_cannot_hold_half_closed_stream_indefinitely"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "ping_after_remote_fin_is_served_while_application_reply_is_waiting"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "raw_server_observes_masking_host_origin_records_and_full_half_close"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "outbound_upgrade_mismatch_never_forwards_application_or_falls_back"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "raw_client_fragmentation_ping_half_close_and_exact_metering"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "quotas_count_only_unwrapped_application_bytes_across_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "missing_close_ack_has_a_bounded_deadline"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "transport_flush_waits_for_wire_backpressure"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "outbound_wss_rejects_wrong_server_name_missing_identity_and_wrong_http_host"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "wss_requires_valid_client_certificate_before_http_upgrade"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "slow_upgrade_releases_connection_slot_and_invalid_update_keeps_old_rule"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "ws_and_mutual_wss_hops_preserve_payload_with_both_proxy_positions"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "pings_do_not_extend_application_idle_timeout"
+    }
+  ],
+  "test_groups": {
+    "crates/relay-platform/src/lib.rs": 33,
+    "crates/relay-platform/tests/budgets.rs": 15,
+    "crates/relay-platform/tests/control_agent.rs": 18,
+    "crates/relay-platform/tests/forwarding.rs": 16,
+    "crates/relay-platform/tests/health.rs": 10,
+    "crates/relay-platform/tests/journal.rs": 6,
+    "crates/relay-platform/tests/ledger.rs": 8,
+    "crates/relay-platform/tests/multipath_transport.rs": 6,
+    "crates/relay-platform/tests/network_features.rs": 16,
+    "crates/relay-platform/tests/node_leases.rs": 12,
+    "crates/relay-platform/tests/proxy_protocol.rs": 19,
+    "crates/relay-platform/tests/recovery.rs": 6,
+    "crates/relay-platform/tests/sync_batch.rs": 5,
+    "crates/relay-platform/tests/tls_transport.rs": 7,
+    "crates/relay-platform/tests/topology.rs": 13,
+    "crates/relay-platform/tests/websocket_transport.rs": 20
+  },
+  "ignored_helpers": [
+    {
+      "name": "journal::tests::crash_worker",
+      "reason": "Explicitly executed four times by the parent crash test"
+    }
+  ],
+  "verification_log_file": "docs/verification-0.15.0.txt",
+  "format_check": "passed",
+  "clippy_warnings_as_errors": "passed",
+  "javascript_syntax": "passed",
+  "python_syntax": "passed",
+  "release_build": "passed",
+  "release_evidence_files": [
+    "docs/cli-smoke-0.15.0.json",
+    "docs/cli-network-smoke-0.15.0.json",
+    "docs/cli-proxy-smoke-0.15.0.json",
+    "docs/proxy-interop-0.15.0.json",
+    "docs/websocket-interop-0.15.0.json",
+    "docs/multipath-interop-0.15.0.json",
+    "docs/recovery-smoke-0.15.0.json",
+    "docs/topology-smoke-0.15.0.json",
+    "docs/health-smoke-0.15.0.json",
+    "docs/node-leases-smoke-0.15.0.json",
+    "docs/node-profiles-smoke-0.15.0.json",
+    "docs/budget-recovery-smoke-0.15.0.json",
+    "docs/benchmark-local-0.15.0.json",
+    "docs/benchmark-budget-0.15.0.json",
+    "docs/benchmark-websocket-0.15.0.json",
+    "docs/benchmark-multipath-0.15.0.json"
+  ],
+  "release_evidence_same_binary": true,
+  "verification_sequence_note": "Full checks and Release build completed before all 16 sequential Release fixtures and benchmarks. JavaScript and Python syntax rechecked after adding the node profile fixture and correcting its UDP error classification. No compiler or performance scripts ran concurrently with benchmarks.",
+  "example_configurations_validated": [
+    "examples/health-echo.json",
+    "examples/multipath-hop.json",
+    "examples/port-range.json",
+    "examples/proxy-hop.json",
+    "examples/standalone.json",
+    "examples/websocket-hop.json"
+  ],
+  "third_party_metadata_packages": 273,
+  "cli_smoke": {
+    "validate": "passed",
+    "probe": {
+      "tcp": "verified",
+      "udp": "verified",
+      "bytes_each_direction_per_protocol": 44
+    },
+    "durable_bytes": 176,
+    "backup_restore": "identical",
+    "child_processes_stopped": true,
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "version": "relay 0.15.0"
+  },
+  "network_cli_smoke": {
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "version": "relay 0.15.0",
+    "ports": 2,
+    "mapping": "offset",
+    "outbound_ip": "127.0.0.1",
+    "outbound_interface": "lo0",
+    "system_dns_cache_config_accepted": true,
+    "shared_meter_records": 1,
+    "validate": "passed",
+    "probe": {
+      "tcp": "verified",
+      "udp": "verified",
+      "bytes_each_direction_per_protocol": 44
+    },
+    "durable_bytes": 352,
+    "backup_restore": "identical",
+    "child_processes_stopped": true
+  },
+  "proxy_cli_smoke": {
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "version": "relay 0.15.0",
+    "hops": 2,
+    "proxy": "v2_crc32c",
+    "meter_records": 2,
+    "headers_excluded": true,
+    "validate": "passed",
+    "probe": {
+      "tcp": "verified",
+      "udp": "verified",
+      "bytes_each_direction_per_protocol": 44
+    },
+    "durable_bytes": 352,
+    "backup_restore": "identical",
+    "child_processes_stopped": true
+  },
+  "proxy_interop_file": "docs/proxy-interop-0.15.0.json",
+  "proxy_interop_cases": 18,
+  "proxy_interop_ledger": {
+    "expected_admitted_bytes": 294912,
+    "recorded_bytes": 294912,
+    "exact_match": true,
+    "proxy_headers_excluded": true
+  },
+  "websocket_interop_file": "docs/websocket-interop-0.15.0.json",
+  "websocket_interop_cases": 3,
+  "websocket_interop_negative_cases": 7,
+  "websocket_interop_ledger": {
+    "expected_admitted_bytes": 1573086,
+    "recorded_bytes": 1573086,
+    "exact_match": true,
+    "framing_and_control_excluded": true
+  },
+  "multipath_interop_file": "docs/multipath-interop-0.15.0.json",
+  "multipath_interop_cases": 2,
+  "multipath_interop_negative_cases": 5,
+  "multipath_interop_ledger": {
+    "upload_bytes": 99182,
+    "download_bytes": 99182,
+    "exact_match": true
+  },
+  "multipath_benchmark_file": "docs/benchmark-multipath-0.15.0.json",
+  "multipath_benchmark": {
+    "median_goodput_mbps": {
+      "single-fast": 14.27472497110233,
+      "stripe": 21.65579286682848,
+      "replicate": 12.041793319016664
+    },
+    "stripe_to_single_fast_ratio": 1.517072511776468,
+    "single_connection_gain_observed": true,
+    "path_cut_same_application_connection": "all bytes verified",
+    "ledgers": [
+      {
+        "rule": "single-fast-entry",
+        "upload_bytes": 12845056,
+        "download_bytes": 12845056,
+        "exact_match": true
+      },
+      {
+        "rule": "single-fast-exit",
+        "upload_bytes": 12845056,
+        "download_bytes": 12845056,
+        "exact_match": true
+      },
+      {
+        "rule": "stripe-entry",
+        "upload_bytes": 17039360,
+        "download_bytes": 17039360,
+        "exact_match": true
+      },
+      {
+        "rule": "stripe-exit",
+        "upload_bytes": 17039360,
+        "download_bytes": 17039360,
+        "exact_match": true
+      },
+      {
+        "rule": "replicate-entry",
+        "upload_bytes": 12845056,
+        "download_bytes": 12845056,
+        "exact_match": true
+      },
+      {
+        "rule": "replicate-exit",
+        "upload_bytes": 12845056,
+        "download_bytes": 12845056,
+        "exact_match": true
+      }
+    ],
+    "node_metrics": [
+      {
+        "name": "entry",
+        "multipath": {
+          "active_sessions": 0,
+          "active_paths": 0,
+          "sessions": 14,
+          "failed_paths": 1,
+          "sent_payload_bytes": 62013440,
+          "replicated_payload_bytes": 12845056,
+          "retransmitted_payload_bytes": 6438912,
+          "received_payload_bytes": 56623104,
+          "duplicate_payload_bytes": 13893632,
+          "delivered_payload_bytes": 42729472,
+          "framing_sent_bytes": 288800,
+          "peak_reorder_bytes": 81920,
+          "peak_send_window_bytes": 1048576,
+          "path_sent_payload_bytes": [
+            34930688,
+            27082752,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      {
+        "name": "exit",
+        "multipath": {
+          "active_sessions": 0,
+          "active_paths": 0,
+          "sessions": 14,
+          "failed_paths": 1,
+          "sent_payload_bytes": 62210048,
+          "replicated_payload_bytes": 12845056,
+          "retransmitted_payload_bytes": 6635520,
+          "received_payload_bytes": 56885248,
+          "duplicate_payload_bytes": 14155776,
+          "delivered_payload_bytes": 42729472,
+          "framing_sent_bytes": 306896,
+          "peak_reorder_bytes": 360448,
+          "peak_send_window_bytes": 1048576,
+          "path_sent_payload_bytes": [
+            34308096,
+            27901952,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      }
+    ],
+    "limits": [
+      "synthetic Python pacing on local loopback, timer and process overhead included",
+      "same-machine Agents; no claim about independent WAN links or Linux kernel MPTCP",
+      "wire caps include TLS and relay framing, exclude IP/TCP headers",
+      "no high-concurrency, long-duration, maximum throughput or third-party comparison"
+    ]
+  },
+  "benchmark_file": "docs/benchmark-local-0.15.0.json",
+  "benchmark_ledger": {
+    "expected_admitted_bytes": 1680058752,
+    "recorded_bytes": 1680058752,
+    "exact_match": true
+  },
+  "budget_benchmark_file": "docs/benchmark-budget-0.15.0.json",
+  "budget_benchmark_ledger": {
+    "expected_admitted_bytes": 6719275008,
+    "controller_bytes": 6719275008,
+    "agent_bytes": 6719275008,
+    "exact_match": true
+  },
+  "budget_settlement": {
+    "expected_bytes": 3359637504,
+    "consumed_bytes": 3359637504,
+    "committed_bytes_after_shutdown": 3359637504,
+    "unused_reserved_bytes_after_shutdown": 0
+  },
+  "controller_sync_metrics": {
+    "queue_time": {
+      "samples": 1033,
+      "total_us": 6174346,
+      "max_us": 30292
+    },
+    "storage_batch_time": {
+      "samples": 596,
+      "total_us": 10679338,
+      "max_us": 261591
+    },
+    "request_time": {
+      "samples": 1033,
+      "total_us": 24593100,
+      "max_us": 264806
+    },
+    "committed_batches": 596,
+    "processed_requests": 1033,
+    "largest_batch": 3,
+    "queue_full_rejections": 0,
+    "failed_batches": 0,
+    "batch_limit": 16,
+    "queue_capacity": 64,
+    "coalesce_window_ms": 2
+  },
+  "node_meter_metrics": [
+    {
+      "name": "budgeted-0",
+      "meter": {
+        "admission_batches": {
+          "samples": 9608,
+          "total_us": 2719091,
+          "max_us": 9733
+        },
+        "admission_requests": 29157,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 3024,
+          "total_us": 72764428,
+          "max_us": 52186
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    },
+    {
+      "name": "budgeted-1",
+      "meter": {
+        "admission_batches": {
+          "samples": 9674,
+          "total_us": 2723388,
+          "max_us": 6823
+        },
+        "admission_requests": 29061,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 2979,
+          "total_us": 71317305,
+          "max_us": 52456
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    },
+    {
+      "name": "plain-0",
+      "meter": {
+        "admission_batches": {
+          "samples": 14406,
+          "total_us": 1427430,
+          "max_us": 6366
+        },
+        "admission_requests": 25845,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 0,
+          "total_us": 0,
+          "max_us": 0
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    },
+    {
+      "name": "plain-1",
+      "meter": {
+        "admission_batches": {
+          "samples": 14937,
+          "total_us": 1439695,
+          "max_us": 6448
+        },
+        "admission_requests": 25929,
+        "failed_batches": 0,
+        "budget_wait": {
+          "samples": 0,
+          "total_us": 0,
+          "max_us": 0
+        },
+        "budget_waiting": 0,
+        "budget_timeouts": 0
+      }
+    }
+  ],
+  "websocket_benchmark_file": "docs/benchmark-websocket-0.15.0.json",
+  "websocket_benchmark_ledgers": {
+    "tcp": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    },
+    "ws": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    },
+    "wss-mtls": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    }
+  },
+  "websocket_benchmark_medians": [
+    {
+      "connections": 1,
+      "mode": "direct",
+      "goodput_mbps": 13433.549507857682
+    },
+    {
+      "connections": 1,
+      "mode": "tcp",
+      "goodput_mbps": 3961.8376722482562
+    },
+    {
+      "connections": 1,
+      "mode": "ws",
+      "goodput_mbps": 3940.782548234927
+    },
+    {
+      "connections": 1,
+      "mode": "wss-mtls",
+      "goodput_mbps": 3228.7960200250345
+    },
+    {
+      "connections": 4,
+      "mode": "direct",
+      "goodput_mbps": 14753.358487224872
+    },
+    {
+      "connections": 4,
+      "mode": "tcp",
+      "goodput_mbps": 10059.86615112871
+    },
+    {
+      "connections": 4,
+      "mode": "ws",
+      "goodput_mbps": 9544.877325334306
+    },
+    {
+      "connections": 4,
+      "mode": "wss-mtls",
+      "goodput_mbps": 7906.566185491791
+    }
+  ],
+  "recovery_smoke": {
+    "at_utc": "2026-10-24T09:55:26.582114+00:00",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "restore": {
+      "journal_id": "bb46d37c-ed25-4ee5-b612-5547efcddd7e",
+      "backup_sequence": 4,
+      "restored_sequence": 12,
+      "replayed_transactions": 8,
+      "budget_allocation_paused": false,
+      "ignored_uncommitted_tail": false
+    },
+    "checks": [
+      "CLI online backup before node creation",
+      "post-backup node identity and configuration recovered",
+      "old API session retained",
+      "same TCP connection survives controller replacement",
+      "offline consumption reconciled",
+      "new reservations issued after validated replay",
+      "source backup and log unchanged",
+      "graceful shutdown returns unused reservations",
+      "all spawned processes exited successfully"
+    ],
+    "ledger": {
+      "expected_bytes": 286720,
+      "controller_bytes": 286720,
+      "agent_bytes": 286720,
+      "budget_consumed_bytes": 286720,
+      "budget_committed_bytes": 286720,
+      "exact_match": true
+    },
+    "limits": [
+      "local macOS loopback only",
+      "no power-loss or remote storage durability test"
+    ],
+    "version": "relay 0.15.0"
+  },
+  "topology_smoke_file": "docs/topology-smoke-0.15.0.json",
+  "topology_smoke": {
+    "at_utc": "2026-10-24T09:55:47.986615+00:00",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "version": "relay 0.15.0",
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "cases": [
+      {
+        "transport": "both",
+        "agents": 3,
+        "forward_payload_bytes": 33333,
+        "udp_payload_bytes": 1200,
+        "reverse_payload_bytes": 43,
+        "per_hop_recorded_bytes": 69152,
+        "total_recorded_bytes": 207456,
+        "preview_read_only": true,
+        "publish_matches_preview": true,
+        "stopped_before_reverse": true,
+        "binary_half_close_verified": true,
+        "restored_topology_usage_and_old_session": true,
+        "restore": {
+          "journal_id": "e42aef9a-41de-49f4-ab8a-f3a4fdd02c99",
+          "backup_sequence": 8,
+          "restored_sequence": 45,
+          "replayed_transactions": 37,
+          "budget_allocation_paused": false,
+          "ignored_uncommitted_tail": false
+        }
+      },
+      {
+        "transport": "ws",
+        "agents": 3,
+        "forward_payload_bytes": 33333,
+        "udp_payload_bytes": 0,
+        "reverse_payload_bytes": 43,
+        "per_hop_recorded_bytes": 66752,
+        "total_recorded_bytes": 200256,
+        "preview_read_only": true,
+        "publish_matches_preview": true,
+        "stopped_before_reverse": true,
+        "binary_half_close_verified": true,
+        "restored_topology_usage_and_old_session": true,
+        "restore": {
+          "journal_id": "a68f462f-93a1-4db7-baae-e824b24ecdaa",
+          "backup_sequence": 8,
+          "restored_sequence": 45,
+          "replayed_transactions": 37,
+          "budget_allocation_paused": false,
+          "ignored_uncommitted_tail": false
+        }
+      },
+      {
+        "transport": "wss",
+        "agents": 3,
+        "forward_payload_bytes": 33333,
+        "udp_payload_bytes": 0,
+        "reverse_payload_bytes": 43,
+        "per_hop_recorded_bytes": 66752,
+        "total_recorded_bytes": 200256,
+        "preview_read_only": true,
+        "publish_matches_preview": true,
+        "stopped_before_reverse": true,
+        "binary_half_close_verified": true,
+        "restored_topology_usage_and_old_session": true,
+        "restore": {
+          "journal_id": "33e82c7b-021e-4fb7-bd0a-5966dd8885ee",
+          "backup_sequence": 9,
+          "restored_sequence": 45,
+          "replayed_transactions": 36,
+          "budget_allocation_paused": false,
+          "ignored_uncommitted_tail": false
+        }
+      }
+    ],
+    "total_recorded_bytes": 607968,
+    "child_processes_stopped": true,
+    "limits": [
+      "one machine, three Agent processes per case",
+      "declared addresses only; no discovery of DNS/NAT aliases",
+      "per-hop accounting, not once-per-logical-flow billing",
+      "asynchronous node activation, not distributed atomic rollout",
+      "not Linux/WAN/throughput acceptance"
+    ]
+  },
+  "health_smoke_file": "docs/health-smoke-0.15.0.json",
+  "health_smoke": {
+    "at_utc": "2026-10-24T09:56:26.746507+00:00",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "version": "relay 0.15.0",
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "observations": [
+      {
+        "phase": "initial application replies",
+        "reports": [
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835749378,
+            "completed_checks": 6,
+            "consecutive_failures": 0,
+            "consecutive_successes": 6,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 622,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 47,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835749379,
+            "completed_checks": 6,
+            "consecutive_failures": 0,
+            "consecutive_successes": 6,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1186,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 46,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835749378,
+            "completed_checks": 6,
+            "consecutive_failures": 0,
+            "consecutive_successes": 6,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 660,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 47,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835749379,
+            "completed_checks": 6,
+            "consecutive_failures": 0,
+            "consecutive_successes": 6,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1643,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 46,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      },
+      {
+        "phase": "TCP failed, UDP independent",
+        "reports": [
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835750382,
+            "completed_checks": 11,
+            "consecutive_failures": 0,
+            "consecutive_successes": 11,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1400,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 44,
+            "probe_sent_bytes": 44,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 70,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 11,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835750383,
+            "completed_checks": 11,
+            "consecutive_failures": 5,
+            "consecutive_successes": 0,
+            "eligible": false,
+            "last_error": "unexpected_response",
+            "latency_ewma_us": 1186,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 44,
+            "probe_sent_bytes": 44,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 69,
+            "selection_reason": "unhealthy",
+            "status": "unhealthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835750382,
+            "completed_checks": 11,
+            "consecutive_failures": 0,
+            "consecutive_successes": 11,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1380,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 44,
+            "probe_sent_bytes": 44,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 70,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 11,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835750383,
+            "completed_checks": 11,
+            "consecutive_failures": 0,
+            "consecutive_successes": 11,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2039,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 44,
+            "probe_sent_bytes": 44,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 69,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 11,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      },
+      {
+        "phase": "both failed on primary",
+        "reports": [
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835751381,
+            "completed_checks": 16,
+            "consecutive_failures": 5,
+            "consecutive_successes": 0,
+            "eligible": false,
+            "last_error": "unexpected_response",
+            "latency_ewma_us": 1400,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 64,
+            "probe_sent_bytes": 64,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 103,
+            "selection_reason": "unhealthy",
+            "status": "unhealthy",
+            "successful_checks": 11,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835751382,
+            "completed_checks": 16,
+            "consecutive_failures": 10,
+            "consecutive_successes": 0,
+            "eligible": false,
+            "last_error": "unexpected_response",
+            "latency_ewma_us": 1186,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 64,
+            "probe_sent_bytes": 64,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 101,
+            "selection_reason": "unhealthy",
+            "status": "unhealthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835751382,
+            "completed_checks": 16,
+            "consecutive_failures": 0,
+            "consecutive_successes": 16,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1720,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 64,
+            "probe_sent_bytes": 64,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 101,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 16,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835751382,
+            "completed_checks": 16,
+            "consecutive_failures": 0,
+            "consecutive_successes": 16,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2589,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 64,
+            "probe_sent_bytes": 64,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 101,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 16,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      },
+      {
+        "phase": "primary recovered after hold",
+        "reports": [
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835752382,
+            "completed_checks": 21,
+            "consecutive_failures": 0,
+            "consecutive_successes": 5,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1468,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 84,
+            "probe_sent_bytes": 84,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 149,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 16,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835752382,
+            "completed_checks": 21,
+            "consecutive_failures": 0,
+            "consecutive_successes": 5,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1829,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 84,
+            "probe_sent_bytes": 84,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 148,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 11,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835752382,
+            "completed_checks": 21,
+            "consecutive_failures": 0,
+            "consecutive_successes": 21,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2037,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 84,
+            "probe_sent_bytes": 84,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 148,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 21,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835752382,
+            "completed_checks": 21,
+            "consecutive_failures": 0,
+            "consecutive_successes": 21,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2814,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 84,
+            "probe_sent_bytes": 84,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 148,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 21,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      },
+      {
+        "phase": "all TCP targets failed",
+        "reports": [
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835753380,
+            "completed_checks": 26,
+            "consecutive_failures": 0,
+            "consecutive_successes": 10,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1298,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 104,
+            "probe_sent_bytes": 104,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 178,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 21,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835753380,
+            "completed_checks": 26,
+            "consecutive_failures": 5,
+            "consecutive_successes": 0,
+            "eligible": false,
+            "last_error": "unexpected_response",
+            "latency_ewma_us": 1829,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 104,
+            "probe_sent_bytes": 104,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 177,
+            "selection_reason": "unhealthy",
+            "status": "unhealthy",
+            "successful_checks": 11,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835753380,
+            "completed_checks": 26,
+            "consecutive_failures": 0,
+            "consecutive_successes": 26,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1696,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 104,
+            "probe_sent_bytes": 104,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 178,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 26,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835753380,
+            "completed_checks": 26,
+            "consecutive_failures": 5,
+            "consecutive_successes": 0,
+            "eligible": false,
+            "last_error": "unexpected_response",
+            "latency_ewma_us": 2814,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 104,
+            "probe_sent_bytes": 104,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 177,
+            "selection_reason": "unhealthy",
+            "status": "unhealthy",
+            "successful_checks": 21,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      },
+      {
+        "phase": "recovered before measurements",
+        "reports": [
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754382,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 15,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1549,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 188,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 26,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754383,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 5,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2338,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 187,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 16,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754382,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 31,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1876,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 188,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 31,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754383,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 5,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2888,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 187,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 26,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      },
+      {
+        "phase": "after verified bulk payloads",
+        "reports": [
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754382,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 15,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1549,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 823,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 26,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754383,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 5,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2338,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 822,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 16,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754382,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 31,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1876,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 823,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 31,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 1,
+            "checked_at_ms": 1792835754383,
+            "completed_checks": 31,
+            "consecutive_failures": 0,
+            "consecutive_successes": 5,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 2888,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 124,
+            "probe_sent_bytes": 124,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 822,
+            "selection_reason": "standby",
+            "status": "healthy",
+            "successful_checks": 26,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      },
+      {
+        "phase": "restart observes changed service",
+        "reports": [
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835786585,
+            "completed_checks": 6,
+            "consecutive_failures": 6,
+            "consecutive_successes": 0,
+            "eligible": false,
+            "last_error": "unexpected_response",
+            "latency_ewma_us": null,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 77,
+            "selection_reason": "unhealthy",
+            "status": "unhealthy",
+            "successful_checks": 0,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835786586,
+            "completed_checks": 6,
+            "consecutive_failures": 6,
+            "consecutive_successes": 0,
+            "eligible": false,
+            "last_error": "unexpected_response",
+            "latency_ewma_us": null,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 0,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 77,
+            "selection_reason": "unhealthy",
+            "status": "unhealthy",
+            "successful_checks": 0,
+            "target_address": "127.0.0.1:63374",
+            "target_index": 0
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835786585,
+            "completed_checks": 6,
+            "consecutive_failures": 0,
+            "consecutive_successes": 6,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 864,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "udp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "udp",
+            "rule_id": "checked",
+            "sample_age_ms": 77,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          },
+          {
+            "active_sessions": 0,
+            "checked_at_ms": 1792835786586,
+            "completed_checks": 6,
+            "consecutive_failures": 0,
+            "consecutive_successes": 6,
+            "eligible": true,
+            "last_error": null,
+            "latency_ewma_us": 1523,
+            "listen_port": 63383,
+            "max_age_ms": 1500,
+            "max_sessions": 32,
+            "priority": 10,
+            "probe_kind": "tcp_exchange",
+            "probe_received_bytes": 24,
+            "probe_sent_bytes": 24,
+            "protocol": "tcp",
+            "rule_id": "checked",
+            "sample_age_ms": 77,
+            "selection_reason": "eligible",
+            "status": "healthy",
+            "successful_checks": 6,
+            "target_address": "127.0.0.1:63375",
+            "target_index": 1
+          }
+        ]
+      }
+    ],
+    "backend_probe_counts": {
+      "A": {
+        "tcp": 41,
+        "udp": 41
+      },
+      "B": {
+        "tcp": 41,
+        "udp": 41
+      }
+    },
+    "ledger": {
+      "by_rule_bytes": {
+        "checked": 673185856,
+        "plain": 673185792
+      },
+      "total_bytes": 1346371648,
+      "exact_match": true,
+      "source_probes_excluded": true
+    },
+    "restore": {
+      "journal_id": "429a3885-cfed-4bef-b179-a8ccaa892f91",
+      "backup_sequence": 3,
+      "restored_sequence": 17,
+      "replayed_transactions": 14,
+      "budget_allocation_paused": false,
+      "ignored_uncommitted_tail": false
+    },
+    "tcp": [
+      {
+        "connections": 1,
+        "samples": {
+          "plain": [
+            {
+              "seconds": 0.0352543750195764,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 3807.122603236343
+            },
+            {
+              "seconds": 0.026179458014667034,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 5126.833715381142
+            },
+            {
+              "seconds": 0.02567695896141231,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 5227.166044145035
+            },
+            {
+              "seconds": 0.026288790977559984,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 5105.511627163371
+            }
+          ],
+          "checked": [
+            {
+              "seconds": 0.028736333013512194,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 4670.663022205689
+            },
+            {
+              "seconds": 0.025802499963901937,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 5201.733482715725
+            },
+            {
+              "seconds": 0.027906458009965718,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 4809.557986616191
+            },
+            {
+              "seconds": 0.027792833978310227,
+              "one_way_payload_bytes": 16777216,
+              "goodput_mbps": 4829.220658272729
+            }
+          ]
+        },
+        "median_mbps": {
+          "plain": 5116.172671272256,
+          "checked": 4819.38932244446
+        },
+        "checked_to_plain_ratio": 0.9419911391000817
+      },
+      {
+        "connections": 4,
+        "samples": {
+          "plain": [
+            {
+              "seconds": 0.04946279199793935,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 10854.03573705193
+            },
+            {
+              "seconds": 0.048972624994348735,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 10962.673780749
+            },
+            {
+              "seconds": 0.049493375001475215,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 10847.32879873312
+            },
+            {
+              "seconds": 0.04948454099940136,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 10849.26526865218
+            }
+          ],
+          "checked": [
+            {
+              "seconds": 0.049949874985031784,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 10748.1933070079
+            },
+            {
+              "seconds": 0.05012308299774304,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 10711.051274004321
+            },
+            {
+              "seconds": 0.048659166030120105,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 11033.2945629951
+            },
+            {
+              "seconds": 0.04797454195795581,
+              "one_way_payload_bytes": 67108864,
+              "goodput_mbps": 11190.745968361844
+            }
+          ]
+        },
+        "median_mbps": {
+          "plain": 10851.650502852055,
+          "checked": 10890.7439350015
+        },
+        "checked_to_plain_ratio": 1.0036025332864498
+      }
+    ],
+    "strict_restart": {
+      "ttl_ms": 30000,
+      "initial_recovery_wait_ms": 29950,
+      "fresh_health_after_restart_seconds": 31.318207666976377
+    },
+    "parameters": {
+      "rounds": 4,
+      "mib_per_connection": 16,
+      "probe_endpoints": 4,
+      "probe_interval_ms": 200,
+      "priority": [
+        0,
+        10
+      ],
+      "target_max_sessions": 32
+    },
+    "child_processes_stopped": true,
+    "limits": [
+      "single macOS/host loopback; not Linux/WAN acceptance",
+      "plain and checked rules share one Agent; background probes run in both samples",
+      "sequential alternating samples; not an isolated proof of performance equivalence",
+      "UDP healthy sessions keep target affinity on recovery; only failed sessions are evicted",
+      "downstream relay probe metering verified separately by Rust mTLS/WSS test"
+    ]
+  },
+  "regression_before_fix_file": "docs/regression-node-reenable-before-fix-0.15.0.txt",
+  "regression_before_fix_scope": "An unpublished 0.15.0 candidate checked shortened expiry on edits but omitted the same check when re-enabling a paused node with an earlier expiry. The regression now rejects re-enable before the existing window has ended.",
+  "node_execution_lease_file": "docs/node-leases-smoke-0.15.0.json",
+  "node_execution_lease": {
+    "at_utc": "2026-10-24T09:55:21.137219+00:00",
+    "version": "relay 0.15.0",
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "python": "3.14.4",
+    "scope": "separate local release processes; one controller; copied node database; shared budget; TCP and UDP; no cross-host, physical suspend, or multi-controller claim",
+    "policy": {
+      "ttl_ms": 5000,
+      "strict": true
+    },
+    "clean_handoff": {
+      "generation": 2,
+      "clone_wait_seconds": 6.133601500012446,
+      "clean_takeover_seconds": 0.48763041698839515,
+      "copied_snapshot_bytes": 3168,
+      "controller_bytes": 30912,
+      "agent_bytes": 30912,
+      "budget_consumed_bytes": 30912,
+      "budget_committed_bytes": 30912,
+      "unused_reserved_bytes": 0,
+      "waiting_clone_kept_original_budget_run": true,
+      "exact_match": true
+    },
+    "control_loss": {
+      "generation": 3,
+      "agent_exit_code": 1,
+      "agent_exit_after_control_stop_seconds": 4.375115750008263,
+      "tcp_connection_closed": true,
+      "tcp_listener_closed": true,
+      "udp_echo_stopped": true,
+      "controller_bytes_before_outage": 35368,
+      "local_bytes_after_exit": 35368,
+      "all_outage_usage_confirmed_before_control_stop": true,
+      "exact_match": true,
+      "unused_reservation_before_outage_bytes": 3736,
+      "expiry_does_not_refund_unconfirmed_reservations": true
+    },
+    "all_child_processes_exited": true
+  },
+  "budget_run_recovery_file": "docs/budget-recovery-smoke-0.15.0.json",
+  "budget_run_recovery": {
+    "at_utc": "2026-10-24T09:55:09.149704+00:00",
+    "version": "relay 0.15.0",
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "machine": "arm64",
+    "python": "3.14.4",
+    "scope": "real SIGKILL; separate local Release processes; original Agent and controller databases; TCP/UDP; single controller; not physical power loss or snapshot completeness",
+    "policy": {
+      "ttl_ms": 5000,
+      "shared_limit_bytes": 65536,
+      "quantum_bytes": 65536
+    },
+    "kill_boundary": {
+      "agent_exit_code": -9,
+      "offline_payload_seconds": 0.005682417016942054,
+      "controller_confirmed_bytes": 256,
+      "agent_durable_bytes": 24832,
+      "unreported_bytes": 24576,
+      "controller_outstanding_bytes": 65280
+    },
+    "recovery": {
+      "seconds_from_controller_restart": 5.181180084007792,
+      "generation": 2,
+      "same_durable_run": true,
+      "listeners_waited": true,
+      "stats": {
+        "run_id": "3dc0d8c9-d99c-4503-80cf-cacf08312d38",
+        "at_ms": 1792835708663,
+        "validated_grants": 1,
+        "recovered_pending_grants": 0,
+        "cancelled_requests": 0,
+        "open_grants": 1
+      },
+      "consumed_bytes_after_recovery": 24832,
+      "diagnostics_preserved_after_stop": true
+    },
+    "ledger": {
+      "expected_bytes": 65536,
+      "agent_bytes": 65536,
+      "controller_bytes": 65536,
+      "budget_consumed_bytes": 65536,
+      "budget_committed_bytes": 65536,
+      "open_reservations_after_stop": 0,
+      "extra_payload_rejected": true,
+      "exact_match": true
+    },
+    "all_child_processes_exited": true
+  },
+  "node_inventory_lifecycle_file": "docs/node-profiles-smoke-0.15.0.json",
+  "node_inventory_lifecycle": {
+    "at_utc": "2026-10-24T09:55:02.476889+00:00",
+    "version": "relay 0.15.0",
+    "binary_sha256": "4c4397b3ed5dd1c6f3e6397d2f1a0566f00584b4d8e3755b5b49591ca5507d67",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "inventory": {
+      "nodes": 2,
+      "filters_matched": true,
+      "cost_micros": 12500123,
+      "same_tcp_connection_after_metadata_edit": true,
+      "configuration_revision_unchanged": 1,
+      "stale_edit_status": 409,
+      "batch_conflict_status": 409,
+      "batch_rollback_verified": true,
+      "batch_receipts": [
+        {
+          "node_id": "81ada534-9346-40d6-b79a-185db1ca09f2",
+          "revision": 3
+        },
+        {
+          "node_id": "e6161122-e0e7-498e-a717-7c1aca8920a7",
+          "revision": 2
+        }
+      ]
+    },
+    "pause": {
+      "agent_exit_code": 1,
+      "seconds_until_exit": 0.46345895796548575,
+      "tcp_and_udp_closed": true,
+      "consumed_and_committed_bytes": 448,
+      "profile_revision": 4
+    },
+    "expiry": {
+      "expires_at_ms": 1792835697001,
+      "listener_closed_at_ms": 1792835696533,
+      "closed_before_expiry_ms": 468,
+      "last_capped_lease_remaining_ms": 3587,
+      "controller_was_offline": true,
+      "expired_restart_exit_code": 1,
+      "expired_restart_http_status": 410,
+      "durable_bytes_before_recovery": 928,
+      "unreported_bytes_recovered": 160,
+      "reactivation_wait_seconds": 5.127858916996047,
+      "generation_after_extension": 3
+    },
+    "ledger": {
+      "expected_bytes": 1216,
+      "agent_bytes": 1216,
+      "controller_bytes": 1216,
+      "budget_consumed_bytes": 1216,
+      "budget_committed_bytes": 1216,
+      "exact_match": true
+    },
+    "restore": {
+      "journal_id": "9e494c79-672e-4e8b-b7d2-0111aa57dc6c",
+      "backup_sequence": 11,
+      "restored_sequence": 36,
+      "replayed_transactions": 25,
+      "budget_allocation_paused": false,
+      "ignored_uncommitted_tail": false
+    },
+    "profiles_after_restore": [
+      {
+        "name": "managed-renamed",
+        "profile": {
+          "revision": 6,
+          "updated_at_ms": 1792835697107,
+          "settings": {
+            "kinds": [
+              "ingress",
+              "relay"
+            ],
+            "group": "bulk-group",
+            "tags": [
+              "premium",
+              "Taipei"
+            ],
+            "notes": "metadata changed while one TCP stream remains open",
+            "cost": {
+              "currency": "USD",
+              "amount_micros": 12500123,
+              "period": "monthly"
+            },
+            "enabled": true,
+            "expires_at_ms": null
+          }
+        },
+        "desired_revision": 1
+      },
+      {
+        "name": "standby-inventory",
+        "profile": {
+          "revision": 2,
+          "updated_at_ms": 1792835689492,
+          "settings": {
+            "kinds": [],
+            "group": "bulk-group",
+            "tags": [],
+            "notes": "",
+            "cost": null,
+            "enabled": true,
+            "expires_at_ms": null
+          }
+        },
+        "desired_revision": 0
+      }
+    ],
+    "udp_stop_observations": [
+      "ConnectionRefusedError",
+      "ConnectionRefusedError"
+    ],
+    "all_child_processes_exited": true
+  },
+  "verified_capabilities": [
+    "Versioned node roles, groups, tags, notes, exact integer cost records and permission-scoped filters",
+    "Node profile revisions are independent of forwarding configurations; metadata edits preserve active TCP streams",
+    "Atomic 1..100-node profile batches reject stale versions, foreign tenants and storage failures without partial writes",
+    "Strict node pause rejects claim and renewal; current authorized windows converge to closed TCP/UDP",
+    "Strict expiry caps issued lease duration; offline control cannot keep business open past the received deadline",
+    "Live expiry edits and re-enable cannot retroactively shorten an already-issued window",
+    "In-process policy clock progresses through observed forward/backward wall-clock changes without reversing",
+    "Expired startup reports HTTP 410; extending policy requires normal ownership and durable budget recovery",
+    "Release fixture checks 160 unreported bytes after expiry, 1216 exact final bytes, and unchanged forwarding revision",
+    "Old controller backup plus complete journal restores all profile fields, names, revisions and ledgers",
+    "UI provides node profile editing, read-only detail, filters and per-node bulk receipts; browser interaction still pending",
+    "All existing transfer, lease, budget recovery, topology, health and multipath regression suites retained"
+  ],
+  "not_verified_or_pending": [
+    "Linux servers, real interfaces/routing and Linux UDP packet-info; user will supply OS, architecture and node count",
+    "Browser visual/click acceptance; prior local-origin access was denied and not bypassed",
+    "Real multi-WAN paths, RTT/loss matrix, kernel MPTCP, automatic subflow rejoin and latency-adaptive scheduling",
+    "Independent multipath server fixture or third-party proprietary protocol interoperability",
+    "High concurrency, long-duration load, maximum throughput, 72-hour stability or same-condition competitor comparisons",
+    "Multi-controller consensus, live node policy migration, credential rotation, recovery of reservations with unknown consumption or arbitrary snapshot rollback, global fairness/rates and full disaster recovery",
+    "Node bulk replacement/upgrades, roles provisioning, cost-aware routing, historical metrics, controller HA, log rotation/offsite storage, key migration and signed Linux releases",
+    "Remaining 22-module requirements including protocols, commerce, subscriptions, NAT/WireGuard, DNS and sharing"
+  ],
+  "historical_performance_references": [
+    {
+      "file": "docs/VALIDATION-0.14.0.md",
+      "scope": "Shipped historical version; source and evidence archived separately."
+    },
+    {
+      "file": "docs/benchmark-multipath-candidate-before-selective.json",
+      "scope": "Earlier uncommitted 0.12.0 candidate before selective ACK, not this Release binary."
+    },
+    {
+      "file": "docs/benchmark-multipath-candidate-before-weighted.json",
+      "scope": "Intermediate uncommitted 0.12.0 candidate with selective ACK but before preferred-queue scheduling fix."
+    },
+    {
+      "file": "docs/VALIDATION-0.11.0.md",
+      "scope": "Shipped historical version; not rerun in this phase."
+    }
+  ],
+  "linux_acceptance_environment": {
+    "status": "existing user servers; details pending",
+    "os": null,
+    "architecture": null,
+    "node_count": null
+  },
+  "remaining_full_scope": "docs/REQUIREMENTS.md and docs/STATUS.md"
+}

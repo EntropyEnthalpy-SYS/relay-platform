@@ -138,6 +138,7 @@ fn apply_sync(tx: &Transaction<'_>, node: &str, request: SyncRequest) -> Result<
         None
     };
     Ok(SyncResponse {
+        credential_rotation: super::credentials::read(tx, node)?.pending,
         budget,
         controller_instance: "store-direct".into(),
         config,
