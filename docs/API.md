@@ -14,6 +14,9 @@ API 尚处开发阶段；以 `model.rs` 的严格字段定义为准。未识别�
 | PUT | `/nodes/{id}/config` | `{expected_revision,rules}`；并发冲突返回 409，成功生成下一版本 |
 | GET | `/nodes/{id}/history` | 最近 100 次配置修订 |
 | POST | `/nodes/{id}/rollback` | `{revision,expected_revision}`；把历史规则作为新修订发布，账本不回滚 |
+| GET | `/topology` | 当前可见节点、配置、声明边、根规则及应用状态 |
+| POST | `/configurations/preview` | `{updates:[{node_id,expected_revision,rules}]}`；只读校验并返回候选配置及完整差异，需要写权限 |
+| POST | `/configurations/publish` | 同预览请求；1..64 个节点的期望配置在同一事务中提交 |
 | GET / POST | `/users` | 列出用户；`{username,password,role,tenant_id?}` 创建用户 |
 | POST | `/users/{id}/revoke-sessions` | 撤销该用户全部现有 Web 会话 |
 | POST | `/tenants` | `{name}`；仅系统管理员 |
@@ -101,3 +104,13 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 规则新增 `inbound_websocket={path,host,allowed_origins}`；每个目标新增 `websocket={path,host,origin}`，缺省表示关闭。两端必须协商 `relay-stream-v1` 子协议。仅 TCP，组合相同方向的 TLS 字段即为 WSS；Host、Origin、路径、二进制记录、半关闭、限额和 PROXY 顺序见 [WEBSOCKET.md](WEBSOCKET.md)。控制器发布时执行结构校验，节点继续执行监听与本地 TLS 材料预检；失败不替换旧版本。
 
 能力目录新增 `websocket` 和 `secure-websocket`，页面提供入口及逐目标编辑字段。SQLite schema v4 与恢复日志不变，0.7 Agent 不接受新字段，应先协调升级。能力目录并不声明任意第三方 WebSocket 隧道兼容或完整安全模块验收通过。
+
+## 0.9.0 多跳与配置批次
+
+规则可声明 `advertise`（其他节点实际可达的 host:port），目标可带 `via={node_id,rule_id}`。引用必须与实际目标地址、租户、协议及传输组合相符，声明图必须无环；已知端点不能仅去掉 `via` 绕过校验。没有自动解析 DNS/NAT 别名或证明网络可达性。
+
+预览和发布都返回 `{configs,changes}`。每个 change 包含 `node_id,from_revision,to_revision,added,modified,removed,rule_changes`；每条 rule_change 为 `{rule_id,before,after}`，新增的 before 或删除的 after 为 null。预览不修改修订、绑定、审计或日志；发布重新执行全部检查。节点修订冲突返回 409，非法引用/协议/环路返回 400，HTTP 请求上限 2 MiB。提交完整的规则列表，省略既有规则表示删除。
+
+改变已启用拓扑规则的路由结构必须先按原结构停用，再等节点确认该版本、无应用错误且全部活跃 TCP/UDP 会话归零；在此之前改向、删除、重新启用或换规则 ID 复用监听都返回 409。单节点 PUT 与历史回滚使用相同检查。节点尚未注册时可以提前编辑。
+
+控制器原子提交配置、历史、绑定和审计，但节点应用是异步的。`/topology` 的 `activation` 固定为 `asynchronous-per-node`，节点列表包含 `desired_revision,applied_revision,apply_error,stats,last_seen_ms,enrolled`。单个节点准备失败仍保留旧版本，必须检查逐节点回执。详细合同和计量方式见 [TOPOLOGY.md](TOPOLOGY.md)。能力目录新增 `declared-multi-node-topology` 和 `atomic-config-batch`；schema v4 不变，先升级所有相关 Agent 再发布新字段。

@@ -1,6 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'nodes', nodes: [], usage: [], selectedNode: null, config: null, busy: false };
-const titles = { nodes: '节点总览', rules: '转发规则', usage: '流量账本', budgets: '共享额度', users: '用户与权限', audit: '操作审计', recovery: '恢复保护', capabilities: '功能进度' };
+const titles = { nodes: '节点总览', rules: '转发规则', topology: '多跳拓扑', usage: '流量账本', budgets: '共享额度', users: '用户与权限', audit: '操作审计', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
@@ -41,13 +41,20 @@ function websocketEditor(id, spec, inbound, defaultHost = () => '') {
   box.append(fields, el('p', '两端使用 relay-stream-v1 子协议。启用对应 TLS 后即为 WSS；只支持 TCP，不承载 UDP。Origin 不是登录凭据，未携带 Origin 的节点连接仍按来源与证书策略检查。', 'fine'));
   return { box, read: () => mode.value === 'off' ? null : { path: path.value.trim(), host: host.value.trim() || null, ...(inbound ? { allowed_origins: origins.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) } : { origin: origins.value.trim() || null }) } };
 }
-function targetEditor(form, targets) {
+function targetEditor(form, targets, topology, sourceTenant, currentRule) {
   const container = el('div'), rows = []; let serial = 0;
   function add(target = { address: '', weight: 1 }) {
     if (rows.length >= 32) return;
     const id = serial++, box = el('fieldset', undefined, 'target-editor'), grid = el('div', undefined, 'form-grid');
     box.append(el('legend', '转发目标'));
     const address = field(grid, `target-address-${id}`, '目标地址 / host:port', target.address);
+    const endpoints = (topology?.configs || []).flatMap(config => config.rules.filter(rule => rule.advertise && rule.tenant_id === sourceTenant && rule.id !== currentRule).map(rule => ({ key: `${config.node_id}/${rule.id}`, config, rule })));
+    const selected = target.via ? `${target.via.node_id}/${target.via.rule_id}` : '';
+    const choices = [['', '外部目标 · 手动输入地址'], ...endpoints.map(item => [item.key, `${topology.nodes.find(node => node.id === item.config.node_id)?.name || item.config.node_id} → ${item.rule.name}`])];
+    if (selected && !choices.some(([key]) => key === selected)) choices.push([selected, '当前引用暂不可选择 · 保留原配置']);
+    const via = select(grid, `target-via-${id}`, '下一跳规则（多个目标为候选，不是顺序串联）', choices, selected);
+    function chooseEndpoint(update) { address.readOnly = !!via.value; const endpoint = endpoints.find(item => item.key === via.value); if (update && endpoint) address.value = endpoint.rule.advertise; }
+    via.addEventListener('change', () => chooseEndpoint(true)); chooseEndpoint(false);
     const weight = field(grid, `target-weight-${id}`, '权重', target.weight, 'number'); weight.min = 1; weight.max = 1000;
     const mode = select(grid, `target-mode-${id}`, '连接目标的安全方式', [['plain', '普通 TCP / UDP'], ['tls', 'TLS（验证目标证书）']], target.tls ? 'tls' : 'plain'); box.append(grid);
     const secure = el('div', undefined, 'form-grid');
@@ -60,7 +67,7 @@ function targetEditor(form, targets) {
     const proxyCrc = select(proxyFields, `target-proxy-crc-${id}`, 'v2 报头校验和', [['off', '不附加'], ['on', '附加 CRC32C']], target.proxy_protocol?.checksum ? 'on' : 'off');
     function showProxy() { proxyPlacement.disabled = proxyMode.value === 'off'; proxyCrc.disabled = proxyMode.value !== 'v2'; } proxyMode.addEventListener('change', showProxy); showProxy();
     const ws = websocketEditor(`target-ws-${id}`, target.websocket, false, () => address.value.trim());
-    const row = { box, address, weight, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws }; rows.push(row);
+    const row = { box, address, via, weight, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws }; rows.push(row);
     function showSecurity() { const enabled = mode.value === 'tls'; secure.classList.toggle('hidden', !enabled); name.required = enabled; [name, ca, identity].forEach(input => { input.disabled = !enabled; }); }
     mode.onchange = showSecurity; showSecurity(); box.append(secure, proxyFields, ws.box, button('移除此目标', () => { rows.splice(rows.indexOf(row), 1); box.remove(); }, 'table-action danger')); container.append(box);
   }
@@ -72,6 +79,7 @@ function targetEditor(form, targets) {
       target.proxy_protocol = { version: row.proxyMode.value, placement: row.proxyPlacement.value, checksum: row.proxyMode.value === 'v2' && row.proxyCrc.value === 'on' };
     }
     const websocket = row.ws.read(); if (websocket) target.websocket = websocket;
+    if (row.via.value) { const [node_id, rule_id] = row.via.value.split('/'); target.via = { node_id, rule_id }; }
     return target;
   }); };
 }
@@ -84,7 +92,7 @@ async function enter() { $('#login-screen').classList.add('hidden'); $('#applica
 async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ nodes: renderNodes, rules: renderRules, usage: renderUsage, budgets: renderBudgets, users: renderUsers, audit: renderAudit, recovery: renderRecovery, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  try { await ({ nodes: renderNodes, rules: renderRules, usage: renderUsage, budgets: renderBudgets, users: renderUsers, audit: renderAudit, recovery: renderRecovery, topology: renderTopology, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (requestedView === 'rules' && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
@@ -112,15 +120,16 @@ async function renderRules() {
   content.replaceChildren(toolbar, p);
 }
 async function saveRules(rules, baseConfig) { const expected_revision = baseConfig.revision; await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision, rules } }); $('#dialog').close(); notify('配置已发布。请在节点总览确认实际应用修订号。'); await renderRules(); }
-function editRule(existing) {
-  const baseConfig = state.config; const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || {};
+async function editRule(existing) {
+  const baseConfig = state.config; const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || {};
   field(grid, 'name', '规则名称', r.name || '').maxLength = 120;
   select(grid, 'protocol', '协议', [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], r.protocol || 'tcp');
   field(grid, 'listen', '监听地址', r.listen || '127.0.0.1:9000');
+  field(grid, 'advertise', '供其他节点连接的地址（跨节点引用时填写）', r.advertise || '', 'text', false);
   const endPort = field(grid, 'listen_end_port', '结束端口（留空只监听一个端口，最多 256 个）', r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
   select(grid, 'port_mapping', '端口段的目标映射', [['fixed', '全部入口连接同一目标端口'], ['offset', '按入口端口偏移目标端口']], r.port_mapping || 'fixed');
   select(grid, 'balance', '目标分配', [['weighted_round_robin', '加权轮询'], ['source_hash', '来源 IP 哈希'], ['least_connections', '最少连接']], r.balance || 'weighted_round_robin'); form.append(grid);
-  const readTargets = targetEditor(form, r.targets || [{ address: '127.0.0.1:8000', weight: 1 }]);
+  const readTargets = targetEditor(form, r.targets || [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id);
   const routing = el('details'); routing.append(el('summary', '出口绑定与 DNS 缓存')); const routeFields = el('div', undefined, 'form-grid');
   field(routeFields, 'outbound_ip', '出口源 IP（留空由系统选择）', r.outbound_bind?.ip || '', 'text', false);
   field(routeFields, 'outbound_interface', '出口网卡名称（留空由系统选择）', r.outbound_bind?.interface || '', 'text', false);
@@ -151,6 +160,7 @@ function editRule(existing) {
   submit(form, existing ? '发布修改' : '创建并发布', async data => {
     const node = state.nodes.find(n => n.id === baseConfig.node_id), lines = key => String(data.get(key)).split('\n').map(s => s.trim()).filter(Boolean);
     const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: readTargets(), meter_epoch: r.meter_epoch || crypto.randomUUID(), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
+    rule.advertise = String(data.get('advertise')).trim() || null;
     rule.listen_end_port = number(data, 'listen_end_port'); rule.port_mapping = data.get('port_mapping');
     const outboundIp = String(data.get('outbound_ip')).trim(), outboundInterface = String(data.get('outbound_interface')).trim();
     if (outboundIp || outboundInterface) rule.outbound_bind = { ip: outboundIp || null, interface: outboundInterface || null };
@@ -170,9 +180,9 @@ async function renderUsage() { const records = await api('/usage'); const p = pa
 async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后已有 Web 会话立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, canWrite() || u.id === state.actor.id ? button('撤销全部会话', async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify('该用户现有会话已撤销。'); }, 'table-action') : '—']))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function newUser() { const form = el('form'); field(form, 'username', '用户名').maxLength = 80; const p = field(form, 'password', '初始密码（至少 12 个字节）', '', 'password'); p.minLength = 12; p.autocomplete = 'new-password'; const roles = [['viewer', '只读用户'], ['tenant_admin', '租户管理员']]; if (state.actor.role === 'system_admin') roles.push(['system_admin', '系统管理员']); select(form, 'role', '角色', roles, 'viewer'); submit(form, '创建用户', async data => { await api('/users', { method: 'POST', body: Object.fromEntries(data) }); $('#dialog').close(); await renderUsers(); }); modal('添加用户', form); }
 async function renderAudit() { const rows = await api('/audit'); const p = panel('操作审计', '记录配置发布、节点注册、身份及会话操作。最近 200 条。'); p.append(table(['时间', '操作者', '操作', '对象', '详情'], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', mptcp: 'MPTCP', 'multipath-aggregation': '单连接多路径聚合', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', mptcp: 'MPTCP', 'multipath-aggregation': '单连接多路径聚合', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
-setInterval(() => { if (state.actor && !document.hidden && !$('#dialog').open && ['nodes', 'usage', 'budgets', 'recovery'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
+setInterval(() => { if (state.actor && !document.hidden && !$('#dialog').open && ['nodes', 'usage', 'budgets', 'recovery', 'topology'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
 if (state.token) { api('/session').then(user => { state.actor = user; return enter(); }).catch(e => { loggedOut(); $('#login-error').textContent = e.message; }); }
 
 const budgetScopeNames = { user: '用户', tenant: '租户', node: '节点' };
@@ -227,4 +237,96 @@ async function renderRecovery() {
     ['最大合并请求数', metrics.largest_batch], ['拥塞退回', metrics.queue_full_rejections], ['提交失败', metrics.failed_batches]
   ]));
   p.append(body); if (state.view === 'recovery') $('#content').replaceChildren(p);
+}
+
+const topologyKey = ref => `${ref.node_id}/${ref.rule_id}`;
+async function renderTopology() {
+  const snapshot = await api('/topology');
+  const names = new Map(snapshot.nodes.map(node => [node.id, node.name]));
+  const rules = snapshot.configs.flatMap(config => config.rules.map(rule => ({ config, rule, key: `${config.node_id}/${rule.id}` })));
+  const byKey = new Map(rules.map(item => [item.key, item]));
+  const displayed = rules.filter(item => item.rule.advertise || item.rule.targets.some(target => target.via));
+  const actions = el('div'); if (canWrite()) actions.append(button('批量编辑', () => editTopologyBatch(snapshot)), button('＋ 创建多跳链路', () => newTopologyChain(snapshot), 'primary'));
+  const p = panel('跨节点链路', '每行是一条实际规则；同一行的多个下一跳是候选组，顺序中转由下一跳规则继续连接。每跳独立计量，同一用户额度会累计各跳接纳量。', actions);
+  if (!displayed.length) p.append(empty('创建入口、中转和出口', '先注册节点，再为链路填写各节点监听与可达地址。'));
+  else p.append(table(['节点 / 规则', '监听 / 可达地址', '下一跳或最终目标', '状态', '操作'], displayed.map(item => {
+    const r = item.rule, targets = el('div');
+    r.targets.forEach(target => { const next = target.via ? byKey.get(topologyKey(target.via)) : null; targets.append(el('div', next ? `→ ${names.get(next.config.node_id)} / ${next.rule.name} · 权重 ${target.weight}` : `→ ${target.address} · 外部目标`)); });
+    const actions = el('div'); actions.append(button('编辑节点规则', async () => { state.selectedNode = item.config.node_id; await navigate('rules'); }, 'table-action'));
+    if (canWrite()) actions.append(button(r.enabled ? '停用关联链路' : '启用关联链路', () => changeTopologyComponent(snapshot, item.key, !r.enabled), 'table-action'));
+    return [namedCell(names.get(item.config.node_id), r.name), namedCell(r.listen, r.advertise || '未声明可达地址'), targets, badge(r.enabled ? '期望启用' : '期望停用', r.enabled ? 'green' : ''), actions];
+  })));
+  const ids = new Set(displayed.map(item => item.config.node_id));
+  const status = panel('节点应用状态', '配置在控制器一次提交，各节点异步应用。修订一致不代表业务探测成功；改向前需停用相关链路，并确认涉及节点的全部活跃会话归零。');
+  status.append(table(['节点', '实际 / 期望修订', '活跃 TCP / UDP', '回报', '应用结果'], snapshot.nodes.filter(node => ids.has(node.id)).map(node => [node.name, `${node.applied_revision} / ${node.desired_revision}`, `${node.stats.active_tcp} / ${node.stats.active_udp}`, timestamp(node.last_seen_ms), node.apply_error || (node.enrolled && node.applied_revision === node.desired_revision ? '配置已确认' : '等待节点')])));
+  if (state.view === 'topology') $('#content').replaceChildren(p, status);
+}
+async function previewTopology(snapshot, input) {
+  const preview = await api('/configurations/preview', { method: 'POST', body: input });
+  const body = el('div');
+  body.append(el('p', '下面是服务器校验后的变更。发布会同时提交期望配置；节点应用结果请在拓扑页逐项确认。'), table(['节点', '修订', '新增 / 修改 / 删除规则'], preview.changes.map(change => [snapshot.nodes.find(node => node.id === change.node_id)?.name || change.node_id, `${change.from_revision} → ${change.to_revision}`, `${change.added.length} / ${change.modified.length} / ${change.removed.length}`])));
+  for (const change of preview.changes) for (const diff of change.rule_changes) { const details = el('details'); details.append(el('summary', `${diff.after?.name || diff.before?.name} · 查看发布前后配置`), el('pre', JSON.stringify({ before: diff.before, after: diff.after }, null, 2))); body.append(details); }
+  body.append(button('发布这些变更', async () => { await api('/configurations/publish', { method: 'POST', body: input }); $('#dialog').close(); notify('期望配置已同时提交，正在等待各节点应用。'); if (state.view === 'topology') await renderTopology(); }, 'primary'));
+  modal('多节点发布预览', body);
+}
+async function changeTopologyComponent(snapshot, seed, enabled) {
+  const selected = new Set([seed]); let changed = true;
+  while (changed) { changed = false; for (const edge of snapshot.graph.edges) { const a = topologyKey(edge.from), b = topologyKey(edge.to); if (selected.has(a) || selected.has(b)) { if (!selected.has(a) || !selected.has(b)) changed = true; selected.add(a); selected.add(b); } } }
+  const updates = snapshot.configs.filter(config => config.rules.some(rule => selected.has(`${config.node_id}/${rule.id}`))).map(config => ({ node_id: config.node_id, expected_revision: config.revision, rules: config.rules.map(rule => selected.has(`${config.node_id}/${rule.id}`) ? { ...rule, enabled } : rule) }));
+  await previewTopology(snapshot, { updates });
+}
+async function newTopologyChain(snapshot) {
+  if (!snapshot.nodes.length) { notify('先注册节点，再创建链路。', true); return; }
+  const users = await api('/users');
+  const form = el('form'), rows = [], holder = el('div');
+  field(form, 'name', '链路名称').maxLength = 80;
+  const ownerField = select(form, 'owner', '规则所有者（须与所有节点同一租户）', users.map(user => [user.id, `${user.username} · ${user.tenant_id}`]), state.actor.id);
+  const protocol = select(form, 'protocol', '业务协议', [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], 'tcp');
+  const transport = select(form, 'transport', '节点间传输', [['plain', '原生 TCP / UDP'], ['ws', 'WS 流隧道 · 仅 TCP'], ['wss', 'WSS 双向证书 · 仅 TCP']], 'plain');
+  const secure = el('div', undefined, 'form-grid');
+  const identity = field(secure, 'server_identity', '中转 / 出口的服务器证书编号', 'server');
+  const authority = field(secure, 'ca_identity', '各节点的信任 CA 编号', 'root');
+  const clientIdentity = field(secure, 'client_identity', '入口 / 中转的客户端证书编号', 'client');
+  const wsFields = el('div'); const wsPath = field(wsFields, 'ws_path', 'WebSocket 路径', '/relay'); wsPath.maxLength = 1024;
+  function showTransport() { const ws = transport.value !== 'plain', tls = transport.value === 'wss'; if (ws) protocol.value = 'tcp'; protocol.disabled = ws; secure.classList.toggle('hidden', !tls); [identity, authority, clientIdentity].forEach(input => { input.disabled = !tls; }); wsFields.classList.toggle('hidden', !ws); wsPath.disabled = !ws; rows.forEach((row, index) => { row.tlsName.disabled = !tls || index === 0; row.tlsName.required = tls && index > 0; row.tlsLabel.classList.toggle('hidden', !tls || index === 0); }); }
+  transport.addEventListener('change', showTransport); form.append(secure, wsFields);
+  form.append(el('p', '按顺序添加入口、中转、出口，可达地址必须从前一节点实际可连接。WSS 证书需要预先放在各节点本地；各节点可在相同证书编号下使用自己的证书内容。前后两端其他参数可通过高级批量编辑同时调整。', 'fine'));
+  function add() {
+    if (rows.length >= 16) return;
+    const index = rows.length, card = el('fieldset'); card.append(el('legend', `第 ${index + 1} 跳`));
+    const node = select(card, `node-${index}`, '节点', snapshot.nodes.map(n => [n.id, `${n.name} · ${n.tenant_id}`]), snapshot.nodes[Math.min(index, snapshot.nodes.length - 1)].id);
+    const listen = field(card, `listen-${index}`, '本机监听地址', `0.0.0.0:${19001 + index}`);
+    const advertise = field(card, `advertise-${index}`, '供前一节点连接的地址'); advertise.placeholder = `node.example.com:${19001 + index}`;
+    const tlsName = field(card, `tls_name-${index}`, '此节点证书中的服务名', '', 'text', false); tlsName.placeholder = 'relay.example.com';
+    rows.push({ node, listen, advertise, tlsName, tlsLabel: tlsName.parentElement }); holder.append(card); showTransport();
+  }
+  add(); add(); form.append(holder, button('＋ 添加一跳', add));
+  textarea(form, 'targets', '出口最终目标（每行一个；多个目标为加权相同的候选）', '', true);
+  textarea(form, 'allow_sources', '允许来源 CIDR（每行一个，留空不限；中转默认看到前一节点地址）');
+  submit(form, '校验并预览链路', async data => {
+    const selected = rows.map(row => snapshot.nodes.find(node => node.id === row.node.value));
+    if (selected.some(node => node.tenant_id !== selected[0].tenant_id)) throw new Error('同一链路的节点必须属于同一租户');
+    const owner = users.find(user => user.id === ownerField.value);
+    if (!owner || owner.tenant_id !== selected[0].tenant_id) throw new Error('规则所有者必须属于节点所在租户');
+    const ids = rows.map(() => crypto.randomUUID()), epoch = crypto.randomUUID();
+    const targets = String(data.get('targets')).split(/\r?\n/).map(value => value.trim()).filter(Boolean).map(address => ({ address, weight: 1 }));
+    const configs = new Map(), ws = transport.value !== 'plain', tls = transport.value === 'wss';
+    rows.forEach((row, index) => {
+      const nodeId = row.node.value, base = snapshot.configs.find(config => config.node_id === nodeId);
+      if (!configs.has(nodeId)) configs.set(nodeId, { node_id: nodeId, expected_revision: base.revision, rules: [...base.rules] });
+      const rule = { id: ids[index], tenant_id: selected[0].tenant_id, owner_id: owner.id, name: `${data.get('name')} · ${index + 1}`, protocol: protocol.value, listen: row.listen.value.trim(), advertise: row.advertise.value.trim(), enabled: true, meter_epoch: epoch, targets: index === rows.length - 1 ? targets : [{ address: rows[index + 1].advertise.value.trim(), weight: 1, via: { node_id: rows[index + 1].node.value, rule_id: ids[index + 1] } }], allow_sources: String(data.get('allow_sources')).split(/\r?\n/).map(value => value.trim()).filter(Boolean) };
+      if (index > 0 && ws) rule.inbound_websocket = { path: wsPath.value.trim(), host: rule.advertise, allowed_origins: [] };
+      if (index > 0 && tls) rule.inbound_tls = { identity: identity.value.trim(), client_ca: authority.value.trim() };
+      if (index < rows.length - 1 && ws) rule.targets[0].websocket = { path: wsPath.value.trim(), host: rows[index + 1].advertise.value.trim() };
+      if (index < rows.length - 1 && tls) rule.targets[0].tls = { server_name: rows[index + 1].tlsName.value.trim(), ca: authority.value.trim(), identity: clientIdentity.value.trim() };
+      configs.get(nodeId).rules.push(rule);
+    });
+    await previewTopology(snapshot, { updates: [...configs.values()] });
+  });
+  showTransport(); modal('创建顺序链路', form);
+}
+function editTopologyBatch(snapshot) {
+  const form = el('form'); const input = textarea(form, 'batch', '节点配置批次（删除不需要发布的节点）', JSON.stringify({ updates: snapshot.configs.map(config => ({ node_id: config.node_id, expected_revision: config.revision, rules: config.rules })) }, null, 2), true); input.rows = 20;
+  form.append(el('p', '保留每个节点的其他规则；省略的规则表示删除。服务器会校验所有引用、修订和停止确认条件。', 'fine'));
+  submit(form, '校验并预览', async data => previewTopology(snapshot, JSON.parse(data.get('batch')))); modal('批量编辑配置', form);
 }

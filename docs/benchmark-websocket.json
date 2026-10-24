@@ -1,8 +1,8 @@
 {
-  "at_utc": "2026-10-24T02:28:38.649080+00:00",
+  "at_utc": "2026-10-24T03:10:42.963975+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "version": "relay 0.8.0",
-  "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
+  "version": "relay 0.9.0",
+  "binary_sha256": "7a1223432b79bbf7caa56598c2dfce14c55ea97e4f50952edb0509ea01a5cfbb",
   "configuration_source": "examples/websocket-hop.json",
   "payload_mib_per_connection": 16,
   "rounds": 4,
@@ -16,330 +16,330 @@
       "connections": 1,
       "round": 1,
       "order": 1,
-      "seconds": 0.01391466602217406,
+      "seconds": 0.01385149999987334,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 9645.774306484542
+      "goodput_mbps": 9689.76125338247
     },
     {
       "mode": "tcp",
       "connections": 1,
       "round": 1,
       "order": 2,
-      "seconds": 0.04110958403907716,
+      "seconds": 0.039807541004847735,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 3264.8768197804648
+      "goodput_mbps": 3371.6658857088173
     },
     {
       "mode": "ws",
       "connections": 1,
       "round": 1,
       "order": 3,
-      "seconds": 0.04948804096784443,
+      "seconds": 0.03840195800876245,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 2712.1244926064037
+      "goodput_mbps": 3495.075120111703
     },
     {
       "mode": "wss-mtls",
       "connections": 1,
       "round": 1,
       "order": 4,
-      "seconds": 0.04802750004455447,
+      "seconds": 0.04466308403061703,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 2794.601590244922
+      "goodput_mbps": 3005.11554258081
     },
     {
       "mode": "tcp",
       "connections": 1,
       "round": 2,
       "order": 1,
-      "seconds": 0.03585145901888609,
+      "seconds": 0.035606916004326195,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 3743.7173178724975
+      "goodput_mbps": 3769.4286127923215
     },
     {
       "mode": "ws",
       "connections": 1,
       "round": 2,
       "order": 2,
-      "seconds": 0.04238158400403336,
+      "seconds": 0.03830741700949147,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 3166.8879574493208
+      "goodput_mbps": 3503.7008098652204
     },
     {
       "mode": "wss-mtls",
       "connections": 1,
       "round": 2,
       "order": 3,
-      "seconds": 0.04537000000709668,
+      "seconds": 0.04349650000222027,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 2958.2924394755555
+      "goodput_mbps": 3085.7132871184776
     },
     {
       "mode": "direct",
       "connections": 1,
       "round": 2,
       "order": 4,
-      "seconds": 0.01107204204890877,
+      "seconds": 0.010194833972491324,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 12122.219858551578
+      "goodput_mbps": 13165.268641172492
     },
     {
       "mode": "ws",
       "connections": 1,
       "round": 3,
       "order": 1,
-      "seconds": 0.03639966598711908,
+      "seconds": 0.0332949580042623,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 3687.334055414032
+      "goodput_mbps": 4031.1727674447866
     },
     {
       "mode": "wss-mtls",
       "connections": 1,
       "round": 3,
       "order": 2,
-      "seconds": 0.04351641604444012,
+      "seconds": 0.04140108299907297,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 3084.301056937531
+      "goodput_mbps": 3241.8893004080433
     },
     {
       "mode": "direct",
       "connections": 1,
       "round": 3,
       "order": 3,
-      "seconds": 0.01007870800094679,
+      "seconds": 0.010139833961147815,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 13316.957688167136
+      "goodput_mbps": 13236.679073274168
     },
     {
       "mode": "tcp",
       "connections": 1,
       "round": 3,
       "order": 4,
-      "seconds": 0.033397333056200296,
+      "seconds": 0.03124687500530854,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 4018.815747177817
+      "goodput_mbps": 4295.396834953822
     },
     {
       "mode": "wss-mtls",
       "connections": 1,
       "round": 4,
       "order": 1,
-      "seconds": 0.04281537502538413,
+      "seconds": 0.04088570800377056,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 3134.8021107003215
+      "goodput_mbps": 3282.7541591702943
     },
     {
       "mode": "direct",
       "connections": 1,
       "round": 4,
       "order": 2,
-      "seconds": 0.010476541996467859,
+      "seconds": 0.01016091596102342,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 12811.262346416517
+      "goodput_mbps": 13209.215440305781
     },
     {
       "mode": "tcp",
       "connections": 1,
       "round": 4,
       "order": 3,
-      "seconds": 0.032960458018351346,
+      "seconds": 0.032400458003394306,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 4072.0832193919086
+      "goodput_mbps": 4142.463911650237
     },
     {
       "mode": "ws",
       "connections": 1,
       "round": 4,
       "order": 4,
-      "seconds": 0.03654695802833885,
+      "seconds": 0.033368750009685755,
       "one_way_payload_bytes": 16777216,
-      "goodput_mbps": 3672.473312168042
+      "goodput_mbps": 4022.258189504893
     },
     {
       "mode": "direct",
       "connections": 4,
       "round": 1,
       "order": 1,
-      "seconds": 0.041191708005499095,
+      "seconds": 0.03832200000761077,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 13033.4705210167
+      "goodput_mbps": 14009.470066629538
     },
     {
       "mode": "tcp",
       "connections": 4,
       "round": 1,
       "order": 2,
-      "seconds": 0.05658466601744294,
+      "seconds": 0.054121666005812585,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 9487.92225502405
+      "goodput_mbps": 9919.704096735322
     },
     {
       "mode": "ws",
       "connections": 4,
       "round": 1,
       "order": 3,
-      "seconds": 0.06694174994481727,
+      "seconds": 0.057096540986094624,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 8019.9712801437645
+      "goodput_mbps": 9402.862287765389
     },
     {
       "mode": "wss-mtls",
       "connections": 4,
       "round": 1,
       "order": 4,
-      "seconds": 0.06735004100482911,
+      "seconds": 0.0801248750067316,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 7971.352414789257
+      "goodput_mbps": 6700.427450961957
     },
     {
       "mode": "tcp",
       "connections": 4,
       "round": 2,
       "order": 1,
-      "seconds": 0.052761083003133535,
+      "seconds": 0.05448145803529769,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 10175.509702257526
+      "goodput_mbps": 9854.19501167112
     },
     {
       "mode": "ws",
       "connections": 4,
       "round": 2,
       "order": 2,
-      "seconds": 0.059069667011499405,
+      "seconds": 0.05762008298188448,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 9088.774986584645
+      "goodput_mbps": 9317.426914653872
     },
     {
       "mode": "wss-mtls",
       "connections": 4,
       "round": 2,
       "order": 3,
-      "seconds": 0.06900991598377004,
+      "seconds": 0.06891120900399983,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 7779.6198466067235
+      "goodput_mbps": 7790.763211959295
     },
     {
       "mode": "direct",
       "connections": 4,
       "round": 2,
       "order": 4,
-      "seconds": 0.03887441597180441,
+      "seconds": 0.03967120801098645,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 13810.391708248226
+      "goodput_mbps": 13533.01144374833
     },
     {
       "mode": "ws",
       "connections": 4,
       "round": 3,
       "order": 1,
-      "seconds": 0.05755591602064669,
+      "seconds": 0.05789279198506847,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 9327.814569181932
+      "goodput_mbps": 9273.536369406196
     },
     {
       "mode": "wss-mtls",
       "connections": 4,
       "round": 3,
       "order": 2,
-      "seconds": 0.06741629197495058,
+      "seconds": 0.069955957995262,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 7963.51885089559
+      "goodput_mbps": 7674.412979039775
     },
     {
       "mode": "direct",
       "connections": 4,
       "round": 3,
       "order": 3,
-      "seconds": 0.03842462500324473,
+      "seconds": 0.042520540999248624,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 13972.053389061428
+      "goodput_mbps": 12626.154309971902
     },
     {
       "mode": "tcp",
       "connections": 4,
       "round": 3,
       "order": 4,
-      "seconds": 0.05374187504639849,
+      "seconds": 0.05379408301087096,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 9989.806115556781
+      "goodput_mbps": 9980.110858874696
     },
     {
       "mode": "wss-mtls",
       "connections": 4,
       "round": 4,
       "order": 1,
-      "seconds": 0.06841187499230728,
+      "seconds": 0.07083137496374547,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 7847.627507071976
+      "goodput_mbps": 7579.563608285078
     },
     {
       "mode": "direct",
       "connections": 4,
       "round": 4,
       "order": 2,
-      "seconds": 0.038602666987571865,
+      "seconds": 0.04083075001835823,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 13907.61193191252
+      "goodput_mbps": 13148.69091943237
     },
     {
       "mode": "tcp",
       "connections": 4,
       "round": 4,
       "order": 3,
-      "seconds": 0.05467675003455952,
+      "seconds": 0.053439624956808984,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 9818.998233447675
+      "goodput_mbps": 10046.307630974397
     },
     {
       "mode": "ws",
       "connections": 4,
       "round": 4,
       "order": 4,
-      "seconds": 0.056402542046271265,
+      "seconds": 0.05764516699127853,
       "one_way_payload_bytes": 67108864,
-      "goodput_mbps": 9518.558783388953
+      "goodput_mbps": 9313.372482401279
     }
   ],
   "medians": [
     {
       "connections": 1,
       "mode": "direct",
-      "goodput_mbps": 12466.741102484048
+      "goodput_mbps": 13187.242040739136
     },
     {
       "connections": 1,
       "mode": "tcp",
-      "goodput_mbps": 3881.2665325251573
+      "goodput_mbps": 3955.946262221279
     },
     {
       "connections": 1,
       "mode": "ws",
-      "goodput_mbps": 3419.680634808681
+      "goodput_mbps": 3762.979499685057
     },
     {
       "connections": 1,
       "mode": "wss-mtls",
-      "goodput_mbps": 3021.2967482065433
+      "goodput_mbps": 3163.80129376326
     },
     {
       "connections": 4,
       "mode": "direct",
-      "goodput_mbps": 13859.001820080372
+      "goodput_mbps": 13340.851181590351
     },
     {
       "connections": 4,
       "mode": "tcp",
-      "goodput_mbps": 9904.40217450223
+      "goodput_mbps": 9949.907477805009
     },
     {
       "connections": 4,
       "mode": "ws",
-      "goodput_mbps": 9208.29477788329
+      "goodput_mbps": 9315.399698527575
     },
     {
       "connections": 4,
       "mode": "wss-mtls",
-      "goodput_mbps": 7905.573178983783
+      "goodput_mbps": 7626.988293662426
     }
   ],
   "ledgers": {

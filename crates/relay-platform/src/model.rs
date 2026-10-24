@@ -58,6 +58,8 @@ pub enum Balance {
 pub struct Target {
     /// Socket address or DNS name:port. IPv6 literals require brackets.
     pub address: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<RuleRef>,
     #[serde(default = "one")]
     pub weight: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -66,6 +68,13 @@ pub struct Target {
     pub proxy_protocol: Option<ProxyOutbound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub websocket: Option<WebSocketClient>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleRef {
+    pub node_id: String,
+    pub rule_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +246,9 @@ pub fn canonical_address(address: SocketAddr) -> SocketAddr {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
+    /// Address that predecessor nodes use to reach this listener/range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<String>,
     /// Controller-assigned hierarchical budgets. Empty means no global budget.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub budget_ids: Vec<String>,
@@ -318,6 +330,9 @@ impl Rule {
         self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(address) = &self.advertise {
+            validate_target(address)?;
+        }
         ensure!(
             self.budget_ids.len() <= 8
                 && self.budget_ids.iter().all(|id| identifier(id))
@@ -434,6 +449,12 @@ impl Rule {
         let mut targets = HashSet::new();
         let encrypted_targets = self.targets[0].tls.is_some();
         for target in &self.targets {
+            if let Some(reference) = &target.via {
+                ensure!(
+                    identifier(&reference.node_id) && identifier(&reference.rule_id),
+                    "invalid next-hop reference"
+                );
+            }
             if let Some(ws) = &target.websocket {
                 crate::websocket::validate_client(ws)?;
             }

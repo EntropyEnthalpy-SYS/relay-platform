@@ -1,0 +1,36 @@
+{
+  "at_utc": "2026-10-24T02:28:02.006409+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
+  "restore": {
+    "journal_id": "e9777af1-a899-4cf3-8fc6-be29dfdd7233",
+    "backup_sequence": 4,
+    "restored_sequence": 11,
+    "replayed_transactions": 7,
+    "budget_allocation_paused": false,
+    "ignored_uncommitted_tail": false
+  },
+  "checks": [
+    "CLI online backup before node creation",
+    "post-backup node identity and configuration recovered",
+    "old API session retained",
+    "same TCP connection survives controller replacement",
+    "offline consumption reconciled",
+    "new reservations issued after validated replay",
+    "source backup and log unchanged",
+    "graceful shutdown returns unused reservations",
+    "all spawned processes exited successfully"
+  ],
+  "ledger": {
+    "expected_bytes": 286720,
+    "controller_bytes": 286720,
+    "agent_bytes": 286720,
+    "budget_consumed_bytes": 286720,
+    "budget_committed_bytes": 286720,
+    "exact_match": true
+  },
+  "limits": [
+    "local macOS loopback only",
+    "no power-loss or remote storage durability test"
+  ]
+}

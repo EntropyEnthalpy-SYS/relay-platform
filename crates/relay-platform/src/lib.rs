@@ -10,5 +10,6 @@ pub mod proxy;
 mod routing;
 pub mod store;
 mod sync_queue;
+pub mod topology;
 pub mod transport;
 pub mod websocket;

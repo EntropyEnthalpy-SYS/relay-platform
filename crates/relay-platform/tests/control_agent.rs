@@ -1277,3 +1277,336 @@ async fn journal_restore_recovers_a_post_backup_node_and_refills_its_live_tcp_se
     assert_eq!((budget.consumed_bytes, budget.committed_bytes), (128, 128));
     stop_server(s).await;
 }
+
+#[path = "common/tls.rs"]
+#[allow(dead_code)]
+mod topology_tls;
+
+fn topology_batch(configs: &[NodeConfig]) -> relay_platform::topology::ConfigBatch {
+    relay_platform::topology::ConfigBatch {
+        updates: configs
+            .iter()
+            .map(|c| relay_platform::topology::ConfigUpdate {
+                node_id: c.node_id.clone(),
+                expected_revision: c.revision,
+                rules: c.rules.clone(),
+            })
+            .collect(),
+    }
+}
+fn topology_link(configs: &mut [NodeConfig], order: &[usize], target: SocketAddr, secure: bool) {
+    for c in configs.iter_mut() {
+        let r = &mut c.rules[0];
+        r.inbound_tls = None;
+        r.inbound_websocket = None;
+        r.inbound_proxy = None;
+        r.targets = rule(target, r.protocol).targets;
+    }
+    for pair in order.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let via = RuleRef {
+            node_id: configs[to].node_id.clone(),
+            rule_id: configs[to].rules[0].id.clone(),
+        };
+        let address = configs[to].rules[0].advertise.clone().unwrap();
+        let placement = if secure {
+            ProxyPlacement::InsideTls
+        } else {
+            ProxyPlacement::BeforeTls
+        };
+        let source = &mut configs[from].rules[0].targets[0];
+        source.address = address;
+        source.via = Some(via);
+        source.proxy_protocol = Some(ProxyOutbound {
+            version: ProxyVersion::V2,
+            placement,
+            checksum: true,
+        });
+        if secure {
+            source.tls = Some(TlsClient {
+                server_name: "localhost".into(),
+                ca: Some("root".into()),
+                identity: Some("client".into()),
+            });
+            source.websocket = Some(WebSocketClient {
+                path: "/topology".into(),
+                host: "relay.test".into(),
+                origin: None,
+            });
+        }
+        let dest = &mut configs[to].rules[0];
+        dest.inbound_proxy = Some(ProxyInbound {
+            version: ProxyAccept::V2,
+            placement,
+            trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
+            max_header_bytes: 4096,
+        });
+        if secure {
+            dest.inbound_tls = Some(TlsServer {
+                identity: "server".into(),
+                client_ca: Some("root".into()),
+            });
+            dest.inbound_websocket = Some(WebSocketServer {
+                path: "/topology".into(),
+                host: Some("relay.test".into()),
+                allowed_origins: vec![],
+            });
+        }
+    }
+}
+async fn topology_wait(control: &Store, admin: &Actor, configs: &[NodeConfig], idle: bool) {
+    timeout(Duration::from_secs(8), async {
+        loop {
+            let nodes = control.nodes(admin).unwrap();
+            if configs.iter().all(|c| {
+                nodes.iter().any(|n| {
+                    n.id == c.node_id
+                        && n.applied_revision == c.revision
+                        && n.apply_error.is_none()
+                        && (!idle || (n.stats.active_tcp == 0 && n.stats.active_udp == 0))
+                })
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("topology nodes did not converge");
+}
+async fn three_agent_topology(secure: bool) {
+    use relay_platform::topology::BatchResult;
+    use tokio::net::UdpSocket;
+    let temp = tempfile::tempdir().unwrap();
+    let cert = topology_tls::Certificates::new();
+    let echo = tcp_echo_at(&free_address().to_string(), None).await;
+    let _udp = if secure {
+        None
+    } else {
+        Some(udp_echo_at(&echo.address.to_string()).await)
+    };
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let server = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", server.address);
+    let (token, _) = control.login("admin", PASSWORD).unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut configs = vec![];
+    let mut locals = vec![];
+    let mut agents = vec![];
+    for index in 0..3 {
+        let (node, enrollment) = control
+            .create_node(&admin, "default", &format!("topology-{index}"))
+            .unwrap();
+        let path = temp.path().join(format!("enroll-{index}.secret"));
+        write_secret(&path, enrollment.as_bytes()).unwrap();
+        let local = Store::open(&temp.path().join(format!("agent-{index}.db"))).unwrap();
+        let stop = CancellationToken::new();
+        let mut opt = options(&origin, &node.id, Some(path));
+        opt.tls_directory = Some(cert.root.clone());
+        let task = tokio::spawn(agent::run(local.clone(), opt, stop.clone()));
+        agents.push((stop, task));
+        locals.push(local);
+        let mut r = rule(
+            echo.address,
+            if secure {
+                Protocol::Tcp
+            } else {
+                Protocol::Both
+            },
+        );
+        r.id = format!("chain-{index}");
+        r.advertise = Some(r.listen.to_string());
+        configs.push(NodeConfig {
+            api_version: 1,
+            node_id: node.id,
+            revision: 0,
+            rules: vec![r],
+        });
+    }
+    topology_link(&mut configs, &[0, 1, 2], echo.address, secure);
+    let input = topology_batch(&configs);
+    let preview: BatchResult = client
+        .post(format!("{origin}/api/v1/configurations/preview"))
+        .bearer_auth(&token)
+        .json(&input)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preview.changes.len(), 3);
+    assert!(
+        control
+            .nodes(&admin)
+            .unwrap()
+            .iter()
+            .all(|n| n.desired_revision == 0)
+    );
+    let published: BatchResult = client
+        .post(format!("{origin}/api/v1/configurations/publish"))
+        .bearer_auth(&token)
+        .json(&input)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    configs = published.configs;
+    topology_wait(&control, &admin, &configs, false).await;
+    let first = configs[0].rules[0].listen;
+    let payload: Vec<u8> = (0..65573).map(|i| (i % 251) as u8).collect();
+    assert_eq!(exchange(first, &payload).await, payload);
+    let mut expected = 6 * payload.len() as u64;
+    if !secure {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(first).await.unwrap();
+        socket.send(&payload[..4096]).await.unwrap();
+        let mut reply = vec![0; 8192];
+        let n = timeout(Duration::from_secs(3), socket.recv(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&reply[..n], &payload[..4096]);
+        expected += 6 * 4096;
+    }
+    // An unrelated listener failure is a node apply failure, not an atomic
+    // multi-machine rollout. The graph must show desired versus applied state.
+    let occupied = TcpListener::bind(free_address()).await.unwrap();
+    let mut bad = configs[2].rules.clone();
+    let mut extra = rule(echo.address, Protocol::Tcp);
+    extra.id = "occupied".into();
+    extra.listen = occupied.local_addr().unwrap();
+    bad.push(extra);
+    let failed: NodeConfig = client
+        .put(format!(
+            "{origin}/api/v1/nodes/{}/config",
+            configs[2].node_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({"expected_revision":configs[2].revision,"rules":bad}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let n = control
+                .nodes(&admin)
+                .unwrap()
+                .into_iter()
+                .find(|n| n.id == configs[2].node_id)
+                .unwrap();
+            if n.apply_error.is_some() {
+                assert_eq!(n.applied_revision, configs[2].revision);
+                assert_eq!(n.desired_revision, failed.revision);
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(exchange(first, b"alive").await, b"alive");
+    expected += 6 * 5;
+    let restored: NodeConfig = client
+        .put(format!(
+            "{origin}/api/v1/nodes/{}/config",
+            configs[2].node_id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({"expected_revision":failed.revision,"rules":configs[2].rules}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    configs[2] = restored;
+    topology_wait(&control, &admin, &configs, false).await;
+    let mut held = TcpStream::connect(first).await.unwrap();
+    held.write_all(b"held").await.unwrap();
+    let mut held_reply = [0; 4];
+    held.read_exact(&mut held_reply).await.unwrap();
+    assert_eq!(&held_reply, b"held");
+    expected += 6 * 4;
+    for c in &mut configs {
+        c.rules[0].enabled = false;
+    }
+    configs = control
+        .publish_configs(&admin, topology_batch(&configs))
+        .unwrap()
+        .configs;
+    let _ = timeout(Duration::from_secs(3), held.read(&mut [0; 1]))
+        .await
+        .unwrap();
+    topology_wait(&control, &admin, &configs, true).await;
+    topology_link(&mut configs, &[2, 1, 0], echo.address, secure);
+    for c in &mut configs {
+        c.rules[0].enabled = true;
+    }
+    configs = control
+        .publish_configs(&admin, topology_batch(&configs))
+        .unwrap()
+        .configs;
+    topology_wait(&control, &admin, &configs, false).await;
+    assert_eq!(
+        exchange(configs[2].rules[0].listen, b"reversed").await,
+        b"reversed"
+    );
+    expected += 6 * 8;
+    wait_usage(&control, &admin, expected).await;
+    let visible: Value = client
+        .get(format!("{origin}/api/v1/topology"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(visible["graph"]["edges"].as_array().unwrap().len(), 2);
+    for (stop, task) in agents {
+        stop.cancel();
+        timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    wait_usage(&control, &admin, expected).await;
+    for local in locals {
+        assert_eq!(
+            local
+                .agent_usage(false)
+                .unwrap()
+                .iter()
+                .map(|r| r.upload_bytes + r.download_bytes)
+                .sum::<u64>(),
+            expected / 3
+        );
+    }
+    stop_server(server).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_real_agents_topology_tcp_udp_and_stopped_direction_change() {
+    three_agent_topology(false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_real_agents_topology_mutual_wss_proxy_and_stopped_direction_change() {
+    three_agent_topology(true).await;
+}

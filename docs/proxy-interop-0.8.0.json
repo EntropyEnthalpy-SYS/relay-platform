@@ -1,0 +1,185 @@
+{
+  "at_utc": "2026-10-24T02:28:00.302595+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "version": "relay 0.8.0",
+  "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
+  "haproxy_version": "HAProxy version 3.0.30-47d806b 2026/10/14 - https://haproxy.org/",
+  "haproxy_binary_sha256": "4ab39a69650b02df027e4af3daf40006c6925c285a4bfaba8c1512dae4d6108e",
+  "topology": "Python client -> HAProxy -> relay -> HAProxy -> Python observer",
+  "cases": [
+    {
+      "input": "v1",
+      "output": "v1",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v1",
+      "output": "v1",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v1",
+      "output": "v2",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v1",
+      "output": "v2",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v1",
+      "output": "v2_crc",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v1",
+      "output": "v2_crc",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2",
+      "output": "v1",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2",
+      "output": "v1",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2",
+      "output": "v2",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2",
+      "output": "v2",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2",
+      "output": "v2_crc",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2",
+      "output": "v2_crc",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2_crc",
+      "output": "v1",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2_crc",
+      "output": "v1",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2_crc",
+      "output": "v2",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2_crc",
+      "output": "v2",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2_crc",
+      "output": "v2_crc",
+      "address_family": "TCP4",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    },
+    {
+      "input": "v2_crc",
+      "output": "v2_crc",
+      "address_family": "TCP6",
+      "original_endpoints_preserved": true,
+      "binary_payload_verified_bytes": 8192,
+      "half_close": "passed",
+      "independent_haproxy_crc32c": "passed"
+    }
+  ],
+  "ledger": {
+    "expected_admitted_bytes": 294912,
+    "recorded_bytes": 294912,
+    "exact_match": true,
+    "proxy_headers_excluded": true
+  },
+  "child_processes_stopped": true,
+  "limits": [
+    "local loopback TCP only",
+    "no external UDP or TLS interop",
+    "not a performance benchmark"
+  ]
+}

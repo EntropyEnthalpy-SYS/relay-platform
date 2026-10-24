@@ -604,6 +604,8 @@ impl Engine {
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
     old.budget_ids != new.budget_ids
+        || ((crate::topology::participates(old) || crate::topology::participates(new))
+            && crate::topology::route_signature(old) != crate::topology::route_signature(new))
         || old.inbound_websocket != new.inbound_websocket
         || old.targets.iter().any(|previous| {
             new.targets.iter().any(|current| {

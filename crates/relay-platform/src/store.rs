@@ -16,6 +16,7 @@ use uuid::Uuid;
 mod budgets;
 mod recovery;
 mod sync;
+mod topology;
 
 #[derive(Debug)]
 pub struct Rejection {
@@ -556,78 +557,6 @@ impl Store {
             Some(s) => Ok(serde_json::from_str(&s)?),
             None => reject(404, "configuration revision not found"),
         }
-    }
-    pub fn set_config(
-        &self,
-        actor: &Actor,
-        node: &str,
-        expected: u64,
-        rules: Vec<Rule>,
-    ) -> Result<NodeConfig> {
-        if expected >= MAX_COUNTER {
-            return reject(400, "revision out of range");
-        }
-        let mut config = NodeConfig {
-            api_version: API_VERSION,
-            node_id: node.into(),
-            revision: expected + 1,
-            rules,
-        };
-        config.validate().map_err(|e| Rejection {
-            status: 400,
-            message: e.to_string(),
-        })?;
-        let mut conn = self.0.lock().unwrap();
-        let tx = conn.transaction()?;
-        let tenant = require_node(&tx, actor, node, true)?;
-        for rule in &mut config.rules {
-            rule.budget_ids = budgets::bindings(&tx, node, rule)?;
-            if rule.tenant_id != tenant {
-                return reject(403, "rule tenant does not match node");
-            }
-            if !tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM users WHERE id=?1 AND tenant_id=?2)",
-                params![rule.owner_id, tenant],
-                |r| r.get::<_, bool>(0),
-            )? {
-                return reject(403, "rule owner must belong to node tenant");
-            }
-            let bound: Option<(String, String)> = tx
-                .query_row(
-                    "SELECT node_id,owner_id FROM rule_bindings WHERE rule_id=?1",
-                    [&rule.id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .optional()?;
-            if bound.is_some_and(|(n, o)| n != node || o != rule.owner_id) {
-                return reject(
-                    409,
-                    "rule identity already belongs to another node or owner",
-                );
-            }
-            tx.execute("INSERT OR IGNORE INTO rule_bindings(rule_id,node_id,tenant_id,owner_id) VALUES(?1,?2,?3,?4)",params![rule.id,node,tenant,rule.owner_id])?;
-            tx.execute(
-                "INSERT OR IGNORE INTO rule_epochs(rule_id,meter_epoch) VALUES(?1,?2)",
-                params![rule.id, rule.meter_epoch],
-            )?;
-        }
-        if tx.execute(
-            "UPDATE nodes SET desired_revision=?1 WHERE id=?2 AND desired_revision=?3",
-            params![config.revision, node, expected],
-        )? != 1
-        {
-            return reject(409, "configuration changed; reload before saving");
-        }
-        tx.execute("INSERT INTO config_history(node_id,revision,config_json,actor_id,created_at_ms) VALUES(?1,?2,?3,?4,?5)",params![node,config.revision,serde_json::to_string(&config)?,actor.id,now_ms()])?;
-        audit(
-            &tx,
-            &actor.id,
-            "config.publish",
-            node,
-            &serde_json::json!({"revision":config.revision,"rules":config.rules.len()}).to_string(),
-        )?;
-        tx.commit()?;
-        Ok(config)
     }
     pub fn history(&self, actor: &Actor, node: &str) -> Result<Vec<serde_json::Value>> {
         let conn = self.0.lock().unwrap();
