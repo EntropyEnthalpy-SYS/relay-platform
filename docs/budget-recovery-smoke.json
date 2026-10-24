@@ -1,7 +1,7 @@
 {
-  "at_utc": "2026-10-24T11:35:34.365903+00:00",
-  "version": "relay 0.17.0",
-  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
+  "at_utc": "2026-10-24T12:41:07.210013+00:00",
+  "version": "relay 0.18.0",
+  "binary_sha256": "ca67905a07e592906701c86ec9512808bd90c825442b96e09a247d7e4e487f50",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "machine": "arm64",
   "python": "3.14.4",
@@ -13,20 +13,20 @@
   },
   "kill_boundary": {
     "agent_exit_code": -9,
-    "offline_payload_seconds": 0.005252458970062435,
+    "offline_payload_seconds": 0.006392208975739777,
     "controller_confirmed_bytes": 256,
     "agent_durable_bytes": 24832,
     "unreported_bytes": 24576,
     "controller_outstanding_bytes": 65280
   },
   "recovery": {
-    "seconds_from_controller_restart": 5.215291541011538,
+    "seconds_from_controller_restart": 5.20032733399421,
     "generation": 2,
     "same_durable_run": true,
     "listeners_waited": true,
     "stats": {
-      "run_id": "a7a9169c-3d03-4884-93b3-b15684079298",
-      "at_ms": 1792841733824,
+      "run_id": "684fbbb8-a132-4fd8-a9d8-bb36bd806a04",
+      "at_ms": 1792845666682,
       "validated_grants": 1,
       "recovered_pending_grants": 0,
       "cancelled_requests": 0,

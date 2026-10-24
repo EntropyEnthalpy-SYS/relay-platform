@@ -1,0 +1,59 @@
+{
+  "at_utc": "2026-10-24T11:35:49.620909+00:00",
+  "version": "relay 0.17.0",
+  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "python": "3.14.4",
+  "tls": "OpenSSL 3.0.19 27 Jan 2026",
+  "successes": [
+    {
+      "mode": "stripe",
+      "payload_bytes_each_direction": 49591,
+      "sent_duplicate_bytes": 19,
+      "received_duplicate_bytes": 0,
+      "out_of_order_and_half_close": "verified",
+      "sha256": "d94913479c6b277781962fb03353ba95930851859bd024df7028fa21288daf88"
+    },
+    {
+      "mode": "replicate",
+      "payload_bytes_each_direction": 49591,
+      "sent_duplicate_bytes": 19,
+      "received_duplicate_bytes": 49591,
+      "out_of_order_and_half_close": "verified",
+      "sha256": "d94913479c6b277781962fb03353ba95930851859bd024df7028fa21288daf88"
+    }
+  ],
+  "rejections": [
+    {
+      "case": "bad-magic",
+      "result": "rejected without application payload"
+    },
+    {
+      "case": "reserved-handshake",
+      "result": "rejected without application payload"
+    },
+    {
+      "case": "oversize-frame",
+      "result": "rejected without application payload"
+    },
+    {
+      "case": "out-of-window",
+      "result": "rejected without application payload"
+    },
+    {
+      "case": "ack-unsent-data",
+      "result": "rejected without application payload"
+    }
+  ],
+  "ledger": {
+    "upload_bytes": 99182,
+    "download_bytes": 99182,
+    "exact_match": true
+  },
+  "child_processes_stopped": true,
+  "scope": "independent Python/OpenSSL client -> native mTLS aggregation server -> Python TCP echo",
+  "limits": [
+    "functional local wire-format fixture",
+    "no independent server, WAN or proprietary protocol compatibility claim"
+  ]
+}

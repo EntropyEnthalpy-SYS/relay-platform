@@ -1,0 +1,47 @@
+{
+  "version": "relay 0.18.0",
+  "binary_sha256": "ca67905a07e592906701c86ec9512808bd90c825442b96e09a247d7e4e487f50",
+  "at_utc": "2026-10-24T12:40:09.591128+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "build_info": {
+    "arch": "aarch64",
+    "controller_schema": 4,
+    "deployment_format": 1,
+    "os": "macos",
+    "product": "relay-platform",
+    "state_contract": {
+      "agent": 1,
+      "controller": 1
+    },
+    "version": "0.18.0"
+  },
+  "signed_bundles_verified": 2,
+  "signing": "RSA-3072 PKCS1v1.5 with SHA-256; temporary test-only signer",
+  "fixture_source_labels_are_not_release_provenance": true,
+  "native_system_install_performed": false,
+  "staged_service_formats": [
+    "systemd",
+    "openrc"
+  ],
+  "native_host_preflight_ready": false,
+  "generated_wrappers_executed_real_processes": true,
+  "controller_listen_changed_then_rolled_back": true,
+  "forced_exit": {
+    "code": -9,
+    "boundary": "selection_durable",
+    "recovered_exact_target": true
+  },
+  "runtime_state_unchanged_by_switch_and_rollback": true,
+  "record_created_after_switch_preserved_after_rollback": true,
+  "original_agent_credential_and_budget_state_retained": true,
+  "reinstall_from_retained_receipts_forwarded_tcp_udp": true,
+  "final_lease_generation": 3,
+  "ledger": {
+    "agent": 320,
+    "controller": 320,
+    "budget_consumed": 320,
+    "budget_committed": 320
+  },
+  "removal_preserved_runtime_state_and_other_role": true,
+  "scope": "Native processes in an isolated staged filesystem; no actual Linux init service, account creation, logrotate execution, release-key custody, cross-version migration or cross-machine acceptance."
+}

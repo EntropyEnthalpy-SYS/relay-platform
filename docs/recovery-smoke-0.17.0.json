@@ -1,0 +1,37 @@
+{
+  "at_utc": "2026-10-24T11:35:51.391189+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
+  "restore": {
+    "journal_id": "2017b80a-6ec8-4873-b295-ce3ca787be02",
+    "backup_sequence": 4,
+    "restored_sequence": 12,
+    "replayed_transactions": 8,
+    "budget_allocation_paused": false,
+    "ignored_uncommitted_tail": false
+  },
+  "checks": [
+    "CLI online backup before node creation",
+    "post-backup node identity and configuration recovered",
+    "old API session retained",
+    "same TCP connection survives controller replacement",
+    "offline consumption reconciled",
+    "new reservations issued after validated replay",
+    "source backup and log unchanged",
+    "graceful shutdown returns unused reservations",
+    "all spawned processes exited successfully"
+  ],
+  "ledger": {
+    "expected_bytes": 286720,
+    "controller_bytes": 286720,
+    "agent_bytes": 286720,
+    "budget_consumed_bytes": 286720,
+    "budget_committed_bytes": 286720,
+    "exact_match": true
+  },
+  "limits": [
+    "local macOS loopback only",
+    "no power-loss or remote storage durability test"
+  ],
+  "version": "relay 0.17.0"
+}

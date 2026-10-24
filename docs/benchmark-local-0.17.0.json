@@ -1,0 +1,154 @@
+{
+  "at_utc": "2026-10-24T11:36:53.062412+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.14.4",
+  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
+  "scope": "local loopback smoke benchmark; durable admission metering; no TLS; Python echo target",
+  "rounds": 5,
+  "mib_per_connection": 32,
+  "tcp": [
+    {
+      "connections": 1,
+      "direct": [
+        {
+          "seconds": 0.026170625002123415,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 10257.128210664432
+        },
+        {
+          "seconds": 0.019410708046052605,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 13829.245968932571
+        },
+        {
+          "seconds": 0.019277249986771494,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 13924.98702793224
+        },
+        {
+          "seconds": 0.018667833996005356,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 14379.571623437474
+        },
+        {
+          "seconds": 0.01766633300576359,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 15194.74674865597
+        }
+      ],
+      "relay": [
+        {
+          "seconds": 0.07220904197311029,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 3717.4770453257347
+        },
+        {
+          "seconds": 0.057993541995529085,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 4628.712900838072
+        },
+        {
+          "seconds": 0.0584188750362955,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 4595.012413936793
+        },
+        {
+          "seconds": 0.058202332991641015,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 4612.108178525293
+        },
+        {
+          "seconds": 0.05672279198188335,
+          "one_way_payload_bytes": 33554432,
+          "goodput_mbps": 4732.409083208306
+        }
+      ],
+      "direct_median_mbps": 13924.98702793224,
+      "relay_median_mbps": 4612.108178525293,
+      "relay_to_direct_ratio": 0.33121094973186177
+    },
+    {
+      "connections": 4,
+      "direct": [
+        {
+          "seconds": 0.06837933300994337,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 15702.724445175007
+        },
+        {
+          "seconds": 0.08052883297204971,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 13333.631997034885
+        },
+        {
+          "seconds": 0.07858320797095075,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 13663.756567394421
+        },
+        {
+          "seconds": 0.07695770799182355,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 13952.362304164264
+        },
+        {
+          "seconds": 0.07705337496008724,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 13935.039504190256
+        }
+      ],
+      "relay": [
+        {
+          "seconds": 0.09464866598136723,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 11344.500346274077
+        },
+        {
+          "seconds": 0.09489916596794501,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 11314.554907286412
+        },
+        {
+          "seconds": 0.09539770899573341,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 11255.42568373442
+        },
+        {
+          "seconds": 0.097077582962811,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 11060.656757506364
+        },
+        {
+          "seconds": 0.09430870797950774,
+          "one_way_payload_bytes": 134217728,
+          "goodput_mbps": 11385.394275927441
+        }
+      ],
+      "direct_median_mbps": 13935.039504190256,
+      "relay_median_mbps": 11314.554907286412,
+      "relay_to_direct_ratio": 0.8119499699935644
+    }
+  ],
+  "udp": {
+    "direct": {
+      "samples": 100,
+      "payload_bytes_per_packet": 1200,
+      "failures": 0,
+      "median_rtt_us": 40.646002162247896,
+      "p95_rtt_us": 55.957993026822805
+    },
+    "relay": {
+      "samples": 100,
+      "payload_bytes_per_packet": 1200,
+      "failures": 0,
+      "median_rtt_us": 175.5000266712159,
+      "p95_rtt_us": 214.33294750750065
+    }
+  },
+  "ledger": {
+    "expected_admitted_bytes": 1680058752,
+    "recorded_bytes": 1680058752,
+    "exact_match": true
+  },
+  "version": "relay 0.17.0"
+}

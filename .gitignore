@@ -5,6 +5,7 @@
 *.db*
 *.credentials.json
 *.secret
+signing-private.pem
 .env
 .DS_Store
 __pycache__/

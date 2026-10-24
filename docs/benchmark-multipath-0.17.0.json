@@ -1,0 +1,296 @@
+{
+  "at_utc": "2026-10-24T11:37:49.450353+00:00",
+  "version": "relay 0.17.0",
+  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "python": "3.14.4",
+  "mode_order": "rotates each round",
+  "rounds": 3,
+  "payload_bytes_per_connection": 4194304,
+  "warmup_bytes_per_mode": 262144,
+  "topology": "one TCP application -> entry Agent -> independent capped mTLS paths -> exit Agent -> echo",
+  "configured_path_mib_per_second_each_direction": [
+    2.0,
+    1.0
+  ],
+  "shaper_block_bytes": 8192,
+  "rate_definition": "one-way verified application bytes * 8 / elapsed round-trip seconds / 1e6",
+  "samples": [
+    {
+      "mode": "single-fast",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 2.362099749967456,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 14.205340820370647,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4226346,
+          "download_bytes": 4228399
+        }
+      ]
+    },
+    {
+      "mode": "stripe",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 1.5523497909889556,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 21.61525204871737,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 2781413,
+          "download_bytes": 2797461
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 1467146,
+          "download_bytes": 1450305
+        }
+      ]
+    },
+    {
+      "mode": "replicate",
+      "round": 1,
+      "application_connections": 1,
+      "seconds": 3.3815201250254177,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 9.922884016474036,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4242446,
+          "download_bytes": 4242399
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 3285505,
+          "download_bytes": 3277337
+        }
+      ]
+    },
+    {
+      "mode": "stripe",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 1.5624054580111988,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 21.476135933825887,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 2782984,
+          "download_bytes": 2798293
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 1465715,
+          "download_bytes": 1449333
+        }
+      ]
+    },
+    {
+      "mode": "replicate",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 2.870751750015188,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 11.688378139914912,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4240556,
+          "download_bytes": 4240019
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 2761217,
+          "download_bytes": 2753049
+        }
+      ]
+    },
+    {
+      "mode": "single-fast",
+      "round": 2,
+      "application_connections": 1,
+      "seconds": 2.4482587079983205,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 13.705427408622953,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4228516,
+          "download_bytes": 4228399
+        }
+      ]
+    },
+    {
+      "mode": "replicate",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 3.2765787079697475,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 10.24069158429928,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4242586,
+          "download_bytes": 4241979
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 3179009,
+          "download_bytes": 3162687
+        }
+      ]
+    },
+    {
+      "mode": "single-fast",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 2.3961392500204965,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 14.003540069598616,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 4228516,
+          "download_bytes": 4228399
+        }
+      ]
+    },
+    {
+      "mode": "stripe",
+      "round": 3,
+      "application_connections": 1,
+      "seconds": 1.5470673330128193,
+      "one_way_payload_bytes": 4194304,
+      "goodput_mbps": 21.689057278880544,
+      "path_stream_bytes_during_sample": [
+        {
+          "slot": 0,
+          "upload_bytes": 2799180,
+          "download_bytes": 2814317
+        },
+        {
+          "slot": 1,
+          "upload_bytes": 1449659,
+          "download_bytes": 1432819
+        }
+      ]
+    }
+  ],
+  "median_goodput_mbps": {
+    "single-fast": 14.003540069598616,
+    "stripe": 21.61525204871737,
+    "replicate": 10.24069158429928
+  },
+  "stripe_to_single_fast_ratio": 1.543556268007089,
+  "single_connection_gain_observed": true,
+  "path_cut_same_application_connection": "all bytes verified",
+  "ledgers": [
+    {
+      "rule": "single-fast-entry",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    },
+    {
+      "rule": "single-fast-exit",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    },
+    {
+      "rule": "stripe-entry",
+      "upload_bytes": 17039360,
+      "download_bytes": 17039360,
+      "exact_match": true
+    },
+    {
+      "rule": "stripe-exit",
+      "upload_bytes": 17039360,
+      "download_bytes": 17039360,
+      "exact_match": true
+    },
+    {
+      "rule": "replicate-entry",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    },
+    {
+      "rule": "replicate-exit",
+      "upload_bytes": 12845056,
+      "download_bytes": 12845056,
+      "exact_match": true
+    }
+  ],
+  "node_metrics": [
+    {
+      "name": "entry",
+      "multipath": {
+        "active_sessions": 0,
+        "active_paths": 0,
+        "sessions": 14,
+        "failed_paths": 1,
+        "sent_payload_bytes": 64077824,
+        "replicated_payload_bytes": 12845056,
+        "retransmitted_payload_bytes": 8503296,
+        "received_payload_bytes": 60096512,
+        "duplicate_payload_bytes": 17367040,
+        "delivered_payload_bytes": 42729472,
+        "framing_sent_bytes": 334096,
+        "peak_reorder_bytes": 65536,
+        "peak_send_window_bytes": 1048576,
+        "path_sent_payload_bytes": [
+          34914304,
+          29163520,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "name": "exit",
+      "multipath": {
+        "active_sessions": 0,
+        "active_paths": 0,
+        "sessions": 14,
+        "failed_paths": 1,
+        "sent_payload_bytes": 64667648,
+        "replicated_payload_bytes": 12845056,
+        "retransmitted_payload_bytes": 9093120,
+        "received_payload_bytes": 59850752,
+        "duplicate_payload_bytes": 17121280,
+        "delivered_payload_bytes": 42729472,
+        "framing_sent_bytes": 301888,
+        "peak_reorder_bytes": 344064,
+        "peak_send_window_bytes": 1048576,
+        "path_sent_payload_bytes": [
+          34275328,
+          30392320,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    }
+  ],
+  "child_processes_stopped": true,
+  "limits": [
+    "synthetic Python pacing on local loopback, timer and process overhead included",
+    "same-machine Agents; no claim about independent WAN links or Linux kernel MPTCP",
+    "wire caps include TLS and relay framing, exclude IP/TCP headers",
+    "no high-concurrency, long-duration, maximum throughput or third-party comparison"
+  ]
+}

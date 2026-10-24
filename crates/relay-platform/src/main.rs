@@ -22,6 +22,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Report build target and the deployment state compatibility contract.
+    BuildInfo,
     /// Run the control API and embedded administration interface.
     Server {
         #[arg(long, default_value = "127.0.0.1:8080")]
@@ -117,6 +119,23 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
     match cli.command {
+        Command::BuildInfo => {
+            // Bump the relevant contract before an incompatible persisted-state
+            // change. Deployment rollback requires exact contract equality and
+            // never restores older state or recovery logs.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "product": "relay-platform",
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "deployment_format": 1,
+                    "state_contract": {"controller": 1, "agent": 1},
+                    "controller_schema": 4
+                })
+            );
+        }
         Command::Server {
             listen,
             state,

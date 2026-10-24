@@ -1,7 +1,7 @@
 {
-  "version": "relay 0.17.0",
-  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
-  "at_utc": "2026-10-24T11:34:51.272439+00:00",
+  "version": "relay 0.18.0",
+  "binary_sha256": "ca67905a07e592906701c86ec9512808bd90c825442b96e09a247d7e4e487f50",
+  "at_utc": "2026-10-24T12:40:24.037762+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "isolated_original": {
     "known_before_revocation": 320,
@@ -9,7 +9,7 @@
     "observed_unreported_bytes": 160,
     "exit_code": 1,
     "tcp_closed": true,
-    "seconds_from_revocation_to_observed_exit": 3.790533791994676
+    "seconds_from_revocation_to_observed_exit": 3.7569607500336133
   },
   "replacement": {
     "fresh_private_state": true,
@@ -17,7 +17,7 @@
     "waited_for_prior_window": true,
     "budget_run_absent_while_waiting": true,
     "lease_generation": 3,
-    "seconds_from_revocation_to_ready": 4.698949166981038,
+    "seconds_from_revocation_to_ready": 4.683666625001933,
     "routine_rotation_revision": 4,
     "same_lease_during_rotation": true,
     "replayed_revocation_kept_current_identity": true,
@@ -32,7 +32,7 @@
     "superseded_ticket_http": 401
   },
   "restore": {
-    "journal_id": "e1ea8b37-57b8-4fa3-b164-f6f339a5ffbd",
+    "journal_id": "f6aa2714-b0f1-4cf1-bb70-ff0f1d0ec51a",
     "backup_sequence": 12,
     "restored_sequence": 34,
     "replayed_transactions": 22,
@@ -43,7 +43,7 @@
   "retired_credentials_rejected_after_restore": 3,
   "rejected_endpoints_per_credential": 6,
   "old_enrollment_tickets_rejected": 4,
-  "restore_to_ready_seconds": 5.124062833026983,
+  "restore_to_ready_seconds": 5.136576166958548,
   "final_credential_revision": 7,
   "final_lease_generation": 6,
   "configuration_revision": 1,

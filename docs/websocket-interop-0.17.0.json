@@ -1,0 +1,81 @@
+{
+  "at_utc": "2026-10-24T11:35:49.155522+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "version": "relay 0.17.0",
+  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
+  "python_version": "3.14.4",
+  "websockets_version": "17.2",
+  "openssl_version": "OpenSSL 3.0.19 27 Jan 2026",
+  "topology": "Python websockets -> relay -> Python websockets",
+  "subprotocol": "relay-stream-v1",
+  "cases": [
+    {
+      "transport": "ws",
+      "payload_each_direction": 262181,
+      "reversed_reply_verified": true,
+      "half_close": "passed",
+      "ping_pong": "passed",
+      "client_close_code": 1005,
+      "backend": {
+        "bytes": 262181,
+        "close_code": 1005
+      },
+      "host_path_origin_subprotocol": "passed",
+      "negative_cases": [
+        "wrong-origin",
+        "wrong-subprotocol"
+      ],
+      "recorded_bytes": 524362
+    },
+    {
+      "transport": "wss",
+      "payload_each_direction": 262181,
+      "reversed_reply_verified": true,
+      "half_close": "passed",
+      "ping_pong": "passed",
+      "client_close_code": 1005,
+      "backend": {
+        "bytes": 262181,
+        "close_code": 1005
+      },
+      "host_path_origin_subprotocol": "passed",
+      "negative_cases": [
+        "wrong-origin",
+        "wrong-subprotocol"
+      ],
+      "recorded_bytes": 524362
+    },
+    {
+      "transport": "wss-mtls",
+      "payload_each_direction": 262181,
+      "reversed_reply_verified": true,
+      "half_close": "passed",
+      "ping_pong": "passed",
+      "client_close_code": 1005,
+      "backend": {
+        "bytes": 262181,
+        "close_code": 1005
+      },
+      "host_path_origin_subprotocol": "passed",
+      "negative_cases": [
+        "wrong-origin",
+        "wrong-subprotocol",
+        "missing-client-certificate"
+      ],
+      "recorded_bytes": 524362
+    }
+  ],
+  "ledger": {
+    "expected_admitted_bytes": 1573086,
+    "recorded_bytes": 1573086,
+    "exact_match": true,
+    "framing_and_control_excluded": true
+  },
+  "child_processes_stopped": true,
+  "limits": [
+    "loopback IPv4 only",
+    "ephemeral private CA",
+    "no external PROXY+WebSocket peer",
+    "not a performance or generic WebSocket proxy benchmark"
+  ]
+}

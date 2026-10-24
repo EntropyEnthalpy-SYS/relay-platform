@@ -1,0 +1,61 @@
+{
+  "version": "relay 0.17.0",
+  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
+  "at_utc": "2026-10-24T11:34:51.272439+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "isolated_original": {
+    "known_before_revocation": 320,
+    "durable_local_bytes": 480,
+    "observed_unreported_bytes": 160,
+    "exit_code": 1,
+    "tcp_closed": true,
+    "seconds_from_revocation_to_observed_exit": 3.790533791994676
+  },
+  "replacement": {
+    "fresh_private_state": true,
+    "enrollment_revision": 3,
+    "waited_for_prior_window": true,
+    "budget_run_absent_while_waiting": true,
+    "lease_generation": 3,
+    "seconds_from_revocation_to_ready": 4.698949166981038,
+    "routine_rotation_revision": 4,
+    "same_lease_during_rotation": true,
+    "replayed_revocation_kept_current_identity": true,
+    "tcp_udp_verified": true
+  },
+  "tickets": {
+    "legacy_client_http": 426,
+    "expired_ticket_http": 410,
+    "expired_agent_exit_code": 1,
+    "retry_did_not_extend_expiry": true,
+    "reissue_revision": 7,
+    "superseded_ticket_http": 401
+  },
+  "restore": {
+    "journal_id": "e1ea8b37-57b8-4fa3-b164-f6f339a5ffbd",
+    "backup_sequence": 12,
+    "restored_sequence": 34,
+    "replayed_transactions": 22,
+    "budget_allocation_paused": false,
+    "ignored_uncommitted_tail": false
+  },
+  "restored_identity_and_operations_match": true,
+  "retired_credentials_rejected_after_restore": 3,
+  "rejected_endpoints_per_credential": 6,
+  "old_enrollment_tickets_rejected": 4,
+  "restore_to_ready_seconds": 5.124062833026983,
+  "final_credential_revision": 7,
+  "final_lease_generation": 6,
+  "configuration_revision": 1,
+  "ledger": {
+    "all_observed_application_bytes": 800,
+    "controller_known_bytes": 640,
+    "latest_agent_known_bytes": 640,
+    "observed_unreported_original_bytes": 160,
+    "budget_consumed_known_bytes": 640,
+    "budget_committed_bytes": 1344,
+    "unknown_original_reservation_still_held": 704,
+    "unknown_bytes_fabricated_or_refunded": false
+  },
+  "scope": "One loopback host; real CLI processes and original-node control isolation. No Linux/WAN, adversarial-host shutdown or per-rule quota claim; quota fencing has separate Rust integration coverage."
+}
