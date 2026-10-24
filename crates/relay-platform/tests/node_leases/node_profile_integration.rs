@@ -245,8 +245,7 @@ async fn pause_closes_active_tcp_udp_without_configuration_republish_and_enable_
     recovery_budget(&db, &admin, 128);
     let token = temp.path().join("enrollment.secret");
     write_secret(&token, enrollment.as_bytes()).unwrap();
-    let echo = tcp_echo().await;
-    let _udp_echo = udp_echo_at(&echo.address.to_string()).await;
+    let (echo, _udp_echo) = tcp_udp_echo().await;
     let mut r = rule(echo.address, Protocol::Both);
     r.owner_id = admin.id.clone();
     let listen = r.listen;
@@ -312,8 +311,7 @@ async fn expiry_stops_tcp_udp_during_control_outage_and_rejects_expired_restarts
     recovery_budget(&db, &admin, 128);
     let token = temp.path().join("enrollment.secret");
     write_secret(&token, enrollment.as_bytes()).unwrap();
-    let echo = tcp_echo().await;
-    let _udp_echo = udp_echo_at(&echo.address.to_string()).await;
+    let (echo, _udp_echo) = tcp_udp_echo().await;
     let mut r = rule(echo.address, Protocol::Both);
     r.owner_id = admin.id.clone();
     let listen = r.listen;

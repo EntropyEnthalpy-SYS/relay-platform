@@ -19,11 +19,15 @@ fn bad_input(error: anyhow::Error) -> anyhow::Error {
     }
     .into()
 }
-fn quiescent(conn: &Connection, node: &str) -> Result<bool> {
+fn quiescent(conn: &Connection, clocks: &mut leases::LeaseClocks, node: &str) -> Result<bool> {
     let (enrolled, desired, applied, error, stats): (bool,u64,u64,Option<String>,String) = conn.query_row(
         "SELECT token_hash IS NOT NULL,desired_revision,applied_revision,apply_error,stats_json FROM nodes WHERE id=?1", [node],
         |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
     if !enrolled {
+        if credentials::read(conn, node)?.revocation.is_some() {
+            let status = leases::status(conn, clocks, node)?;
+            return Ok(status.policy.is_some() && !status.active && status.recovery_wait_ms == 0);
+        }
         return Ok(true);
     }
     let Ok(stats) = serde_json::from_str::<EngineStats>(&stats) else {
@@ -31,7 +35,12 @@ fn quiescent(conn: &Connection, node: &str) -> Result<bool> {
     };
     Ok(desired == applied && error.is_none() && stats.business_idle() && stats.active_probes == 0)
 }
-fn retirement_barrier(conn: &Connection, old: &NodeConfig, new: &NodeConfig) -> Result<()> {
+fn retirement_barrier(
+    conn: &Connection,
+    clocks: &mut leases::LeaseClocks,
+    old: &NodeConfig,
+    new: &NodeConfig,
+) -> Result<()> {
     for previous in &old.rules {
         let next = new.rules.iter().find(|r| r.id == previous.id);
         if !topology::participates(previous) && next.is_none_or(|r| !topology::participates(r)) {
@@ -59,7 +68,7 @@ fn retirement_barrier(conn: &Connection, old: &NodeConfig, new: &NodeConfig) -> 
         }
         if !previous.enabled
             && (structural || reused_listener || next.is_some_and(|r| r.enabled))
-            && !quiescent(conn, &old.node_id)?
+            && !quiescent(conn, clocks, &old.node_id)?
         {
             return reject(
                 409,
@@ -69,7 +78,12 @@ fn retirement_barrier(conn: &Connection, old: &NodeConfig, new: &NodeConfig) -> 
     }
     Ok(())
 }
-fn prepare(conn: &Connection, actor: &Actor, batch: ConfigBatch) -> Result<BatchResult> {
+fn prepare(
+    conn: &Connection,
+    clocks: &mut leases::LeaseClocks,
+    actor: &Actor,
+    batch: ConfigBatch,
+) -> Result<BatchResult> {
     if !actor.may_write() {
         return reject(403, "read-only role cannot publish configuration");
     }
@@ -102,6 +116,7 @@ fn prepare(conn: &Connection, actor: &Actor, batch: ConfigBatch) -> Result<Batch
         };
         config.validate().map_err(bad_input)?;
         for rule in &mut config.rules {
+            credentials::require_meter_period(conn, &config.node_id, rule)?;
             if rule.tenant_id != tenant {
                 return reject(403, "rule tenant does not match node");
             }
@@ -127,7 +142,7 @@ fn prepare(conn: &Connection, actor: &Actor, batch: ConfigBatch) -> Result<Batch
             }
             rule.budget_ids = budgets::bindings(conn, &config.node_id, rule)?;
         }
-        retirement_barrier(conn, old, &config)?;
+        retirement_barrier(conn, clocks, old, &config)?;
         let mut change = ConfigChange {
             node_id: config.node_id.clone(),
             from_revision: old.revision,
@@ -171,12 +186,12 @@ fn prepare(conn: &Connection, actor: &Actor, batch: ConfigBatch) -> Result<Batch
 impl Store {
     pub fn preview_configs(&self, actor: &Actor, batch: ConfigBatch) -> Result<BatchResult> {
         let conn = self.0.lock().unwrap();
-        prepare(&conn, actor, batch)
+        prepare(&conn, &mut self.3.lock().unwrap(), actor, batch)
     }
     pub fn publish_configs(&self, actor: &Actor, batch: ConfigBatch) -> Result<BatchResult> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        let result = prepare(&tx, actor, batch)?;
+        let result = prepare(&tx, &mut self.3.lock().unwrap(), actor, batch)?;
         for config in &result.configs {
             for rule in &config.rules {
                 tx.execute("INSERT OR IGNORE INTO rule_bindings(rule_id,node_id,tenant_id,owner_id) VALUES(?1,?2,?3,?4)",params![rule.id,config.node_id,rule.tenant_id,rule.owner_id])?;

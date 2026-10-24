@@ -1,0 +1,41 @@
+{
+  "at_utc": "2026-10-24T10:23:06.287630+00:00",
+  "version": "relay 0.16.0",
+  "binary_sha256": "43df5a27ee54b7d812e91246d17be3d56a7030e78f79f6fbdc3631c8c6c2afc1",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "python": "3.14.4",
+  "scope": "separate local release processes; one controller; copied node database; shared budget; TCP and UDP; no cross-host, physical suspend, or multi-controller claim",
+  "policy": {
+    "ttl_ms": 5000,
+    "strict": true
+  },
+  "clean_handoff": {
+    "generation": 2,
+    "clone_wait_seconds": 6.154097167018335,
+    "clean_takeover_seconds": 0.4523764579789713,
+    "copied_snapshot_bytes": 3168,
+    "controller_bytes": 30912,
+    "agent_bytes": 30912,
+    "budget_consumed_bytes": 30912,
+    "budget_committed_bytes": 30912,
+    "unused_reserved_bytes": 0,
+    "waiting_clone_kept_original_budget_run": true,
+    "exact_match": true
+  },
+  "control_loss": {
+    "generation": 3,
+    "agent_exit_code": 1,
+    "agent_exit_after_control_stop_seconds": 4.380762916000094,
+    "tcp_connection_closed": true,
+    "tcp_listener_closed": true,
+    "udp_echo_stopped": true,
+    "controller_bytes_before_outage": 35368,
+    "local_bytes_after_exit": 35368,
+    "all_outage_usage_confirmed_before_control_stop": true,
+    "exact_match": true,
+    "unused_reservation_before_outage_bytes": 3736,
+    "expiry_does_not_refund_unconfirmed_reservations": true
+  },
+  "all_child_processes_exited": true
+}

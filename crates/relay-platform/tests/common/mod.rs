@@ -93,6 +93,25 @@ pub async fn tcp_echo() -> Echo {
 }
 pub async fn tcp_echo_at(bind: &str, marker: Option<u8>) -> Echo {
     let listener = TcpListener::bind(bind).await.unwrap();
+    tcp_echo_from(listener, marker)
+}
+pub async fn tcp_udp_echo() -> (Echo, Echo) {
+    tcp_udp_echo_at("127.0.0.1:0").await
+}
+pub async fn tcp_udp_echo_at(bind: &str) -> (Echo, Echo) {
+    // Keep both reservations alive before starting either task. A TCP ephemeral
+    // port can already be occupied by an unrelated UDP client in a parallel test.
+    for _ in 0..100 {
+        let listener = TcpListener::bind(bind).await.unwrap();
+        match UdpSocket::bind(listener.local_addr().unwrap()).await {
+            Ok(socket) => return (tcp_echo_from(listener, None), udp_echo_from(socket)),
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(error) => panic!("cannot reserve UDP echo socket: {error}"),
+        }
+    }
+    panic!("cannot reserve a shared TCP/UDP echo port after 100 attempts")
+}
+fn tcp_echo_from(listener: TcpListener, marker: Option<u8>) -> Echo {
     let address = listener.local_addr().unwrap();
     let stop = CancellationToken::new();
     let shutdown = stop.clone();
@@ -134,6 +153,9 @@ pub async fn udp_echo() -> Echo {
 }
 pub async fn udp_echo_at(bind: &str) -> Echo {
     let socket = UdpSocket::bind(bind).await.unwrap();
+    udp_echo_from(socket)
+}
+fn udp_echo_from(socket: UdpSocket) -> Echo {
     let address = socket.local_addr().unwrap();
     let stop = CancellationToken::new();
     let shutdown = stop.clone();

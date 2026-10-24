@@ -220,8 +220,7 @@ fn range_limits_overlap_and_static_cycle_validation() {
 #[tokio::test]
 async fn outbound_ip_and_loopback_interface_tcp_udp_ipv4_ipv6() {
     for local in ["127.0.0.1:0", "[::1]:0"] {
-        let echo = tcp_echo_at(local, None).await;
-        let _udp = udp_echo_at(&echo.address.to_string()).await;
+        let (echo, _udp) = tcp_udp_echo_at(local).await;
         let interface = if_addrs::get_if_addrs()
             .unwrap()
             .into_iter()
@@ -510,8 +509,7 @@ async fn udp_dns_cycle_drops_before_recursive_datagram() {
 
 #[tokio::test]
 async fn ipv6_wildcard_is_v6_only_and_ipv4_can_share_port() {
-    let echo = tcp_echo().await;
-    let _udp = udp_echo_at(&echo.address.to_string()).await;
+    let (echo, _udp) = tcp_udp_echo().await;
     let temp = tempfile::tempdir().unwrap();
     let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
     let a = rule(echo.address, Protocol::Both);
@@ -532,8 +530,7 @@ async fn ipv6_wildcard_is_v6_only_and_ipv4_can_share_port() {
 
 #[tokio::test]
 async fn dns_positive_ttl_cap_and_zero_ttl_udp() {
-    let echo = tcp_echo().await;
-    let _udp = udp_echo_at(&echo.address.to_string()).await;
+    let (echo, _udp) = tcp_udp_echo().await;
     let dns = DnsStub::new(vec![echo.address.ip()], 30).await;
     let temp = tempfile::tempdir().unwrap();
     let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());

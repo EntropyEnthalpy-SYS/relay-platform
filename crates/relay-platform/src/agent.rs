@@ -120,6 +120,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 node_id: credential.node_id.clone(),
                 enrollment_token: token.into(),
                 credential: credential.token.clone(),
+                identity_revision_supported: true,
             })
             .send()
             .await?;
@@ -130,6 +131,11 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         );
         let enrolled: EnrollmentResponse = bounded_json(response).await?;
         ensure!(enrolled.enrolled, "controller did not confirm enrollment");
+        ensure!(
+            (1..=i64::MAX as u64).contains(&enrolled.credential_revision),
+            "invalid enrolled credential revision"
+        );
+        credential.revision = enrolled.credential_revision;
         credential.pending_enrollment_token = None;
         store.set_metadata("agent_credential", &serde_json::to_string(&credential)?)?;
     }

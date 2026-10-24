@@ -14,8 +14,10 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | POST | `/nodes/profiles` | `{updates:[{node_id,update}]}`；原子保存 1..100 个节点资料，逐节点返回修订 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |
 | PUT | `/nodes/{id}/config` | `{expected_revision,rules}`；并发冲突返回 409，成功生成下一版本 |
-| GET | `/nodes/{id}/credential` | 可见节点的凭据版本、待执行任务及上次完成回执；不返回秘密或哈希 |
+| GET | `/nodes/{id}/credential` | 可见节点的身份阶段/版本、轮换/撤销/替换回执与受保护配额周期；不返回秘密或哈希 |
 | POST | `/nodes/{id}/credential/rotate` | `{expected_revision}` 请求 Agent 自行生成并轮换凭据；权限与版本检查 |
+| POST | `/nodes/{id}/credential/revoke` | `{operation_id,expected_revision,reason}`；退役身份、保留旧窗口与未知预留 |
+| POST | `/nodes/{id}/credential/replace` | `{operation_id,expected_revision,enrollment_token,valid_for_seconds,offline_stop_attested?,lease_policy?}`；签发或重签限时替换令牌 |
 | GET | `/nodes/{id}/health` | 实际修订对应的目标健康、年龄、候选原因、探测流量与容量；按节点权限过滤 |
 | GET | `/nodes/{id}/history` | 最近 100 次配置修订 |
 | POST | `/nodes/{id}/rollback` | `{revision,expected_revision}`；把历史规则作为新修订发布，账本不回滚 |
@@ -33,13 +35,13 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/recovery` | `{enabled,healthy,head}`；仅系统管理员，读取控制器恢复日志状态 |
 | GET | `/control/metrics` | 仅系统管理员；返回本次控制器运行的节点同步统计 |
 | GET | `/capabilities` | 实现能力与待实现能力目录，不代表完整发布验收 |
-| POST | `/agent/enroll` | `{node_id,enrollment_token,credential}`；返回 `{enrolled:true}` |
+| POST | `/agent/enroll` | `{node_id,enrollment_token,credential,identity_revision_supported?}`；返回 `{enrolled:true,credential_revision}`；替换注册必须声明能力为 true |
 | POST | `/agent/credential/rotate` | `{request_id,expected_revision,credential,lease}`；事务换钥并返回可重试回执 |
 | POST | `/agent/reconcile` | 节点凭据认证；分页获取权威用量下限和相同修订的配置 |
 | POST | `/agent/budgets/recover` | 严格节点在开启监听前验证原状态预留、补报消费和处理待确认请求 |
 | POST | `/agent/sync` | 节点凭据认证，上报用量/状态并获取期望配置 |
 
-注册时 Agent 先在本地生成并持久化独立 `credential`，然后请求控制器绑定。一次性令牌只允许首次绑定；相同已绑定凭据可以重试确认，原注册令牌不能绑定第二个凭据。控制器不需要保存可还原的节点秘密。0.16.0 支持管理员发起、Agent 自行执行和中断恢复的常规凭据轮换；完整合同见 [NODE_CREDENTIALS.md](NODE_CREDENTIALS.md)。身份替换与紧急撤销仍未完成。
+注册时 Agent 先在本地生成并持久化独立 `credential`，然后请求控制器绑定。一次性令牌只允许首次绑定；相同已绑定凭据可以重试确认，原注册令牌不能绑定第二个凭据。控制器不需要保存可还原的节点秘密。0.16.0 支持管理员发起、Agent 自行执行和中断恢复的常规凭据轮换；完整合同见 [NODE_CREDENTIALS.md](NODE_CREDENTIALS.md)。0.17.0 增加撤销和全新状态替换，包含操作幂等、限时令牌、旧租约窗口和配额周期保护，见 [NODE_IDENTITY.md](NODE_IDENTITY.md)。
 
 同步请求：
 

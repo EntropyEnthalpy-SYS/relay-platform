@@ -145,6 +145,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/nodes/{node}/history", get(history))
         .route("/api/v1/nodes/{node}/credential", get(node_credential))
         .route(
+            "/api/v1/nodes/{node}/credential/revoke",
+            post(revoke_credential),
+        )
+        .route(
+            "/api/v1/nodes/{node}/credential/replace",
+            post(replace_credential),
+        )
+        .route(
             "/api/v1/nodes/{node}/credential/rotate",
             post(request_rotation),
         )
@@ -523,10 +531,17 @@ pub struct Enrollment {
     pub node_id: String,
     pub enrollment_token: String,
     pub credential: String,
+    #[serde(default)]
+    pub identity_revision_supported: bool,
 }
 #[derive(Serialize, Deserialize)]
 pub struct EnrollmentResponse {
     pub enrolled: bool,
+    #[serde(default = "initial_credential_revision")]
+    pub credential_revision: u64,
+}
+fn initial_credential_revision() -> u64 {
+    1
 }
 async fn enroll(
     State(state): State<AppState>,
@@ -539,11 +554,19 @@ async fn enroll(
         }
         .into());
     }
-    database(state.store, move |db| {
-        db.enroll(&input.node_id, &input.enrollment_token, &input.credential)
+    let credential_revision = database(state.store, move |db| {
+        db.enroll_with_capability(
+            &input.node_id,
+            &input.enrollment_token,
+            &input.credential,
+            input.identity_revision_supported,
+        )
     })
     .await?;
-    Ok(Json(EnrollmentResponse { enrolled: true }))
+    Ok(Json(EnrollmentResponse {
+        enrolled: true,
+        credential_revision,
+    }))
 }
 async fn reconcile(
     State(state): State<AppState>,
@@ -566,6 +589,32 @@ async fn node_credential(
     Ok(Json(
         database(state.store, move |db| {
             db.node_credential_status(&actor, &node)
+        })
+        .await?,
+    ))
+}
+async fn revoke_credential(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Json(input): Json<crate::credential::RevokeCredential>,
+) -> ApiResult<crate::credential::CredentialStatus> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.revoke_node_credential(&actor, &node, input)
+        })
+        .await?,
+    ))
+}
+async fn replace_credential(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Json(input): Json<crate::credential::ReplaceCredential>,
+) -> ApiResult<crate::credential::CredentialStatus> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.replace_node_credential(&actor, &node, input)
         })
         .await?,
     ))
@@ -671,7 +720,7 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
 }

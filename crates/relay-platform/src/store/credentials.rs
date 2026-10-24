@@ -1,5 +1,12 @@
 use super::*;
-use crate::credential::{CredentialStatus, RotateCredential, RotationReceipt, RotationRequest};
+use crate::credential::{
+    CredentialPhase, CredentialStatus, RotateCredential, RotationReceipt, RotationRequest,
+};
+
+mod replacement;
+pub(super) use replacement::{
+    blocked_quotas, enrollment_ready, finish_enrollment, require_meter_period,
+};
 
 fn key(node: &str) -> String {
     format!("node_credential:{node}")
@@ -24,6 +31,11 @@ pub(super) fn read(conn: &Connection, node: &str) -> Result<CredentialStatus> {
         |row| row.get(0),
     )?;
     Ok(CredentialStatus {
+        phase: if enrolled {
+            CredentialPhase::Active
+        } else {
+            CredentialPhase::NotEnrolled
+        },
         revision: u64::from(enrolled),
         ..Default::default()
     })
@@ -35,8 +47,8 @@ fn write(tx: &Transaction<'_>, node: &str, value: &CredentialStatus) -> Result<(
 }
 pub(super) fn require_fresh(conn: &Connection, hash: &str) -> Result<()> {
     let used: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?1) OR EXISTS(SELECT 1 FROM nodes WHERE token_hash=?2)",
-        params![retired_key(hash), hash], |row| row.get(0),
+        "SELECT EXISTS(SELECT 1 FROM metadata WHERE key IN (?1,?3)) OR EXISTS(SELECT 1 FROM nodes WHERE token_hash=?2 OR enrollment_hash=?2)",
+        params![retired_key(hash), hash, replacement::retired_enrollment_key(hash)], |row| row.get(0),
     )?;
     if used {
         return reject(
@@ -50,7 +62,9 @@ impl Store {
     pub fn node_credential_status(&self, actor: &Actor, node: &str) -> Result<CredentialStatus> {
         let conn = self.0.lock().unwrap();
         require_node(&conn, actor, node, false)?;
-        read(&conn, node)
+        let mut state = read(&conn, node)?;
+        state.blocked_quota_periods = blocked_quotas(&conn, node)?;
+        Ok(state)
     }
     pub fn request_credential_rotation(
         &self,
@@ -62,7 +76,7 @@ impl Store {
         let tx = conn.transaction()?;
         require_node(&tx, actor, node, true)?;
         let mut state = read(&tx, node)?;
-        if state.revision == 0 {
+        if state.revision == 0 || state.phase != CredentialPhase::Active {
             return reject(409, "enroll the node before rotating its credential");
         }
         if state.revision != expected_revision || state.pending.is_some() {

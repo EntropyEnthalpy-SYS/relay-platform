@@ -114,6 +114,8 @@ impl Actor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
     #[serde(default)]
+    pub credential_phase: crate::credential::CredentialPhase,
+    #[serde(default)]
     pub profile: crate::node::NodeProfile,
     #[serde(default)]
     pub lifecycle: crate::node::NodeLifecycle,
@@ -527,6 +529,7 @@ impl Store {
         leases::created(&mut self.3.lock().unwrap(), &id);
         Ok((
             Node {
+                credential_phase: crate::credential::CredentialPhase::NotEnrolled,
                 lifecycle: profile.settings.lifecycle(now),
                 profile,
                 lease: crate::lease::LeaseStatus {
@@ -547,6 +550,18 @@ impl Store {
         ))
     }
     pub fn enroll(&self, node: &str, token: &str, credential: &str) -> Result<()> {
+        self.enroll_revision(node, token, credential).map(|_| ())
+    }
+    pub fn enroll_revision(&self, node: &str, token: &str, credential: &str) -> Result<u64> {
+        self.enroll_with_capability(node, token, credential, true)
+    }
+    pub fn enroll_with_capability(
+        &self,
+        node: &str,
+        token: &str,
+        credential: &str,
+        identity_revision_supported: bool,
+    ) -> Result<u64> {
         if [token, credential]
             .iter()
             .any(|value| value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -562,6 +577,12 @@ impl Store {
             |row| row.get(0),
         )?;
         if eligible {
+            credentials::enrollment_ready(
+                &tx,
+                node,
+                self.3.lock().unwrap().policy_now_ms(),
+                identity_revision_supported,
+            )?;
             credentials::require_fresh(&tx, &token_hash(credential))?;
         }
         let changed=tx.execute("UPDATE nodes SET token_hash=?1,enrollment_hash=NULL WHERE id=?2 AND enrollment_hash=?3",params![token_hash(credential),node,token_hash(token)])?;
@@ -573,11 +594,17 @@ impl Store {
             if !same_credential {
                 return reject(401, "enrollment token invalid or already consumed");
             }
-        } else {
-            audit(&tx, node, "node.enroll", node, "{}")?;
         }
+        let revision = if changed == 1 {
+            let revision =
+                credentials::finish_enrollment(&tx, node, self.3.lock().unwrap().policy_now_ms())?;
+            audit(&tx, node, "node.enroll", node, "{}")?;
+            revision
+        } else {
+            credentials::read(&tx, node)?.revision
+        };
         tx.commit()?;
-        Ok(())
+        Ok(revision)
     }
     pub fn authenticate_node(&self, token: &str) -> Result<String> {
         self.0
@@ -597,6 +624,7 @@ impl Store {
         let mut q=conn.prepare("SELECT id,tenant_id,name,desired_revision,applied_revision,last_seen_ms,apply_error,token_hash IS NOT NULL,stats_json FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY name,id")?;
         let rows = q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
             Ok(Node {
+                credential_phase: crate::credential::CredentialPhase::NotEnrolled,
                 profile: Default::default(),
                 lifecycle: Default::default(),
                 lease: crate::lease::LeaseStatus::default(),
@@ -615,6 +643,7 @@ impl Store {
         let mut clocks = self.3.lock().unwrap();
         let now = clocks.policy_now_ms();
         for node in &mut nodes {
+            node.credential_phase = credentials::read(&conn, &node.id)?.phase;
             node.lease = leases::status(&conn, &mut clocks, &node.id)?;
             node.profile = node_profiles::read(&conn, &node.id)?;
             node.lifecycle = node.profile.settings.lifecycle(now);

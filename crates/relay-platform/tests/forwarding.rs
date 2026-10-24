@@ -446,8 +446,7 @@ async fn failed_meter_transaction_never_forwards_uncommitted_payload() {
 
 #[tokio::test]
 async fn dual_protocol_listener_and_ipv6_udp_are_independently_verified() {
-    let tcp = tcp_echo_at("[::1]:0", None).await;
-    let _udp = udp_echo_at(&tcp.address.to_string()).await;
+    let (tcp, _udp) = tcp_udp_echo_at("[::1]:0").await;
     let temp = tempfile::tempdir().unwrap();
     let db = Store::open(&temp.path().join("agent.db")).unwrap();
     let engine = Engine::new(db.clone());

@@ -1,7 +1,7 @@
 {
-  "at_utc": "2026-10-24T10:22:47.588499+00:00",
-  "version": "relay 0.16.0",
-  "binary_sha256": "43df5a27ee54b7d812e91246d17be3d56a7030e78f79f6fbdc3631c8c6c2afc1",
+  "at_utc": "2026-10-24T11:35:27.606731+00:00",
+  "version": "relay 0.17.0",
+  "binary_sha256": "e89374f6c25649923e3f114cd0607d09f9fbd63ac5af400f0b6e3d271c5ae743",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "inventory": {
     "nodes": 2,
@@ -14,33 +14,33 @@
     "batch_rollback_verified": true,
     "batch_receipts": [
       {
-        "node_id": "a3ab6f1f-3a76-475c-82c0-ad34446d21ec",
+        "node_id": "557d432c-d855-491b-8578-6cb2b1344522",
         "revision": 3
       },
       {
-        "node_id": "88317bce-5751-4346-a12a-e77b12a77a9f",
+        "node_id": "e198b092-ed08-45e7-996b-f7ecfd70f7f1",
         "revision": 2
       }
     ]
   },
   "pause": {
     "agent_exit_code": 1,
-    "seconds_until_exit": 0.44916508300229907,
+    "seconds_until_exit": 0.47553429199615493,
     "tcp_and_udp_closed": true,
     "consumed_and_committed_bytes": 448,
     "profile_revision": 4
   },
   "expiry": {
-    "expires_at_ms": 1792837362094,
-    "listener_closed_at_ms": 1792837361638,
-    "closed_before_expiry_ms": 456,
-    "last_capped_lease_remaining_ms": 3541,
+    "expires_at_ms": 1792841722095,
+    "listener_closed_at_ms": 1792841721623,
+    "closed_before_expiry_ms": 472,
+    "last_capped_lease_remaining_ms": 3578,
     "controller_was_offline": true,
     "expired_restart_exit_code": 1,
     "expired_restart_http_status": 410,
     "durable_bytes_before_recovery": 928,
     "unreported_bytes_recovered": 160,
-    "reactivation_wait_seconds": 5.137051290948875,
+    "reactivation_wait_seconds": 5.13624024996534,
     "generation_after_extension": 3
   },
   "ledger": {
@@ -52,7 +52,7 @@
     "exact_match": true
   },
   "restore": {
-    "journal_id": "8a1bcdf2-89f4-4165-abfa-c126bab8a143",
+    "journal_id": "19ca64a8-3286-472b-9e7d-8ff2d71e75f5",
     "backup_sequence": 11,
     "restored_sequence": 36,
     "replayed_transactions": 25,
@@ -64,7 +64,7 @@
       "name": "managed-renamed",
       "profile": {
         "revision": 6,
-        "updated_at_ms": 1792837362211,
+        "updated_at_ms": 1792841722206,
         "settings": {
           "kinds": [
             "ingress",
@@ -91,7 +91,7 @@
       "name": "standby-inventory",
       "profile": {
         "revision": 2,
-        "updated_at_ms": 1792837354592,
+        "updated_at_ms": 1792841714569,
         "settings": {
           "kinds": [],
           "group": "bulk-group",

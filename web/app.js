@@ -168,7 +168,7 @@ async function renderNodes() {
   if(!nodes.length) p.append(empty(query?'没有匹配的节点':'接入你的第一个节点',query?'调整筛选条件后重试。':'注册后启动 Agent，再配置转发。'));
   else p.append(table(['选择','节点 / ID','类型 / 分组 / 成本','运行许可 / 到期','控制连接','运行保护','配置修订','活跃会话','操作'],nodes.map(node=>{
     let choice='—';if(canWrite()){choice=el('input');choice.className='node-choice';choice.type='checkbox';choice.checked=state.selectedNodes.has(node.id);choice.setAttribute('aria-label','选择 '+node.name);choice.onchange=()=>choice.checked?state.selectedNodes.add(node.id):state.selectedNodes.delete(node.id);}
-    return [choice,namedCell(node.name,node.id),nodeInventoryCell(node),nodeLifecycleCell(node),namedCell(node.enrolled?online(node)?'控制在线':'无近期回报':'待注册',timestamp(node.last_seen_ms)),nodeLeaseBadge(node),node.apply_error?namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`,node.apply_error):`${node.applied_revision} / ${node.desired_revision}`,online(node)?`${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP`:'—',nodeActions(node)];
+    return [choice,namedCell(node.name,node.id),nodeInventoryCell(node),nodeLifecycleCell(node),namedCell(node.credential_phase==='revoked'?'身份已撤销':node.credential_phase==='replacement_pending'?'等待替换注册':node.enrolled?online(node)?'控制在线':'无近期回报':'待注册',timestamp(node.last_seen_ms)),nodeLeaseBadge(node),node.apply_error?namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`,node.apply_error):`${node.applied_revision} / ${node.desired_revision}`,online(node)?`${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP`:'—',nodeActions(node)];
   })));
   if(state.view==='nodes') $('#content').replaceChildren(metric,p);
 }
@@ -186,20 +186,26 @@ function timingRow(label, value) {
 function nodeActions(node) {
   const actions = el('div');
   actions.append(button(canWrite() ? '编辑资料' : '查看资料', () => editNode(node), 'table-action'), button('管理规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button('运行诊断', () => nodeDiagnostics(node), 'table-action'));
-  if (node.enrolled) actions.append(button('节点凭据', () => nodeCredential(node), 'table-action'));
+  actions.append(button('节点身份', () => nodeCredential(node), 'table-action'));
   return actions;
 }
 async function nodeCredential(node) {
+  node = (await api('/nodes')).find(n=>n.id===node.id) || node;
   const status = await api(`/nodes/${node.id}/credential`), body = el('div');
+  const phase = status.phase || (node.enrolled ? 'active' : 'not_enrolled');
   body.append(el('p', node.name), table(['项目', '状态'], [
+    ['身份状态', { active:'已绑定', not_enrolled:'待首次注册', revoked:'已撤销', replacement_pending:'等待替换实例注册' }[phase] || phase],
     ['当前凭据版本', status.revision],
     ['轮换任务', status.pending ? '等待节点执行' : '无待执行任务'],
     ['请求时间', status.pending ? timestamp(status.pending.requested_at_ms) : '—'],
     ['上次完成', status.last_rotation ? timestamp(status.last_rotation.completed_at_ms) : '—']
   ]), el('p', '节点自行生成并保存新凭据，控制器确认后旧凭据失效。在线节点自动处理，离线或暂停的节点恢复运行后处理；旧版本 Agent 需要先升级。这里不会显示密钥。', 'fine'),
-  el('p', '轮换保留当前转发配置和租约。它用于常规换钥；丢失节点状态或怀疑节点已被控制时，仍需独立的身份替换与撤销流程。', 'fine'));
+  el('p', '常规轮换保留配置和运行。紧急撤销会拒绝旧凭据并中断业务；已授执行窗口仍须等待结束，未知流量预留继续保留。', 'fine'));
+  if (status.revocation) body.append(el('p', `最近撤销：${timestamp(status.revocation.at_ms)} · ${status.revocation.reason}`, 'fine'));
+  if (status.replacement) body.append(el('p', `替换票据到期：${timestamp(status.replacement.expires_at_ms)} · ${status.replacement.enrolled_at_ms ? '已注册' : '尚未使用'}`, 'fine'));
+  if (status.blocked_quota_periods?.length) body.append(el('p', '以下旧配额周期可能存在未上报消费，替换实例会等待。请停用对应规则，或在规则编辑中明确开始新周期。旧账和共享预算不会清零。', 'fine'), table(['规则', '受保护的旧周期'], status.blocked_quota_periods.map(p => [p.rule_id,p.meter_epoch])));
   if (status.pending) body.append(el('p', `任务编号：${status.pending.id}`, 'fine'));
-  if (canWrite() && !status.pending) {
+  if (canWrite() && phase === 'active' && !status.pending) {
     const action = button('发起凭据轮换', async () => {
       action.disabled = true;
       try {
@@ -209,8 +215,52 @@ async function nodeCredential(node) {
     }, 'primary');
     body.append(action);
   }
+  if (canWrite()) {
+    body.append(button(phase === 'not_enrolled' ? '撤销遗失的注册令牌' : '紧急撤销身份', () => revokeNodeIdentity(node,status), 'danger'));
+    if (phase === 'revoked' || phase === 'replacement_pending') body.append(button('签发替换票据', () => replaceNodeIdentity(node,status), 'primary'));
+  }
   body.append(button('刷新状态', () => nodeCredential(node)));
-  modal('节点凭据轮换', body);
+  modal('节点身份与凭据', body);
+}
+function revokeNodeIdentity(node,status) {
+  const form = el('form');
+  form.append(el('p', `撤销「${node.name}」的当前凭据、待执行轮换和注册票据。规则与历史账本保留，无法撤回此动作；恢复运行需要签发新票据。`));
+  field(form,'reason','撤销原因（最多 512 字节）','','text').maxLength=512;
+  const operation = crypto.randomUUID();
+  let request = null;
+  submit(form,'确认撤销身份',async data=>{
+    const reason=String(data.get('reason')).trim();
+    if (!request && (!reason || new TextEncoder().encode(reason).length>512 || /[\x00-\x1f\x7f-\x9f]/.test(reason))) throw new Error('请填写不含控制字符、最多 512 字节的撤销原因。');
+    request ||= {operation_id:operation,expected_revision:status.revision,reason};
+    await api(`/nodes/${node.id}/credential/revoke`,{method:'POST',body:request});
+    await nodeCredential(node);
+    notify('撤销操作已确认，请以当前身份状态为准。严格节点按已授期限停止；离线实例需要外部停止。');
+  });
+  modal('紧急撤销节点身份',form);
+}
+function replaceNodeIdentity(node,status) {
+  const form=el('form');
+  form.append(el('p','替换实例须使用新的私有状态目录。控制器保留配置和已知账本，不恢复未知消费，也不会提前跳过旧执行窗口。票据只显示在此处，请保存为权限 0600 的文件。'));
+  const ttl=field(form,'valid_for_seconds','票据有效秒数',600,'number');ttl.min=1;ttl.max=86400;
+  let offline=null;
+  if (!node.lease?.policy) {
+    const label=el('label',undefined,'inline-check');offline=el('input');offline.type='checkbox';offline.required=true;label.append(offline,document.createTextNode('我已通过服务器管理渠道停止所有旧离线实例及副本'));form.append(label,el('p','平台不能证明旧离线程序已停止。新身份将启用 30 秒严格租约。','fine'));
+  }
+  const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);
+  const enrollment=Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('');
+  const operation=crypto.randomUUID();let request=null;
+  submit(form,'签发一次性替换票据',async data=>{
+    request ||= {operation_id:operation,expected_revision:status.revision,enrollment_token:enrollment,valid_for_seconds:number(data,'valid_for_seconds'),offline_stop_attested:!!offline?.checked,lease_policy:offline?{ttl_ms:30000}:null};
+    const result=await api(`/nodes/${node.id}/credential/replace`,{method:'POST',body:request});
+    if (result.phase!=='replacement_pending' || result.replacement?.id!==operation || result.replacement.revision!==status.revision+1 || result.replacement.enrolled_at_ms) {
+      await nodeCredential(node);
+      notify('该签发操作已处理，票据已经使用或被后续操作替代。请查看当前身份状态。');
+      return;
+    }
+    const content=el('div');content.append(el('p',`票据到期：${timestamp(result.replacement.expires_at_ms)}`),el('div',enrollment,'secret-box'),el('pre',`relay agent --controller ${location.origin} --node-id ${node.id} --enrollment-token-file /path/to/replacement.secret --state /var/lib/relay-agent-replacement`),el('p','不要把此命令指向旧状态目录。丢失此票据可重新签发，之前的票据将失效；重试同一请求不会再次更换票据。','fine'));
+    modal('保存替换票据',content);
+  });
+  modal('替换节点身份',form);
 }
 function nodeDiagnostics(node) {
   const body = el('div'), stats = node.stats, meter = stats.meter;
@@ -374,6 +424,7 @@ async function editRule(existing) {
   function showProxyInput() { const enabled = proxyMode.value !== 'off'; proxyOptions.classList.toggle('hidden', !enabled); proxyOptions.querySelectorAll('input, select, textarea').forEach(input => { input.disabled = !enabled; }); } proxyMode.addEventListener('change', showProxyInput); showProxyInput();
   proxyInput.append(proxyOptions, el('p', '启用后必须携带正确报头；直接客户端将被拒绝。来源 ACL 和来源哈希按报头中的客户端地址执行。PROXY 和 CRC32C 不提供身份认证；可信网段应只包含你的代理。UDP 每包都须携带 v2，回复为普通业务数据。', 'fine')); form.append(proxyInput);
   const limits = el('div', undefined, 'form-grid'); field(limits, 'quota_bytes', '合并配额 / bytes（留空不限，0 禁止流量）', r.quota_bytes, 'number', false).min = 0; field(limits, 'rate_bytes_per_sec', '合并速率 / bytes/s（留空不限）', r.rate_bytes_per_sec, 'number', false).min = 1; form.append(limits);
+  if(existing){const label=el('label',undefined,'inline-check'),fresh=el('input');fresh.type='checkbox';fresh.name='new_meter_period';label.append(fresh,document.createTextNode('明确开始新计量周期：旧账保留，重新发放本规则额度；共享预算不重置'));form.append(label);}
   const details = el('details'); details.append(el('summary', '高级：超时、会话上限、到期和来源网段')); const advanced = el('div', undefined, 'form-grid');
   for (const [name, label, fallback, min, max] of [['connect_timeout_ms', '连接超时 / ms', 5000, 100, 60000], ['idle_timeout_secs', '空闲回收 / 秒', 120, 1, 86400], ['max_connections', 'TCP 最大连接', 4096, 1, 1000000], ['udp_max_sessions', 'UDP 最大会话', 1024, 1, 100000]]) { const input = field(advanced, name, label, r[name] ?? fallback, 'number'); input.min = min; input.max = max; }
   const expiry = field(advanced, 'expires_at_ms', '到期 / Unix 毫秒（留空永不过期）', r.expires_at_ms, 'number', false); expiry.min = 0; details.append(advanced); textarea(details, 'allow_sources', '允许来源 CIDR（留空允许所有未拒绝来源，每行一个）', (r.allow_sources || []).join('\n')); textarea(details, 'deny_sources', '拒绝来源 CIDR（优先于允许列表，每行一个）', (r.deny_sources || []).join('\n')); form.append(details);
@@ -381,7 +432,7 @@ async function editRule(existing) {
   form.append(el('p', '同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。', 'fine'));
   submit(form, existing ? '发布修改' : '创建并发布', async data => {
     const node = state.nodes.find(n => n.id === baseConfig.node_id), lines = key => String(data.get(key)).split('\n').map(s => s.trim()).filter(Boolean);
-    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: readTargets(), meter_epoch: r.meter_epoch || crypto.randomUUID(), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
+    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
     rule.health_check = readHealth();
     Object.assign(rule, multipath.read(readTargets.multipathPaths()));
     rule.advertise = String(data.get('advertise')).trim() || null;

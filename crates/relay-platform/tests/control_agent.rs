@@ -1589,11 +1589,11 @@ async fn three_agent_topology(secure: bool) {
     use tokio::net::UdpSocket;
     let temp = tempfile::tempdir().unwrap();
     let cert = topology_tls::Certificates::new();
-    let echo = tcp_echo_at(&free_address().to_string(), None).await;
-    let _udp = if secure {
-        None
+    let (echo, _udp) = if secure {
+        (tcp_echo().await, None)
     } else {
-        Some(udp_echo_at(&echo.address.to_string()).await)
+        let (tcp, udp) = tcp_udp_echo().await;
+        (tcp, Some(udp))
     };
     let control = Store::open(&temp.path().join("controller.db")).unwrap();
     let admin = control.bootstrap(PASSWORD).unwrap();

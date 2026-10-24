@@ -3,6 +3,8 @@ mod common;
 mod credential_integration;
 #[path = "node_leases/node_profile_integration.rs"]
 mod node_profile_integration;
+#[path = "node_leases/replacement_integration.rs"]
+mod replacement_integration;
 use common::*;
 use futures_util::StreamExt;
 use relay_platform::{
@@ -231,8 +233,7 @@ async fn original_state_recovers_after_abort_and_lost_recovery_reply_before_tcp_
     recovery_budget(&db, &admin, 64);
     let token = temp.path().join("enrollment.secret");
     write_secret(&token, enrollment.as_bytes()).unwrap();
-    let echo = tcp_echo().await;
-    let _udp_echo = udp_echo_at(&echo.address.to_string()).await;
+    let (echo, _udp_echo) = tcp_udp_echo().await;
     let mut r = rule(echo.address, Protocol::Both);
     r.owner_id = admin.id.clone();
     let listen = r.listen;
@@ -805,8 +806,7 @@ async fn stalled_renewal_response_cannot_extend_tcp_or_udp_deadline() {
     let (node, enrollment) = strict(&db, &admin);
     let token = temp.path().join("enrollment.secret");
     write_secret(&token, enrollment.as_bytes()).unwrap();
-    let echo = tcp_echo().await;
-    let _udp_echo = udp_echo_at(&echo.address.to_string()).await;
+    let (echo, _udp_echo) = tcp_udp_echo().await;
     let r = rule(echo.address, Protocol::Both);
     let listen = r.listen;
     db.set_config(&admin, &node, 0, vec![r]).unwrap();

@@ -51,8 +51,7 @@ async fn online_rotation_keeps_tcp_udp_budget_and_lease_during_an_old_credential
     let budget = recovery_budget(&db, &admin, 2048);
     let enrollment_file = temp.path().join("enroll.secret");
     write_secret(&enrollment_file, enrollment.as_bytes()).unwrap();
-    let echo = tcp_echo().await;
-    let _udp = udp_echo_at(&echo.address.to_string()).await;
+    let (echo, _udp) = tcp_udp_echo().await;
     let mut r = rule(echo.address, Protocol::Both);
     r.owner_id = admin.id.clone();
     let listen = r.listen;
@@ -169,8 +168,7 @@ async fn rotation_resumes_the_same_durable_candidate_after_abort_before_or_after
         recovery_budget(&db, &admin, 1024);
         let enrollment_file = temp.path().join("enroll.secret");
         write_secret(&enrollment_file, enrollment.as_bytes()).unwrap();
-        let echo = tcp_echo().await;
-        let _udp = udp_echo_at(&echo.address.to_string()).await;
+        let (echo, _udp) = tcp_udp_echo().await;
         let mut r = rule(echo.address, Protocol::Both);
         r.owner_id = admin.id.clone();
         let listen = r.listen;

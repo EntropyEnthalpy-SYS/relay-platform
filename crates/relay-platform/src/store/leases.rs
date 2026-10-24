@@ -238,6 +238,98 @@ pub(super) fn status(
     })
 }
 
+/// Install only after the enclosing identity transaction commits. Revocation
+/// removes the holder but retains every already-issued execution window.
+pub(super) struct PendingFence {
+    node: String,
+    deadline: Deadline,
+}
+impl PendingFence {
+    pub(super) fn install(self, clocks: &mut LeaseClocks) {
+        clocks.nodes.insert(self.node, self.deadline);
+    }
+}
+pub(super) fn invalidate(
+    tx: &Transaction<'_>,
+    clocks: &mut LeaseClocks,
+    node: &str,
+) -> Result<PendingFence> {
+    let mut state = read(tx, node)?;
+    let now = Instant::now();
+    let until = if state.policy.is_some() {
+        let clock = deadline(clocks, node, &state);
+        clock.recovery_until.max(if state.holder.is_some() {
+            clock.expires
+        } else {
+            now
+        })
+    } else {
+        now
+    };
+    state.generation = state
+        .generation
+        .checked_add(1)
+        .filter(|n| *n <= i64::MAX as u64)
+        .context("node lease generation exhausted")?;
+    state.holder = None;
+    write(tx, node, &state)?;
+    Ok(PendingFence {
+        node: node.into(),
+        deadline: Deadline {
+            generation: state.generation,
+            holder_hash: None,
+            expires: until,
+            recovery_until: until,
+        },
+    })
+}
+pub(super) fn replacement_policy(
+    tx: &Transaction<'_>,
+    node: &str,
+    requested: Option<LeasePolicy>,
+    offline_stopped: bool,
+) -> Result<Option<PendingFence>> {
+    let mut state = read(tx, node)?;
+    if let Some(policy) = &state.policy {
+        if requested.as_ref().is_some_and(|p| p != policy) {
+            return reject(
+                409,
+                "replacement must preserve the existing strict lease policy",
+            );
+        }
+        return Ok(None);
+    }
+    if !offline_stopped {
+        return reject(
+            409,
+            "confirm all offline instances are externally stopped before replacement",
+        );
+    }
+    let Some(policy) = requested else {
+        return reject(
+            400,
+            "replacing an offline identity requires a strict lease policy",
+        );
+    };
+    policy.validate()?;
+    state.policy = Some(policy);
+    ensure!(
+        state.holder.is_none(),
+        "offline identity unexpectedly has a lease holder"
+    );
+    write(tx, node, &state)?;
+    let now = Instant::now();
+    Ok(Some(PendingFence {
+        node: node.into(),
+        deadline: Deadline {
+            generation: state.generation,
+            holder_hash: None,
+            expires: now,
+            recovery_until: now,
+        },
+    }))
+}
+
 impl Store {
     pub fn exchange_lease(&self, credential: &str, input: LeaseRequest) -> Result<LeaseReply> {
         if !identifier(&input.run_id)
@@ -250,6 +342,13 @@ impl Store {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let node = authenticated(&tx, credential)?;
+        if input.generation.is_none() && !super::credentials::blocked_quotas(&tx, &node)?.is_empty()
+        {
+            return reject(
+                423,
+                "replacement cannot reuse quota periods with unknown prior consumption; disable affected rules or publish a new meter period",
+            );
+        }
         let mut state = read(&tx, &node)?;
         let Some(policy) = state.policy.clone() else {
             return Ok(LeaseReply {
