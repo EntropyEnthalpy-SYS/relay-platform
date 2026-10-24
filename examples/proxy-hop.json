@@ -1,0 +1,38 @@
+{
+  "api_version": 1,
+  "node_id": "standalone-proxy",
+  "revision": 1,
+  "rules": [
+    {
+      "id": "proxy-entry",
+      "tenant_id": "default",
+      "owner_id": "admin",
+      "name": "Local PROXY entry",
+      "listen": "127.0.0.1:19001",
+      "protocol": "both",
+      "targets": [{
+        "address": "127.0.0.1:19002",
+        "weight": 1,
+        "proxy_protocol": {"version": "v2", "checksum": true}
+      }],
+      "meter_epoch": "initial-period",
+      "allow_sources": ["127.0.0.0/8"]
+    },
+    {
+      "id": "proxy-exit",
+      "tenant_id": "default",
+      "owner_id": "admin",
+      "name": "Local PROXY exit",
+      "listen": "127.0.0.1:19002",
+      "protocol": "both",
+      "inbound_proxy": {
+        "version": "v2",
+        "trusted_sources": ["127.0.0.0/8"],
+        "max_header_bytes": 4096
+      },
+      "targets": [{"address": "127.0.0.1:19000", "weight": 1}],
+      "meter_epoch": "initial-period",
+      "allow_sources": ["127.0.0.0/8"]
+    }
+  ]
+}

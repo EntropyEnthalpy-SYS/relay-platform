@@ -1,6 +1,8 @@
 use crate::{
+    datagram,
     model::*,
     network::{self, TargetResolver},
+    proxy::{self, ConnectionInfo},
     routing::{Endpoint as ListenerKey, LoopGuard, Routes, Topology, local_ips},
     store::{Admission, AdmissionDecision, Store},
     transport::{BoxStream, PreparedTls},
@@ -304,8 +306,9 @@ impl RuntimeRule {
             Balance::WeightedRoundRobin | Balance::SourceHash => {
                 let sum: u64 = targets.iter().map(|t| t.weight as u64).sum();
                 let value = if self.spec.balance == Balance::SourceHash {
-                    let hash =
-                        Sha256::digest(format!("{}:{}", self.spec.id, source.ip()).as_bytes());
+                    let hash = Sha256::digest(
+                        format!("{}:{}", self.spec.id, canonical_ip(source.ip())).as_bytes(),
+                    );
                     u64::from_be_bytes(hash[0..8].try_into().unwrap())
                 } else {
                     next
@@ -347,6 +350,17 @@ impl RuntimeRule {
                 .spec
                 .expires_at_ms
                 .is_none_or(|expiry| expiry > now_ms())
+    }
+    fn accepts_transport(&self, peer: SocketAddr) -> bool {
+        if let Some(proxy) = &self.spec.inbound_proxy {
+            proxy.trusts(peer.ip())
+                && self
+                    .spec
+                    .expires_at_ms
+                    .is_none_or(|expiry| expiry > now_ms())
+        } else {
+            self.accepts(peer)
+        }
     }
 }
 
@@ -589,6 +603,23 @@ impl Engine {
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
     old.budget_ids != new.budget_ids
+        || old.inbound_proxy != new.inbound_proxy
+        || old.targets.iter().any(|previous| {
+            new.targets.iter().any(|current| {
+                current.address == previous.address
+                    && current.proxy_protocol != previous.proxy_protocol
+            })
+        })
+        || old
+            .targets
+            .iter()
+            .filter_map(|t| t.proxy_protocol.as_ref())
+            .collect::<Vec<_>>()
+            != new
+                .targets
+                .iter()
+                .filter_map(|t| t.proxy_protocol.as_ref())
+                .collect::<Vec<_>>()
         || old.outbound_bind != new.outbound_bind
         || old.dns_cache != new.dns_cache
         || old.port_mapping != new.port_mapping
@@ -637,7 +668,7 @@ async fn tcp_listener(
             }
         };
         let rule = updates.borrow().clone();
-        if !rule.accepts(peer) {
+        if !rule.accepts_transport(peer) {
             stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
             continue;
         }
@@ -663,12 +694,12 @@ async fn tcp_listener(
 
 async fn connect_tcp(
     rule: &RuntimeRule,
-    peer: SocketAddr,
+    info: ConnectionInfo,
     inlet: ListenerKey,
 ) -> Result<(BoxStream, TargetGuard, LoopGuard)> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     let mut last = None;
-    for index in rule.order(peer) {
+    for index in rule.order(info.source) {
         let guard = rule.target_guard(index);
         let target = rule.spec.target_address(index, inlet.address.port())?;
         let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
@@ -682,10 +713,23 @@ async fn connect_tcp(
         for address in addresses {
             match timeout_at(deadline, async {
                 let route = rule.routes.reserve(inlet, address)?;
-                let stream =
+                let mut stream =
                     network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await?;
                 stream.set_nodelay(true)?;
-                Ok::<_, anyhow::Error>((rule.tls.connect(index, stream).await?, route))
+                let policy = rule.spec.targets[index].proxy_protocol.as_ref();
+                if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::BeforeTls) {
+                    stream
+                        .write_all(&proxy::encode(policy, true, info)?)
+                        .await?;
+                }
+                let mut stream = rule.tls.connect(index, stream).await?;
+                if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::InsideTls) {
+                    stream
+                        .write_all(&proxy::encode(policy, true, info)?)
+                        .await?;
+                    stream.flush().await?;
+                }
+                Ok::<_, anyhow::Error>((stream, route))
             })
             .await
             {
@@ -699,7 +743,7 @@ async fn connect_tcp(
 }
 
 async fn tcp_session(
-    client: TcpStream,
+    mut client: TcpStream,
     peer: SocketAddr,
     inlet: ListenerKey,
     rule: Arc<RuntimeRule>,
@@ -707,13 +751,32 @@ async fn tcp_session(
     stats: Arc<Counters>,
 ) -> Result<()> {
     client.set_nodelay(true)?;
-    let client = timeout_at(
+    let original = ConnectionInfo {
+        source: peer,
+        destination: client.local_addr()?,
+    };
+    let (client, info) = timeout_at(
         Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms),
-        rule.tls.accept(client),
+        async {
+            let mut info = original;
+            let policy = rule.spec.inbound_proxy.as_ref();
+            if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::BeforeTls) {
+                info = proxy::read_tcp(&mut client, policy, original).await?;
+            }
+            let mut client = rule.tls.accept(client).await?;
+            if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::InsideTls) {
+                info = proxy::read_tcp(&mut client, policy, original).await?;
+            }
+            Ok::<_, anyhow::Error>((client, info))
+        },
     )
     .await
-    .context("inbound TLS handshake timed out")??;
-    let (target, _target_guard, _route_guard) = connect_tcp(&rule, peer, inlet).await?;
+    .context("inbound TLS/PROXY handshake timed out")??;
+    if !rule.accepts(info.source) {
+        stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+        return Ok(());
+    }
+    let (target, _target_guard, _route_guard) = connect_tcp(&rule, info, inlet).await?;
     let activity = Arc::new(StdMutex::new(Instant::now()));
     let (cr, cw) = tokio::io::split(client);
     let (tr, tw) = tokio::io::split(target);
@@ -793,6 +856,12 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct UdpSessionKey {
+    peer: SocketAddr,
+    local: SocketAddr,
+    info: ConnectionInfo,
+}
 struct UdpEntry {
     generation: u64,
     sender: mpsc::Sender<Vec<u8>>,
@@ -806,55 +875,81 @@ async fn udp_listener(
     stats: Arc<Counters>,
     tasks: TaskTracker,
 ) {
+    let bound = listener.local_addr().expect("bound UDP listener");
     let listener = Arc::new(listener);
-    let mut sessions = HashMap::<SocketAddr, UdpEntry>::new();
-    let (finished_tx, mut finished_rx) = mpsc::unbounded_channel::<(SocketAddr, u64)>();
+    let mut sessions = HashMap::<UdpSessionKey, UdpEntry>::new();
+    let (finished_tx, mut finished_rx) = mpsc::unbounded_channel::<(UdpSessionKey, u64)>();
     let mut generation = 0u64;
     let mut buffer = vec![0u8; BUFFER_SIZE];
     loop {
         tokio::select! {
             biased;
             _=stop.cancelled()=>break,
-            Some((peer,id))=finished_rx.recv()=>{if sessions.get(&peer).is_some_and(|s|s.generation==id){sessions.remove(&peer);}},
+            Some((key,id))=finished_rx.recv()=>{if sessions.get(&key).is_some_and(|s|s.generation==id){sessions.remove(&key);}},
             changed=updates.changed()=>{if changed.is_err(){break;}sessions.retain(|_,entry|!entry.sender.is_closed());},
-            received=listener.recv_from(&mut buffer)=>{
-                let (size,peer)=match received{Ok(pair)=>pair,Err(error)=>{tracing::warn!(%error,"UDP receive failed");sleep(Duration::from_millis(100)).await;continue;}};
+            received=datagram::receive(&listener,&mut buffer,bound)=>{
+                let (size,peer,local)=match received {
+                    Ok(packet)=>packet,
+                    Err(error)=>{
+                        if error.kind()==io::ErrorKind::InvalidData {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
+                        tracing::warn!(%error,"UDP receive failed");sleep(Duration::from_millis(100)).await;continue;
+                    }
+                };
                 let runtime=updates.borrow().clone();
-                if !runtime.accepts(peer){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
-                if sessions.get(&peer).is_some_and(|entry|entry.sender.is_closed()){sessions.remove(&peer);}
-                if let Some(session)=sessions.get(&peer) {
-                    if session.sender.try_send(buffer[..size].to_vec()).is_err(){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);}
+                if !runtime.accepts_transport(peer){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
+                let original=ConnectionInfo{source:peer,destination:local};
+                let (info,header_size)=if let Some(policy)=&runtime.spec.inbound_proxy {
+                    match proxy::decode_v2(&buffer[..size],false,policy.max_header_bytes,original) {
+                        Ok(decoded)=>decoded,
+                        Err(error)=>{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"UDP PROXY rejected");continue;}
+                    }
+                } else {(original,0)};
+                if !runtime.accepts(info.source){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
+                let key=UdpSessionKey{peer,local,info};
+                if sessions.get(&key).is_some_and(|entry|entry.sender.is_closed()){sessions.remove(&key);}
+                if let Some(session)=sessions.get(&key) {
+                    if session.sender.try_send(buffer[header_size..size].to_vec()).is_err(){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);}
                     continue;
                 }
                 let Some(guard)=CountGuard::acquire(runtime.shared.udp.clone(),runtime.spec.udp_max_sessions as usize,stats.clone(),false) else{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;};
                 let (sender,receiver)=mpsc::channel(UDP_QUEUE);
-                let _=sender.try_send(buffer[..size].to_vec());generation=generation.wrapping_add(1);let id=generation;
-                sessions.insert(peer,UdpEntry{generation:id,sender});
+                let _=sender.try_send(buffer[header_size..size].to_vec());generation=generation.wrapping_add(1);let id=generation;
+                sessions.insert(key,UdpEntry{generation:id,sender});
                 let socket=listener.clone();let meter=meter.clone();let stats=stats.clone();let finished=finished_tx.clone();let listener_stop=stop.clone();
                 tasks.spawn(async move {
                     let _guard=guard;
-                    let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=udp_session(socket,peer,receiver,runtime.clone(),meter,stats.clone())=>result};
+                    let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=udp_session(socket,key,receiver,runtime.clone(),meter,stats.clone())=>result};
                     if let Err(error)=outcome{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"UDP session ended");}
-                    let _=finished.send((peer,id));
+                    let _=finished.send((key,id));
                 });
             }
         }
     }
-    // Dropping senders also ends sessions when the listener is removed.
 }
 
+struct UdpTarget {
+    socket: UdpSocket,
+    header: Vec<u8>,
+    wire_limit: usize,
+    _target_guard: TargetGuard,
+    _route_guard: LoopGuard,
+}
 async fn udp_target(
     rule: &RuntimeRule,
-    peer: SocketAddr,
+    info: ConnectionInfo,
     inlet: ListenerKey,
-) -> Result<(UdpSocket, TargetGuard, LoopGuard)> {
+) -> Result<UdpTarget> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
-    for index in rule.order(peer) {
+    let mut last = None;
+    for index in rule.order(info.source) {
         let guard = rule.target_guard(index);
         let target = rule.spec.target_address(index, inlet.address.port())?;
         let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
             Ok(Ok(a)) => a,
-            Ok(Err(_)) => continue,
+            Ok(Err(error)) => {
+                last = Some(error.to_string());
+                continue;
+            }
             Err(_) => bail!("UDP target resolution timed out"),
         };
         for address in addresses {
@@ -863,22 +958,39 @@ async fn udp_target(
                 let socket =
                     network::outbound_udp(rule.spec.outbound_bind.as_ref(), address.is_ipv4())?;
                 socket.connect(address).await?;
-                Ok::<_, anyhow::Error>((socket, route))
+                let header = rule.spec.targets[index]
+                    .proxy_protocol
+                    .as_ref()
+                    .map(|policy| proxy::encode(policy, false, info))
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok::<_, anyhow::Error>((socket, route, header))
             })
             .await
             {
-                Ok(Ok((socket, route))) => return Ok((socket, guard, route)),
-                Ok(Err(_)) => continue,
+                Ok(Ok((socket, route, header))) => {
+                    return Ok(UdpTarget {
+                        socket,
+                        header,
+                        wire_limit: if address.is_ipv4() { 65507 } else { 65527 },
+                        _target_guard: guard,
+                        _route_guard: route,
+                    });
+                }
+                Ok(Err(error)) => {
+                    last = Some(error.to_string());
+                    continue;
+                }
                 Err(_) => bail!("UDP target connection timed out"),
             }
         }
     }
-    bail!("no UDP target can be resolved and connected")
+    bail!("all UDP targets failed: {}", last.unwrap_or_default())
 }
 
 async fn udp_session(
     listener: Arc<UdpSocket>,
-    peer: SocketAddr,
+    key: UdpSessionKey,
     mut incoming: mpsc::Receiver<Vec<u8>>,
     rule: Arc<RuntimeRule>,
     meter: Meter,
@@ -888,7 +1000,7 @@ async fn udp_session(
         address: listener.local_addr()?,
         tcp: false,
     };
-    let (target, _target_guard, _route_guard) = udp_target(&rule, peer, inlet).await?;
+    let target = udp_target(&rule, key.info, inlet).await?;
     let mut buffer = vec![0u8; BUFFER_SIZE];
     loop {
         let deadline = Instant::now() + Duration::from_secs(rule.spec.idle_timeout_secs);
@@ -904,17 +1016,20 @@ async fn udp_session(
             _=sleep_until(deadline)=>return Ok(()),
             message=incoming.recv()=>{
                 let Some(payload)=message else{return Ok(());};
+                if payload.len()+target.header.len()>target.wire_limit {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
                 rule.shared.throttle(payload.len()).await;
                 let allowed=meter.admit(&rule.spec,true,payload.len(),true).await?;
                 if allowed!=Some(payload.len()){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);return Ok(());}
-                let sent=target.send(&payload).await?;
-                stats.forwarded_upload_bytes.fetch_add(sent as u64,Ordering::Relaxed);
+                let wire=if target.header.is_empty() {payload} else {let mut wire=target.header.clone();wire.extend_from_slice(&payload);wire};
+                let sent=target.socket.send(&wire).await?;
+                ensure!(sent==wire.len(),"partial UDP send");
+                stats.forwarded_upload_bytes.fetch_add((sent-target.header.len()) as u64,Ordering::Relaxed);
             },
-            reply=target.recv(&mut buffer)=>{
+            reply=target.socket.recv(&mut buffer)=>{
                 let size=reply?;rule.shared.throttle(size).await;
                 let allowed=meter.admit(&rule.spec,false,size,true).await?;
                 if allowed!=Some(size) {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);return Ok(());}
-                let sent=listener.send_to(&buffer[..size],peer).await?;
+                let sent=datagram::send(&listener,&buffer[..size],key.peer,key.local,inlet.address.ip().is_unspecified()).await?;
                 stats.forwarded_download_bytes.fetch_add(sent as u64,Ordering::Relaxed);
             }
         }

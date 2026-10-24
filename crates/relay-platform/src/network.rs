@@ -234,6 +234,7 @@ pub(crate) fn udp_listener(address: SocketAddr) -> Result<UdpSocket> {
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
+    crate::datagram::configure(&socket, address)?;
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
     Ok(UdpSocket::from_std(socket.into())?)

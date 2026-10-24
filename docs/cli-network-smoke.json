@@ -1,6 +1,6 @@
 {
-  "binary_sha256": "72426dd5778076f78304a8bc08f149164aa671c08344d3863689d140eeef25da",
-  "version": "relay 0.6.0",
+  "binary_sha256": "c86356cb62381537c183ffed7febcf1db16aeba235f23c6a3698e1c22b4c3f73",
+  "version": "relay 0.7.0",
   "ports": 2,
   "mapping": "offset",
   "outbound_ip": "127.0.0.1",

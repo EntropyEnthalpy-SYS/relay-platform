@@ -4,6 +4,8 @@
 
 0.4.0 启用 SQLite Session 扩展，增加 bindgen/clang-sys 等构建依赖；构建环境需要 C 编译器和 libclang，运行时不需要安装 libclang。0.6.0 增加 Hickory Resolver 0.26.3 与 if-addrs 0.15.0，启用 Socket2 0.6.5 的扩展套接字选项。
 
+0.7.0 增加 crc32c 0.6.8；Linux/macOS 的 UDP packet-info 使用 nix 0.31.3（间接增加 memoffset 0.9.1）。HAProxy 仅作为外部互通测试程序，没有链接进平台或包含在源码交付包中。
+
 | 包 | 版本 | 声明许可 | 源码/项目 |
 | --- | --- | --- | --- |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | [项目](https://github.com/BurntSushi/aho-corasick) |
@@ -44,6 +46,7 @@
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | [项目](https://github.com/servo/core-foundation-rs) |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
 | cpufeatures | 0.3.1 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
+| crc32c | 0.6.8 | Apache-2.0/MIT | [项目](https://github.com/zowens/crc32c) |
 | critical-section | 1.2.0 | MIT OR Apache-2.0 | [项目](https://github.com/rust-embedded/critical-section) |
 | crossbeam-channel | 0.5.17 | MIT OR Apache-2.0 | [项目](https://github.com/crossbeam-rs/crossbeam) |
 | crossbeam-epoch | 0.9.21 | MIT OR Apache-2.0 | [项目](https://github.com/crossbeam-rs/crossbeam) |
@@ -119,11 +122,13 @@
 | matchers | 0.2.0 | MIT | [项目](https://github.com/hawkw/matchers) |
 | matchit | 0.8.4 | MIT AND BSD-3-Clause | [项目](https://github.com/ibraheemdev/matchit) |
 | memchr | 2.8.3 | Unlicense OR MIT | [项目](https://github.com/BurntSushi/memchr) |
+| memoffset | 0.9.1 | MIT | [项目](https://github.com/Gilnaa/memoffset) |
 | mime | 0.3.17 | MIT OR Apache-2.0 | [项目](https://github.com/hyperium/mime) |
 | minimal-lexical | 0.2.1 | MIT/Apache-2.0 | [项目](https://github.com/Alexhuszagh/minimal-lexical) |
 | mio | 1.2.4 | MIT | [项目](https://github.com/tokio-rs/mio) |
 | moka | 0.12.16 | (MIT OR Apache-2.0) AND Apache-2.0 | [项目](https://github.com/moka-rs/moka) |
 | ndk-context | 0.1.1 | MIT OR Apache-2.0 | [项目](https://github.com/rust-windowing/android-ndk-rs) |
+| nix | 0.31.3 | MIT | [项目](https://github.com/nix-rust/nix) |
 | nom | 7.1.3 | MIT | [项目](https://github.com/Geal/nom) |
 | nu-ansi-term | 0.50.3 | MIT | [项目](https://github.com/nushell/nu-ansi-term) |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | [项目](https://github.com/rust-num/num-traits) |

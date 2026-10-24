@@ -131,6 +131,7 @@ async fn routing_updates_preserve_existing_connections_and_shutdown_cancels_all_
         address: first.address.to_string(),
         weight: 1,
         tls: None,
+        proxy_protocol: None,
     });
     engine.apply(c).await.unwrap();
     old.write_all(b"alive").await.unwrap();
@@ -350,11 +351,13 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             address: a.address.to_string(),
             weight: 2,
             tls: None,
+            proxy_protocol: None,
         },
         Target {
             address: b.address.to_string(),
             weight: 1,
             tls: None,
+            proxy_protocol: None,
         },
     ];
     let address = r.listen;
@@ -377,11 +380,13 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             address: free_address().to_string(),
             weight: 1,
             tls: None,
+            proxy_protocol: None,
         },
         Target {
             address: b.address.to_string(),
             weight: 1,
             tls: None,
+            proxy_protocol: None,
         },
     ];
     engine.apply(c).await.unwrap();
@@ -457,6 +462,7 @@ async fn source_hash_is_stable_and_least_connections_uses_active_sessions() {
         address: b.address.to_string(),
         weight: 1,
         tls: None,
+        proxy_protocol: None,
     });
     r.balance = Balance::SourceHash;
     let address = r.listen;

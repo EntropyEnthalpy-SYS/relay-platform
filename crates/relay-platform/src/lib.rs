@@ -1,10 +1,12 @@
 pub mod agent;
 pub mod api;
 pub mod budget;
+mod datagram;
 pub mod engine;
 pub mod journal;
 pub mod model;
 mod network;
+pub mod proxy;
 mod routing;
 pub mod store;
 mod sync_queue;

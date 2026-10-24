@@ -39,10 +39,12 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         dns_cache: None,
         protocol,
         inbound_tls: None,
+        inbound_proxy: None,
         targets: vec![Target {
             address: target.to_string(),
             weight: 1,
             tls: None,
+            proxy_protocol: None,
         }],
         balance: Balance::WeightedRoundRobin,
         enabled: true,

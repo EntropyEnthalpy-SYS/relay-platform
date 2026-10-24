@@ -62,6 +62,62 @@ pub struct Target {
     pub weight: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsClient>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<ProxyOutbound>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyVersion {
+    V1,
+    V2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyAccept {
+    V1,
+    V2,
+    Any,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyPlacement {
+    #[default]
+    BeforeTls,
+    InsideTls,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyInbound {
+    pub version: ProxyAccept,
+    pub trusted_sources: Vec<IpNet>,
+    #[serde(default)]
+    pub placement: ProxyPlacement,
+    #[serde(default = "proxy_header_limit")]
+    pub max_header_bytes: u32,
+}
+fn proxy_header_limit() -> u32 {
+    4096
+}
+impl ProxyInbound {
+    pub fn trusts(&self, peer: IpAddr) -> bool {
+        self.trusted_sources
+            .iter()
+            .any(|network| network.contains(&canonical_ip(peer)))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyOutbound {
+    pub version: ProxyVersion,
+    #[serde(default)]
+    pub placement: ProxyPlacement,
+    #[serde(default)]
+    pub checksum: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +235,8 @@ pub struct Rule {
     pub protocol: Protocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_tls: Option<TlsServer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_proxy: Option<ProxyInbound>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -251,6 +309,24 @@ impl Rule {
             ensure!(
                 identifier(&tls.identity) && tls.client_ca.as_ref().is_none_or(|id| identifier(id)),
                 "invalid inbound TLS profile ID"
+            );
+        }
+        if let Some(proxy) = &self.inbound_proxy {
+            ensure!(
+                !proxy.trusted_sources.is_empty() && proxy.trusted_sources.len() <= 256,
+                "PROXY input requires 1..256 explicitly trusted source networks"
+            );
+            ensure!(
+                (16..=65551).contains(&proxy.max_header_bytes),
+                "PROXY header limit must be 16..65551 bytes"
+            );
+            ensure!(
+                !self.protocol.udp() || proxy.version == ProxyAccept::V2,
+                "UDP PROXY input requires v2"
+            );
+            ensure!(
+                proxy.placement != ProxyPlacement::InsideTls || self.inbound_tls.is_some(),
+                "PROXY inside TLS requires inbound TLS"
             );
         }
         for (name, value) in [
@@ -326,6 +402,20 @@ impl Rule {
         let mut targets = HashSet::new();
         let encrypted_targets = self.targets[0].tls.is_some();
         for target in &self.targets {
+            if let Some(proxy) = &target.proxy_protocol {
+                ensure!(
+                    !self.protocol.udp() || proxy.version == ProxyVersion::V2,
+                    "UDP PROXY output requires v2"
+                );
+                ensure!(
+                    !proxy.checksum || proxy.version == ProxyVersion::V2,
+                    "PROXY CRC32C requires v2"
+                );
+                ensure!(
+                    proxy.placement != ProxyPlacement::InsideTls || target.tls.is_some(),
+                    "PROXY inside TLS requires target TLS"
+                );
+            }
             ensure!(
                 target.tls.is_some() == encrypted_targets,
                 "all targets in a rule must use the same TLS mode; plaintext downgrade is forbidden"

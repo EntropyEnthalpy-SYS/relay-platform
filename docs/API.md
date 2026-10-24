@@ -89,3 +89,9 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 ## 0.6.0 路由字段
 
 规则新增可选 `listen_end_port`、`port_mapping`、`outbound_bind`、`dns_cache`；完整合同及示例见 [ROUTING.md](ROUTING.md)。旧字段默认值保持兼容，SQLite schema 仍为 v4。0.5 Agent 会拒绝带新字段的配置，因此先升级节点，再发布新能力。IPv6 监听现在明确设为仅 IPv6，双栈需要两条监听规则。
+
+## 0.7.0 PROXY 字段
+
+规则新增 `inbound_proxy={version,trusted_sources,placement,max_header_bytes}`；每个目标新增 `proxy_protocol={version,placement,checksum}`。字段、默认值、TLS 顺序、可信对端与来源 ACL 的区别、UDP 逐包语义见 [PROXY.md](PROXY.md)。未知字段和不支持的协议组合会被拒绝；节点实际应用失败继续通过 `apply_error` 返回。SQLite schema v4 不变，0.6 Agent 应先升级再发布新字段。
+
+能力目录新增 `proxy-protocol-tcp-v1-v2`、`proxy-protocol-udp-v2`、`udp-destination-tracking`。它们表示代码实现能力，不表示已经通过 Linux、外部 UDP/TLS 互通或生产压力验收。

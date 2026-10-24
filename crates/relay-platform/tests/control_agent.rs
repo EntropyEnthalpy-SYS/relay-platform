@@ -9,6 +9,7 @@ use relay_platform::{
 use serde_json::{Value, json};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     task::JoinHandle,
     time::{Instant, sleep, timeout},
@@ -19,6 +20,132 @@ struct Server {
     address: SocketAddr,
     stop: CancellationToken,
     task: JoinHandle<()>,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proxy_settings_roundtrip_http_and_managed_agent_enforces_them() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    control.set_kind("controller").unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (node, enrollment) = control
+        .create_node(&admin, "default", "proxy-agent")
+        .unwrap();
+    let (token, _) = control.login("admin", PASSWORD).unwrap();
+    let server_instance = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", server_instance.address);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut r = rule(backend.local_addr().unwrap(), Protocol::Tcp);
+    r.inbound_proxy = Some(ProxyInbound {
+        version: ProxyAccept::V1,
+        trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
+        placement: ProxyPlacement::BeforeTls,
+        max_header_bytes: 4096,
+    });
+    r.targets[0].proxy_protocol = Some(ProxyOutbound {
+        version: ProxyVersion::V2,
+        placement: ProxyPlacement::BeforeTls,
+        checksum: true,
+    });
+    r.allow_sources = vec!["198.51.100.7/32".parse().unwrap()];
+    let address = r.listen;
+    let url = format!("{origin}/api/v1/nodes/{}/config", node.id);
+    let published: NodeConfig = client
+        .put(&url)
+        .bearer_auth(&token)
+        .json(&json!({"expected_revision":0,"rules":[r.clone()]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(published.rules[0].inbound_proxy, r.inbound_proxy);
+    assert_eq!(
+        published.rules[0].targets[0].proxy_protocol,
+        r.targets[0].proxy_protocol
+    );
+    let mut bad = r.clone();
+    bad.inbound_proxy.as_mut().unwrap().trusted_sources.clear();
+    assert!(
+        !client
+            .put(&url)
+            .bearer_auth(&token)
+            .json(&json!({"expected_revision":1,"rules":[bad]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let retrieved: NodeConfig = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(retrieved.revision, 1);
+    assert_eq!(retrieved.rules[0], published.rules[0]);
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, enrollment.as_bytes()).unwrap();
+    let agent_db = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        agent_db.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    let target = tokio::spawn(async move {
+        let (mut stream, _) = backend.accept().await.unwrap();
+        let mut header = [0; 35];
+        stream.read_exact(&mut header).await.unwrap();
+        let expected: Vec<u8> =
+            b"0d0a0d0a000d0a515549540a21110013c6336407cb007109303901bb030004376c844a"
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect();
+        assert_eq!(header.as_slice(), expected);
+        let mut payload = [0; 8];
+        stream.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"real-api");
+        stream.write_all(&payload).await.unwrap();
+    });
+    let mut stream = TcpStream::connect(address).await.unwrap();
+    stream
+        .write_all(b"PROXY TCP4 198.51.100.7 203.0.113.9 12345 443\r\nreal-api")
+        .await
+        .unwrap();
+    stream.shutdown().await.unwrap();
+    let mut reply = vec![];
+    timeout(Duration::from_secs(3), stream.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, b"real-api");
+    target.await.unwrap();
+    wait_usage(&control, &admin, 16).await;
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        agent_db.agent_config().unwrap().unwrap().rules[0].inbound_proxy,
+        r.inbound_proxy
+    );
+    stop_server(server_instance).await;
 }
 async fn server(db: Store, bind: SocketAddr) -> Server {
     server_with_router(api::router(AppState::new(db)), bind).await
