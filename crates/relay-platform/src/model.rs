@@ -64,6 +64,27 @@ pub struct Target {
     pub tls: Option<TlsClient>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_protocol: Option<ProxyOutbound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket: Option<WebSocketClient>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSocketServer {
+    pub path: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSocketClient {
+    pub path: String,
+    pub host: String,
+    #[serde(default)]
+    pub origin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -237,6 +258,8 @@ pub struct Rule {
     pub inbound_tls: Option<TlsServer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_proxy: Option<ProxyInbound>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_websocket: Option<WebSocketServer>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -310,6 +333,15 @@ impl Rule {
                 identifier(&tls.identity) && tls.client_ca.as_ref().is_none_or(|id| identifier(id)),
                 "invalid inbound TLS profile ID"
             );
+        }
+        ensure!(
+            self.protocol == Protocol::Tcp
+                || (self.inbound_websocket.is_none()
+                    && self.targets.iter().all(|t| t.websocket.is_none())),
+            "WebSocket byte streams require TCP-only forwarding"
+        );
+        if let Some(ws) = &self.inbound_websocket {
+            crate::websocket::validate_server(ws)?;
         }
         if let Some(proxy) = &self.inbound_proxy {
             ensure!(
@@ -402,6 +434,9 @@ impl Rule {
         let mut targets = HashSet::new();
         let encrypted_targets = self.targets[0].tls.is_some();
         for target in &self.targets {
+            if let Some(ws) = &target.websocket {
+                crate::websocket::validate_client(ws)?;
+            }
             if let Some(proxy) = &target.proxy_protocol {
                 ensure!(
                     !self.protocol.udp() || proxy.version == ProxyVersion::V2,

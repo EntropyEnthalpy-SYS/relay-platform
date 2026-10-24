@@ -28,6 +28,19 @@ function select(form, name, text, options, value) { const label = el('label', te
 function textarea(form, name, text, value = '', required = false) { const label = el('label', text), input = el('textarea'); input.name = name; input.value = value; input.required = required; label.append(input); form.append(label); return input; }
 function submit(form, text, handler) { const actions = el('div', undefined, 'dialog-actions'); actions.append(button('取消', () => $('#dialog').close())); const save = el('button', text, 'primary'); save.type = 'submit'; actions.append(save); form.append(actions); const error = el('p', undefined, 'error'); error.setAttribute('role', 'alert'); form.append(error); form.onsubmit = async e => { e.preventDefault(); save.disabled = true; error.textContent = ''; try { await handler(new FormData(form)); } catch (err) { error.textContent = err.message; } finally { save.disabled = false; } }; }
 function number(data, key) { const raw = data.get(key); if (raw === '') return null; const n = Number(raw); if (!Number.isSafeInteger(n) || n < 0) throw new Error(`${key} 必须为安全范围内的非负整数`); return n; }
+function websocketEditor(id, spec, inbound, defaultHost = () => '') {
+  const box = el('details'); box.open = !!spec; box.append(el('summary', inbound ? '入口 WebSocket / WSS 隧道' : '出口 WebSocket / WSS 隧道'));
+  const mode = select(box, `${id}-mode`, 'WebSocket 封装', [['off', '关闭'], ['on', '启用 · TCP 流隧道']], spec ? 'on' : 'off');
+  const fields = el('div', undefined, 'form-grid');
+  const path = field(fields, `${id}-path`, '路径（含可选查询参数，须与对端完全一致）', spec?.path || '/relay'); path.maxLength = 1024;
+  const host = field(fields, `${id}-host`, inbound ? '允许的 Host（留空不限，可带端口）' : 'HTTP Host（可带端口，与 TLS 服务名分别配置）', spec?.host || (inbound ? '' : defaultHost()), 'text', !inbound); host.maxLength = 255;
+  const origins = inbound ? textarea(fields, `${id}-origins`, '允许的浏览器 Origin（每行一个，留空拒绝携带 Origin 的连接）', (spec?.allowed_origins || []).join('\n')) : field(fields, `${id}-origin`, '发送的 Origin（节点连接通常留空）', spec?.origin || '', 'text', false);
+  if (!inbound) origins.maxLength = 512;
+  function show() { const enabled = mode.value === 'on'; fields.classList.toggle('hidden', !enabled); fields.querySelectorAll('input, textarea').forEach(input => { input.disabled = !enabled; }); if (enabled && !inbound && !host.value) host.value = defaultHost(); }
+  mode.addEventListener('change', show); show();
+  box.append(fields, el('p', '两端使用 relay-stream-v1 子协议。启用对应 TLS 后即为 WSS；只支持 TCP，不承载 UDP。Origin 不是登录凭据，未携带 Origin 的节点连接仍按来源与证书策略检查。', 'fine'));
+  return { box, read: () => mode.value === 'off' ? null : { path: path.value.trim(), host: host.value.trim() || null, ...(inbound ? { allowed_origins: origins.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) } : { origin: origins.value.trim() || null }) } };
+}
 function targetEditor(form, targets) {
   const container = el('div'), rows = []; let serial = 0;
   function add(target = { address: '', weight: 1 }) {
@@ -46,9 +59,10 @@ function targetEditor(form, targets) {
     const proxyPlacement = select(proxyFields, `target-proxy-placement-${id}`, 'PROXY 报头位置', [['before_tls', 'TLS 之前（普通连接也选此项）'], ['inside_tls', 'TLS 加密连接内（对端须配置一致）']], target.proxy_protocol?.placement || 'before_tls');
     const proxyCrc = select(proxyFields, `target-proxy-crc-${id}`, 'v2 报头校验和', [['off', '不附加'], ['on', '附加 CRC32C']], target.proxy_protocol?.checksum ? 'on' : 'off');
     function showProxy() { proxyPlacement.disabled = proxyMode.value === 'off'; proxyCrc.disabled = proxyMode.value !== 'v2'; } proxyMode.addEventListener('change', showProxy); showProxy();
-    const row = { box, address, weight, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc }; rows.push(row);
+    const ws = websocketEditor(`target-ws-${id}`, target.websocket, false, () => address.value.trim());
+    const row = { box, address, weight, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws }; rows.push(row);
     function showSecurity() { const enabled = mode.value === 'tls'; secure.classList.toggle('hidden', !enabled); name.required = enabled; [name, ca, identity].forEach(input => { input.disabled = !enabled; }); }
-    mode.onchange = showSecurity; showSecurity(); box.append(secure, proxyFields, button('移除此目标', () => { rows.splice(rows.indexOf(row), 1); box.remove(); }, 'table-action danger')); container.append(box);
+    mode.onchange = showSecurity; showSecurity(); box.append(secure, proxyFields, ws.box, button('移除此目标', () => { rows.splice(rows.indexOf(row), 1); box.remove(); }, 'table-action danger')); container.append(box);
   }
   targets.forEach(add); form.append(container, button('＋ 添加目标', () => add()));
   return () => { if (!rows.length) throw new Error('至少保留一个转发目标'); return rows.map(row => {
@@ -57,6 +71,7 @@ function targetEditor(form, targets) {
       if (row.proxyPlacement.value === 'inside_tls' && row.mode.value !== 'tls') throw new Error('将 PROXY 放入加密连接前，请启用目标 TLS');
       target.proxy_protocol = { version: row.proxyMode.value, placement: row.proxyPlacement.value, checksum: row.proxyMode.value === 'v2' && row.proxyCrc.value === 'on' };
     }
+    const websocket = row.ws.read(); if (websocket) target.websocket = websocket;
     return target;
   }); };
 }
@@ -118,6 +133,7 @@ function editRule(existing) {
   const transport = el('details'); transport.append(el('summary', '入口 TLS 与客户端认证')); const tlsFields = el('div', undefined, 'form-grid');
   field(tlsFields, 'tls_identity', '入口证书编号（留空使用普通连接）', r.inbound_tls?.identity || '', 'text', false);
   field(tlsFields, 'tls_client_ca', '允许客户端的 CA 编号（留空不要求客户端证书）', r.inbound_tls?.client_ca || '', 'text', false); transport.append(tlsFields, el('p', '证书和私钥预先放在节点本地，面板只保存编号。TLS 仅用于 TCP；一条规则的所有出口必须使用相同的安全方式。', 'fine')); form.append(transport);
+  const inboundWs = websocketEditor('inbound-ws', r.inbound_websocket, true); form.append(inboundWs.box);
   const proxyInput = el('details'); proxyInput.append(el('summary', '接收可信上游传递的原始地址（PROXY protocol）'));
   const proxyMode = select(proxyInput, 'proxy_input_version', '入口 PROXY 报头', [['off', '关闭'], ['v1', '要求 v1 · 仅 TCP'], ['v2', '要求 v2 · TCP / UDP'], ['any', '要求 v1 或 v2 · 仅 TCP']], r.inbound_proxy?.version || 'off');
   const proxyOptions = el('div', undefined, 'form-grid');
@@ -142,6 +158,8 @@ function editRule(existing) {
     const identity = String(data.get('tls_identity')).trim(), clientCa = String(data.get('tls_client_ca')).trim();
     if (clientCa && !identity) throw new Error('要求客户端证书时，请同时填写入口证书编号');
     if (identity) rule.inbound_tls = { identity, client_ca: clientCa || null };
+    const websocket = inboundWs.read(); if (websocket) rule.inbound_websocket = websocket;
+    if (rule.protocol !== 'tcp' && (websocket || rule.targets.some(target => target.websocket))) throw new Error('WebSocket / WSS 流隧道只支持 TCP，请调整规则协议');
     if (data.get('proxy_input_version') !== 'off') rule.inbound_proxy = { version: data.get('proxy_input_version'), trusted_sources: lines('proxy_trusted_sources'), placement: data.get('proxy_input_placement'), max_header_bytes: number(data, 'proxy_header_limit') };
     for (const key of ['quota_bytes', 'rate_bytes_per_sec', 'expires_at_ms', 'connect_timeout_ms', 'idle_timeout_secs', 'max_connections', 'udp_max_sessions']) rule[key] = number(data, key);
     await saveRules(existing ? baseConfig.rules.map(item => item.id === r.id ? rule : item) : [...baseConfig.rules, rule], baseConfig);
@@ -152,7 +170,7 @@ async function renderUsage() { const records = await api('/usage'); const p = pa
 async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后已有 Web 会话立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, canWrite() || u.id === state.actor.id ? button('撤销全部会话', async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify('该用户现有会话已撤销。'); }, 'table-action') : '—']))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function newUser() { const form = el('form'); field(form, 'username', '用户名').maxLength = 80; const p = field(form, 'password', '初始密码（至少 12 个字节）', '', 'password'); p.minLength = 12; p.autocomplete = 'new-password'; const roles = [['viewer', '只读用户'], ['tenant_admin', '租户管理员']]; if (state.actor.role === 'system_admin') roles.push(['system_admin', '系统管理员']); select(form, 'role', '角色', roles, 'viewer'); submit(form, '创建用户', async data => { await api('/users', { method: 'POST', body: Object.fromEntries(data) }); $('#dialog').close(); await renderUsers(); }); modal('添加用户', form); }
 async function renderAudit() { const rows = await api('/audit'); const p = panel('操作审计', '记录配置发布、节点注册、身份及会话操作。最近 200 条。'); p.append(table(['时间', '操作者', '操作', '对象', '详情'], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 隧道', mptcp: 'MPTCP', 'multipath-aggregation': '单连接多路径聚合', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', mptcp: 'MPTCP', 'multipath-aggregation': '单连接多路径聚合', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 setInterval(() => { if (state.actor && !document.hidden && !$('#dialog').open && ['nodes', 'usage', 'budgets', 'recovery'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
 if (state.token) { api('/session').then(user => { state.actor = user; return enter(); }).catch(e => { loggedOut(); $('#login-error').textContent = e.message; }); }

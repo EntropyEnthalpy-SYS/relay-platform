@@ -23,6 +23,123 @@ struct Server {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn websocket_configuration_roundtrips_http_and_managed_agent_both_directions() {
+    use relay_platform::{engine::Engine, websocket};
+    let temp = tempfile::tempdir().unwrap();
+    let echo = tcp_echo().await;
+    let ws_in = WebSocketServer {
+        path: "/managed".into(),
+        host: Some("managed.test".into()),
+        allowed_origins: vec![],
+    };
+    let ws_out = WebSocketClient {
+        path: "/managed".into(),
+        host: "managed.test".into(),
+        origin: None,
+    };
+    let exit = Engine::new(Store::open(&temp.path().join("exit.db")).unwrap());
+    let mut end = rule(echo.address, Protocol::Tcp);
+    end.inbound_websocket = Some(ws_in.clone());
+    let hop = end.listen;
+    exit.apply(config(end)).await.unwrap();
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    control.set_kind("controller").unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (node, enrollment) = control
+        .create_node(&admin, "default", "websocket-agent")
+        .unwrap();
+    let (token, _) = control.login("admin", PASSWORD).unwrap();
+    let server_instance = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", server_instance.address);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("{origin}/api/v1/nodes/{}/config", node.id);
+    let mut r = rule(hop, Protocol::Tcp);
+    r.inbound_websocket = Some(ws_in);
+    r.targets[0].websocket = Some(ws_out.clone());
+    let listen = r.listen;
+    let published: NodeConfig = client
+        .put(&url)
+        .bearer_auth(&token)
+        .json(&json!({"expected_revision":0,"rules":[r.clone()]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(published.rules[0].inbound_websocket, r.inbound_websocket);
+    assert_eq!(
+        published.rules[0].targets[0].websocket,
+        r.targets[0].websocket
+    );
+    let mut bad = r.clone();
+    bad.protocol = Protocol::Udp;
+    assert!(
+        !client
+            .put(&url)
+            .bearer_auth(&token)
+            .json(&json!({"expected_revision":1,"rules":[bad]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let retrieved: NodeConfig = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(retrieved).unwrap(),
+        serde_json::to_value(published).unwrap()
+    );
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, enrollment.as_bytes()).unwrap();
+    let agent_db = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        agent_db.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    let socket = TcpStream::connect(listen).await.unwrap();
+    let mut stream = websocket::connect(Box::new(socket), &ws_out, false, Duration::from_secs(2))
+        .await
+        .unwrap();
+    stream.write_all(b"managed-ws").await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut reply = vec![];
+    timeout(Duration::from_secs(3), stream.read_to_end(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, b"managed-ws");
+    wait_usage(&control, &admin, 20).await;
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        agent_db.agent_config().unwrap().unwrap().rules[0].inbound_websocket,
+        r.inbound_websocket
+    );
+    exit.shutdown().await.unwrap();
+    stop_server(server_instance).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_settings_roundtrip_http_and_managed_agent_enforces_them() {
     let temp = tempfile::tempdir().unwrap();
     let control = Store::open(&temp.path().join("controller.db")).unwrap();

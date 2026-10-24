@@ -6,7 +6,7 @@
   },
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
-  "source_fingerprint_algorithm": "SHA256 of concatenated sorted relative UTF-8 paths, NUL, and raw file SHA256; Cargo.toml, Cargo.lock, rustfmt.toml, crates/, web/, scripts/ (excluding __pycache__), deploy/",
+  "source_fingerprint_algorithm": "SHA256 of concatenated sorted relative UTF-8 paths, NUL, and raw file SHA256; Cargo.toml, Cargo.lock, rustfmt.toml, crates/, web/, scripts/ (excluding __pycache__), deploy/, examples/ (examples added to scope in 0.8.0)",
   "ignored_helpers": [
     {
       "name": "journal::tests::crash_worker",
@@ -17,12 +17,12 @@
   "remaining_full_scope": "REQUIREMENTS.md and STATUS.md",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "machine": "arm64",
-  "version": "0.7.0-development",
-  "verified_at_utc": "2026-10-24T01:45:35.997844+00:00",
+  "version": "0.8.0-development",
+  "verified_at_utc": "2026-10-24T02:30:51.055360+00:00",
   "full_goal_complete": false,
   "profile": "release",
-  "binary_sha256": "c86356cb62381537c183ffed7febcf1db16aeba235f23c6a3698e1c22b4c3f73",
-  "source_fingerprint_sha256": "b8ee52135b2e54d6f9f424510c7eb50177f7fd054d3f2183a7c67a2d0adc59bc",
+  "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
+  "source_fingerprint_sha256": "42d0e4a201e4c8239c7299c08921b9b1b4c5933b23f02ca55dbc1d31eb6dc3fa",
   "source_fingerprint_paths": [
     "Cargo.lock",
     "Cargo.toml",
@@ -47,6 +47,7 @@
     "crates/relay-platform/src/store/sync.rs",
     "crates/relay-platform/src/sync_queue.rs",
     "crates/relay-platform/src/transport.rs",
+    "crates/relay-platform/src/websocket.rs",
     "crates/relay-platform/tests/budgets.rs",
     "crates/relay-platform/tests/common/mod.rs",
     "crates/relay-platform/tests/common/tls.rs",
@@ -59,28 +60,36 @@
     "crates/relay-platform/tests/recovery.rs",
     "crates/relay-platform/tests/sync_batch.rs",
     "crates/relay-platform/tests/tls_transport.rs",
+    "crates/relay-platform/tests/websocket_transport.rs",
     "deploy/Caddyfile.example",
     "deploy/agent.env.example",
     "deploy/relay-agent.service",
     "deploy/relay-controller.service",
+    "examples/port-range.json",
+    "examples/proxy-hop.json",
+    "examples/standalone.json",
+    "examples/websocket-hop.json",
     "rustfmt.toml",
     "scripts/bench_budget.py",
     "scripts/bench_loopback.py",
     "scripts/bench_sync.py",
+    "scripts/bench_websocket.py",
     "scripts/check_proxy_interop.py",
     "scripts/check_recovery.py",
+    "scripts/check_websocket_interop.py",
     "scripts/echo_fixture.py",
     "scripts/probe.py",
+    "scripts/requirements-interop.txt",
     "scripts/verify.sh",
     "web/app.js",
     "web/index.html",
     "web/style.css"
   ],
-  "automated_tests_passed": 109,
+  "automated_tests_passed": 130,
   "automated_tests_failed": 0,
   "test_cases": [
     {
-      "file": "crates/relay-platform/src/journal.rs",
+      "file": "crates/relay-platform/src/lib.rs",
       "name": "journal::tests::abrupt_exit_at_each_durable_boundary"
     },
     {
@@ -89,19 +98,11 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "restored_controller_cannot_reissue_reservations_forgotten_by_its_backup"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "invalid_report_rolls_back_other_reports_and_retry_updates_totals_once"
-    },
-    {
-      "file": "crates/relay-platform/tests/budgets.rs",
       "name": "graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idempotent"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "budget_activation_requires_quiescence_and_published_bindings_cannot_be_removed"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -113,7 +114,15 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "invalid_report_rolls_back_other_reports_and_retry_updates_totals_once"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
       "name": "hierarchical_limits_are_atomic_and_udp_never_partially_consumes_other_scopes"
+    },
+    {
+      "file": "crates/relay-platform/tests/budgets.rs",
+      "name": "restored_controller_cannot_reissue_reservations_forgotten_by_its_backup"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -121,11 +130,11 @@
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "settlement_cancels_an_unissued_request_before_a_late_original_can_allocate"
+      "name": "settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
-      "name": "settlement_recovers_a_lost_grant_response_even_after_the_rule_is_removed"
+      "name": "settlement_cancels_an_unissued_request_before_a_late_original_can_allocate"
     },
     {
       "file": "crates/relay-platform/tests/budgets.rs",
@@ -145,15 +154,15 @@
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
-      "name": "interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener"
-    },
-    {
-      "file": "crates/relay-platform/tests/control_agent.rs",
       "name": "proxy_settings_roundtrip_http_and_managed_agent_enforces_them"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
       "name": "running_agent_republishes_acknowledged_counters_after_controller_restore"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "interrupted_checkpoint_and_failed_activation_never_reopen_restored_cached_listener"
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
@@ -173,6 +182,10 @@
     },
     {
       "file": "crates/relay-platform/tests/control_agent.rs",
+      "name": "websocket_configuration_roundtrips_http_and_managed_agent_both_directions"
+    },
+    {
+      "file": "crates/relay-platform/tests/control_agent.rs",
       "name": "udp_uses_only_its_reserved_budget_during_outage_and_resumes_when_control_returns"
     },
     {
@@ -185,15 +198,15 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "source_acl_denies_before_any_billable_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "routing_updates_preserve_existing_connections_and_shutdown_cancels_all_generations"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "failed_meter_transaction_never_forwards_uncommitted_payload"
-    },
-    {
-      "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "source_acl_denies_before_any_billable_payload"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -225,15 +238,15 @@
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
+      "name": "tcp_binary_payload_half_close_and_durable_bidirectional_metering"
+    },
+    {
+      "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "weighted_target_selection_and_connect_failure_fallback"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
       "name": "udp_preserves_datagrams_empty_payloads_and_peer_isolation"
-    },
-    {
-      "file": "crates/relay-platform/tests/forwarding.rs",
-      "name": "tcp_binary_payload_half_close_and_durable_bidirectional_metering"
     },
     {
       "file": "crates/relay-platform/tests/forwarding.rs",
@@ -277,11 +290,11 @@
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
-      "name": "periods_do_not_reset_on_reapply_and_old_periods_cannot_spend"
+      "name": "exhausted_expired_and_disabled_rules_reject_empty_datagrams_too"
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
-      "name": "exhausted_expired_and_disabled_rules_reject_empty_datagrams_too"
+      "name": "periods_do_not_reset_on_reapply_and_old_periods_cannot_spend"
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
@@ -293,11 +306,11 @@
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
-      "name": "controller_replay_is_idempotent_and_counter_regression_is_rejected"
+      "name": "enrollment_is_single_use_and_configuration_writes_are_optimistic"
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
-      "name": "enrollment_is_single_use_and_configuration_writes_are_optimistic"
+      "name": "controller_replay_is_idempotent_and_counter_regression_is_rejected"
     },
     {
       "file": "crates/relay-platform/tests/ledger.rs",
@@ -305,11 +318,11 @@
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "bound_source_ip_is_observed_by_target_and_dns_family_falls_back"
+      "name": "invalid_bind_rejects_config_without_unbound_fallback"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "dns_two_hop_cycles_stop_but_acyclic_local_chains_forward"
+      "name": "bound_source_ip_is_observed_by_target_and_dns_family_falls_back"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
@@ -317,11 +330,11 @@
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "invalid_bind_rejects_config_without_unbound_fallback"
+      "name": "range_limits_overlap_and_static_cycle_validation"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "range_limits_overlap_and_static_cycle_validation"
+      "name": "dns_two_hop_cycles_stop_but_acyclic_local_chains_forward"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
@@ -333,11 +346,11 @@
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "range_stage_failure_releases_new_sockets_and_preserves_old_config"
+      "name": "port_ranges_offset_tcp_udp_and_shared_meter"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "port_ranges_offset_tcp_udp_and_shared_meter"
+      "name": "range_stage_failure_releases_new_sockets_and_preserves_old_config"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
@@ -353,15 +366,15 @@
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
+      "name": "dns_cache_uses_authoritative_ttl_and_shares_across_rules"
+    },
+    {
+      "file": "crates/relay-platform/tests/network_features.rs",
       "name": "dns_rebinding_to_local_listener_is_rejected_after_ttl"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
       "name": "dns_negative_cache_expires_and_failed_target_falls_back"
-    },
-    {
-      "file": "crates/relay-platform/tests/network_features.rs",
-      "name": "dns_cache_uses_authoritative_ttl_and_shares_across_rules"
     },
     {
       "file": "crates/relay-platform/tests/network_features.rs",
@@ -381,15 +394,15 @@
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
-      "name": "source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4"
-    },
-    {
-      "file": "crates/relay-platform/tests/proxy_protocol.rs",
       "name": "tcp_output_without_input_header_uses_actual_client_and_wildcard_destination"
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
       "name": "moving_proxy_policy_between_existing_targets_cancels_old_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/proxy_protocol.rs",
+      "name": "source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4"
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
@@ -413,11 +426,11 @@
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
-      "name": "tcp_output_matches_independent_v1_v2_and_crc_fixtures_once_per_connection"
+      "name": "mismatched_tls_proxy_placement_fails_without_forwarding_payload"
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
-      "name": "mismatched_tls_proxy_placement_fails_without_forwarding_payload"
+      "name": "tcp_output_matches_independent_v1_v2_and_crc_fixtures_once_per_connection"
     },
     {
       "file": "crates/relay-platform/tests/proxy_protocol.rs",
@@ -514,6 +527,86 @@
     {
       "file": "crates/relay-platform/tests/tls_transport.rs",
       "name": "tls_rejects_missing_client_identity_wrong_authority_and_wrong_server_name"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "invalid_ws_configurations_are_rejected_without_optional_protocol_fallback"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "bounded_incoming_queue_backpressures_and_drop_stops_the_driver"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "malformed_records_frames_and_early_close_never_become_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "coalesced_upgrade_response_and_reverse_half_close_preserve_large_payload"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "path_policy_change_revokes_open_streams_without_disabling_plain_target_updates"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "handshake_path_host_origin_subprotocol_key_and_header_limit_reject_before_target"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "moving_websocket_policy_between_existing_targets_revokes_old_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "blocked_control_flush_cannot_hold_half_closed_stream_indefinitely"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "ping_after_remote_fin_is_served_while_application_reply_is_waiting"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "quotas_count_only_unwrapped_application_bytes_across_sessions"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "raw_client_fragmentation_ping_half_close_and_exact_metering"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "outbound_upgrade_mismatch_never_forwards_application_or_falls_back"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "raw_server_observes_masking_host_origin_records_and_full_half_close"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "transport_flush_waits_for_wire_backpressure"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "missing_close_ack_has_a_bounded_deadline"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "outbound_wss_rejects_wrong_server_name_missing_identity_and_wrong_http_host"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "wss_requires_valid_client_certificate_before_http_upgrade"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "slow_upgrade_releases_connection_slot_and_invalid_update_keeps_old_rule"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "ws_and_mutual_wss_hops_preserve_payload_with_both_proxy_positions"
+    },
+    {
+      "file": "crates/relay-platform/tests/websocket_transport.rs",
+      "name": "pings_do_not_extend_application_idle_timeout"
     }
   ],
   "format_check": "passed",
@@ -531,12 +624,12 @@
     "durable_bytes": 176,
     "backup_restore": "identical",
     "child_processes_stopped": true,
-    "version": "relay 0.7.0",
-    "binary_sha256": "c86356cb62381537c183ffed7febcf1db16aeba235f23c6a3698e1c22b4c3f73"
+    "version": "relay 0.8.0",
+    "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13"
   },
   "network_cli_smoke": {
-    "binary_sha256": "c86356cb62381537c183ffed7febcf1db16aeba235f23c6a3698e1c22b4c3f73",
-    "version": "relay 0.7.0",
+    "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
+    "version": "relay 0.8.0",
     "ports": 2,
     "mapping": "offset",
     "outbound_ip": "127.0.0.1",
@@ -554,8 +647,8 @@
     "child_processes_stopped": true
   },
   "proxy_cli_smoke": {
-    "binary_sha256": "c86356cb62381537c183ffed7febcf1db16aeba235f23c6a3698e1c22b4c3f73",
-    "version": "relay 0.7.0",
+    "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
+    "version": "relay 0.8.0",
     "hops": 2,
     "proxy": "v2_crc32c",
     "meter_records": 2,
@@ -600,9 +693,9 @@
     "unused_reserved_bytes_after_shutdown": 0
   },
   "controller_sync_metrics": {
-    "committed_batches": 359,
-    "processed_requests": 606,
-    "largest_batch": 4,
+    "committed_batches": 329,
+    "processed_requests": 601,
+    "largest_batch": 3,
     "queue_full_rejections": 0,
     "failed_batches": 0,
     "batch_limit": 16,
@@ -610,11 +703,11 @@
     "coalesce_window_ms": 2
   },
   "recovery_smoke": {
-    "at_utc": "2026-10-24T01:38:37.436461+00:00",
+    "at_utc": "2026-10-24T02:28:02.006409+00:00",
     "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-    "binary_sha256": "c86356cb62381537c183ffed7febcf1db16aeba235f23c6a3698e1c22b4c3f73",
+    "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
     "restore": {
-      "journal_id": "70f04687-976a-48af-865c-f2b93cfd98f1",
+      "journal_id": "e9777af1-a899-4cf3-8fc6-be29dfdd7233",
       "backup_sequence": 4,
       "restored_sequence": 11,
       "replayed_transactions": 7,
@@ -645,7 +738,7 @@
       "no power-loss or remote storage durability test"
     ]
   },
-  "third_party_metadata_packages": 265,
+  "third_party_metadata_packages": 273,
   "verified_capabilities": [
     "port_ranges_fixed_and_offset",
     "range_shared_quota_and_session_limits",
@@ -669,14 +762,23 @@
     "udp_wildcard_actual_destination_and_reply_source_macos_ipv4_ipv6",
     "proxy_policy_change_cancels_existing_sessions",
     "http_proxy_config_to_real_managed_agent",
-    "haproxy_tcp_proxy_interop_18_cases"
+    "haproxy_tcp_proxy_interop_18_cases",
+    "relay_stream_v1_ws_wss_tcp_half_close_and_bounded_backpressure",
+    "ws_upgrade_validation_and_size_limits",
+    "ws_protected_control_flush_and_close_deadline",
+    "ws_mtls_and_both_proxy_positions",
+    "ws_payload_only_metering_and_application_idle_timeout",
+    "ws_policy_changes_revoke_existing_sessions",
+    "http_websocket_configuration_to_managed_agent",
+    "python_websockets_17_2_interoperability",
+    "native_two_hop_ws_wss_loopback_benchmark"
   ],
   "not_verified_or_pending": [
     "browser_visual_and_click_acceptance",
     "Linux_interface_permissions_and_real_routing",
     "two_Linux_node_deployment",
     "WAN_and_Realm_comparison",
-    "TLS_pressure",
+    "TLS_high_concurrency_or_sustained_pressure",
     "many_connections_and_72_hour_soak",
     "cross_node_topology_and_loop_detection",
     "complete_budget_disaster_recovery",
@@ -687,7 +789,10 @@
     "Linux_udp_packet_info_runtime",
     "external_udp_and_tls_proxy_interop",
     "proxy_and_wildcard_udp_performance",
-    "stable_small_connection_shared_budget_performance"
+    "stable_small_connection_shared_budget_performance",
+    "WS_WSS_real_IPv6_network_acceptance",
+    "generic_or_reference_product_websocket_compatibility",
+    "certificate_automation_and_credential_rotation"
   ],
   "historical_performance_references": {
     "version": "0.5.0",
@@ -696,9 +801,85 @@
       "benchmark-budget-individual-0.5.0.json",
       "benchmark-budget-32m-0.5.0.json"
     ],
-    "note": "Not rerun for 0.7.0; do not present these 0.5.0 results as current-binary results."
+    "note": "Not rerun for 0.8.0; these 0.5.0 results are historical only."
   },
-  "two_connection_diagnostic": {
+  "resolved_test_issue": "A new duplex-64-byte regression reproduced an unbounded Pong flush after local FIN. Control frame flush now has the configured timeout. Regression and all 130 tests passed. Earlier validation also fixed acceptance of Host ports exceeding 65535.",
+  "websocket_interop_file": "websocket-interop.json",
+  "websocket_interop_cases": 3,
+  "websocket_interop_negative_cases": 7,
+  "websocket_interop_ledger": {
+    "expected_admitted_bytes": 1573086,
+    "recorded_bytes": 1573086,
+    "exact_match": true,
+    "framing_and_control_excluded": true
+  },
+  "websocket_benchmark_file": "benchmark-websocket.json",
+  "websocket_benchmark_ledgers": {
+    "tcp": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    },
+    "ws": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    },
+    "wss-mtls": {
+      "expected_admitted_bytes": 1346371584,
+      "recorded_bytes": 1346371584,
+      "rule_records": 2,
+      "exact_match": true,
+      "backup_restore": "identical"
+    }
+  },
+  "websocket_benchmark_medians": [
+    {
+      "connections": 1,
+      "mode": "direct",
+      "goodput_mbps": 12466.741102484048
+    },
+    {
+      "connections": 1,
+      "mode": "tcp",
+      "goodput_mbps": 3881.2665325251573
+    },
+    {
+      "connections": 1,
+      "mode": "ws",
+      "goodput_mbps": 3419.680634808681
+    },
+    {
+      "connections": 1,
+      "mode": "wss-mtls",
+      "goodput_mbps": 3021.2967482065433
+    },
+    {
+      "connections": 4,
+      "mode": "direct",
+      "goodput_mbps": 13859.001820080372
+    },
+    {
+      "connections": 4,
+      "mode": "tcp",
+      "goodput_mbps": 9904.40217450223
+    },
+    {
+      "connections": 4,
+      "mode": "ws",
+      "goodput_mbps": 9208.29477788329
+    },
+    {
+      "connections": 4,
+      "mode": "wss-mtls",
+      "goodput_mbps": 7905.573178983783
+    }
+  ],
+  "historical_two_connection_diagnostic": {
     "execution_order": [
       "benchmark-budget-two-connections-0.7.0.json",
       "benchmark-budget-two-connections-0.6.0-recheck.json",
@@ -732,7 +913,18 @@
         "exact_match": true
       }
     ],
-    "conclusion": "Large run-to-run variance; the original slower 0.7.0 sample is retained. These sequential runs do not establish a causal PROXY regression or equivalent performance. No isolated fsync/host-load causality claim."
+    "conclusion": "Large run-to-run variance; the original slower 0.7.0 sample is retained. These sequential runs do not establish a causal PROXY regression or equivalent performance. No isolated fsync/host-load causality claim.",
+    "note": "Performed for 0.7.0, not rerun for 0.8.0; no causal regression or equivalence claim."
   },
-  "resolved_test_issue": "An integration regression reproduced live sessions remaining open after moving an unchanged PROXY policy between existing target addresses. Per-target policy comparison now revokes those sessions; the full suite passes. The 0.6 test-port fix remains in place."
+  "linux_acceptance_environment": {
+    "user_has_servers": true,
+    "system_architecture_node_count": "user will provide later",
+    "credentials_requested": false
+  },
+  "example_configurations_validated": [
+    "examples/port-range.json",
+    "examples/proxy-hop.json",
+    "examples/standalone.json",
+    "examples/websocket-hop.json"
+  ]
 }

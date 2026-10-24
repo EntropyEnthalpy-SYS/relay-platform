@@ -1,0 +1,26 @@
+Pre-fix regression: blocked Pong on 64-byte duplex escaped timeout.
+
+   Compiling relay-platform v0.8.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.67s
+     Running tests/websocket_transport.rs (target/debug/deps/websocket_transport-4465361df8ddc45a)
+
+running 1 test
+test blocked_control_flush_cannot_hold_half_closed_stream_indefinitely ... FAILED
+
+failures:
+
+---- blocked_control_flush_cannot_hold_half_closed_stream_indefinitely stdout ----
+
+thread 'blocked_control_flush_cannot_hold_half_closed_stream_indefinitely' (4667493) panicked at crates/relay-platform/tests/websocket_transport.rs:894:14:
+blocked control flush escaped its deadline: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    blocked_control_flush_cannot_hold_half_closed_stream_indefinitely
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 1.01s
+
+error: test failed, to rerun pass `--test websocket_transport`
+
+Post-fix: same regression passed in verification-0.8.0.txt, together with all 130 tests.

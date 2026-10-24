@@ -6,6 +6,7 @@ use crate::{
     routing::{Endpoint as ListenerKey, LoopGuard, Routes, Topology, local_ips},
     store::{Admission, AdmissionDecision, Store},
     transport::{BoxStream, PreparedTls},
+    websocket,
 };
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
@@ -603,6 +604,22 @@ impl Engine {
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
     old.budget_ids != new.budget_ids
+        || old.inbound_websocket != new.inbound_websocket
+        || old.targets.iter().any(|previous| {
+            new.targets.iter().any(|current| {
+                current.address == previous.address && current.websocket != previous.websocket
+            })
+        })
+        || old
+            .targets
+            .iter()
+            .filter_map(|t| t.websocket.as_ref())
+            .collect::<Vec<_>>()
+            != new
+                .targets
+                .iter()
+                .filter_map(|t| t.websocket.as_ref())
+                .collect::<Vec<_>>()
         || old.inbound_proxy != new.inbound_proxy
         || old.targets.iter().any(|previous| {
             new.targets.iter().any(|current| {
@@ -729,6 +746,15 @@ async fn connect_tcp(
                         .await?;
                     stream.flush().await?;
                 }
+                if let Some(spec) = &rule.spec.targets[index].websocket {
+                    stream = websocket::connect(
+                        stream,
+                        spec,
+                        rule.spec.targets[index].tls.is_some(),
+                        Duration::from_millis(rule.spec.connect_timeout_ms),
+                    )
+                    .await?;
+                }
                 Ok::<_, anyhow::Error>((stream, route))
             })
             .await
@@ -755,27 +781,39 @@ async fn tcp_session(
         source: peer,
         destination: client.local_addr()?,
     };
-    let (client, info) = timeout_at(
-        Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms),
-        async {
-            let mut info = original;
-            let policy = rule.spec.inbound_proxy.as_ref();
-            if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::BeforeTls) {
-                info = proxy::read_tcp(&mut client, policy, original).await?;
-            }
-            let mut client = rule.tls.accept(client).await?;
-            if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::InsideTls) {
-                info = proxy::read_tcp(&mut client, policy, original).await?;
-            }
-            Ok::<_, anyhow::Error>((client, info))
-        },
-    )
+    let handshake_deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
+    let (client, info) = timeout_at(handshake_deadline, async {
+        let mut info = original;
+        let policy = rule.spec.inbound_proxy.as_ref();
+        if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::BeforeTls) {
+            info = proxy::read_tcp(&mut client, policy, original).await?;
+        }
+        let mut client = rule.tls.accept(client).await?;
+        if let Some(policy) = policy.filter(|p| p.placement == ProxyPlacement::InsideTls) {
+            info = proxy::read_tcp(&mut client, policy, original).await?;
+        }
+        Ok::<_, anyhow::Error>((client, info))
+    })
     .await
     .context("inbound TLS/PROXY handshake timed out")??;
     if !rule.accepts(info.source) {
         stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
+    let client = if let Some(spec) = &rule.spec.inbound_websocket {
+        timeout_at(
+            handshake_deadline,
+            websocket::accept(
+                client,
+                spec,
+                Duration::from_millis(rule.spec.connect_timeout_ms),
+            ),
+        )
+        .await
+        .context("inbound WebSocket handshake timed out")??
+    } else {
+        client
+    };
     let (target, _target_guard, _route_guard) = connect_tcp(&rule, info, inlet).await?;
     let activity = Arc::new(StdMutex::new(Instant::now()));
     let (cr, cw) = tokio::io::split(client);

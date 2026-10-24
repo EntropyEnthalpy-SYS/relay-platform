@@ -95,3 +95,9 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 规则新增 `inbound_proxy={version,trusted_sources,placement,max_header_bytes}`；每个目标新增 `proxy_protocol={version,placement,checksum}`。字段、默认值、TLS 顺序、可信对端与来源 ACL 的区别、UDP 逐包语义见 [PROXY.md](PROXY.md)。未知字段和不支持的协议组合会被拒绝；节点实际应用失败继续通过 `apply_error` 返回。SQLite schema v4 不变，0.6 Agent 应先升级再发布新字段。
 
 能力目录新增 `proxy-protocol-tcp-v1-v2`、`proxy-protocol-udp-v2`、`udp-destination-tracking`。它们表示代码实现能力，不表示已经通过 Linux、外部 UDP/TLS 互通或生产压力验收。
+
+## 0.8.0 WebSocket 字段
+
+规则新增 `inbound_websocket={path,host,allowed_origins}`；每个目标新增 `websocket={path,host,origin}`，缺省表示关闭。两端必须协商 `relay-stream-v1` 子协议。仅 TCP，组合相同方向的 TLS 字段即为 WSS；Host、Origin、路径、二进制记录、半关闭、限额和 PROXY 顺序见 [WEBSOCKET.md](WEBSOCKET.md)。控制器发布时执行结构校验，节点继续执行监听与本地 TLS 材料预检；失败不替换旧版本。
+
+能力目录新增 `websocket` 和 `secure-websocket`，页面提供入口及逐目标编辑字段。SQLite schema v4 与恢复日志不变，0.7 Agent 不接受新字段，应先协调升级。能力目录并不声明任意第三方 WebSocket 隧道兼容或完整安全模块验收通过。

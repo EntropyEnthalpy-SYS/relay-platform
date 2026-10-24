@@ -1,0 +1,34 @@
+{
+  "api_version": 1,
+  "node_id": "standalone-websocket",
+  "revision": 1,
+  "rules": [
+    {
+      "id": "ws-entry",
+      "tenant_id": "default",
+      "owner_id": "admin",
+      "name": "Local TCP to WebSocket",
+      "listen": "127.0.0.1:19001",
+      "protocol": "tcp",
+      "targets": [{
+        "address": "127.0.0.1:19002",
+        "weight": 1,
+        "websocket": {"path": "/relay", "host": "relay.local"}
+      }],
+      "meter_epoch": "initial-period",
+      "allow_sources": ["127.0.0.0/8"]
+    },
+    {
+      "id": "ws-exit",
+      "tenant_id": "default",
+      "owner_id": "admin",
+      "name": "Local WebSocket to TCP",
+      "listen": "127.0.0.1:19002",
+      "protocol": "tcp",
+      "inbound_websocket": {"path": "/relay", "host": "relay.local", "allowed_origins": []},
+      "targets": [{"address": "127.0.0.1:19000", "weight": 1}],
+      "meter_epoch": "initial-period",
+      "allow_sources": ["127.0.0.0/8"]
+    }
+  ]
+}

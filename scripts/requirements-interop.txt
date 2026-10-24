@@ -1,0 +1,2 @@
+# Optional, isolated test environment only; not a platform runtime dependency.
+websockets==17.2

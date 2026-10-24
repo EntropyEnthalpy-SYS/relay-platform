@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 argon2 = "0.5"
 axum = { version = "0.8.9", features = ["json", "tokio", "http1"] }
 clap = { version = "4", features = ["derive"] }
@@ -19,6 +20,8 @@ if-addrs = "0.15.0"
 hickory-resolver = "0.26.1"
 socket2 = { version = "0.6.5", features = ["all"] }
 crc32c = "0.6"
+futures-util = { version = "0.3", features = ["sink"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "backup", "fallible_uint", "session"] }
@@ -38,7 +41,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 
 [dev-dependencies]
-base64 = "0.22"
 ring = "0.17"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

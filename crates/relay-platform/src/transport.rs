@@ -132,10 +132,13 @@ impl PreparedTls {
             } else {
                 builder.with_no_client_auth()
             };
-            let config = builder.with_single_cert(
+            let mut config = builder.with_single_cert(
                 material.certificates(&spec.identity, "cert.pem")?,
                 material.key(&spec.identity)?,
             )?;
+            if rule.inbound_websocket.is_some() {
+                config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            }
             Some(TlsAcceptor::from(Arc::new(config)))
         } else {
             None
@@ -146,7 +149,7 @@ impl PreparedTls {
                 let builder = ClientConfig::builder_with_provider(provider.clone())
                     .with_safe_default_protocol_versions()?
                     .with_root_certificates(material.roots(spec.ca.as_deref())?);
-                let config = if let Some(identity) = &spec.identity {
+                let mut config = if let Some(identity) = &spec.identity {
                     builder.with_client_auth_cert(
                         material.certificates(identity, "cert.pem")?,
                         material.key(identity)?,
@@ -154,6 +157,9 @@ impl PreparedTls {
                 } else {
                     builder.with_no_client_auth()
                 };
+                if target.websocket.is_some() {
+                    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+                }
                 Some(Outbound {
                     connector: TlsConnector::from(Arc::new(config)),
                     name: ServerName::try_from(spec.server_name.clone())?,

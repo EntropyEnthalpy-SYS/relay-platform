@@ -883,6 +883,7 @@ async fn source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4() {
         weight: 1,
         tls: None,
         proxy_protocol: None,
+        websocket: None,
     });
     let address = r.listen;
     engine.apply(config(r)).await.unwrap();

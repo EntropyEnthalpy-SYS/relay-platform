@@ -419,6 +419,7 @@ async fn dns_negative_cache_expires_and_failed_target_falls_back() {
         weight: 1,
         tls: None,
         proxy_protocol: None,
+        websocket: None,
     });
     *dns.ips.lock().unwrap() = vec![];
     engine.apply(c).await.unwrap();

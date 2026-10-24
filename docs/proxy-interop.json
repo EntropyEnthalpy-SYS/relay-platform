@@ -1,8 +1,8 @@
 {
-  "at_utc": "2026-10-24T01:38:03.577143+00:00",
+  "at_utc": "2026-10-24T02:28:00.302595+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
-  "version": "relay 0.7.0",
-  "binary_sha256": "c86356cb62381537c183ffed7febcf1db16aeba235f23c6a3698e1c22b4c3f73",
+  "version": "relay 0.8.0",
+  "binary_sha256": "50365b3987d7581de15a877a23c0574b3031f9f47955c77fa62731234d67aa13",
   "haproxy_version": "HAProxy version 3.0.30-47d806b 2026/10/14 - https://haproxy.org/",
   "haproxy_binary_sha256": "4ab39a69650b02df027e4af3daf40006c6925c285a4bfaba8c1512dae4d6108e",
   "topology": "Python client -> HAProxy -> relay -> HAProxy -> Python observer",
@@ -181,11 +181,5 @@
     "local loopback TCP only",
     "no external UDP or TLS interop",
     "not a performance benchmark"
-  ],
-  "haproxy_source": {
-    "url": "https://www.haproxy.org/download/3.0/src/haproxy-3.0.30.tar.gz",
-    "sha256": "a7c594a1985936890737219ae2d7c3769346a92a2f536522b8b3abc540d7a608",
-    "version": "3.0.30"
-  },
-  "haproxy_build": "make TARGET=osx -j2; no installation, no OpenSSL"
+  ]
 }

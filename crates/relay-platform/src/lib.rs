@@ -11,3 +11,4 @@ mod routing;
 pub mod store;
 mod sync_queue;
 pub mod transport;
+pub mod websocket;
