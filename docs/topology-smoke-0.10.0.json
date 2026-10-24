@@ -1,0 +1,83 @@
+{
+  "at_utc": "2026-10-24T04:28:58.275257+00:00",
+  "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+  "version": "relay 0.10.0",
+  "binary_sha256": "45d52994fa0332ab2dc74d38360447f885b9e7592552e491c4e89bb6e8ab2d8a",
+  "cases": [
+    {
+      "transport": "both",
+      "agents": 3,
+      "forward_payload_bytes": 33333,
+      "udp_payload_bytes": 1200,
+      "reverse_payload_bytes": 43,
+      "per_hop_recorded_bytes": 69152,
+      "total_recorded_bytes": 207456,
+      "preview_read_only": true,
+      "publish_matches_preview": true,
+      "stopped_before_reverse": true,
+      "binary_half_close_verified": true,
+      "restored_topology_usage_and_old_session": true,
+      "restore": {
+        "journal_id": "125a8fc8-de40-4e11-a380-54da7ee48828",
+        "backup_sequence": 9,
+        "restored_sequence": 38,
+        "replayed_transactions": 29,
+        "budget_allocation_paused": false,
+        "ignored_uncommitted_tail": false
+      }
+    },
+    {
+      "transport": "ws",
+      "agents": 3,
+      "forward_payload_bytes": 33333,
+      "udp_payload_bytes": 0,
+      "reverse_payload_bytes": 43,
+      "per_hop_recorded_bytes": 66752,
+      "total_recorded_bytes": 200256,
+      "preview_read_only": true,
+      "publish_matches_preview": true,
+      "stopped_before_reverse": true,
+      "binary_half_close_verified": true,
+      "restored_topology_usage_and_old_session": true,
+      "restore": {
+        "journal_id": "fb53714b-0f0d-4276-86cd-0c08b6109f88",
+        "backup_sequence": 8,
+        "restored_sequence": 39,
+        "replayed_transactions": 31,
+        "budget_allocation_paused": false,
+        "ignored_uncommitted_tail": false
+      }
+    },
+    {
+      "transport": "wss",
+      "agents": 3,
+      "forward_payload_bytes": 33333,
+      "udp_payload_bytes": 0,
+      "reverse_payload_bytes": 43,
+      "per_hop_recorded_bytes": 66752,
+      "total_recorded_bytes": 200256,
+      "preview_read_only": true,
+      "publish_matches_preview": true,
+      "stopped_before_reverse": true,
+      "binary_half_close_verified": true,
+      "restored_topology_usage_and_old_session": true,
+      "restore": {
+        "journal_id": "06477f8b-ee93-429a-8665-e511a2508698",
+        "backup_sequence": 8,
+        "restored_sequence": 39,
+        "replayed_transactions": 31,
+        "budget_allocation_paused": false,
+        "ignored_uncommitted_tail": false
+      }
+    }
+  ],
+  "total_recorded_bytes": 607968,
+  "child_processes_stopped": true,
+  "limits": [
+    "one machine, three Agent processes per case",
+    "declared addresses only; no discovery of DNS/NAT aliases",
+    "per-hop accounting, not once-per-logical-flow billing",
+    "asynchronous node activation, not distributed atomic rollout",
+    "not Linux/WAN/throughput acceptance"
+  ]
+}

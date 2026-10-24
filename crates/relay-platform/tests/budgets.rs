@@ -162,6 +162,149 @@ fn status<T>(result: anyhow::Result<T>) -> u16 {
         .status
 }
 
+#[tokio::test]
+async fn committed_refill_between_admission_and_wait_is_visible_to_every_waiter() {
+    let f = Fixture::new(128, 64, false);
+    // Register before querying admission. A controller response can commit
+    // after that query but before the caller first polls its wait future.
+    let first = f.agents[0].budget_updated();
+    let second = f.agents[0].budget_updated();
+    assert!(matches!(
+        f.agents[0]
+            .admit_batch_detailed(&[admission(&f.rules[0], 16, false)])
+            .unwrap()[0],
+        relay_platform::store::AdmissionDecision::AwaitingBudget
+    ));
+    f.sync(0);
+    tokio::time::timeout(std::time::Duration::from_millis(20), async {
+        tokio::join!(first, second);
+    })
+    .await
+    .expect("durable refill was lost before waiting began");
+    assert_eq!(
+        f.agents[0]
+            .admit_batch(&[admission(&f.rules[0], 16, false)])
+            .unwrap(),
+        vec![Some(16)]
+    );
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            f.agents[0].budget_updated()
+        )
+        .await
+        .is_err(),
+        "a new observer must not consume an earlier notification"
+    );
+}
+
+fn unaccepted_refill(f: &Fixture) -> SyncResponse {
+    f.sync(0);
+    assert_eq!(
+        f.agents[0]
+            .admit_batch(&[admission(&f.rules[0], 40, false)])
+            .unwrap(),
+        vec![Some(40)]
+    );
+    let mut request = f.request(0, f.agents[0].budget_outbox(&f.runs[0], true).unwrap());
+    request.usage = f.agents[0].agent_usage(true).unwrap();
+    let response = f.control.sync(&f.nodes[0], request).unwrap();
+    assert_eq!(response.acknowledgements.len(), 1);
+    assert_eq!(response.budget.as_ref().unwrap().grants.len(), 1);
+    response
+}
+
+#[tokio::test]
+async fn sync_reply_rolls_back_usage_and_grants_on_invalid_later_grant_then_retries_once() {
+    let f = Fixture::new(128, 64, false);
+    let reply = unaccepted_refill(&f);
+    let mut bad = reply.budget.clone().unwrap();
+    let mut unsolicited = bad.grants[0].clone();
+    unsolicited.grant_id = "unsolicited-grant".into();
+    unsolicited.request_id = "unsolicited-request".into();
+    bad.grants.push(unsolicited);
+    let notice = f.agents[0].budget_updated();
+    assert!(
+        f.agents[0]
+            .accept_sync_reply(&f.runs[0], &reply.acknowledgements, Some(bad))
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), notice)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.agents[0].agent_usage(true).unwrap().len(), 1);
+    assert_eq!(
+        f.agents[0]
+            .budget_outbox(&f.runs[0], true)
+            .unwrap()
+            .requests
+            .len(),
+        1
+    );
+    assert_eq!(
+        f.agents[0]
+            .admit_batch(&[admission(&f.rules[0], 32, true)])
+            .unwrap(),
+        vec![None]
+    );
+    for _ in 0..2 {
+        f.agents[0]
+            .accept_sync_reply(&f.runs[0], &reply.acknowledgements, reply.budget.clone())
+            .unwrap();
+    }
+    assert!(f.agents[0].agent_usage(true).unwrap().is_empty());
+    assert_eq!(
+        f.agents[0]
+            .admit_batch(&[admission(&f.rules[0], 88, true)])
+            .unwrap(),
+        vec![Some(88)]
+    );
+    assert_eq!(
+        f.agents[0]
+            .admit_batch(&[admission(&f.rules[0], 1, true)])
+            .unwrap(),
+        vec![None]
+    );
+    f.sync(0);
+    assert_eq!(f.user().consumed_bytes, 128);
+    assert_eq!(f.user().committed_bytes, 128);
+}
+
+#[test]
+fn sync_reply_storage_failure_does_not_acknowledge_usage_or_lose_pending_request() {
+    let f = Fixture::new(128, 64, false);
+    let reply = unaccepted_refill(&f);
+    let conn = rusqlite::Connection::open(f.tmp.path().join("agent-0.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_grant BEFORE INSERT ON agent_budget_grants BEGIN SELECT RAISE(ABORT,'injected reply persistence failure'); END;").unwrap();
+    assert!(
+        f.agents[0]
+            .accept_sync_reply(&f.runs[0], &reply.acknowledgements, reply.budget.clone())
+            .is_err()
+    );
+    assert_eq!(f.agents[0].agent_usage(true).unwrap().len(), 1);
+    assert_eq!(
+        f.agents[0]
+            .budget_outbox(&f.runs[0], true)
+            .unwrap()
+            .requests[0]
+            .request_id,
+        reply.budget.as_ref().unwrap().grants[0].request_id
+    );
+    conn.execute_batch("DROP TRIGGER fail_grant;").unwrap();
+    f.agents[0]
+        .accept_sync_reply(&f.runs[0], &reply.acknowledgements, reply.budget)
+        .unwrap();
+    assert!(f.agents[0].agent_usage(true).unwrap().is_empty());
+    assert_eq!(
+        f.agents[0]
+            .admit_batch(&[admission(&f.rules[0], 88, true)])
+            .unwrap(),
+        vec![Some(88)]
+    );
+}
+
 #[test]
 fn concurrent_nodes_and_replayed_requests_cannot_multiply_a_user_budget() {
     let f = Fixture::new(100, 64, false);

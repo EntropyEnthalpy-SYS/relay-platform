@@ -1103,6 +1103,32 @@ async fn two_real_agents_share_user_quota_refill_without_stream_loss_and_return_
         "idle and stopped agents must return unused reservations"
     );
     wait_usage(&control, &admin, quota + 10).await;
+    let nodes: Value = client
+        .get(format!("{origin}/api/v1/nodes"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut timeouts = 0;
+    for node in nodes.as_array().unwrap() {
+        let meter = &node["stats"]["meter"];
+        assert!(meter["admission_requests"].as_u64().unwrap() > 0);
+        assert!(meter["admission_batches"]["samples"].as_u64().unwrap() > 0);
+        assert!(meter["admission_batches"]["max_us"].as_u64().unwrap() > 0);
+        assert!(meter["budget_wait"]["samples"].as_u64().unwrap() > 0);
+        assert_eq!(meter["budget_waiting"], 0);
+        assert_eq!(meter["failed_batches"], 0);
+        timeouts += meter["budget_timeouts"].as_u64().unwrap();
+    }
+    assert!(
+        timeouts >= 1,
+        "the intentional exhausted request must be observable"
+    );
     stop_server(s).await;
 }
 

@@ -221,7 +221,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                             granted_budget = synced.budget.as_ref().is_some_and(|reply| !reply.grants.is_empty());
                             let db = store.clone();
                             let run=budget_run.clone();
-                            tokio::task::spawn_blocking(move || {db.acknowledge(&synced.acknowledgements)?;if let Some(reply)=synced.budget {db.accept_budget_reply(&run,reply)?;}Ok::<_,anyhow::Error>(())}).await??;
+                            tokio::task::spawn_blocking(move || db.accept_sync_reply(&run, &synced.acknowledgements, synced.budget)).await??;
                             if let Some(config) = synced.config {
                                 ensure!(config.node_id == credential.node_id, "controller sent a different node identity");
                                 if let Some(cached) = store.agent_config()? {
@@ -305,10 +305,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 .await?
                 .error_for_status()?;
             let reply: SyncResponse = bounded_json(response).await?;
-            store.acknowledge(&reply.acknowledgements)?;
-            if let Some(reply) = reply.budget {
-                store.accept_budget_reply(&budget_run, reply)?;
-            }
+            store.accept_sync_reply(&budget_run, &reply.acknowledgements, reply.budget)?;
         }
     };
     if !matches!(

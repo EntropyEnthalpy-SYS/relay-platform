@@ -171,6 +171,8 @@ async def run(args):
                 raise RuntimeError('agent and controller ledgers differ')
             recovery = await api('GET', '/recovery')
             control_metrics = await api('GET', '/control/metrics')
+            node_metrics = [{'name': node['name'], 'meter': node['stats'].get('meter')}
+                            for node in await api('GET', '/nodes')]
             if not recovery['enabled'] or not recovery['healthy']:
                 raise RuntimeError('controller recovery logging was not healthy during the benchmark')
             return {'at_utc': datetime.now(timezone.utc).isoformat(), 'platform': platform.platform(),
@@ -179,6 +181,7 @@ async def run(args):
                     'scope': 'two managed agents on local loopback; shared user budget versus no global budget; both use durable admission; controller recovery logging enabled; no TLS; Python echo',
                     'controller_recovery_log': recovery,
                     'controller_sync_metrics': control_metrics,
+                    'node_meter_metrics': node_metrics,
                     'rounds': args.rounds, 'mib_per_connection': args.mib, 'reservation_quantum_bytes': quantum,
                     'tcp': measurements, 'budget': {'expected_bytes': expected_each_group, 'consumed_bytes': measured_budget['consumed_bytes'],
                     'committed_bytes_after_shutdown': measured_budget['committed_bytes'], 'unused_reserved_bytes_after_shutdown': 0},

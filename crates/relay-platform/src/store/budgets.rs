@@ -315,88 +315,105 @@ impl Store {
         })
     }
     pub fn accept_budget_reply(&self, run: &str, reply: BudgetReply) -> Result<()> {
-        ensure!(
-            reply.grants.len() <= 1024
-                && reply.acknowledgements.len() <= 1024
-                && reply.cancelled_requests.len() <= 1024,
-            "budget response exceeds limit"
-        );
+        self.accept_sync_reply(run, &[], Some(reply))
+    }
+    /// A sync reply has one durable acknowledgement boundary. Invalid grants
+    /// or a later write failure must not confirm earlier usage from that reply.
+    pub fn accept_sync_reply(
+        &self,
+        run: &str,
+        acknowledgements: &[UsageAck],
+        reply: Option<BudgetReply>,
+    ) -> Result<()> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        for id in &reply.cancelled_requests {
+        super::acknowledge_usage(&tx, acknowledgements)?;
+        let notify = reply.is_some();
+        if let Some(reply) = reply {
             ensure!(
-                identifier(id) && !reply.grants.iter().any(|g| &g.request_id == id),
-                "inconsistent reservation cancellation"
+                reply.grants.len() <= 1024
+                    && reply.acknowledgements.len() <= 1024
+                    && reply.cancelled_requests.len() <= 1024,
+                "budget response exceeds limit"
             );
-            tx.execute(
-                "DELETE FROM agent_budget_requests WHERE run_id=?1 AND request_id=?2",
-                params![run, id],
-            )?;
-        }
-        for grant in reply.grants {
-            ensure!(
-                grant.run_id == run
-                    && identifier(&grant.grant_id)
-                    && identifier(&grant.budget_id)
-                    && identifier(&grant.request_id)
-                    && grant.bytes > 0
-                    && grant.bytes <= MAX_COUNTER,
-                "invalid grant"
-            );
-            let request: Option<String> = tx
+            for id in &reply.cancelled_requests {
+                ensure!(
+                    identifier(id) && !reply.grants.iter().any(|g| &g.request_id == id),
+                    "inconsistent reservation cancellation"
+                );
+                tx.execute(
+                    "DELETE FROM agent_budget_requests WHERE run_id=?1 AND request_id=?2",
+                    params![run, id],
+                )?;
+            }
+            for grant in reply.grants {
+                ensure!(
+                    grant.run_id == run
+                        && identifier(&grant.grant_id)
+                        && identifier(&grant.budget_id)
+                        && identifier(&grant.request_id)
+                        && grant.bytes > 0
+                        && grant.bytes <= MAX_COUNTER,
+                    "invalid grant"
+                );
+                let request: Option<String> = tx
                 .query_row(
                     "SELECT request_id FROM agent_budget_requests WHERE budget_id=?1 AND run_id=?2",
                     params![grant.budget_id, run],
                     |r| r.get(0),
                 )
                 .optional()?;
-            let old: Option<(String, String, String, u64)> = tx
+                let old: Option<(String, String, String, u64)> = tx
                 .query_row(
                     "SELECT budget_id,run_id,request_id,bytes FROM agent_budget_grants WHERE id=?1",
                     [&grant.grant_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            if let Some(old) = old {
-                ensure!(
-                    old == (
-                        grant.budget_id.clone(),
-                        grant.run_id.clone(),
-                        grant.request_id.clone(),
-                        grant.bytes
-                    ),
-                    "grant identity changed"
-                );
-            } else {
-                ensure!(
-                    request.as_deref() == Some(&grant.request_id),
-                    "unsolicited grant"
-                );
-                tx.execute("INSERT INTO agent_budget_grants(id,budget_id,request_id,run_id,bytes,state) VALUES(?1,?2,?3,?4,?5,'open')",params![grant.grant_id,grant.budget_id,grant.request_id,run,grant.bytes])?;
+                if let Some(old) = old {
+                    ensure!(
+                        old == (
+                            grant.budget_id.clone(),
+                            grant.run_id.clone(),
+                            grant.request_id.clone(),
+                            grant.bytes
+                        ),
+                        "grant identity changed"
+                    );
+                } else {
+                    ensure!(
+                        request.as_deref() == Some(&grant.request_id),
+                        "unsolicited grant"
+                    );
+                    tx.execute("INSERT INTO agent_budget_grants(id,budget_id,request_id,run_id,bytes,state) VALUES(?1,?2,?3,?4,?5,'open')",params![grant.grant_id,grant.budget_id,grant.request_id,run,grant.bytes])?;
+                }
+                tx.execute(
+                    "DELETE FROM agent_budget_requests WHERE budget_id=?1 AND request_id=?2",
+                    params![grant.budget_id, grant.request_id],
+                )?;
             }
-            tx.execute(
-                "DELETE FROM agent_budget_requests WHERE budget_id=?1 AND request_id=?2",
-                params![grant.budget_id, grant.request_id],
-            )?;
-        }
-        for ack in reply.acknowledgements {
-            let (local, limit, state): (u64, u64, String) = tx.query_row(
-                "SELECT consumed_bytes,bytes,state FROM agent_budget_grants WHERE id=?1",
-                [&ack.grant_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-            ensure!(
-                ack.consumed_bytes <= limit && (state != "open" || ack.consumed_bytes <= local),
-                "budget acknowledgement conflicts with a running grant"
-            );
-            ensure!(
-                !ack.surrender || state != "open",
-                "controller closed a grant not sealed locally"
-            );
-            tx.execute("UPDATE agent_budget_grants SET consumed_bytes=MAX(consumed_bytes,?1),ack_consumed=MAX(ack_consumed,?1),ack_closed=MAX(ack_closed,?2) WHERE id=?3",params![ack.consumed_bytes,ack.surrender,ack.grant_id])?;
+            for ack in reply.acknowledgements {
+                let (local, limit, state): (u64, u64, String) = tx.query_row(
+                    "SELECT consumed_bytes,bytes,state FROM agent_budget_grants WHERE id=?1",
+                    [&ack.grant_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?;
+                ensure!(
+                    ack.consumed_bytes <= limit && (state != "open" || ack.consumed_bytes <= local),
+                    "budget acknowledgement conflicts with a running grant"
+                );
+                ensure!(
+                    !ack.surrender || state != "open",
+                    "controller closed a grant not sealed locally"
+                );
+                tx.execute("UPDATE agent_budget_grants SET consumed_bytes=MAX(consumed_bytes,?1),ack_consumed=MAX(ack_consumed,?1),ack_closed=MAX(ack_closed,?2) WHERE id=?3",params![ack.consumed_bytes,ack.surrender,ack.grant_id])?;
+            }
         }
         tx.commit()?;
-        self.2.updated.notify_waiters();
+        drop(conn);
+        if notify {
+            self.2.updated.notify_waiters();
+        }
         Ok(())
     }
 }

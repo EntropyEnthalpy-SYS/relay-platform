@@ -688,6 +688,8 @@ pub struct UsageAck {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineStats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meter: Option<crate::metrics::MeterStats>,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub active_probes: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -125,3 +125,11 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 `GET /nodes/{id}/health` 返回 `{node_id,applied_revision,desired_revision,apply_error,last_seen_ms,active_probes,expected_endpoints,rule_names,reports}`。报告字段见 HEALTH.md；读取时为采样年龄加上最后心跳后的时间，过期报告显示 stale，不覆盖数据库原始样本。节点未上报或返回空列表时不可推定健康。所有计数表示最后一次节点采样。
 
 能力目录新增 `target-health-checks` 和 `priority-capacity-selection`。目标健康页面与规则编辑器使用相同模型。schema v4 保持不变，需协调升级控制器和 Agent，再启用新字段；成本/延迟自适应调度及跨节点容量租约仍未完成。
+
+## 0.11.0 计量与同步耗时
+
+节点同步 stats 增加可选 `meter`，经现有 `/nodes` 返回；老节点缺省为 null/不提供，不能推断为零等待。新 Agent 总是发送此字段，因此先升级控制器再升级 Agent。SQLite schema v4 不变。
+
+`meter` 包含 `admission_batches,admission_requests,failed_batches,budget_wait,budget_waiting,budget_timeouts`。其中 admission_batches 与 budget_wait 是 `{samples,total_us,max_us}`。控制器 `/control/metrics` 新增相同计时结构的 `queue_time,storage_batch_time,request_time`，仍仅允许系统管理员访问。完整边界、失败采样、并发快照和计时单位见 [DIAGNOSTICS.md](DIAGNOSTICS.md)。
+
+这些数据用于运行诊断，不能替代累计业务账本或触发退款。接收同步回复时，Agent 将用量确认与预算回复在一次本地事务内提交，非法后续回执不会提前确认前面的用量；失败请求可按原身份重试。

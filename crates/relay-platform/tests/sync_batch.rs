@@ -320,6 +320,19 @@ async fn http_coalesces_requests_preserves_response_identity_and_restricts_metri
             let bytes = response.into_body().collect().await.unwrap().to_bytes();
             let metrics: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(metrics["processed_requests"], 4);
+            assert_eq!(metrics["queue_time"]["samples"], 4);
+            assert_eq!(metrics["request_time"]["samples"], 4);
+            assert_eq!(
+                metrics["storage_batch_time"]["samples"],
+                metrics["committed_batches"]
+            );
+            for phase in ["queue_time", "storage_batch_time", "request_time"] {
+                assert!(metrics[phase]["max_us"].as_u64().unwrap() > 0);
+                assert!(
+                    metrics[phase]["total_us"].as_u64().unwrap()
+                        >= metrics[phase]["max_us"].as_u64().unwrap()
+                );
+            }
             assert!(metrics["largest_batch"].as_u64().unwrap() >= 2);
             assert_eq!(
                 f.sequence() - sequence,

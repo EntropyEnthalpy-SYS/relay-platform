@@ -1,4 +1,5 @@
 use crate::{
+    metrics::{Timing, TimingStats},
     model::{SyncRequest, SyncResponse},
     store::{Store, reject},
 };
@@ -14,12 +15,16 @@ const CAPACITY: usize = 64;
 const WINDOW: std::time::Duration = std::time::Duration::from_millis(2);
 
 struct Job {
+    queued_at: tokio::time::Instant,
     token: String,
     request: SyncRequest,
     response: oneshot::Sender<Result<SyncResponse>>,
 }
 #[derive(Default)]
 struct Counters {
+    queue_time: Timing,
+    storage_batch_time: Timing,
+    request_time: Timing,
     batches: AtomicU64,
     requests: AtomicU64,
     max_batch: AtomicU64,
@@ -28,6 +33,9 @@ struct Counters {
 }
 #[derive(Serialize)]
 pub struct SyncQueueStats {
+    pub queue_time: TimingStats,
+    pub storage_batch_time: TimingStats,
+    pub request_time: TimingStats,
     pub committed_batches: u64,
     pub processed_requests: u64,
     pub largest_batch: u64,
@@ -61,6 +69,9 @@ impl SyncQueue {
     pub fn stats(&self) -> SyncQueueStats {
         let c = &self.0.counters;
         SyncQueueStats {
+            queue_time: c.queue_time.snapshot(),
+            storage_batch_time: c.storage_batch_time.snapshot(),
+            request_time: c.request_time.snapshot(),
             committed_batches: c.batches.load(Ordering::Relaxed),
             processed_requests: c.requests.load(Ordering::Relaxed),
             largest_batch: c.max_batch.load(Ordering::Relaxed),
@@ -86,6 +97,7 @@ impl SyncQueue {
         });
         let (response, result) = oneshot::channel();
         match sender.try_send(Job {
+            queued_at: tokio::time::Instant::now(),
             token,
             request,
             response,
@@ -127,7 +139,10 @@ async fn worker(
         }
         let mut inputs = Vec::with_capacity(jobs.len());
         let mut replies = Vec::with_capacity(jobs.len());
+        let mut submitted = Vec::with_capacity(jobs.len());
         for job in jobs {
+            counters.queue_time.record(job.queued_at.elapsed());
+            submitted.push(job.queued_at);
             inputs.push((job.token, job.request));
             replies.push(job.response);
         }
@@ -137,7 +152,12 @@ async fn worker(
         };
         let db = inner.store.clone();
         drop(inner);
+        let began = tokio::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || db.sync_authenticated_batch(inputs)).await;
+        counters.storage_batch_time.record(began.elapsed());
+        for at in submitted {
+            counters.request_time.record(at.elapsed());
+        }
         match result {
             Ok(Ok(responses)) => {
                 counters.batches.fetch_add(1, Ordering::Relaxed);

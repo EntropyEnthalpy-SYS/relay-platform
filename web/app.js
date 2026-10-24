@@ -104,8 +104,28 @@ async function renderNodes() {
   [['节点总数', nodes.length, '当前账号可见的节点'], ['控制在线', nodes.filter(online).length, '最近 30 秒收到心跳'], ['活跃连接', nodes.filter(online).reduce((s, n) => s + n.stats.active_tcp + n.stats.active_udp, 0), '在线节点的 TCP + UDP 会话'], ['近期上报负载', bytes(usage.reduce((s, u) => s + u.upload_bytes + u.download_bytes, 0)), '最近 2,000 个计量周期 · 上下行合计']].forEach(([title, value, foot]) => { const n = el('div', undefined, 'metric'); n.append(el('div', title, 'metric-label'), el('div', String(value), 'metric-value'), el('div', foot, 'metric-foot')); metric.append(n); });
   const p = panel('节点', '注册节点、确认配置生效，并检查实际回报。', canWrite() ? button('＋ 注册节点', newNode, 'primary') : null);
   if (!nodes.length) p.append(empty('接入你的第一个节点', '注册生成一次性令牌，在节点启动 Agent 后即可配置转发。', canWrite() ? button('注册节点', newNode, 'primary') : null));
-  else p.append(table(['节点 / ID', '控制连接', '配置修订', '活跃会话', '最近回报', '操作'], nodes.map(node => [namedCell(node.name, node.id), badge(node.enrolled ? online(node) ? '● 控制在线' : '○ 无近期回报' : '待注册', online(node) ? 'green' : ''), node.apply_error ? namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`, node.apply_error) : badge(`${node.applied_revision} / ${node.desired_revision}`, node.applied_revision === node.desired_revision && node.enrolled ? 'green' : 'orange'), online(node) ? `${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP` : '—', timestamp(node.last_seen_ms), button('管理规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action')])));
+  else p.append(table(['节点 / ID', '控制连接', '配置修订', '活跃会话', '最近回报', '操作'], nodes.map(node => [namedCell(node.name, node.id), badge(node.enrolled ? online(node) ? '● 控制在线' : '○ 无近期回报' : '待注册', online(node) ? 'green' : ''), node.apply_error ? namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`, node.apply_error) : badge(`${node.applied_revision} / ${node.desired_revision}`, node.applied_revision === node.desired_revision && node.enrolled ? 'green' : 'orange'), online(node) ? `${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP` : '—', timestamp(node.last_seen_ms), nodeActions(node)])));
   if (state.view === 'nodes') $('#content').replaceChildren(metric, p);
+}
+function timingRow(label, value) {
+  if (!value) return [label, '未提供', '—', '—'];
+  return [label, String(value.samples), value.samples ? (value.total_us / value.samples / 1000).toFixed(3) : '—', value.samples ? (value.max_us / 1000).toFixed(3) : '—'];
+}
+function nodeActions(node) {
+  const actions = el('div');
+  actions.append(button('管理规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button('运行诊断', () => nodeDiagnostics(node), 'table-action'));
+  return actions;
+}
+function nodeDiagnostics(node) {
+  const body = el('div'), stats = node.stats, meter = stats.meter;
+  body.append(el('p', `${node.name} · 最近回报 ${timestamp(node.last_seen_ms)}`), el('p', online(node) ? '以下为最近一次节点采样。' : '节点没有近期回报，以下是旧采样。', 'fine'));
+  if (!meter) body.append(empty('尚无计量诊断', '节点需要支持计量诊断的版本，并完成一次状态上报。'));
+  else {
+    body.append(table(['诊断阶段', '已完成采样数', '平均 / ms', '最大 / ms'], [timingRow('本地计量批次', meter.admission_batches), timingRow('额度等待片段', meter.budget_wait)]));
+    body.append(table(['项目', '最近采样'], [['计量请求（包含重试）', meter.admission_requests], ['计量批次失败', meter.failed_batches], ['正在等待额度的方向 / 会话', meter.budget_waiting], ['额度等待超时', meter.budget_timeouts], ['累计额度等待 / 秒', (meter.budget_wait.total_us / 1000000).toFixed(3)], ['活跃 TCP / UDP / 探测', `${stats.active_tcp} / ${stats.active_udp} / ${stats.active_probes || 0}`]]));
+    body.append(el('p', '本地计量耗时包括线程池调度、数据库锁等待与事务执行，不是纯磁盘时间。额度等待按每次休眠片段计数，包含被取消的片段；并发等待时间可重叠相加。统计从进程启动累计，不作为用量或额度依据。', 'fine'));
+  }
+  modal('节点运行诊断', body);
 }
 function newNode() { const form = el('form'); field(form, 'name', '节点名称', '', 'text').maxLength = 120; form.append(el('p', '节点归属当前租户；注册令牌仅显示一次，并在成功注册后失效。', 'fine')); submit(form, '创建节点', async data => { const result = await api('/nodes', { method: 'POST', body: { name: data.get('name') } }); const body = el('div'); body.append(el('p', '请将此令牌保存为节点上的私有文件（权限 0600）。'), el('div', result.enrollment_token, 'secret-box')); const command = `relay agent --controller ${location.origin} --node-id ${result.node.id} --enrollment-token-file /path/to/enrollment.secret --state /var/lib/relay-agent`; body.append(el('p', '节点启动命令', 'fine'), el('pre', command), el('p', '跨机器接入须使用 HTTPS 控制地址。本机 HTTP 地址仅用于本地验收。', 'fine'), button('我已保存令牌', () => $('#dialog').close(), 'primary')); $('#dialog').close(); modal('节点已创建 · 保存一次性令牌', body); state.selectedNode = result.node.id; await renderNodes(); }); modal('注册节点', form); }
 
@@ -240,6 +260,7 @@ async function renderRecovery() {
     ['已处理请求', metrics.processed_requests], ['完成提交批次', metrics.committed_batches],
     ['最大合并请求数', metrics.largest_batch], ['拥塞退回', metrics.queue_full_rejections], ['提交失败', metrics.failed_batches]
   ]));
+  body.append(table(['同步阶段', '采样数', '平均 / ms', '最大 / ms'], [timingRow('排队与合并', metrics.queue_time), timingRow('数据库处理批次', metrics.storage_batch_time), timingRow('请求处理总时间', metrics.request_time)]), el('p', '数据库阶段包含线程池、数据库锁、SQL 和恢复日志提交；总时间到持久化结果返回，不包含响应传输与 Agent 本地写入。失败的已处理请求也计入耗时，429 拥塞退回不计入。', 'fine'));
   p.append(body); if (state.view === 'recovery') $('#content').replaceChildren(p);
 }
 

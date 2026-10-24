@@ -1,0 +1,27 @@
+Intentional red regression against 0.10.0 source, before the fix.
+Base commit: c4176dd28f04fc0647c1da536eb10748c4a6d957
+Only the new committed_refill_between_admission_and_wait_is_visible_to_every_waiter test had been added to tests/budgets.rs.
+The production implementation was unchanged for this run.
+
+   Compiling relay-platform v0.10.0 (/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/crates/relay-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running tests/budgets.rs (target/debug/deps/budgets-017be142de49495d)
+
+running 1 test
+test committed_refill_between_admission_and_wait_is_visible_to_every_waiter ... FAILED
+
+failures:
+
+---- committed_refill_between_admission_and_wait_is_visible_to_every_waiter stdout ----
+
+thread 'committed_refill_between_admission_and_wait_is_visible_to_every_waiter' (4766274) panicked at crates/relay-platform/tests/budgets.rs:177:14:
+durable refill was lost before waiting began: Elapsed(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    committed_refill_between_admission_and_wait_is_visible_to_every_waiter
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.34s
+
+error: test failed, to rerun pass `--test budgets`

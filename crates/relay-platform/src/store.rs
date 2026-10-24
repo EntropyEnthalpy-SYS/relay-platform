@@ -19,6 +19,23 @@ mod recovery;
 mod sync;
 mod topology;
 
+fn acknowledge_usage(tx: &Transaction<'_>, acks: &[UsageAck]) -> Result<()> {
+    ensure!(acks.len() <= 1024, "too many usage acknowledgements");
+    for ack in acks {
+        let sequence: u64 = tx.query_row(
+            "SELECT sequence FROM agent_meters WHERE rule_id=?1 AND meter_epoch=?2",
+            params![ack.rule_id, ack.meter_epoch],
+            |r| r.get(0),
+        )?;
+        ensure!(
+            ack.sequence <= sequence,
+            "controller acknowledgement is ahead of local ledger"
+        );
+        tx.execute("UPDATE agent_meters SET ack_sequence=MAX(ack_sequence,?1) WHERE rule_id=?2 AND meter_epoch=?3",params![ack.sequence,ack.rule_id,ack.meter_epoch])?;
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct Rejection {
     pub status: u16,
@@ -638,8 +655,10 @@ impl Store {
     pub async fn budget_refill_needed(&self) {
         self.2.refill.notified().await;
     }
-    pub async fn budget_updated(&self) {
-        self.2.updated.notified().await;
+    pub fn budget_updated(&self) -> impl std::future::Future<Output = ()> + '_ {
+        // Construct before checking credit: notify_waiters remembers changes
+        // since construction even if the future has not been polled yet.
+        self.2.updated.notified()
     }
     pub fn admit_batch_detailed(&self, requests: &[Admission]) -> Result<Vec<AdmissionDecision>> {
         let mut conn = self.0.lock().unwrap();
@@ -733,18 +752,7 @@ impl Store {
     pub fn acknowledge(&self, acks: &[UsageAck]) -> Result<()> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        for ack in acks {
-            let sequence: u64 = tx.query_row(
-                "SELECT sequence FROM agent_meters WHERE rule_id=?1 AND meter_epoch=?2",
-                params![ack.rule_id, ack.meter_epoch],
-                |r| r.get(0),
-            )?;
-            ensure!(
-                ack.sequence <= sequence,
-                "controller acknowledgement is ahead of local ledger"
-            );
-            tx.execute("UPDATE agent_meters SET ack_sequence=MAX(ack_sequence,?1) WHERE rule_id=?2 AND meter_epoch=?3",params![ack.sequence,ack.rule_id,ack.meter_epoch])?;
-        }
+        acknowledge_usage(&tx, acks)?;
         tx.commit()?;
         Ok(())
     }

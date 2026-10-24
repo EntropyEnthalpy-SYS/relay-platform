@@ -1,6 +1,7 @@
 use crate::{
     datagram,
     health::{self, HealthSet, Observation},
+    metrics::{MeterStats, Timing},
     model::*,
     network::{self, TargetResolver},
     proxy::{self, ConnectionInfo},
@@ -49,6 +50,7 @@ struct Counters {
 impl Counters {
     fn snapshot(&self) -> EngineStats {
         EngineStats {
+            meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),
             target_health: vec![],
             active_tcp: self.active_tcp.load(Ordering::Relaxed),
@@ -67,15 +69,34 @@ struct MeterMessage {
     request: Option<Admission>,
     response: oneshot::Sender<Result<AdmissionDecision>>,
 }
+#[derive(Default)]
+struct MeterCounters {
+    batches: Timing,
+    requests: AtomicU64,
+    failures: AtomicU64,
+    waits: Timing,
+    waiting: AtomicU64,
+    timeouts: AtomicU64,
+}
+struct BudgetWaitGuard(Arc<MeterCounters>, Instant);
+impl Drop for BudgetWaitGuard {
+    fn drop(&mut self) {
+        self.0.waits.record(self.1.elapsed());
+        self.0.waiting.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 #[derive(Clone)]
 struct Meter {
     sender: mpsc::Sender<MeterMessage>,
     store: Store,
+    counters: Arc<MeterCounters>,
 }
 impl Meter {
     fn new(store: Store) -> Self {
         let (sender, mut receiver) = mpsc::channel::<MeterMessage>(1024);
         let actor_store = store.clone();
+        let counters = Arc::new(MeterCounters::default());
+        let worker_counters = counters.clone();
         tokio::spawn(async move {
             while let Some(first) = receiver.recv().await {
                 let mut batch = vec![first];
@@ -86,9 +107,15 @@ impl Meter {
                     }
                 }
                 let requests: Vec<_> = batch.iter().filter_map(|m| m.request.clone()).collect();
+                let count = requests.len() as u64;
                 let db = actor_store.clone();
+                let began = Instant::now();
                 let result =
                     tokio::task::spawn_blocking(move || db.admit_batch_detailed(&requests)).await;
+                if count > 0 {
+                    worker_counters.batches.record(began.elapsed());
+                    worker_counters.requests.fetch_add(count, Ordering::Relaxed);
+                }
                 match result {
                     Ok(Ok(values)) => {
                         let mut iter = values.into_iter();
@@ -102,6 +129,9 @@ impl Meter {
                         }
                     }
                     error => {
+                        if count > 0 {
+                            worker_counters.failures.fetch_add(1, Ordering::Relaxed);
+                        }
                         tracing::error!(?error, "durable metering failed; rejecting payload");
                         for message in batch {
                             let _ = message
@@ -112,7 +142,21 @@ impl Meter {
                 }
             }
         });
-        Self { sender, store }
+        Self {
+            sender,
+            store,
+            counters,
+        }
+    }
+    fn stats(&self) -> MeterStats {
+        MeterStats {
+            admission_batches: self.counters.batches.snapshot(),
+            admission_requests: self.counters.requests.load(Ordering::Relaxed),
+            failed_batches: self.counters.failures.load(Ordering::Relaxed),
+            budget_wait: self.counters.waits.snapshot(),
+            budget_waiting: self.counters.waiting.load(Ordering::Relaxed),
+            budget_timeouts: self.counters.timeouts.load(Ordering::Relaxed),
+        }
     }
     async fn admit(
         &self,
@@ -123,6 +167,7 @@ impl Meter {
     ) -> Result<Option<usize>> {
         let deadline = Instant::now() + Duration::from_millis(rule.connect_timeout_ms);
         loop {
+            let budget_updated = self.store.budget_updated();
             let (tx, rx) = oneshot::channel();
             self.sender
                 .send(MeterMessage {
@@ -142,9 +187,12 @@ impl Meter {
                 AdmissionDecision::Rejected => return Ok(None),
                 AdmissionDecision::AwaitingBudget => {
                     if Instant::now() >= deadline {
+                        self.counters.timeouts.fetch_add(1, Ordering::Relaxed);
                         return Ok(None);
                     }
-                    tokio::select! {_=self.store.budget_updated()=>{},_=sleep_until((Instant::now()+Duration::from_millis(50)).min(deadline))=>{}}
+                    self.counters.waiting.fetch_add(1, Ordering::Relaxed);
+                    let _wait = BudgetWaitGuard(self.counters.clone(), Instant::now());
+                    tokio::select! {_=budget_updated=>{},_=sleep_until((Instant::now()+Duration::from_millis(50)).min(deadline))=>{}}
                 }
             }
         }
@@ -629,6 +677,7 @@ impl Engine {
     }
     pub fn stats(&self) -> EngineStats {
         let mut stats = self.stats.snapshot();
+        stats.meter = Some(self.meter.stats());
         for runtime in self.health_runtimes.lock().unwrap().iter() {
             if let Some(health) = &runtime.health {
                 stats
