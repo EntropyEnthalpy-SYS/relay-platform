@@ -1,6 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
-const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', 'client-subscriptions': '客户端订阅', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
+const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = { read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' };
@@ -904,14 +904,53 @@ async function deleteSubscription(item) {
 }
 
 async function renderUsage() { const records = await api('/usage'); const p = panel('已接纳应用负载', '累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。'); if (!records.length) p.append(empty('还没有流量记录', '让一条转发规则通过真实流量，Agent 会在同步后上报。')); else p.append(table(['规则 / 周期', '节点', '上行', '下行', '序号', '最近上报'], records.map(r => [namedCell(r.rule_id, r.meter_epoch), r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)]))); if (state.view === 'usage') $('#content').replaceChildren(p); }
-async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后该用户已有的 Web 会话和 API 令牌立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '两步验证', '跨节点总限速', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.mfa_enabled ? badge('已启用', 'green') : badge('未启用'), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge('不限速'), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
+async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销、停用、改密或删除后，该用户已有的 Web 会话和 API 令牌立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '状态', '两步验证', '跨节点总限速', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.disabled ? badge('已停用', 'red') : badge('启用', 'green'), u.mfa_enabled ? badge('已启用', 'green') : badge('未启用'), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge('不限速'), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function userActions(u) {
   if (!canWrite() && u.id !== state.actor.id) return '—';
   const actions = el('div');
   actions.append(button('撤销全部会话', async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify('该用户现有会话和 API 令牌已撤销。'); }, 'table-action'));
   if (state.actor.role === 'system_admin' || u.rate_bytes_per_sec) actions.append(button('总限速', () => editUserRate(u), 'table-action'));
+  if (canWrite() && u.id !== state.actor.id) {
+    actions.append(button('改密', () => adminPassword(u), 'table-action'));
+    actions.append(button(u.disabled ? '启用' : '停用', () => toggleUserDisabled(u), 'table-action'));
+    actions.append(button('删除', () => deleteUser(u), 'table-action danger'));
+  }
   if (canWrite() && u.mfa_enabled && u.id !== state.actor.id) actions.append(button('重置两步验证', async () => { if (!confirm(`重置 ${u.username} 的两步验证？其会话和 API 令牌会同时失效；之后可只用密码登录并重新启用。`)) return; await api(`/users/${u.id}/mfa/reset`, { method: 'POST' }); notify(`${u.username} 的两步验证已重置。`); await renderUsers(); }, 'table-action danger'));
   return actions;
+}
+function adminPassword(u) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'password', `为 ${u.username} 设置新密码`, '', 'password').maxLength = 1024;
+  form.append(grid, el('p', '保存后该用户的全部 Web 会话和 API 令牌立即失效，需要使用新密码重新登录。密码至少 12 字节。', 'fine'));
+  submit(form, '重置密码', async data => {
+    await api(`/users/${u.id}/password`, { method: 'POST', body: { password: String(data.get('password')) } });
+    $('#dialog').close(); notify(`${u.username} 的密码已重置。`); await renderUsers();
+  });
+  modal(`重置密码 · ${u.username}`, form);
+}
+async function toggleUserDisabled(u) {
+  if (!confirm(`${u.disabled ? '启用' : '停用'} ${u.username}？${u.disabled ? '旧密码仍有效，可重新登录。' : '现有会话和 API 令牌会立即失效，之后可重新启用。'}`)) return;
+  await api(`/users/${u.id}/disabled`, { method: 'PUT', body: { disabled: !u.disabled } });
+  notify(`${u.username} 已${u.disabled ? '启用' : '停用'}。`); await renderUsers();
+}
+async function deleteUser(u) {
+  if (!confirm(`永久删除 ${u.username}？其会话、API 令牌、两步验证和限速设置会删除；拥有规则或订阅时服务端会拒绝。`)) return;
+  await api(`/users/${u.id}`, { method: 'DELETE' });
+  notify(`${u.username} 已删除。`); await renderUsers();
+}
+async function changeOwnPassword() {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'current', '当前密码', '', 'password').maxLength = 1024;
+  field(grid, 'next', '新密码（至少 12 字节）', '', 'password').maxLength = 1024;
+  field(grid, 'confirm', '再次输入新密码', '', 'password').maxLength = 1024;
+  form.append(grid, el('p', '修改成功后当前会话保留，其他 Web 会话失效；API 令牌不受影响。忘记当前密码时需其他管理员重置。', 'fine'));
+  submit(form, '修改密码', async data => {
+    const next = String(data.get('next'));
+    if (next !== String(data.get('confirm'))) throw new Error('两次输入的新密码不一致');
+    await api('/account/password', { method: 'POST', body: { current_password: String(data.get('current')), new_password: next } });
+    $('#dialog').close(); notify('密码已修改。'); await renderAccount();
+  });
+  modal('修改登录密码', form);
 }
 async function editUserRate(u) {
   const [view, nodes] = await Promise.all([api(`/users/${u.id}/rate`), api('/nodes').catch(() => [])]);
@@ -933,10 +972,12 @@ async function renderAccount() {
   for (const [label, value] of [['状态', factor.enabled ? badge('已启用', 'green') : badge(factor.pending ? '设置未完成' : '未启用', factor.pending ? 'orange' : '')], ...(factor.enabled ? [['剩余恢复码', badge(`${factor.recovery_codes_remaining} 个`, factor.recovery_codes_remaining <= 2 ? 'orange' : '')]] : [])]) { const row = el('div', undefined, 'capability'); row.append(el('span', label), value); status.append(row); }
   status.append(el('p', factor.enabled ? '手机丢失时可用恢复码登录；恢复码用完或丢失时，请其他管理员在“用户与权限”中重置。' : '启用后，此账号的每次登录都需要验证码。API 令牌不受影响，但只能在登录后创建。', 'fine'));
   security.append(status);
+  const password = panel('登录密码', '修改后当前会话保留，其他 Web 会话失效；API 令牌不受影响。', button('修改密码', changeOwnPassword, 'primary'));
+  password.append(el('p', '密码至少 12 字节。忘记密码时请其他管理员在“用户与权限”中重置。', 'fine'));
   const keys = panel('API 令牌', '供脚本和自动化调用 API。令牌权限是所选范围与你的角色权限的交集；令牌不能创建令牌或修改两步验证。', button('＋ 创建令牌', createApiToken, 'primary'));
   if (!tokens.length) keys.append(empty('尚无 API 令牌', '令牌创建后只显示一次，到期后自动失效。'));
   else keys.append(table(['名称', '权限范围', '创建时间', '到期时间', '操作'], tokens.map(t => [namedCell(t.name, t.id), t.scopes.map(scope => scopeNames[scope] || scope).join('、'), timestamp(t.created_at_ms), t.expires_at_ms <= Date.now() ? badge('已过期', 'red') : timestamp(t.expires_at_ms), button('撤销', async () => { if (!confirm(`撤销令牌“${t.name}”？使用它的脚本将立即失效。`)) return; await api(`/api-tokens/${t.id}`, { method: 'DELETE' }); notify('令牌已撤销。'); await renderAccount(); }, 'table-action danger')])));
-  const page = el('div'); page.append(security, keys);
+  const page = el('div'); page.append(password, security, keys);
   if (state.view === 'account') $('#content').replaceChildren(page);
 }
 function setupSecondFactor() {

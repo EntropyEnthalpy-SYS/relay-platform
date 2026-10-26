@@ -253,6 +253,13 @@ pub fn router(state: AppState) -> Router {
             post(revoke_sessions),
         )
         .route("/api/v1/users/{user}/mfa/reset", post(reset_second_factor))
+        .route("/api/v1/account/password", post(change_password))
+        .route("/api/v1/users/{user}/password", post(reset_user_password))
+        .route(
+            "/api/v1/users/{user}/disabled",
+            axum::routing::put(set_user_disabled),
+        )
+        .route("/api/v1/users/{user}", delete(delete_user))
         .route(
             "/api/v1/users/{user}/rate",
             get(user_rate).put(set_user_rate),
@@ -687,6 +694,67 @@ async fn users(
     Ok(Json(
         database(state.store, move |db| db.users(&actor)).await?,
     ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChangePassword {
+    current_password: String,
+    new_password: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdminPassword {
+    password: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetUserDisabled {
+    disabled: bool,
+}
+async fn change_password(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    headers: HeaderMap,
+    Json(input): Json<ChangePassword>,
+) -> ApiResult<serde_json::Value> {
+    let token = bearer(&headers)?;
+    database(state.store, move |db| {
+        db.change_password(&actor, &input.current_password, &input.new_password, &token)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn reset_user_password(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+    Json(input): Json<AdminPassword>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.reset_password(&actor, &user, &input.password)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn set_user_disabled(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+    Json(input): Json<SetUserDisabled>,
+) -> ApiResult<serde_json::Value> {
+    let disabled = database(state.store, move |db| {
+        db.set_user_disabled(&actor, &user, input.disabled)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"disabled": disabled})))
+}
+async fn delete_user(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_user(&actor, &user)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

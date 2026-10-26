@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.23.0 开发版在 macOS 27.0.1 arm64 通过 **337 项自动化测试（308 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 338 项。日志见 [verification-0.23.0.txt](verification-0.23.0.txt)，逐项清单见 [validation-evidence-0.23.0.json](validation-evidence-0.23.0.json)。
+0.24.0 开发版在 macOS 27.0.1 arm64 通过 **339 项自动化测试（310 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 340 项。日志见 [verification-0.24.0.txt](verification-0.24.0.txt)，逐项清单见 [validation-evidence-0.24.0.json](validation-evidence-0.24.0.json)。
 
-## 0.23.0 DNS 健康摘除验证
+## 0.24.0 账号生命周期验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 本人改密错误当前密码 403；旧密码失效；其他会话失效、当前会话保留；管理员重置撤销全部会话/API 令牌；停用/启用；删除；自停用/自删除拒绝 |
+| HTTP | 真实登录、改密、停用、启用、管理员重置、删除路由；旧密码 401、停用后 401、删除后 401；用户列表 `disabled` |
+| 面板 | `node --check web/app.js` 通过；用户页/账户页新增改密、停用、删除按钮，未做浏览器点击验收 |
+
+## 0.23.0 DNS 健康摘除验证（历史）
+
+0.23.0 开发版在 macOS 27.0.1 arm64 通过 **337 项自动化测试（308 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 338 项。日志见 [verification-0.23.0.txt](verification-0.23.0.txt)，逐项清单见 [validation-evidence-0.23.0.json](validation-evidence-0.23.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

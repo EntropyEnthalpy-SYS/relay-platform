@@ -336,3 +336,14 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 ## 0.23.0 DNS 健康摘除
 
 记录创建/更新可带 `health:{node_id,rule_id}`，同步器要求节点心跳不超过 90 秒、节点资料为活动状态，并且该规则至少有一个 `eligible=true` 且 `status=healthy` 的目标报告；否则观察模式报告 `would-health-remove`，应用模式删除服务商记录，恢复后下一次同步重建。更新时 `clear_health:true` 移除门控。`min_keep` 以“本地启用且健康门控通过”的记录数计算。健康门控测试直接写入真实 `nodes.stats_json` 结构，但没有启动真实 Agent 产生探测流量。
+
+## 0.24.0 账号生命周期
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/account/password` | 本人改密 `{current_password,new_password}`；复核当前密码，保留当前会话、撤销其他 Web 会话 |
+| POST | `/users/{id}/password` | 管理员重置密码 `{password}`；撤销目标全部 Web 会话和 API 令牌 |
+| PUT | `/users/{id}/disabled` | `{disabled}`；停用撤销全部凭据，禁止停用自己，保护最后一个系统管理员 |
+| DELETE | `/users/{id}` | 删除账号；禁止删除自己；目标有规则或订阅时 409；删除会话、令牌、MFA 和限速元数据 |
+
+`/account/password` 只接受登录会话，API 令牌按 `account/` 前缀拒绝。`/users/*` 写入仍受角色、租户和 `users:write` 范围约束。密码 12..1024 字节。停用/启用不恢复旧会话或 API 令牌；删除用户前必须删除或转移其规则/订阅。用户列表新增 `disabled` 字段。

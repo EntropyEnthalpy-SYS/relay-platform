@@ -131,6 +131,7 @@ pub struct SecondFactorSetup {
 pub struct UserSummary {
     #[serde(flatten)]
     pub user: Actor,
+    pub disabled: bool,
     pub mfa_enabled: bool,
     /// Combined bytes/second across every node, if limited.
     pub rate_bytes_per_sec: Option<u64>,
@@ -238,13 +239,14 @@ impl Store {
     }
     pub fn users(&self, actor: &Actor) -> Result<Vec<UserSummary>> {
         let conn = self.0.lock().unwrap();
-        let mut q = conn.prepare("SELECT u.id,u.tenant_id,u.username,u.role,COALESCE(json_extract(m.value,'$.enabled'),0),CAST(r.value AS INTEGER) FROM users u LEFT JOIN metadata m ON m.key='user_mfa:'||u.id LEFT JOIN metadata r ON r.key='user_rate:'||u.id WHERE (?1='system_admin' OR u.tenant_id=?2) ORDER BY u.username")?;
+        let mut q = conn.prepare("SELECT u.id,u.tenant_id,u.username,u.role,u.disabled,COALESCE(json_extract(m.value,'$.enabled'),0),CAST(r.value AS INTEGER) FROM users u LEFT JOIN metadata m ON m.key='user_mfa:'||u.id LEFT JOIN metadata r ON r.key='user_rate:'||u.id WHERE (?1='system_admin' OR u.tenant_id=?2) ORDER BY u.username")?;
         Ok(
             q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
                 Ok(UserSummary {
                     user: actor_row(r)?,
-                    mfa_enabled: r.get(4)?,
-                    rate_bytes_per_sec: r.get(5)?,
+                    disabled: r.get(4)?,
+                    mfa_enabled: r.get(5)?,
+                    rate_bytes_per_sec: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -336,6 +338,154 @@ impl Store {
         conn.query_row("SELECT u.id,u.tenant_id,u.username,u.role FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.hash=?1 AND s.expires_at_ms>?2 AND u.disabled=0", params![token_hash(token),now_ms()], actor_row).optional()?
             .map(|actor| Ok((actor, None)))
             .unwrap_or_else(|| reject(401, "session expired or invalid"))
+    }
+    /// Self-service password change. The caller's current session is retained;
+    /// every other web session is revoked. API tokens are independent and stay
+    /// valid until explicitly revoked.
+    pub fn change_password(
+        &self,
+        actor: &Actor,
+        current: &str,
+        new: &str,
+        keep_token: &str,
+    ) -> Result<()> {
+        self.confirm_password(actor, current)?;
+        let hash = password_hash(new).map_err(|error| Rejection {
+            status: 400,
+            message: error.to_string(),
+        })?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE users SET password_hash=?1 WHERE id=?2 AND disabled=0",
+            params![hash, actor.id],
+        )?;
+        tx.execute(
+            "DELETE FROM sessions WHERE user_id=?1 AND hash<>?2",
+            params![actor.id, token_hash(keep_token)],
+        )?;
+        audit(&tx, &actor.id, "account.password", &actor.id, "{}")?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Administrative password reset. All sessions and API tokens of the
+    /// target are revoked so an old credential cannot survive the reset.
+    pub fn reset_password(&self, actor: &Actor, user_id: &str, new: &str) -> Result<()> {
+        let hash = password_hash(new).map_err(|error| Rejection {
+            status: 400,
+            message: error.to_string(),
+        })?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let target = accounts::require_user_manager(&tx, actor, user_id)?;
+        tx.execute(
+            "UPDATE users SET password_hash=?1 WHERE id=?2",
+            params![hash, target.id],
+        )?;
+        accounts::end_credentials(&tx, &target.id)?;
+        audit(&tx, &actor.id, "user.password", &target.id, "{}")?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Pauses or resumes an account. Disabling revokes every session and API
+    /// token; the account can be re-enabled later without its old credentials.
+    pub fn set_user_disabled(&self, actor: &Actor, user_id: &str, disabled: bool) -> Result<bool> {
+        if actor.id == user_id {
+            return reject(400, "you cannot disable your own account");
+        }
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let target = accounts::require_user_manager(&tx, actor, user_id)?;
+        if disabled && target.role == Role::SystemAdmin {
+            let remaining: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM users WHERE role='system_admin' AND disabled=0 AND id<>?1",
+                [&target.id],
+                |r| r.get(0),
+            )?;
+            if remaining == 0 {
+                return reject(409, "cannot disable the last active system administrator");
+            }
+        }
+        tx.execute(
+            "UPDATE users SET disabled=?1 WHERE id=?2",
+            params![disabled, target.id],
+        )?;
+        if disabled {
+            accounts::end_credentials(&tx, &target.id)?;
+        }
+        audit(
+            &tx,
+            &actor.id,
+            if disabled {
+                "user.disable"
+            } else {
+                "user.enable"
+            },
+            &target.id,
+            "{}",
+        )?;
+        tx.commit()?;
+        Ok(disabled)
+    }
+
+    /// Deletes an account only after its owned rules and subscriptions are
+    /// removed; this avoids silently orphaning tenant resources. Sessions,
+    /// API tokens, MFA material and rate metadata are removed atomically.
+    pub fn delete_user(&self, actor: &Actor, user_id: &str) -> Result<()> {
+        if actor.id == user_id {
+            return reject(400, "you cannot delete your own account");
+        }
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let target = accounts::require_user_manager(&tx, actor, user_id)?;
+        if target.role == Role::SystemAdmin {
+            let remaining: u64 = tx.query_row(
+                "SELECT COUNT(*) FROM users WHERE role='system_admin' AND disabled=0 AND id<>?1",
+                [&target.id],
+                |r| r.get(0),
+            )?;
+            if remaining == 0 {
+                return reject(409, "cannot delete the last active system administrator");
+            }
+        }
+        let owned_rules: u64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM rule_bindings WHERE owner_id=?1",
+                [&target.id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if owned_rules > 0 {
+            return reject(
+                409,
+                "delete or reassign this user's rules before deleting the account",
+            );
+        }
+        let subscriptions: u64 = tx.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key GLOB 'subscription:*' AND key NOT GLOB 'subscription_token:*' AND json_extract(value,'$.owner_id')=?1",
+            [&target.id],
+            |r| r.get(0),
+        )?;
+        if subscriptions > 0 {
+            return reject(
+                409,
+                "delete this user's subscriptions before deleting the account",
+            );
+        }
+        accounts::end_credentials(&tx, &target.id)?;
+        tx.execute(
+            "DELETE FROM metadata WHERE key IN (?1,?2)",
+            params![
+                format!("user_mfa:{}", target.id),
+                format!("user_rate:{}", target.id)
+            ],
+        )?;
+        tx.execute("DELETE FROM users WHERE id=?1", [&target.id])?;
+        audit(&tx, &actor.id, "user.delete", &target.id, "{}")?;
+        tx.commit()?;
+        Ok(())
     }
 }
 
