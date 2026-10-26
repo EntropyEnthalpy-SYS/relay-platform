@@ -315,3 +315,20 @@ Shadowsocks：TCP 重放盐缓存按（方式、密钥）在进程内共享。�
 `format` 为 `v2ray`、`clash`、`surge`、`shadowrocket`。`template` 为 `{name_prefix,host,node_tags,udp}`，创建时保存为快照；`host` 覆盖连接地址，`node_tags` 过滤节点，通配监听且无 `advertise`/`host` 的规则会被跳过。端口段展开为多个条目。只支持 Shadowsocks 入站；其他协议在预览的 `skipped` 中给出原因。
 
 权限：读取列表/预览需要 `read`，创建/轮换/删除需要 `users:write`，并同时受账号角色与租户边界限制；只读用户不能写入。系统管理员可见全部，租户管理员可见本租户普通用户，普通用户只管理自己。令牌只保存 SHA-256 哈希；记录和索引写入 metadata，应用 schema 仍为 v5、恢复日志格式 4 不变。0.20.0 二进制忽略这些键，回退会丢失订阅服务但不会删除数据。详见 [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)。
+
+## 0.22.0 DNS 托管记录与 DDNS
+
+DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日志格式 4。所有 `/dns/*` 接口仅系统管理员，且只接受登录会话；API 令牌访问返回 403。服务商读取只返回 `token_set`，不返回令牌原文。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/dns/providers` | 服务商列表/创建 `{name,kind,endpoint,token}` |
+| GET/PUT/DELETE | `/dns/providers/{id}` | 读取（脱敏）/更新（令牌留空保留）/删除；有区域时 409 |
+| GET/POST | `/dns/zones` | 区域列表/创建 `{provider_id,name,mode,min_keep}` |
+| GET/PUT/DELETE | `/dns/zones/{id}` | 读取/更新/删除；有记录时 409 |
+| GET/POST | `/dns/zones/{id}/records` | 记录列表/创建 `{name,type,content,ttl,proxied}` |
+| GET/PUT/DELETE | `/dns/records/{id}` | 记录读取/更新/删除；应用模式删除时清理服务商记录 |
+| POST | `/dns/zones/{id}/reconcile` | 观察或应用同步，返回创建/更新/删除/未变/保留/错误和逐条 action |
+| POST | `/dns/records/{id}/ddns` | `{content}` 更新 A/AAAA 并同步；CNAME 返回 400 |
+
+`mode=observe` 不写服务商，`apply` 只管理带 `relay:<record id>` 注释的记录。`min_keep` 在删除停用记录时保护启用的托管记录数。DDNS 不自动探测公网 IP；服务商只证明 API 接受，不证明 DNS 已传播。详见 [DNS.md](DNS.md)。

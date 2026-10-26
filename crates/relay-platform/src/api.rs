@@ -169,6 +169,7 @@ async fn require_session(
 fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     let path = path.strip_prefix("/api/v1/").unwrap_or(path);
     if path.starts_with("account/")
+        || path.starts_with("dns/")
         || path.starts_with("api-tokens")
         || path.ends_with("/mfa/reset")
         || path == "auth/logout"
@@ -278,6 +279,33 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/subscriptions/{id}/preview",
             get(preview_subscription),
         )
+        .route(
+            "/api/v1/dns/providers",
+            get(dns_providers).post(create_dns_provider),
+        )
+        .route(
+            "/api/v1/dns/providers/{id}",
+            get(dns_provider)
+                .put(update_dns_provider)
+                .delete(delete_dns_provider),
+        )
+        .route("/api/v1/dns/zones", get(dns_zones).post(create_dns_zone))
+        .route(
+            "/api/v1/dns/zones/{id}",
+            get(dns_zone).put(update_dns_zone).delete(delete_dns_zone),
+        )
+        .route(
+            "/api/v1/dns/zones/{id}/records",
+            get(dns_records).post(create_dns_record),
+        )
+        .route("/api/v1/dns/zones/{id}/reconcile", post(reconcile_dns_zone))
+        .route(
+            "/api/v1/dns/records/{id}",
+            get(dns_record)
+                .put(update_dns_record)
+                .delete(delete_dns_record),
+        )
+        .route("/api/v1/dns/records/{id}/ddns", post(dns_ddns))
         .route("/api/v1/tenants", post(create_tenant))
         .route("/api/v1/usage", get(usage))
         .route("/api/v1/budgets", get(budgets).post(create_budget))
@@ -1259,11 +1287,355 @@ async fn public_subscription(
     Ok(response)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewDnsProvider {
+    name: String,
+    kind: crate::dns::ProviderKind,
+    #[serde(default)]
+    endpoint: Option<String>,
+    token: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateDnsProvider {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    endpoint: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewDnsZone {
+    provider_id: String,
+    name: String,
+    mode: crate::dns::ZoneMode,
+    #[serde(default)]
+    min_keep: u32,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateDnsZone {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    mode: Option<crate::dns::ZoneMode>,
+    #[serde(default)]
+    min_keep: Option<u32>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewDnsRecord {
+    name: String,
+    #[serde(rename = "type")]
+    record_type: crate::dns::RecordType,
+    content: String,
+    #[serde(default = "default_dns_ttl")]
+    ttl: u32,
+    #[serde(default)]
+    proxied: bool,
+}
+fn default_dns_ttl() -> u32 {
+    300
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateDnsRecord {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    ttl: Option<u32>,
+    #[serde(default)]
+    proxied: Option<bool>,
+    #[serde(default)]
+    enabled: Option<bool>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DdnsUpdate {
+    content: String,
+}
+async fn dns_providers(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::dns::ProviderView>> {
+    Ok(Json(
+        database(state.store, move |db| db.dns_providers(&actor)).await?,
+    ))
+}
+async fn dns_provider(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::dns::ProviderView> {
+    Ok(Json(
+        database(state.store, move |db| db.dns_provider(&actor, &id)).await?,
+    ))
+}
+async fn create_dns_provider(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NewDnsProvider>,
+) -> ApiResult<crate::dns::ProviderView> {
+    let endpoint = input
+        .endpoint
+        .unwrap_or_else(|| "https://api.cloudflare.com/client/v4".into());
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_dns_provider(&actor, &input.name, input.kind, &endpoint, &input.token)
+        })
+        .await?,
+    ))
+}
+async fn update_dns_provider(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateDnsProvider>,
+) -> ApiResult<crate::dns::ProviderView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_dns_provider(
+                &actor,
+                &id,
+                input.name.as_deref(),
+                input.endpoint.as_deref(),
+                input.token.as_deref(),
+            )
+        })
+        .await?,
+    ))
+}
+async fn delete_dns_provider(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_dns_provider(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn dns_zones(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::dns::Zone>> {
+    Ok(Json(
+        database(state.store, move |db| db.dns_zones(&actor)).await?,
+    ))
+}
+async fn dns_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::dns::Zone> {
+    Ok(Json(
+        database(state.store, move |db| db.dns_zone(&actor, &id)).await?,
+    ))
+}
+async fn create_dns_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NewDnsZone>,
+) -> ApiResult<crate::dns::Zone> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_dns_zone(
+                &actor,
+                &input.provider_id,
+                &input.name,
+                input.mode,
+                input.min_keep,
+            )
+        })
+        .await?,
+    ))
+}
+async fn update_dns_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateDnsZone>,
+) -> ApiResult<crate::dns::Zone> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_dns_zone(
+                &actor,
+                &id,
+                input.name.as_deref(),
+                input.mode,
+                input.min_keep,
+            )
+        })
+        .await?,
+    ))
+}
+async fn delete_dns_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_dns_zone(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn dns_records(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(zone): Path<String>,
+) -> ApiResult<Vec<crate::dns::RecordView>> {
+    Ok(Json(
+        database(state.store, move |db| db.dns_records(&actor, &zone)).await?,
+    ))
+}
+async fn dns_record(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::dns::RecordView> {
+    Ok(Json(
+        database(state.store, move |db| db.dns_record(&actor, &id)).await?,
+    ))
+}
+async fn create_dns_record(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(zone): Path<String>,
+    Json(input): Json<NewDnsRecord>,
+) -> ApiResult<crate::dns::RecordView> {
+    let record = crate::store::NewDnsRecord {
+        name: input.name,
+        record_type: input.record_type,
+        content: input.content,
+        ttl: input.ttl,
+        proxied: input.proxied,
+    };
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_dns_record(&actor, &zone, record)
+        })
+        .await?,
+    ))
+}
+async fn update_dns_record(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<UpdateDnsRecord>,
+) -> ApiResult<crate::dns::RecordView> {
+    let patch = crate::store::DnsRecordPatch {
+        name: input.name,
+        content: input.content,
+        ttl: input.ttl,
+        proxied: input.proxied,
+        enabled: input.enabled,
+    };
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_dns_record(&actor, &id, patch)
+        })
+        .await?,
+    ))
+}
+async fn delete_dns_record(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let store = state.store.clone();
+    let actor2 = actor.clone();
+    let record_id = id.clone();
+    let record = database(store.clone(), move |db| db.dns_record(&actor2, &record_id)).await?;
+    let zone = database(store.clone(), {
+        let actor = actor.clone();
+        let zone_id = record.zone_id.clone();
+        move |db| db.dns_zone(&actor, &zone_id)
+    })
+    .await?;
+    if zone.mode == crate::dns::ZoneMode::Apply
+        && let Some(remote_id) = record.provider_record_id.as_deref()
+    {
+        let provider = database(store.clone(), {
+            let provider_id = zone.provider_id.clone();
+            move |db| db.dns_provider_raw(&provider_id)
+        })
+        .await?;
+        let client =
+            crate::dns::Cloudflare::new(reqwest::Client::new(), &provider).map_err(ApiError)?;
+        client
+            .delete(&zone.name, remote_id)
+            .await
+            .map_err(ApiError)?;
+    }
+    database(store, move |db| db.delete_dns_record(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn reconcile_dns_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::dns::ReconcileResult> {
+    // Check the system-administrator scope before touching provider secrets.
+    database(state.store.clone(), {
+        let actor = actor.clone();
+        let id = id.clone();
+        move |db| db.dns_zone(&actor, &id)
+    })
+    .await?;
+    let result = crate::dns::reconcile(&state.store, &reqwest::Client::new(), &id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(result))
+}
+async fn dns_ddns(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<DdnsUpdate>,
+) -> ApiResult<crate::dns::ReconcileResult> {
+    let (zone_id, record_type) = database(state.store.clone(), {
+        let actor = actor.clone();
+        let id = id.clone();
+        move |db| {
+            db.dns_record(&actor, &id)
+                .map(|record| (record.zone_id, record.record_type))
+        }
+    })
+    .await?;
+    if !matches!(
+        record_type,
+        crate::dns::RecordType::A | crate::dns::RecordType::Aaaa
+    ) {
+        return Err(Rejection {
+            status: 400,
+            message: "DDNS only updates A or AAAA records".into(),
+        }
+        .into());
+    }
+    database(state.store.clone(), move |db| {
+        db.update_dns_record(
+            &actor,
+            &id,
+            crate::store::DnsRecordPatch {
+                content: Some(input.content),
+                ..Default::default()
+            },
+        )
+        .map(|_| ())
+    })
+    .await?;
+    let result = crate::dns::reconcile(&state.store, &reqwest::Client::new(), &zone_id)
+        .await
+        .map_err(ApiError)?;
+    Ok(Json(result))
+}
+
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
-        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce","dns-management","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
 

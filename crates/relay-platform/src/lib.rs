@@ -4,6 +4,7 @@ pub mod api;
 pub mod budget;
 pub mod credential;
 mod datagram;
+pub mod dns;
 pub mod engine;
 pub mod health;
 pub mod journal;

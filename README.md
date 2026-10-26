@@ -2,7 +2,9 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.21.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.22.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+
+0.22.0 新增 DNS 托管记录：Cloudflare 兼容服务商、区域、A/AAAA/CNAME 托管记录、观察/应用同步、`min_keep` 保护与 DDNS 更新；服务商令牌只向系统管理员开放且读取脱敏，记录写入既有 metadata，schema v5 不变。真实 Cloudflare、DNS 传播、健康摘除和权威池尚未验收。见 [DNS.md](docs/DNS.md)。
 
 0.21.0 新增客户端订阅：把用户自己的 Shadowsocks 规则按 V2Ray/Base64、Clash、Surge、Shadowrocket 快照成可撤销链接，支持模板、预览、过期、轮换和公开端点限频；令牌只保存哈希，订阅状态写入既有 metadata，schema v5 不变。当前仍只覆盖 Shadowsocks 入站，普通 TCP/TLS/WS 规则会明确列为不兼容；真实客户端矩阵尚未验收。字段、格式、权限和限制见 [SUBSCRIPTIONS.md](docs/SUBSCRIPTIONS.md)。
 

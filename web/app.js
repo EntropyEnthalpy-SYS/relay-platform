@@ -1,6 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
-const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, config: null, busy: false };
-const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', 'client-subscriptions': '客户端订阅', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
+const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
+const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', 'client-subscriptions': '客户端订阅', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = { read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' };
@@ -161,7 +161,7 @@ async function enter() { $('#login-screen').classList.add('hidden'); $('#applica
 async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
@@ -703,6 +703,120 @@ function shareShadowsocks(rule) {
 }
 async function history() { const baseConfig = state.config; const revisions = await api(`/nodes/${baseConfig.node_id}/history`); const body = table(['修订', '操作者', '时间', '操作'], revisions.map(r => [`v${r.revision}`, r.actor_id, timestamp(r.created_at_ms), canWrite() ? button('发布此版本', async () => { await api(`/nodes/${baseConfig.node_id}/rollback`, { method: 'POST', body: { revision: r.revision, expected_revision: baseConfig.revision } }); $('#dialog').close(); notify('历史配置已作为新修订发布。账本不回滚。'); await renderRules(); }, 'table-action') : '只读'])); modal('最近 100 次配置修订', body); }
 const subscriptionFormats = { v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'Clash / mihomo（YAML）', surge: 'Surge（文本）', shadowrocket: 'Shadowrocket（ss:// 列表）' };
+const dnsModes = { observe: '观察（只读，不写服务商）', apply: '应用（创建/更新/删除托管记录）' };
+const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];
+async function renderDns() {
+  if (state.actor.role !== 'system_admin') { $('#content').replaceChildren(empty('仅系统管理员可见', 'DNS 服务商令牌可修改外部 DNS，因此只向系统管理员开放。')); return; }
+  const [providers, zones] = await Promise.all([api('/dns/providers'), api('/dns/zones')]);
+  const providerNames = Object.fromEntries(providers.map(p => [p.id, p.name]));
+  const p = panel('DNS 服务商', '保存 Cloudflare 兼容 API 的地址和令牌。令牌可逆保存以调用服务商，接口只显示是否已设置；仅系统管理员可读写。', button('＋ 新增服务商', () => dnsProviderForm(null), 'primary'));
+  if (!providers.length) p.append(empty('还没有 DNS 服务商', '先添加服务商，再创建区域和托管记录。'));
+  else p.append(table(['名称', '类型', 'API 地址', '令牌', '操作'], providers.map(provider => {
+    const actions = el('div'); actions.append(button('编辑', () => dnsProviderForm(provider), 'table-action'), button('删除', () => deleteDnsProvider(provider), 'table-action danger'));
+    return [namedCell(provider.name, provider.id), provider.kind, provider.endpoint, provider.token_set ? badge('已设置', 'green') : badge('未设置', 'red'), actions];
+  })));
+  const z = panel('DNS 区域', '区域名是服务商的 zone 名称或 ID。观察模式只读取服务商并报告差异；应用模式只管理由本平台创建、带 relay 标记的记录。', providers.length ? button('＋ 新增区域', () => dnsZoneForm(null, providers), 'primary') : null);
+  if (!zones.length) z.append(empty('还没有 DNS 区域', '添加区域后可以创建 A/AAAA/CNAME 托管记录并执行一次同步。'));
+  else z.append(table(['区域', '服务商', '模式', '最少保留', '操作'], zones.map(zone => {
+    const actions = el('div');
+    actions.append(button('记录', async () => { state.dnsZone = zone.id; await renderDns(); }, 'table-action'));
+    actions.append(button('立即同步', () => reconcileDns(zone), 'table-action'));
+    actions.append(button('编辑', () => dnsZoneForm(zone, providers), 'table-action'), button('删除', () => deleteDnsZone(zone), 'table-action danger'));
+    return [namedCell(zone.name, zone.id), providerNames[zone.provider_id] || zone.provider_id, dnsModes[zone.mode] || zone.mode, zone.min_keep, actions];
+  })));
+  const selected = zones.find(zone => zone.id === state.dnsZone) || zones[0];
+  if (selected) {
+    state.dnsZone = selected.id;
+    const records = await api(`/dns/zones/${selected.id}/records`);
+    const r = panel(`托管记录 · ${selected.name}`, '每条记录带 relay 标记。删除记录时应用模式会同时删除服务商记录；观察模式只删除本地记录。', button('＋ 新增记录', () => dnsRecordForm(selected, null), 'primary'));
+    if (!records.length) r.append(empty('还没有托管记录', '创建 A/AAAA/CNAME 记录，然后执行“立即同步”。'));
+    else r.append(table(['名称', '类型', '内容', 'TTL', '状态', '服务商记录', '操作'], records.map(record => {
+      const actions = el('div');
+      actions.append(button('编辑', () => dnsRecordForm(selected, record), 'table-action'));
+      if (record.type === 'A' || record.type === 'AAAA') actions.append(button('DDNS', () => ddnsRecord(record), 'table-action'));
+      actions.append(button(record.enabled ? '停用' : '启用', async () => { await api(`/dns/records/${record.id}`, { method: 'PUT', body: { enabled: !record.enabled } }); await renderDns(); }, 'table-action'));
+      actions.append(button('删除', () => deleteDnsRecord(record), 'table-action danger'));
+      const stateBadge = record.last_error ? badge('错误', 'red') : record.enabled ? badge('启用', 'green') : badge('停用', '');
+      return [namedCell(record.name, record.id), record.type, record.content, record.ttl, stateBadge, record.provider_record_id || '—', actions];
+    })));
+    if (records.some(record => record.last_error)) r.append(el('p', records.filter(record => record.last_error).map(record => `${record.name}: ${record.last_error}`).join('；'), 'error-text'));
+    $('#content').replaceChildren(p, z, r);
+  } else {
+    $('#content').replaceChildren(p, z);
+  }
+}
+function dnsProviderForm(provider) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', '名称', provider?.name || '').maxLength = 120;
+  select(grid, 'kind', '服务商类型', [['cloudflare', 'Cloudflare 兼容 API']], provider?.kind || 'cloudflare');
+  field(grid, 'endpoint', 'API 基础地址', provider?.endpoint || 'https://api.cloudflare.com/client/v4').maxLength = 500;
+  const token = field(grid, 'token', provider ? '令牌（留空保留原值）' : 'API 令牌', '', 'password', false); token.maxLength = 4096;
+  form.append(grid, el('p', '令牌只应授予 DNS 编辑权限；接口不会返回令牌原文。HTTP 只允许回环地址用于本机测试。', 'fine'));
+  submit(form, provider ? '保存服务商' : '添加服务商', async data => {
+    const body = { name: String(data.get('name')).trim(), kind: data.get('kind'), endpoint: String(data.get('endpoint')).trim() };
+    if (String(data.get('token') || '')) body.token = String(data.get('token'));
+    if (provider) await api(`/dns/providers/${provider.id}`, { method: 'PUT', body });
+    else await api('/dns/providers', { method: 'POST', body });
+    $('#dialog').close(); notify('DNS 服务商已保存。'); await renderDns();
+  });
+  modal(provider ? `编辑 DNS 服务商 · ${provider.name}` : '新增 DNS 服务商', form);
+}
+function dnsZoneForm(zone, providers) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', '区域名称 / ID', zone?.name || '').maxLength = 253;
+  select(grid, 'provider_id', '服务商', providers.map(provider => [provider.id, provider.name]), zone?.provider_id || providers[0]?.id || '');
+  select(grid, 'mode', '模式', Object.entries(dnsModes), zone?.mode || 'observe');
+  const keep = field(grid, 'min_keep', '最少保留记录数', zone?.min_keep ?? 1, 'number'); keep.min = 0; keep.max = 1000;
+  form.append(grid, el('p', '观察模式适合先核对现有记录。应用模式只创建/更新/删除本平台带 relay 标记的记录，不会接管同名的外部记录。', 'fine'));
+  submit(form, zone ? '保存区域' : '添加区域', async data => {
+    const body = { name: String(data.get('name')).trim(), provider_id: data.get('provider_id'), mode: data.get('mode'), min_keep: number(data, 'min_keep') };
+    if (zone) await api(`/dns/zones/${zone.id}`, { method: 'PUT', body });
+    else { const created = await api('/dns/zones', { method: 'POST', body }); state.dnsZone = created.id; }
+    $('#dialog').close(); notify('DNS 区域已保存。'); await renderDns();
+  });
+  modal(zone ? `编辑 DNS 区域 · ${zone.name}` : '新增 DNS 区域', form);
+}
+function dnsRecordForm(zone, record) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', '记录名称', record?.name || '').maxLength = 253;
+  select(grid, 'type', '类型', dnsRecordTypes.map(type => [type, type]), record?.type || 'A');
+  field(grid, 'content', '内容（IP 或 CNAME）', record?.content || '').maxLength = 253;
+  const ttl = field(grid, 'ttl', 'TTL（秒）', record?.ttl ?? 300, 'number'); ttl.min = 1; ttl.max = 86400;
+  select(grid, 'proxied', 'Cloudflare 代理', [['no', '不代理'], ['yes', '代理']], record?.proxied ? 'yes' : 'no');
+  form.append(grid, el('p', '应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。', 'fine'));
+  submit(form, record ? '保存记录' : '添加记录', async data => {
+    const body = { name: String(data.get('name')).trim(), type: data.get('type'), content: String(data.get('content')).trim(), ttl: number(data, 'ttl'), proxied: data.get('proxied') === 'yes' };
+    if (record) await api(`/dns/records/${record.id}`, { method: 'PUT', body });
+    else await api(`/dns/zones/${zone.id}/records`, { method: 'POST', body });
+    $('#dialog').close(); notify('DNS 记录已保存；执行“立即同步”后写入服务商。'); await renderDns();
+  });
+  modal(record ? `编辑 DNS 记录 · ${record.name}` : '新增 DNS 记录', form);
+}
+async function reconcileDns(zone) {
+  const result = await api(`/dns/zones/${zone.id}/reconcile`, { method: 'POST' });
+  const body = el('div');
+  body.append(el('p', `${dnsModes[zone.mode]}：观察 ${result.observed} 条，创建 ${result.created}，更新 ${result.updated}，删除 ${result.deleted}，未变 ${result.unchanged}，保留 ${result.kept}，错误 ${result.errors}。`));
+  if (result.actions.length) body.append(table(['记录', '动作', '详情'], result.actions.map(action => [action.record_id, action.action, action.detail])));
+  modal(`同步结果 · ${zone.name}`, body); await renderDns();
+}
+async function deleteDnsProvider(provider) {
+  if (!confirm(`删除 DNS 服务商「${provider.name}」？存在区域时会被拒绝。`)) return;
+  await api(`/dns/providers/${provider.id}`, { method: 'DELETE' }); notify('DNS 服务商已删除。'); await renderDns();
+}
+async function deleteDnsZone(zone) {
+  if (!confirm(`删除 DNS 区域「${zone.name}」？存在托管记录时会被拒绝。`)) return;
+  await api(`/dns/zones/${zone.id}`, { method: 'DELETE' }); if (state.dnsZone === zone.id) state.dnsZone = null; notify('DNS 区域已删除。'); await renderDns();
+}
+async function deleteDnsRecord(record) {
+  if (!confirm(`删除 DNS 记录「${record.name}」？应用模式会同时删除服务商记录。`)) return;
+  await api(`/dns/records/${record.id}`, { method: 'DELETE' }); notify('DNS 记录已删除。'); await renderDns();
+}
+async function ddnsRecord(record) {
+  const content = prompt(`为「${record.name}」输入新的 ${record.type} 地址（DDNS）；当前 ${record.content}`, record.content);
+  if (!content || content.trim() === record.content) return;
+  await api(`/dns/records/${record.id}/ddns`, { method: 'POST', body: { content: content.trim() } }); notify('DDNS 已更新并同步；观察模式只报告差异。'); await renderDns();
+}
+
 async function renderSubscriptions() {
   const subscriptions = await api('/subscriptions');
   const p = panel('客户端订阅', '把 Shadowsocks 规则快照成可撤销的订阅链接。链接只包含客户端连接参数，不包含控制器会话或节点凭据；轮换后旧链接立即失效。', canWrite() ? button('＋ 新建订阅', newSubscription, 'primary') : null);
@@ -900,7 +1014,7 @@ function editAlertChannel(existing) {
   });
   modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
 }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', 'client-subscriptions': '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', 'client-subscriptions': '客户端订阅', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

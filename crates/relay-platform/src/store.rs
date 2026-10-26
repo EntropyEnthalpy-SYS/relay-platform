@@ -17,6 +17,7 @@ mod accounts;
 mod alert_config;
 mod budgets;
 mod credentials;
+mod dns;
 mod health;
 mod leases;
 mod node_profiles;
@@ -31,6 +32,7 @@ pub use accounts::{
     SecondFactorSetup, SecondFactorStatus, UserSummary,
 };
 pub use alert_config::AlertNode;
+pub use dns::{DnsRecordPatch, NewDnsRecord};
 pub use reservations::MeterFlush;
 pub use user_rates::{MAX_USER_RATE, MIN_USER_RATE, UserRateView};
 

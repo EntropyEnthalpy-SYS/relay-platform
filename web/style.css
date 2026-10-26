@@ -502,3 +502,10 @@ td .clip { display: block; max-width: 340px; overflow: hidden; text-overflow: el
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+.error-text {
+  margin: 8px 0 0;
+  color: var(--danger, #e5534b);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
