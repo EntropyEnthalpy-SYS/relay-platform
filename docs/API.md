@@ -297,3 +297,21 @@ API 令牌使用同一个 `Authorization: Bearer` 头，格式为 `rpat_` 加 64
 - 同一用户流量经过多跳时，每一跳执行自己的份额，链路吞吐可能低于单节点份额；当前没有可信上游认证，不能只对入口计量。
 
 Shadowsocks：TCP 重放盐缓存按（方式、密钥）在进程内共享。规则重命名、限速调整等不改变密钥的替换继续拒绝已捕获的请求；修改密钥后使用新的加密身份。UDP 关联在规则修改时仍按既有行为结束，已结束关联的包号记录保留 60 秒。
+
+## 0.21.0 客户端订阅
+
+订阅把用户自己的 Shadowsocks 入站规则快照成 V2Ray/Base64、Clash YAML、Surge 或 Shadowrocket 文本。管理接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/subscriptions` | 可见订阅列表；不返回令牌或哈希 |
+| POST | `/subscriptions` | `{name,format,template,expires_in_days,user_id?}` → `{subscription,token}`；令牌只返回一次 |
+| GET | `/subscriptions/{id}` | 订阅元数据 |
+| GET | `/subscriptions/{id}/preview` | `{content,content_type,entries,skipped}`；普通 TCP/TLS/WS 规则明确列入 `skipped` |
+| POST | `/subscriptions/{id}/rotate` | 新令牌，旧令牌立即失效 |
+| DELETE | `/subscriptions/{id}` | 删除记录与索引 |
+| GET | `/sub/{token}` | 公开端点，无登录；60 次/分钟/令牌；`Cache-Control: no-store` |
+
+`format` 为 `v2ray`、`clash`、`surge`、`shadowrocket`。`template` 为 `{name_prefix,host,node_tags,udp}`，创建时保存为快照；`host` 覆盖连接地址，`node_tags` 过滤节点，通配监听且无 `advertise`/`host` 的规则会被跳过。端口段展开为多个条目。只支持 Shadowsocks 入站；其他协议在预览的 `skipped` 中给出原因。
+
+权限：读取列表/预览需要 `read`，创建/轮换/删除需要 `users:write`，并同时受账号角色与租户边界限制；只读用户不能写入。系统管理员可见全部，租户管理员可见本租户普通用户，普通用户只管理自己。令牌只保存 SHA-256 哈希；记录和索引写入 metadata，应用 schema 仍为 v5、恢复日志格式 4 不变。0.20.0 二进制忽略这些键，回退会丢失订阅服务但不会删除数据。详见 [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)。

@@ -6,7 +6,7 @@
 
 0.7.0 增加 crc32c 0.6.8；Linux/macOS 的 UDP packet-info 使用 nix 0.31.3（间接增加 memoffset 0.9.1）。HAProxy 仅作为外部互通测试程序，没有链接进平台或包含在源码交付包中。
 
-0.8.0 增加 tokio-tungstenite / tungstenite 0.30.0 及其 SHA-1 依赖，用于标准 WebSocket 握手与帧；TLS 仍由既有 rustls 路径处理。共 273 个第三方元数据条目。0.13.0 的节点租约复用既有 Tokio、UUID、随机数、SHA256 和 SQLite，没有新增平台依赖；独立 CLI 验收脚本只使用 Python 标准库。Python websockets 17.2（BSD-3-Clause）仅用于独立互通测试，单独安装，不链接进平台或打入源码包。0.9.0 没有增加平台依赖；三节点 CLI 验证复用该隔离测试环境中的临时证书工具。0.10.0 没有新增平台依赖，健康检查使用现有传输栈；独立健康服务与性能脚本使用 Python 标准库。0.11.0 使用既有 Tokio 通知和原子计数实现诊断，没有新增依赖。0.12.0 自有聚合协议复用既有 Tokio、rustls、rand 与 SHA256，没有新增平台依赖；独立线格式客户端使用 Python 标准库/OpenSSL，临时证书生成复用既有隔离互通环境。0.19.0 增加 qrcode 0.14.1（仅启用 SVG 输出，没有间接依赖），用于两步验证二维码；TOTP 的 HMAC-SHA1 使用已经随 rustls 链接的 ring 0.17。Shadowsocks 服务增加 blake3 1.8.7（2022 版会话子密钥派生，间接增加 arrayvec 0.7.8 和 constant_time_eq 0.4.2）与 md-5 0.11.0（旧版 AEAD 方式的密码转密钥）；AEAD 加密与 HKDF-SHA1 使用既有 ring。shadowsocks-rust 1.25.0（MIT）的 sslocal 仅作为外部互通测试程序，不链接进平台。Shadowsocks UDP 增加 aes 0.9.3（2022 版数据报的会话头块加密）与 chacha20poly1305 0.11.0（2022-blake3-chacha20-poly1305 数据报使用的 XChaCha20-Poly1305，复用既有 chacha20 0.10.2），间接增加 aead 0.6.1、cipher 0.5.2、cmov 0.5.4、cpubits 0.1.1、ctutils 0.4.6、inout 0.2.5、poly1305 0.9.1 和 universal-hash 0.6.1；数据报正文的 AES-GCM 仍使用 ring。
+0.8.0 增加 tokio-tungstenite / tungstenite 0.30.0 及其 SHA-1 依赖，用于标准 WebSocket 握手与帧；TLS 仍由既有 rustls 路径处理。共 273 个第三方元数据条目。0.13.0 的节点租约复用既有 Tokio、UUID、随机数、SHA256 和 SQLite，没有新增平台依赖；独立 CLI 验收脚本只使用 Python 标准库。Python websockets 17.2（BSD-3-Clause）仅用于独立互通测试，单独安装，不链接进平台或打入源码包。0.9.0 没有增加平台依赖；三节点 CLI 验证复用该隔离测试环境中的临时证书工具。0.10.0 没有新增平台依赖，健康检查使用现有传输栈；独立健康服务与性能脚本使用 Python 标准库。0.11.0 使用既有 Tokio 通知和原子计数实现诊断，没有新增依赖。0.12.0 自有聚合协议复用既有 Tokio、rustls、rand 与 SHA256，没有新增平台依赖；独立线格式客户端使用 Python 标准库/OpenSSL，临时证书生成复用既有隔离互通环境。0.19.0 增加 qrcode 0.14.1（仅启用 SVG 输出，没有间接依赖），用于两步验证二维码；TOTP 的 HMAC-SHA1 使用已经随 rustls 链接的 ring 0.17。Shadowsocks 服务增加 blake3 1.8.7（2022 版会话子密钥派生，间接增加 arrayvec 0.7.8 和 constant_time_eq 0.4.2）与 md-5 0.11.0（旧版 AEAD 方式的密码转密钥）；AEAD 加密与 HKDF-SHA1 使用既有 ring。shadowsocks-rust 1.25.0（MIT）的 sslocal 仅作为外部互通测试程序，不链接进平台。0.21.0 增加 serde_yaml 0.9.34（Clash / mihomo YAML 输出，间接增加 unsafe-libyaml 0.2.11 与 indexmap 2.14.2）；订阅渲染不使用网络或外部客户端库。Shadowsocks UDP 增加 aes 0.9.3（2022 版数据报的会话头块加密）与 chacha20poly1305 0.11.0（2022-blake3-chacha20-poly1305 数据报使用的 XChaCha20-Poly1305，复用既有 chacha20 0.10.2），间接增加 aead 0.6.1、cipher 0.5.2、cmov 0.5.4、cpubits 0.1.1、ctutils 0.4.6、inout 0.2.5、poly1305 0.9.1 和 universal-hash 0.6.1；数据报正文的 AES-GCM 仍使用 ring。
 
 | 包 | 版本 | 声明许可 | 源码/项目 |
 | --- | --- | --- | --- |
@@ -201,6 +201,9 @@
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | [项目](https://github.com/serde-rs/serde) |
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 | [项目](https://github.com/serde-rs/serde) |
 | serde_json | 1.0.154 | MIT OR Apache-2.0 | [项目](https://github.com/serde-rs/json) |
+| serde_yaml | 0.9.34+deprecated | MIT OR Apache-2.0 | [项目](https://github.com/dtolnay/serde-yaml) |
+| unsafe-libyaml | 0.2.11 | MIT | [项目](https://github.com/dtolnay/unsafe-libyaml) |
+| indexmap | 2.14.2 | Apache-2.0 OR MIT | [项目](https://github.com/indexmap-rs/indexmap) |
 | serde_path_to_error | 0.1.20 | MIT OR Apache-2.0 | [项目](https://github.com/dtolnay/path-to-error) |
 | serde_urlencoded | 0.7.1 | MIT/Apache-2.0 | [项目](https://github.com/nox/serde_urlencoded) |
 | sha1 | 0.11.0 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/hashes) |

@@ -22,6 +22,7 @@ mod leases;
 mod node_profiles;
 mod recovery;
 mod reservations;
+mod subscriptions;
 mod sync;
 mod topology;
 mod user_rates;

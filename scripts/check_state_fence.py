@@ -298,7 +298,8 @@ def main():
     info = {'new': build_info(new), 'old': build_info(old)}
     if legacy:
         info['legacy'] = build_info(legacy)
-    assert info['new']['version'] == '0.20.0'
+    new_version = tuple(int(part) for part in info['new']['version'].split('.')[:2])
+    assert new_version >= (0, 20), info['new']['version']
     assert info['old']['version'] == '0.19.0'
     assert info['new']['state_contract'] != info['old']['state_contract']
     assert info['new']['controller_schema'] == 5

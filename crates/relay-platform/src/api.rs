@@ -2,9 +2,11 @@ use crate::{
     budget::{Budget, BudgetOverview, BudgetUpdate, NewBudget},
     model::*,
     store::{Actor, Rejection, Role, Scope, Store, reject},
+    subscription::{Format, Template},
 };
 use axum::{
     Json, Router,
+    body::Body,
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
@@ -27,6 +29,7 @@ pub struct AppState {
     login_attempts: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     second_factor_failures: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     login_slots: Arc<Semaphore>,
+    subscription_hits: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     sync_queue: crate::sync_queue::SyncQueue,
     /// Ends agent watches so a graceful shutdown need not wait for them.
     stopping: tokio_util::sync::CancellationToken,
@@ -40,6 +43,7 @@ impl AppState {
             login_attempts: Arc::new(Mutex::new(HashMap::new())),
             second_factor_failures: Arc::new(Mutex::new(HashMap::new())),
             login_slots: Arc::new(Semaphore::new(4)),
+            subscription_hits: Arc::new(Mutex::new(HashMap::new())),
             stopping: Default::default(),
         }
     }
@@ -65,6 +69,20 @@ impl AppState {
         entry.0 <= 30
     }
     /// Wrong second-factor codes are limited per account, independent of source address.
+    /// Public subscription polling is capped per token. The map stores hashes,
+    /// never the bearer value, and is bounded so random paths cannot grow it.
+    fn subscription_allowed(&self, token: &str) -> bool {
+        let key = crate::subscription::token_hash(token);
+        let now = Instant::now();
+        let mut map = self.subscription_hits.lock().unwrap();
+        map.retain(|_, (_, until)| *until > now);
+        if !map.contains_key(&key) && map.len() >= 4096 {
+            return false;
+        }
+        let entry = map.entry(key).or_insert((0, now + Duration::from_secs(60)));
+        entry.0 += 1;
+        entry.0 <= 60
+    }
     fn second_factor_locked(&self, username: &str, failed: bool) -> bool {
         let now = Instant::now();
         let mut map = self.second_factor_failures.lock().unwrap();
@@ -157,6 +175,13 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     {
         return false;
     }
+    if path.starts_with("subscriptions") {
+        return if method == Method::GET || method == Method::HEAD {
+            scopes.contains(&Scope::Read)
+        } else {
+            scopes.contains(&Scope::UsersWrite)
+        };
+    }
     let needed = if method == Method::GET || method == Method::HEAD {
         Scope::Read
     } else if path.starts_with("nodes") || path.starts_with("configurations/") {
@@ -237,6 +262,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/account/mfa/disable", post(disable_second_factor))
         .route("/api/v1/api-tokens", get(api_tokens).post(create_api_token))
         .route("/api/v1/api-tokens/{id}", delete(revoke_api_token))
+        .route(
+            "/api/v1/subscriptions",
+            get(subscriptions).post(create_subscription),
+        )
+        .route(
+            "/api/v1/subscriptions/{id}",
+            get(subscription).delete(delete_subscription),
+        )
+        .route(
+            "/api/v1/subscriptions/{id}/rotate",
+            post(rotate_subscription),
+        )
+        .route(
+            "/api/v1/subscriptions/{id}/preview",
+            get(preview_subscription),
+        )
         .route("/api/v1/tenants", post(create_tenant))
         .route("/api/v1/usage", get(usage))
         .route("/api/v1/budgets", get(budgets).post(create_budget))
@@ -269,6 +310,7 @@ pub fn router(state: AppState) -> Router {
         ));
     Router::new()
         .merge(authenticated)
+        .route("/sub/{token}", get(public_subscription))
         .route("/healthz", get(health))
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/agent/enroll", post(enroll))
@@ -1108,11 +1150,120 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
         ),
     )
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewSubscription {
+    name: String,
+    format: Format,
+    #[serde(default)]
+    template: Template,
+    #[serde(default = "default_subscription_days")]
+    expires_in_days: u32,
+    /// System administrators and tenant administrators may create a
+    /// subscription for another user in their scope.
+    #[serde(default)]
+    user_id: Option<String>,
+}
+fn default_subscription_days() -> u32 {
+    365
+}
+async fn subscriptions(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::subscription::SubscriptionView>> {
+    Ok(Json(
+        database(state.store, move |db| db.subscriptions(&actor)).await?,
+    ))
+}
+async fn create_subscription(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NewSubscription>,
+) -> ApiResult<serde_json::Value> {
+    let (subscription, token) = database(state.store, move |db| {
+        db.create_subscription(
+            &actor,
+            input.user_id.as_deref(),
+            &input.name,
+            input.format,
+            input.template,
+            input.expires_in_days,
+        )
+    })
+    .await?;
+    Ok(Json(
+        serde_json::json!({"subscription": subscription, "token": token}),
+    ))
+}
+async fn subscription(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::subscription::SubscriptionView> {
+    Ok(Json(
+        database(state.store, move |db| db.subscription(&actor, &id)).await?,
+    ))
+}
+async fn rotate_subscription(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let (subscription, token) =
+        database(state.store, move |db| db.rotate_subscription(&actor, &id)).await?;
+    Ok(Json(
+        serde_json::json!({"subscription": subscription, "token": token}),
+    ))
+}
+async fn delete_subscription(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_subscription(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn preview_subscription(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::subscription::Rendered> {
+    Ok(Json(
+        database(state.store, move |db| db.render_subscription(&actor, &id)).await?,
+    ))
+}
+async fn public_subscription(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Response, ApiError> {
+    if !state.subscription_allowed(&token) {
+        return Err(Rejection {
+            status: 429,
+            message: "subscription token is rate limited; retry in one minute".into(),
+        }
+        .into());
+    }
+    let rendered = database(state.store, move |db| db.render_public_subscription(&token)).await?;
+    let mut response = Response::new(Body::from(rendered.content));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(rendered.content_type),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
-        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce","dns-management","federation","postgresql-ha"]
     }))
 }
 

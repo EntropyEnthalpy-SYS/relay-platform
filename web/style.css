@@ -488,3 +488,17 @@ td .clip { display: block; max-width: 340px; overflow: hidden; text-overflow: el
   .alert-stat { padding: 14px 16px; }
   footer { flex-direction: column; gap: 4px; }
 }
+
+.subscription-preview {
+  max-height: 42vh;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

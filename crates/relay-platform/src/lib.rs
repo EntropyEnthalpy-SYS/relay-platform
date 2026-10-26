@@ -17,6 +17,7 @@ pub mod proxy;
 mod routing;
 pub mod shadowsocks;
 pub mod store;
+pub mod subscription;
 mod sync_queue;
 pub mod system;
 pub mod telemetry;

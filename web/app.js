@@ -1,6 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, config: null, busy: false };
-const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
+const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', 'client-subscriptions': '客户端订阅', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = { read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' };
@@ -161,7 +161,7 @@ async function enter() { $('#login-screen').classList.add('hidden'); $('#applica
 async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
@@ -702,6 +702,87 @@ function shareShadowsocks(rule) {
   modal(`分享 ${rule.name}`, body);
 }
 async function history() { const baseConfig = state.config; const revisions = await api(`/nodes/${baseConfig.node_id}/history`); const body = table(['修订', '操作者', '时间', '操作'], revisions.map(r => [`v${r.revision}`, r.actor_id, timestamp(r.created_at_ms), canWrite() ? button('发布此版本', async () => { await api(`/nodes/${baseConfig.node_id}/rollback`, { method: 'POST', body: { revision: r.revision, expected_revision: baseConfig.revision } }); $('#dialog').close(); notify('历史配置已作为新修订发布。账本不回滚。'); await renderRules(); }, 'table-action') : '只读'])); modal('最近 100 次配置修订', body); }
+const subscriptionFormats = { v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'Clash / mihomo（YAML）', surge: 'Surge（文本）', shadowrocket: 'Shadowrocket（ss:// 列表）' };
+async function renderSubscriptions() {
+  const subscriptions = await api('/subscriptions');
+  const p = panel('客户端订阅', '把 Shadowsocks 规则快照成可撤销的订阅链接。链接只包含客户端连接参数，不包含控制器会话或节点凭据；轮换后旧链接立即失效。', canWrite() ? button('＋ 新建订阅', newSubscription, 'primary') : null);
+  if (!subscriptions.length) p.append(empty('还没有订阅链接', '先创建至少一条启用中的 Shadowsocks 规则，再按客户端格式生成订阅。'));
+  else p.append(table(['名称', '格式', '所有者', '到期', '最近使用', '操作'], subscriptions.map(item => {
+    const actions = el('div');
+    actions.append(button('预览', () => previewSubscription(item), 'table-action'));
+    if (canWrite()) {
+      actions.append(button('轮换链接', () => rotateSubscription(item), 'table-action'));
+      actions.append(button('删除', () => deleteSubscription(item), 'table-action danger'));
+    }
+    return [namedCell(item.name, item.id), subscriptionFormats[item.format] || item.format, item.owner_id, item.expires_at_ms ? timestamp(item.expires_at_ms) : '不过期', item.last_used_ms ? `${timestamp(item.last_used_ms)} · ${item.uses} 次` : '尚未使用', actions];
+  })));
+  if (state.view === 'subscriptions') $('#content').replaceChildren(p);
+}
+async function newSubscription() {
+  const users = state.actor.role === 'viewer' ? [] : await api('/users').catch(() => []);
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', '名称（说明用途，如“手机订阅”）').maxLength = 120;
+  select(grid, 'format', '客户端格式', Object.entries(subscriptionFormats), 'v2ray');
+  field(grid, 'prefix', '客户端显示名称前缀（可选）', 'Relay ').maxLength = 64;
+  const host = field(grid, 'host', '替换所有节点地址（可选，NAT / 域名场景）', '', 'text', false); host.maxLength = 253;
+  const tags = field(grid, 'tags', '只包含这些节点标签（逗号分隔，留空全部）', '', 'text', false);
+  select(grid, 'udp', '在客户端启用 UDP', [['yes', '启用'], ['no', '不启用']], 'yes');
+  const days = field(grid, 'days', '有效天数（1–3650）', 365, 'number'); days.min = 1; days.max = 3650;
+  if (state.actor.role !== 'viewer' && users.length > 1) {
+    const owner = select(grid, 'user_id', '订阅所有者', [['', '当前账号'], ...users.map(u => [u.id, `${u.username} · ${roleNames[u.role]}`])], '');
+    owner.required = false;
+  }
+  form.append(grid, el('p', '名称前缀和节点标签会作为快照保存在订阅记录中；节点后续改名不会改变已生成链接的显示名。只读账号不能创建或轮换链接。', 'fine'));
+  submit(form, '创建订阅', async data => {
+    const result = await api('/subscriptions', { method: 'POST', body: {
+      name: String(data.get('name')).trim(),
+      format: data.get('format'),
+      expires_in_days: number(data, 'days'),
+      ...(String(data.get('user_id') || '') ? { user_id: String(data.get('user_id')) } : {}),
+      template: {
+        name_prefix: String(data.get('prefix') || ''),
+        host: String(data.get('host') || '').trim() || null,
+        node_tags: String(data.get('tags') || '').split(',').map(t => t.trim()).filter(Boolean),
+        udp: data.get('udp') === 'yes'
+      }
+    }});
+    $('#dialog').close();
+    showSubscriptionToken(result.subscription.name, result.token);
+    await renderSubscriptions();
+  });
+  modal('新建客户端订阅', form);
+}
+function showSubscriptionToken(name, token) {
+  const body = el('div');
+  const url = `${location.origin}/sub/${token}`;
+  body.append(el('p', '订阅链接只显示这一次。任何持有链接的人都能读取节点连接参数；请像密码一样保存，泄露时立即轮换。', 'fine'), el('div', url, 'secret-box'));
+  const actions = el('div', undefined, 'dialog-actions');
+  actions.append(button('关闭', () => $('#dialog').close()), button('复制链接', async () => { await navigator.clipboard.writeText(url); notify('订阅链接已复制。'); }, 'primary'));
+  body.append(actions);
+  modal(`订阅已创建 · ${name}`, body);
+}
+async function previewSubscription(item) {
+  const preview = await api(`/subscriptions/${item.id}/preview`);
+  const body = el('div');
+  if (preview.entries.length) body.append(table(['客户端名称', '服务器', '端口', '加密方式'], preview.entries.map(entry => [entry.name, entry.host, entry.port, entry.method])));
+  else body.append(el('p', '没有可生成的条目，原因见下方跳过列表。', 'muted'));
+  if (preview.skipped.length) body.append(el('h3', '跳过规则'), table(['规则', '原因'], preview.skipped.map(s => [namedCell(s.rule_name, s.rule_id), s.reason])));
+  const details = el('details'); details.append(el('summary', '查看生成内容'), el('pre', preview.content, 'subscription-preview')); body.append(details);
+  modal(`预览 · ${item.name}`, body);
+}
+async function rotateSubscription(item) {
+  if (!confirm(`轮换「${item.name}」的订阅链接？旧链接会立即失效，已导入的客户端需要重新导入。`)) return;
+  const result = await api(`/subscriptions/${item.id}/rotate`, { method: 'POST' });
+  showSubscriptionToken(item.name, result.token);
+  await renderSubscriptions();
+}
+async function deleteSubscription(item) {
+  if (!confirm(`删除订阅「${item.name}」？使用该链接的客户端将立即无法更新。`)) return;
+  await api(`/subscriptions/${item.id}`, { method: 'DELETE' });
+  notify('订阅已删除。');
+  await renderSubscriptions();
+}
+
 async function renderUsage() { const records = await api('/usage'); const p = panel('已接纳应用负载', '累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。'); if (!records.length) p.append(empty('还没有流量记录', '让一条转发规则通过真实流量，Agent 会在同步后上报。')); else p.append(table(['规则 / 周期', '节点', '上行', '下行', '序号', '最近上报'], records.map(r => [namedCell(r.rule_id, r.meter_epoch), r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)]))); if (state.view === 'usage') $('#content').replaceChildren(p); }
 async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后该用户已有的 Web 会话和 API 令牌立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '两步验证', '跨节点总限速', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.mfa_enabled ? badge('已启用', 'green') : badge('未启用'), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge('不限速'), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function userActions(u) {
@@ -819,7 +900,7 @@ function editAlertChannel(existing) {
   });
   modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
 }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', 'client-subscriptions': '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

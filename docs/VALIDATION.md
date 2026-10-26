@@ -1,5 +1,20 @@
 # 本地验证记录
 
+0.21.0 开发版在 macOS 27.0.1 arm64 通过 **333 项自动化测试（304 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 334 项。日志见 [verification-0.21.0.txt](verification-0.21.0.txt)，逐项清单见 [validation-evidence-0.21.0.json](validation-evidence-0.21.0.json)。客户端订阅另有 `scripts/check_subscriptions.py` 的独立格式检查（真实控制器、公开端点、PyYAML/Base64 解析、轮换与删除）。
+
+## 0.21.0 客户端订阅验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 渲染单元测试 | 4 项：四种格式结构、跳过原因、宿主/标签/端口段/重名、令牌与过期 |
+| Store/HTTP 集成 | 3 项：租户与系统管理员边界、持久化重开、真实公开端点、API scope、轮换/删除、60 次/分钟限频 |
+| 独立格式检查 | `scripts/check_subscriptions.py` 启动真实控制器，发布 Shadowsocks 与普通 TCP 规则，分别拉取 V2Ray/Clash/Surge/Shadowrocket；PyYAML 解析 Clash，Base64 解码 V2Ray，核对预览跳过普通 TCP，轮换后旧链接 401、删除后 401 |
+| 面板 | `node --check web/app.js` 通过；新增订阅页源码检查，未做浏览器点击验收 |
+
+格式边界：只支持 Shadowsocks 入站；普通 TCP/TLS/WS 规则在 `skipped` 中明确说明。真实客户端矩阵、模板版本化、持久化分布式限频和反向代理审计仍未验收。
+
+## 0.20.0 历史记录
+
 0.20.0 开发版在 macOS 27.0.1 arm64 通过 **326 项自动化测试（297 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、规则编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用，不作为跳过项。Linux 上还多一项条件单元测试，合计 327 项。日志见 [verification-0.20.0.txt](verification-0.20.0.txt)，逐项清单见 [validation-evidence-0.20.0.json](validation-evidence-0.20.0.json)。完整 22 模块、两节点原生服务和长期负载验收仍在推进。
 
 0.19.0 的历史计数需要更正：其开头的 318 项（289 + 29）来自 `--no-fail-fast` 的便携运行，没有计入 macOS 上失败的遥测与监听地址两项，也没有计入 1 项过滤；Linux 记录为 293 项 Rust（比 macOS 多一项条件测试）。0.20.0 已修复这两项 macOS 失败，并统一按完整套件计数。以下 0.19.0 记录保留原观测值。
