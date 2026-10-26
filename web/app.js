@@ -707,7 +707,7 @@ const dnsModes = { observe: '观察（只读，不写服务商）', apply: '应�
 const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];
 async function renderDns() {
   if (state.actor.role !== 'system_admin') { $('#content').replaceChildren(empty('仅系统管理员可见', 'DNS 服务商令牌可修改外部 DNS，因此只向系统管理员开放。')); return; }
-  const [providers, zones] = await Promise.all([api('/dns/providers'), api('/dns/zones')]);
+  const [providers, zones, nodes] = await Promise.all([api('/dns/providers'), api('/dns/zones'), api('/nodes')]);
   const providerNames = Object.fromEntries(providers.map(p => [p.id, p.name]));
   const p = panel('DNS 服务商', '保存 Cloudflare 兼容 API 的地址和令牌。令牌可逆保存以调用服务商，接口只显示是否已设置；仅系统管理员可读写。', button('＋ 新增服务商', () => dnsProviderForm(null), 'primary'));
   if (!providers.length) p.append(empty('还没有 DNS 服务商', '先添加服务商，再创建区域和托管记录。'));
@@ -728,16 +728,16 @@ async function renderDns() {
   if (selected) {
     state.dnsZone = selected.id;
     const records = await api(`/dns/zones/${selected.id}/records`);
-    const r = panel(`托管记录 · ${selected.name}`, '每条记录带 relay 标记。删除记录时应用模式会同时删除服务商记录；观察模式只删除本地记录。', button('＋ 新增记录', () => dnsRecordForm(selected, null), 'primary'));
+    const r = panel(`托管记录 · ${selected.name}`, '每条记录带 relay 标记。删除记录时应用模式会同时删除服务商记录；观察模式只删除本地记录。健康摘除只在节点心跳新鲜且至少一个目标健康时保留记录。', button('＋ 新增记录', () => dnsRecordForm(selected, null, nodes), 'primary'));
     if (!records.length) r.append(empty('还没有托管记录', '创建 A/AAAA/CNAME 记录，然后执行“立即同步”。'));
-    else r.append(table(['名称', '类型', '内容', 'TTL', '状态', '服务商记录', '操作'], records.map(record => {
+    else r.append(table(['名称', '类型', '内容', 'TTL', '状态', '健康摘除', '服务商记录', '操作'], records.map(record => {
       const actions = el('div');
-      actions.append(button('编辑', () => dnsRecordForm(selected, record), 'table-action'));
+      actions.append(button('编辑', () => dnsRecordForm(selected, record, nodes), 'table-action'));
       if (record.type === 'A' || record.type === 'AAAA') actions.append(button('DDNS', () => ddnsRecord(record), 'table-action'));
       actions.append(button(record.enabled ? '停用' : '启用', async () => { await api(`/dns/records/${record.id}`, { method: 'PUT', body: { enabled: !record.enabled } }); await renderDns(); }, 'table-action'));
       actions.append(button('删除', () => deleteDnsRecord(record), 'table-action danger'));
       const stateBadge = record.last_error ? badge('错误', 'red') : record.enabled ? badge('启用', 'green') : badge('停用', '');
-      return [namedCell(record.name, record.id), record.type, record.content, record.ttl, stateBadge, record.provider_record_id || '—', actions];
+      return [namedCell(record.name, record.id), record.type, record.content, record.ttl, stateBadge, record.health ? `${record.health.node_id} / ${record.health.rule_id}` : '—', record.provider_record_id || '—', actions];
     })));
     if (records.some(record => record.last_error)) r.append(el('p', records.filter(record => record.last_error).map(record => `${record.name}: ${record.last_error}`).join('；'), 'error-text'));
     $('#content').replaceChildren(p, z, r);
@@ -776,16 +776,22 @@ function dnsZoneForm(zone, providers) {
   });
   modal(zone ? `编辑 DNS 区域 · ${zone.name}` : '新增 DNS 区域', form);
 }
-function dnsRecordForm(zone, record) {
+function dnsRecordForm(zone, record, nodes) {
   const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'name', '记录名称', record?.name || '').maxLength = 253;
   select(grid, 'type', '类型', dnsRecordTypes.map(type => [type, type]), record?.type || 'A');
   field(grid, 'content', '内容（IP 或 CNAME）', record?.content || '').maxLength = 253;
   const ttl = field(grid, 'ttl', 'TTL（秒）', record?.ttl ?? 300, 'number'); ttl.min = 1; ttl.max = 86400;
   select(grid, 'proxied', 'Cloudflare 代理', [['no', '不代理'], ['yes', '代理']], record?.proxied ? 'yes' : 'no');
-  form.append(grid, el('p', '应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。', 'fine'));
+  select(grid, 'health_node', '入口健康摘除节点', [['', '不启用'], ...nodes.map(node => [node.id, node.name])], record?.health?.node_id || '');
+  field(grid, 'health_rule', '健康摘除规则 ID（可选）', record?.health?.rule_id || '').maxLength = 128;
+  if (record?.health) select(grid, 'health_clear', '健康摘除设置', [['no', '保留现有设置'], ['yes', '清除健康摘除']], 'no');
+  form.append(grid, el('p', '应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。填写节点和规则 ID 后，节点心跳超过 90 秒或没有健康目标时，应用模式会摘除该记录；恢复后自动重建。', 'fine'));
   submit(form, record ? '保存记录' : '添加记录', async data => {
     const body = { name: String(data.get('name')).trim(), type: data.get('type'), content: String(data.get('content')).trim(), ttl: number(data, 'ttl'), proxied: data.get('proxied') === 'yes' };
+    const healthNode = String(data.get('health_node') || ''), healthRule = String(data.get('health_rule') || '').trim();
+    if (data.get('health_clear') === 'yes') body.clear_health = true;
+    else if (healthNode && healthRule) body.health = { node_id: healthNode, rule_id: healthRule };
     if (record) await api(`/dns/records/${record.id}`, { method: 'PUT', body });
     else await api(`/dns/zones/${zone.id}/records`, { method: 'POST', body });
     $('#dialog').close(); notify('DNS 记录已保存；执行“立即同步”后写入服务商。'); await renderDns();

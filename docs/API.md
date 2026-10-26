@@ -326,9 +326,13 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | GET/PUT/DELETE | `/dns/providers/{id}` | 读取（脱敏）/更新（令牌留空保留）/删除；有区域时 409 |
 | GET/POST | `/dns/zones` | 区域列表/创建 `{provider_id,name,mode,min_keep}` |
 | GET/PUT/DELETE | `/dns/zones/{id}` | 读取/更新/删除；有记录时 409 |
-| GET/POST | `/dns/zones/{id}/records` | 记录列表/创建 `{name,type,content,ttl,proxied}` |
+| GET/POST | `/dns/zones/{id}/records` | 记录列表/创建 `{name,type,content,ttl,proxied,health?}` |
 | GET/PUT/DELETE | `/dns/records/{id}` | 记录读取/更新/删除；应用模式删除时清理服务商记录 |
 | POST | `/dns/zones/{id}/reconcile` | 观察或应用同步，返回创建/更新/删除/未变/保留/错误和逐条 action |
 | POST | `/dns/records/{id}/ddns` | `{content}` 更新 A/AAAA 并同步；CNAME 返回 400 |
 
-`mode=observe` 不写服务商，`apply` 只管理带 `relay:<record id>` 注释的记录。`min_keep` 在删除停用记录时保护启用的托管记录数。DDNS 不自动探测公网 IP；服务商只证明 API 接受，不证明 DNS 已传播。详见 [DNS.md](DNS.md)。
+`mode=observe` 不写服务商，`apply` 只管理带 `relay:<record id>` 注释的记录。`min_keep` 在删除停用/健康摘除记录时保护当前有效托管记录数。记录的 `health:{node_id,rule_id}` 要求节点心跳不超过 90 秒且规则至少有一个 `eligible && healthy` 目标；否则观察模式给出 `would-health-remove`，应用模式摘除，恢复后重建。更新时 `clear_health:true` 移除门控。DDNS 不自动探测公网 IP；服务商只证明 API 接受，不证明 DNS 已传播。详见 [DNS.md](DNS.md)。
+
+## 0.23.0 DNS 健康摘除
+
+记录创建/更新可带 `health:{node_id,rule_id}`，同步器要求节点心跳不超过 90 秒、节点资料为活动状态，并且该规则至少有一个 `eligible=true` 且 `status=healthy` 的目标报告；否则观察模式报告 `would-health-remove`，应用模式删除服务商记录，恢复后下一次同步重建。更新时 `clear_health:true` 移除门控。`min_keep` 以“本地启用且健康门控通过”的记录数计算。健康门控测试直接写入真实 `nodes.stats_json` 结构，但没有启动真实 Agent 产生探测流量。

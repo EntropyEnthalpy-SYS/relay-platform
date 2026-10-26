@@ -1336,6 +1336,8 @@ struct NewDnsRecord {
     ttl: u32,
     #[serde(default)]
     proxied: bool,
+    #[serde(default)]
+    health: Option<crate::dns::HealthGate>,
 }
 fn default_dns_ttl() -> u32 {
     300
@@ -1353,6 +1355,10 @@ struct UpdateDnsRecord {
     proxied: Option<bool>,
     #[serde(default)]
     enabled: Option<bool>,
+    #[serde(default)]
+    health: Option<crate::dns::HealthGate>,
+    #[serde(default)]
+    clear_health: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1510,6 +1516,7 @@ async fn create_dns_record(
         content: input.content,
         ttl: input.ttl,
         proxied: input.proxied,
+        health: input.health,
     };
     Ok(Json(
         database(state.store, move |db| {
@@ -1530,6 +1537,8 @@ async fn update_dns_record(
         ttl: input.ttl,
         proxied: input.proxied,
         enabled: input.enabled,
+        health: input.health,
+        clear_health: input.clear_health,
     };
     Ok(Json(
         database(state.store, move |db| {

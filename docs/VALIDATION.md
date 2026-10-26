@@ -1,14 +1,23 @@
 # 本地验证记录
 
-0.22.0 开发版在 macOS 27.0.1 arm64 通过 **336 项自动化测试（307 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 337 项。日志见 [verification-0.22.0.txt](verification-0.22.0.txt)，逐项清单见 [validation-evidence-0.22.0.json](validation-evidence-0.22.0.json)。
+0.23.0 开发版在 macOS 27.0.1 arm64 通过 **337 项自动化测试（308 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 338 项。日志见 [verification-0.23.0.txt](verification-0.23.0.txt)，逐项清单见 [validation-evidence-0.23.0.json](validation-evidence-0.23.0.json)。
 
-## 0.22.0 DNS 托管记录验证
+## 0.23.0 DNS 健康摘除验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 健康门控 | 绑定节点/规则；写入真实 `stats_json` 的健康报告，验证冷启动不创建、健康创建、不健康摘除、心跳过期摘除、恢复重建；`clear_health` 与 `min_keep` 有效 |
+| 面板 | `node --check web/app.js` 通过；DNS 页新增健康节点/规则/清除字段，未做浏览器点击验收 |
+
+## 0.22.0 DNS 托管记录验证（历史）
+
+0.22.0 开发版在 macOS 27.0.1 arm64 通过 **336 项自动化测试（307 项 Rust、29 项 Python）**；DNS 核心为 3 项测试，健康门控在 0.23.0 增加。日志见 [verification-0.22.0.txt](verification-0.22.0.txt)，逐项清单见 [validation-evidence-0.22.0.json](validation-evidence-0.22.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |
 | DNS 单元/集成 | 3 项：mock Cloudflare 的创建、更新、观察不写、`min_keep` 保留/删除、服务商隔离；输入边界与回环 HTTP 规则；真实 HTTP 路由、令牌脱敏、租户管理员/API 令牌 403、DDNS 与删除清理 |
 | 面板 | `node --check web/app.js` 通过；新增 DNS 页源码检查，未做浏览器点击验收 |
-| 同步边界 | 只验证服务商 API 接受/返回；未连接真实 Cloudflare，未验证 DNS 传播、分页、供应商错误码矩阵、健康摘除、webhook、权威池或污染/缓存 |
+| 同步边界 | 只验证服务商 API 接受/返回；未连接真实 Cloudflare，未验证 DNS 传播、分页、供应商错误码矩阵、真实 Agent 端到端、webhook、权威池或污染/缓存 |
 
 ## 0.21.0 客户端订阅验证
 

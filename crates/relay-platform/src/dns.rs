@@ -83,6 +83,11 @@ impl RecordType {
         }
     }
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthGate {
+    pub node_id: String,
+    pub rule_id: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Record {
     pub id: String,
@@ -95,6 +100,10 @@ pub struct Record {
     #[serde(default)]
     pub proxied: bool,
     pub enabled: bool,
+    /// Optional entry-health gate: remove this record while the linked node
+    /// rule has no fresh, eligible healthy target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthGate>,
     /// Provider's record ID once created or imported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_record_id: Option<String>,
@@ -115,6 +124,7 @@ pub struct RecordView {
     pub ttl: u32,
     pub proxied: bool,
     pub enabled: bool,
+    pub health: Option<HealthGate>,
     pub provider_record_id: Option<String>,
     pub last_observed: Option<String>,
     pub last_error: Option<String>,
@@ -131,6 +141,7 @@ impl From<&Record> for RecordView {
             ttl: value.ttl,
             proxied: value.proxied,
             enabled: value.enabled,
+            health: value.health.clone(),
             provider_record_id: value.provider_record_id.clone(),
             last_observed: value.last_observed.clone(),
             last_error: value.last_error.clone(),
@@ -204,6 +215,19 @@ pub fn validate_record(record_type: RecordType, name: &str, content: &str, ttl: 
                     .any(|c| c.is_control() || c.is_whitespace() || c == '/')
             {
                 bail!("CNAME content must be a hostname");
+            }
+        }
+    }
+    Ok(())
+}
+pub fn validate_health(gate: Option<&HealthGate>) -> Result<()> {
+    if let Some(gate) = gate {
+        for (value, what) in [
+            (&gate.node_id, "health node ID"),
+            (&gate.rule_id, "health rule ID"),
+        ] {
+            if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+                bail!("{what} must be 1..128 bytes without control characters");
             }
         }
     }
@@ -378,7 +402,16 @@ pub async fn reconcile(
         errors: 0,
         actions: vec![],
     };
-    let enabled = records.iter().filter(|record| record.enabled).count();
+    let mut health = std::collections::HashMap::new();
+    for record in &records {
+        if let Some(gate) = &record.health {
+            health.insert(record.id.clone(), store.dns_health_ok(gate)?);
+        }
+    }
+    let enabled = records
+        .iter()
+        .filter(|record| record.enabled && health.get(&record.id).copied().unwrap_or(true))
+        .count();
     for mut record in records {
         let remote_record = record
             .provider_record_id
@@ -393,17 +426,35 @@ pub async fn reconcile(
                         && remote.comment.as_deref() == Some(comment(&record.id).as_str())
                 })
             });
-        if !record.enabled {
+        let health_ok = health.get(&record.id).copied().unwrap_or(true);
+        let blocked_by_health = record.enabled && !health_ok;
+        if !record.enabled || !health_ok {
+            let observe_action = if blocked_by_health {
+                "would-health-remove"
+            } else {
+                "would-delete"
+            };
+            let apply_action = if blocked_by_health {
+                "health-remove"
+            } else {
+                "delete"
+            };
+            let reason = if blocked_by_health {
+                "health gate has no fresh eligible healthy target"
+            } else {
+                "disabled"
+            };
             if let Some(remote_record) = remote_record {
                 if zone.mode == ZoneMode::Observe {
                     result.deleted += 1;
                     actions.push(Action {
                         record_id: record.id.clone(),
-                        action: "would-delete".into(),
+                        action: observe_action.into(),
                         detail: format!(
-                            "disabled {} {} would be deleted",
+                            "{} {} {} would be removed: {reason}",
                             record.record_type.as_str(),
-                            record.name
+                            record.name,
+                            record.content
                         ),
                     });
                 } else if enabled >= zone.min_keep as usize {
@@ -412,9 +463,9 @@ pub async fn reconcile(
                             result.deleted += 1;
                             actions.push(Action {
                                 record_id: record.id.clone(),
-                                action: "delete".into(),
+                                action: apply_action.into(),
                                 detail: format!(
-                                    "deleted disabled {} {}",
+                                    "removed {} {}: {reason}",
                                     record.record_type.as_str(),
                                     record.name
                                 ),
@@ -444,7 +495,7 @@ pub async fn reconcile(
                         record_id: record.id.clone(),
                         action: "keep".into(),
                         detail: format!(
-                            "disabled managed record kept to satisfy min_keep={}",
+                            "managed record kept to satisfy min_keep={} ({reason})",
                             zone.min_keep
                         ),
                     });

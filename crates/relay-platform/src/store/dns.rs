@@ -3,7 +3,8 @@
 //! reversible and therefore restricted to system administrators.
 use super::*;
 use crate::dns::{
-    Provider, ProviderKind, ProviderView, Record, RecordType, RecordView, Zone, ZoneMode,
+    HealthGate, Provider, ProviderKind, ProviderView, Record, RecordType, RecordView, Zone,
+    ZoneMode,
 };
 
 fn provider_key(id: &str) -> String {
@@ -103,6 +104,7 @@ pub struct NewDnsRecord {
     pub content: String,
     pub ttl: u32,
     pub proxied: bool,
+    pub health: Option<HealthGate>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct DnsRecordPatch {
@@ -111,6 +113,10 @@ pub struct DnsRecordPatch {
     pub ttl: Option<u32>,
     pub proxied: Option<bool>,
     pub enabled: Option<bool>,
+    /// `Some` replaces the gate; `None` leaves it unchanged.
+    pub health: Option<HealthGate>,
+    /// Explicitly remove the health gate when true.
+    pub clear_health: bool,
 }
 impl Store {
     pub fn dns_providers(&self, actor: &Actor) -> Result<Vec<ProviderView>> {
@@ -351,6 +357,7 @@ impl Store {
     ) -> Result<RecordView> {
         require_admin(actor)?;
         crate::dns::validate_record(input.record_type, &input.name, &input.content, input.ttl)?;
+        crate::dns::validate_health(input.health.as_ref())?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let zone = read_zone(&tx, zone_id)?.context("DNS zone not found")?;
@@ -364,6 +371,7 @@ impl Store {
             ttl: input.ttl,
             proxied: input.proxied,
             enabled: true,
+            health: input.health,
             provider_record_id: None,
             last_observed: None,
             last_error: None,
@@ -399,6 +407,11 @@ impl Store {
         if let Some(value) = patch.enabled {
             record.enabled = value;
         }
+        if patch.clear_health {
+            record.health = None;
+        } else if let Some(value) = patch.health {
+            record.health = Some(value);
+        }
         crate::dns::validate_record(
             record.record_type,
             &record.name,
@@ -422,6 +435,37 @@ impl Store {
         audit(&tx, &actor.id, "dns.record.delete", id, "{}")?;
         tx.commit()?;
         Ok(record)
+    }
+    /// Health gate: a record is active only while its linked node has a fresh
+    /// applied observation with at least one eligible healthy target for the
+    /// rule. Unknown, stale, disabled or absent nodes fail closed.
+    pub(crate) fn dns_health_ok(&self, gate: &HealthGate) -> Result<bool> {
+        let conn = self.0.lock().unwrap();
+        let row: Option<(Option<i64>, String)> = conn
+            .query_row(
+                "SELECT last_seen_ms,COALESCE(stats_json,'{}') FROM nodes WHERE id=?1",
+                [&gate.node_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((last_seen, stats)) = row else {
+            return Ok(false);
+        };
+        if super::node_profiles::read(&conn, &gate.node_id)?
+            .settings
+            .lifecycle(now_ms())
+            != crate::node::NodeLifecycle::Active
+            || last_seen.is_none_or(|seen| now_ms().saturating_sub(seen) > 90_000)
+        {
+            return Ok(false);
+        }
+        let stats: EngineStats =
+            serde_json::from_str(&stats).context("invalid node health statistics")?;
+        Ok(stats.target_health.iter().any(|report| {
+            report.rule_id == gate.rule_id
+                && report.eligible
+                && report.status == crate::health::Status::Healthy
+        }))
     }
     pub fn dns_record_synced(
         &self,

@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use relay_platform::{
     api::{self, AppState},
-    dns::{self, ProviderKind, RecordType, ZoneMode},
+    dns::{self, HealthGate, ProviderKind, RecordType, ZoneMode},
     store::{Rejection, Store},
 };
 use serde_json::{Value, json};
@@ -224,6 +224,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
                 content: "203.0.113.10".into(),
                 ttl: 300,
                 proxied: false,
+                health: None,
             },
         )
         .unwrap();
@@ -237,6 +238,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
                 content: "203.0.113.11".into(),
                 ttl: 300,
                 proxied: false,
+                health: None,
             },
         )
         .unwrap();
@@ -286,6 +288,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
                 content: "203.0.113.20".into(),
                 ttl: 300,
                 proxied: false,
+                health: None,
             },
         )
         .unwrap();
@@ -368,6 +371,130 @@ async fn login(client: &reqwest::Client, origin: &str, username: &str) -> String
         .unwrap();
     assert!(body["token"].is_string(), "{body}");
     body["token"].as_str().unwrap().into()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_health_gate_removes_an_entry_and_restores_it_after_recovery() {
+    let (_mock, endpoint, stop) = mock_cloudflare("example.com").await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("controller.db");
+    let store = Store::open(&path).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (node, _enrollment) = store.create_node(&admin, "default", "edge").unwrap();
+    let provider = store
+        .create_dns_provider(
+            &admin,
+            "fixture",
+            ProviderKind::Cloudflare,
+            &endpoint,
+            "test-token",
+        )
+        .unwrap();
+    let zone = store
+        .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Apply, 0)
+        .unwrap();
+    let record = store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            relay_platform::store::NewDnsRecord {
+                name: "edge.example.com".into(),
+                record_type: RecordType::A,
+                content: "203.0.113.40".into(),
+                ttl: 300,
+                proxied: false,
+                health: Some(HealthGate {
+                    node_id: node.id.clone(),
+                    rule_id: "entry".into(),
+                }),
+            },
+        )
+        .unwrap();
+    let http = reqwest::Client::new();
+    // No fresh observation: the gate fails closed and creates nothing.
+    let cold = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(cold.created, 0, "{cold:?}");
+    assert!(_mock.records.lock().await.is_empty());
+
+    let set_health = |status: &str, eligible: bool, seen: i64| {
+        let stats = json!({
+            "active_tcp": 0, "active_udp": 0, "accepted_tcp": 0,
+            "rejected_connections": 0, "failed_connections": 0,
+            "dropped_datagrams": 0, "forwarded_upload_bytes": 0,
+            "forwarded_download_bytes": 0,
+            "target_health": [{
+                "probe_kind": "tcp_connect", "rule_id": "entry", "target_index": 0,
+                "listen_port": 443, "protocol": "tcp", "target_address": "127.0.0.1:9",
+                "status": status, "eligible": eligible, "selection_reason": if eligible { "eligible" } else { "unhealthy" },
+                "sample_age_ms": 10, "max_age_ms": 5000, "checked_at_ms": relay_platform::model::now_ms(),
+                "latency_ewma_us": 1000, "window_checks": 1, "window_failures": if eligible { 0 } else { 1 },
+                "jitter_us": null, "consecutive_successes": if eligible { 1 } else { 0 },
+                "consecutive_failures": if eligible { 0 } else { 1 }, "completed_checks": 1,
+                "successful_checks": if eligible { 1 } else { 0 }, "last_error": null,
+                "probe_sent_bytes": 0, "probe_received_bytes": 0, "priority": 0,
+                "active_sessions": 0, "max_sessions": null
+            }]
+        });
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "UPDATE nodes SET last_seen_ms=?1,stats_json=?2 WHERE id=?3",
+                rusqlite::params![seen, stats.to_string(), node.id],
+            )
+            .unwrap();
+    };
+    set_health("healthy", true, relay_platform::model::now_ms());
+    let healthy = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(healthy.created, 1, "{healthy:?}");
+    assert_eq!(_mock.records.lock().await.len(), 1);
+
+    set_health("unhealthy", false, relay_platform::model::now_ms());
+    let removed = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(removed.deleted, 1, "{removed:?}");
+    assert!(
+        removed
+            .actions
+            .iter()
+            .any(|action| action.action == "health-remove")
+    );
+    assert!(_mock.records.lock().await.is_empty());
+    assert!(store.dns_record(&admin, &record.id).unwrap().enabled);
+
+    set_health("healthy", true, relay_platform::model::now_ms());
+    let restored = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(restored.created, 1, "{restored:?}");
+
+    // A stale heartbeat fails closed even when the last report was healthy.
+    set_health("healthy", true, relay_platform::model::now_ms() - 120_000);
+    let stale = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(stale.deleted, 1, "{stale:?}");
+    assert!(_mock.records.lock().await.is_empty());
+
+    set_health("healthy", true, relay_platform::model::now_ms());
+    let recovered = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(recovered.created, 1, "{recovered:?}");
+
+    // Clearing the gate stops health-based removal.
+    store
+        .update_dns_record(
+            &admin,
+            &record.id,
+            relay_platform::store::DnsRecordPatch {
+                clear_health: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    set_health(
+        "unhealthy",
+        false,
+        relay_platform::model::now_ms() - 120_000,
+    );
+    let ungated = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(ungated.deleted, 0, "{ungated:?}");
+    assert_eq!(_mock.records.lock().await.len(), 1);
+    stop.cancel();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
