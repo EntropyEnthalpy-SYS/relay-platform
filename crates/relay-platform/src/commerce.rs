@@ -46,6 +46,38 @@ pub struct LedgerEntry {
     pub description: String,
     pub created_at_ms: i64,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentChannel {
+    #[default]
+    Wallet,
+    External,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaymentStatus {
+    Pending,
+    Paid,
+    Failed,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Payment {
+    pub id: String,
+    pub order_id: String,
+    pub user_id: String,
+    pub amount_cents: i64,
+    pub status: PaymentStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    pub created_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled_at_ms: Option<i64>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct WebhookView {
+    pub enabled: bool,
+    pub secret_set: bool,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderStatus {
@@ -65,6 +97,8 @@ pub struct Order {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_bytes: Option<u64>,
     pub status: OrderStatus,
+    #[serde(default)]
+    pub channel: PaymentChannel,
     pub created_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paid_at_ms: Option<i64>,

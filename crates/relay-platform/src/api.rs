@@ -313,6 +313,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/commerce/orders/{id}/pay", post(pay_order))
         .route("/api/v1/commerce/orders/{id}/refund", post(refund_order))
+        .route("/api/v1/commerce/orders/{id}/payment", post(create_payment))
+        .route(
+            "/api/v1/commerce/webhook",
+            get(commerce_webhook).put(set_commerce_webhook),
+        )
         .route(
             "/api/v1/announcements",
             get(announcements).post(create_announcement),
@@ -381,6 +386,10 @@ pub fn router(state: AppState) -> Router {
         ));
     Router::new()
         .merge(authenticated)
+        .route(
+            "/api/v1/commerce/payments/callback",
+            post(commerce_payment_callback),
+        )
         .route("/sub/{token}", get(public_subscription))
         .route("/healthz", get(health))
         .route("/api/v1/auth/login", post(login))
@@ -1541,6 +1550,138 @@ async fn refund_order(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct WebhookSet {
+    secret: String,
+    #[serde(default = "commerce_enabled")]
+    enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaymentCallback {
+    payment_id: String,
+    status: crate::commerce::PaymentStatus,
+    #[serde(default)]
+    external_id: Option<String>,
+    amount_cents: i64,
+}
+async fn commerce_webhook(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::commerce::WebhookView> {
+    Ok(Json(
+        database(state.store, move |db| db.commerce_webhook(&actor)).await?,
+    ))
+}
+async fn set_commerce_webhook(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<WebhookSet>,
+) -> ApiResult<crate::commerce::WebhookView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.set_commerce_webhook(&actor, &input.secret, input.enabled)
+        })
+        .await?,
+    ))
+}
+async fn create_payment(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::commerce::Payment> {
+    Ok(Json(
+        database(state.store, move |db| db.create_payment(&actor, &id)).await?,
+    ))
+}
+/// Public gateway callback. Authentication is the HMAC over the exact raw body.
+async fn commerce_payment_callback(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let webhook = database(state.store.clone(), move |db| db.commerce_webhook_secret())
+        .await?
+        .ok_or_else(|| {
+            ApiError(
+                Rejection {
+                    status: 409,
+                    message: "payment webhook is not configured".into(),
+                }
+                .into(),
+            )
+        })?;
+    if !webhook.enabled {
+        return Err(Rejection {
+            status: 409,
+            message: "payment webhook is disabled".into(),
+        }
+        .into());
+    }
+    let signature = headers
+        .get("x-relay-signature")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("sha256=").or(Some(value)))
+        .and_then(hex_decode)
+        .ok_or_else(|| {
+            ApiError(
+                Rejection {
+                    status: 401,
+                    message: "missing or invalid payment signature".into(),
+                }
+                .into(),
+            )
+        })?;
+    let expected = ring::hmac::sign(
+        &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, webhook.secret.as_bytes()),
+        &body,
+    );
+    let expected = expected.as_ref();
+    let mismatch = signature.len() != expected.len()
+        || signature
+            .iter()
+            .zip(expected)
+            .fold(0u8, |diff, (left, right)| diff | (left ^ right))
+            != 0;
+    if mismatch {
+        return Err(Rejection {
+            status: 401,
+            message: "payment signature rejected".into(),
+        }
+        .into());
+    }
+    let input: PaymentCallback = serde_json::from_slice(&body).map_err(|_| {
+        ApiError(
+            Rejection {
+                status: 400,
+                message: "invalid payment callback JSON".into(),
+            }
+            .into(),
+        )
+    })?;
+    let (payment, duplicate) = database(state.store, move |db| {
+        db.settle_external_payment(
+            &input.payment_id,
+            input.status,
+            input.external_id.as_deref(),
+            input.amount_cents,
+        )
+    })
+    .await?;
+    Ok(Json(
+        serde_json::json!({"payment": payment, "duplicate": duplicate}),
+    ))
+}
+fn hex_decode(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(2) || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..value.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&value[index..index + 2], 16).ok())
+        .collect()
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnnouncementInput {
     #[serde(default)]
     tenant_id: Option<String>,
@@ -1988,8 +2129,8 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
-        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-payments","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
 

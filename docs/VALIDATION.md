@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.27.0 开发版在 macOS 27.0.1 arm64 通过 **349 项自动化测试（320 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 350 项。日志见 [verification-0.27.0.txt](verification-0.27.0.txt)，逐项清单见 [validation-evidence-0.27.0.json](validation-evidence-0.27.0.json)。
+0.28.0 开发版在 macOS 27.0.1 arm64 通过 **350 项自动化测试（321 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 351 项。日志见 [verification-0.28.0.txt](verification-0.28.0.txt)，逐项清单见 [validation-evidence-0.28.0.json](validation-evidence-0.28.0.json)。
 
-## 0.27.0 套餐、钱包与订单验证
+## 0.28.0 外部支付回调验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store/HTTP | HMAC 签名失败 401、支付成功、重复回调幂等、订单外部通道、钱包余额不变、外部订单钱包退款 409 |
+| 面板 | `node --check web/app.js` 与视图结构检查；外部支付/回调密钥源码，未做浏览器点击验收 |
+
+## 0.27.0 套餐、钱包与订单验证（历史）
+
+0.27.0 开发版在 macOS 27.0.1 arm64 通过 **349 项自动化测试（320 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 350 项。日志见 [verification-0.27.0.txt](verification-0.27.0.txt)，逐项清单见 [validation-evidence-0.27.0.json](validation-evidence-0.27.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

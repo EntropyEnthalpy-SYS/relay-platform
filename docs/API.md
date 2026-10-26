@@ -384,3 +384,13 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | POST | `/commerce/orders/{id}/refund` | 管理员退款，重复退款 409 |
 
 套餐/订单保存价格快照。支付/退款不自动创建订阅、规则或流量权益。详见 [COMMERCE.md](COMMERCE.md)。
+
+## 0.28.0 外部支付回调
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/commerce/orders/{id}/payment` | 创建/复用待支付外部支付意图；订单必须 pending |
+| GET/PUT | `/commerce/webhook` | 管理员查看/设置 `{secret,enabled}`；读取只返回 `secret_set` |
+| POST | `/commerce/payments/callback` | 无登录公开回调，HMAC-SHA256 验证原始请求体 |
+
+回调 body：`{payment_id,status:"paid"|"failed",external_id,amount_cents}`；`X-Relay-Signature` 为原始 JSON 的 HMAC-SHA256 十六进制（可带 `sha256=`）。重复同状态回调幂等；金额不符/状态冲突/错误签名 4xx。外部支付成功订单 `channel=external`，钱包不变；钱包订单退款仍走 `/orders/{id}/refund`，外部订单该接口 409。其他 `/commerce/*` 仍仅登录会话。详见 [COMMERCE.md](COMMERCE.md)。

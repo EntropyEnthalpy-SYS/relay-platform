@@ -2,8 +2,8 @@
 //! transaction together with its ledger entry and order/wallet state.
 use super::*;
 use crate::commerce::{
-    CURRENCY, LedgerEntry, LedgerKind, Order, OrderStatus, Plan, PlanInput, Wallet, WalletView,
-    validate_adjustment, validate_plan,
+    CURRENCY, LedgerEntry, LedgerKind, Order, OrderStatus, Payment, PaymentChannel, PaymentStatus,
+    Plan, PlanInput, Wallet, WalletView, WebhookView, validate_adjustment, validate_plan,
 };
 
 fn plan_key(id: &str) -> String {
@@ -20,6 +20,15 @@ fn ledger_ref_key(reference: &str) -> String {
 }
 fn order_key(id: &str) -> String {
     format!("commerce_order:{id}")
+}
+fn payment_key(id: &str) -> String {
+    format!("commerce_payment:{id}")
+}
+const WEBHOOK_KEY: &str = "commerce_webhook";
+#[derive(Serialize, Deserialize)]
+pub(crate) struct WebhookRecord {
+    pub(crate) secret: String,
+    pub(crate) enabled: bool,
 }
 fn read_plan(conn: &Connection, id: &str) -> Result<Option<Plan>> {
     read_json(conn, &plan_key(id))
@@ -268,6 +277,7 @@ impl Store {
             duration_days: plan.duration_days,
             traffic_bytes: plan.traffic_bytes,
             status: OrderStatus::Pending,
+            channel: PaymentChannel::Wallet,
             created_at_ms: now_ms(),
             paid_at_ms: None,
             refunded_at_ms: None,
@@ -286,6 +296,18 @@ impl Store {
         }
         if order.status != OrderStatus::Pending {
             return reject(409, "order is not pending");
+        }
+        // A wallet payment supersedes any pending external intent; a later
+        // callback sees a failed payment and cannot settle the order twice.
+        for mut payment in all::<Payment>(&tx, "commerce_payment:")?
+            .into_iter()
+            .filter(|payment| {
+                payment.order_id == order.id && payment.status == PaymentStatus::Pending
+            })
+        {
+            payment.status = PaymentStatus::Failed;
+            payment.settled_at_ms = Some(now_ms());
+            write_json(&tx, &payment_key(&payment.id), &payment)?;
         }
         let mut wallet = read_wallet(&tx, &order.user_id)?;
         if wallet.balance_cents < order.amount_cents {
@@ -319,6 +341,12 @@ impl Store {
         if order.status != OrderStatus::Paid {
             return reject(409, "only a paid order can be refunded");
         }
+        if order.channel == PaymentChannel::External {
+            return reject(
+                409,
+                "external payments must be refunded through the payment provider",
+            );
+        }
         if order.amount_cents > 0 {
             let mut wallet = read_wallet(&tx, &order.user_id)?;
             wallet.balance_cents = wallet
@@ -342,5 +370,129 @@ impl Store {
         audit(&tx, &actor.id, "commerce.order.refund", &order.id, "{}")?;
         tx.commit()?;
         Ok(order)
+    }
+    pub fn commerce_webhook(&self, actor: &Actor) -> Result<WebhookView> {
+        require_admin(actor)?;
+        let conn = self.0.lock().unwrap();
+        let record: Option<WebhookRecord> = read_json(&conn, WEBHOOK_KEY)?;
+        Ok(WebhookView {
+            enabled: record.as_ref().is_some_and(|r| r.enabled),
+            secret_set: record.as_ref().is_some_and(|r| !r.secret.is_empty()),
+        })
+    }
+    pub fn set_commerce_webhook(
+        &self,
+        actor: &Actor,
+        secret: &str,
+        enabled: bool,
+    ) -> Result<WebhookView> {
+        require_admin(actor)?;
+        if secret.len() < 16 || secret.len() > 512 || secret.chars().any(char::is_control) {
+            return reject(
+                400,
+                "webhook secret must contain 16..512 bytes without control characters",
+            );
+        }
+        let record = WebhookRecord {
+            secret: secret.into(),
+            enabled,
+        };
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        write_json(&tx, WEBHOOK_KEY, &record)?;
+        audit(&tx, &actor.id, "commerce.webhook.update", "commerce", "{}")?;
+        tx.commit()?;
+        Ok(WebhookView {
+            enabled,
+            secret_set: true,
+        })
+    }
+    pub(crate) fn commerce_webhook_secret(&self) -> Result<Option<WebhookRecord>> {
+        let conn = self.0.lock().unwrap();
+        read_json(&conn, WEBHOOK_KEY)
+    }
+    pub fn create_payment(&self, actor: &Actor, order_id: &str) -> Result<Payment> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let order = read_order(&tx, order_id)?.context("order not found")?;
+        if order.user_id != actor.id && actor.role != Role::SystemAdmin {
+            return reject(403, "order belongs to another user");
+        }
+        if order.status != OrderStatus::Pending {
+            return reject(409, "only a pending order can create a payment");
+        }
+        let existing: Option<Payment> = all::<Payment>(&tx, "commerce_payment:")?
+            .into_iter()
+            .find(|p| p.order_id == order.id && p.status == PaymentStatus::Pending);
+        if let Some(payment) = existing {
+            return Ok(payment);
+        }
+        let payment = Payment {
+            id: Uuid::new_v4().to_string(),
+            order_id: order.id,
+            user_id: order.user_id,
+            amount_cents: order.amount_cents,
+            status: PaymentStatus::Pending,
+            external_id: None,
+            created_at_ms: now_ms(),
+            settled_at_ms: None,
+        };
+        write_json(&tx, &payment_key(&payment.id), &payment)?;
+        audit(&tx, &actor.id, "commerce.payment.create", &payment.id, "{}")?;
+        tx.commit()?;
+        Ok(payment)
+    }
+    /// Used only after the caller verified the webhook signature.
+    pub fn settle_external_payment(
+        &self,
+        payment_id: &str,
+        status: PaymentStatus,
+        external_id: Option<&str>,
+        amount_cents: i64,
+    ) -> Result<(Payment, bool)> {
+        if !matches!(status, PaymentStatus::Paid | PaymentStatus::Failed) {
+            return reject(400, "webhook status must be paid or failed");
+        }
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut payment: Payment =
+            read_json(&tx, &payment_key(payment_id))?.context("payment not found")?;
+        if payment.amount_cents != amount_cents {
+            return reject(409, "payment amount does not match the order");
+        }
+        if payment.status == status && payment.status != PaymentStatus::Pending {
+            return Ok((payment, true));
+        }
+        if payment.status != PaymentStatus::Pending {
+            return reject(409, "payment has already been settled differently");
+        }
+        let mut order = read_order(&tx, &payment.order_id)?.context("order not found")?;
+        if order.status != OrderStatus::Pending {
+            return reject(409, "order is not pending");
+        }
+        payment.status = status;
+        payment.external_id = external_id.map(str::to_owned);
+        payment.settled_at_ms = Some(now_ms());
+        write_json(&tx, &payment_key(&payment.id), &payment)?;
+        let paid = status == PaymentStatus::Paid;
+        if paid {
+            order.status = OrderStatus::Paid;
+            order.channel = PaymentChannel::External;
+            order.paid_at_ms = Some(now_ms());
+            write_order(&tx, &order)?;
+        }
+        audit(
+            &tx,
+            "webhook",
+            if paid {
+                "commerce.payment.paid"
+            } else {
+                "commerce.payment.failed"
+            },
+            &payment.id,
+            "{}",
+        )?;
+        tx.commit()?;
+        Ok((payment, false))
     }
 }

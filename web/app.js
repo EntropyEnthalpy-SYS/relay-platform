@@ -744,35 +744,62 @@ const announcementSeverities = { info: '信息', warning: '警告', critical: '�
 function announcementTime(ms) { return timestamp(ms); }
 function announcementDateTime(ms) { const d = new Date(ms || Date.now()); const pad = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; }
 const orderStatuses = { pending: '待支付', paid: '已支付', refunded: '已退款' };
+const orderChannels = { wallet: '钱包', external: '外部支付' };
 const ledgerKinds = { adjustment: '调整', credit: '充值', purchase: '购买', refund: '退款' };
 function money(cents) { return `¥${(cents / 100).toFixed(2)}`; }
 async function renderCommerce() {
   const [wallet, plans, orders] = await Promise.all([api('/commerce/wallet'), api('/commerce/plans'), api('/commerce/orders')]);
+  const webhook = state.actor.role === 'system_admin' ? await api('/commerce/webhook') : null;
   const p = panel('钱包', `余额 ${money(wallet.wallet.balance_cents)} · ${wallet.wallet.currency}。余额只能通过管理员调整或退款入账；购买会即时扣款。`, state.actor.role === 'system_admin' ? button('调整用户钱包', adjustWallet, 'primary') : null);
   p.append(table(['金额', '类型', '说明', '引用', '时间'], wallet.entries.map(entry => [money(entry.delta_cents), ledgerKinds[entry.kind] || entry.kind, entry.description, entry.reference, timestamp(entry.created_at_ms)])));
   if (!wallet.entries.length) p.append(el('p', '还没有资金流水。', 'muted'));
   const plansPanel = panel('套餐', '价格以人民币分保存；购买订单保存套餐快照，后续改价不影响已创建订单。', state.actor.role === 'system_admin' ? button('＋ 新建套餐', () => planForm(null), 'primary') : null);
   if (!plans.length) plansPanel.append(empty('暂无可用套餐', '管理员创建并启用套餐后，用户可以创建订单。'));
   else plansPanel.append(table(['套餐', '说明', '价格', '时长', '流量', '操作'], plans.map(plan => {
-    const actions = el('div'); actions.append(button('购买', () => buyPlan(plan), 'table-action'));
+    const actions = el('div'); actions.append(button('钱包购买', () => buyPlan(plan), 'table-action'), button('创建待支付订单', async () => { await api('/commerce/orders', { method: 'POST', body: { plan_id: plan.id } }); notify('订单已创建，可在订单中选择钱包或外部支付。'); await renderCommerce(); }, 'table-action'));
     if (state.actor.role === 'system_admin') actions.append(button('编辑', () => planForm(plan), 'table-action'), button('删除', () => deletePlan(plan), 'table-action danger'));
     return [namedCell(plan.name, plan.id), plan.description || '—', money(plan.price_cents), `${plan.duration_days} 天`, plan.traffic_bytes ? bytes(plan.traffic_bytes) : '不限', actions];
   })));
   const ordersPanel = panel('订单', '订单只记录计费结果；套餐权益的自动发放/到期执行仍未实现。', null);
   if (!orders.length) ordersPanel.append(empty('还没有订单', '选择套餐购买后会生成订单。'));
-  else ordersPanel.append(table(['套餐', '金额', '状态', '创建', '支付/退款', '操作'], orders.map(order => {
+  else ordersPanel.append(table(['套餐', '金额', '状态', '通道', '创建', '支付/退款', '操作'], orders.map(order => {
     const actions = el('div');
-    if (order.status === 'pending') actions.append(button('支付', async () => { await api(`/commerce/orders/${order.id}/pay`, { method: 'POST' }); notify('订单已支付。'); await renderCommerce(); }, 'table-action'));
-    if (order.status === 'paid' && state.actor.role === 'system_admin') actions.append(button('退款', async () => { if (!confirm(`退款 ${money(order.amount_cents)} 到用户钱包？`)) return; await api(`/commerce/orders/${order.id}/refund`, { method: 'POST' }); notify('订单已退款。'); await renderCommerce(); }, 'table-action danger'));
-    return [order.plan_name, money(order.amount_cents), badge(orderStatuses[order.status] || order.status, order.status === 'paid' ? 'green' : order.status === 'refunded' ? 'orange' : ''), timestamp(order.created_at_ms), order.paid_at_ms ? timestamp(order.paid_at_ms) : order.refunded_at_ms ? timestamp(order.refunded_at_ms) : '—', actions];
+    if (order.status === 'pending') actions.append(button('钱包支付', async () => { await api(`/commerce/orders/${order.id}/pay`, { method: 'POST' }); notify('订单已支付。'); await renderCommerce(); }, 'table-action'), button('外部支付', () => externalPayment(order), 'table-action'));
+    if (order.status === 'paid' && order.channel === 'wallet' && state.actor.role === 'system_admin') actions.append(button('退款', async () => { if (!confirm(`退款 ${money(order.amount_cents)} 到用户钱包？`)) return; await api(`/commerce/orders/${order.id}/refund`, { method: 'POST' }); notify('订单已退款。'); await renderCommerce(); }, 'table-action danger'));
+    return [order.plan_name, money(order.amount_cents), badge(orderStatuses[order.status] || order.status, order.status === 'paid' ? 'green' : order.status === 'refunded' ? 'orange' : ''), orderChannels[order.channel] || order.channel || '钱包', timestamp(order.created_at_ms), order.paid_at_ms ? timestamp(order.paid_at_ms) : order.refunded_at_ms ? timestamp(order.refunded_at_ms) : '—', actions];
   })));
-  $('#content').replaceChildren(p, plansPanel, ordersPanel);
+  const panels = [p, plansPanel, ordersPanel];
+  if (webhook) {
+    const w = panel('支付回调', '外部支付回调使用 HMAC-SHA256 验证原始请求体；配置/轮换密钥会使旧签名失效。', button('配置回调密钥', webhookForm, 'primary'));
+    w.append(table(['状态', '密钥'], [[webhook.enabled ? badge('启用', 'green') : badge('停用', ''), webhook.secret_set ? badge('已设置', 'green') : badge('未设置', 'red')]]));
+    panels.push(w);
+  }
+  $('#content').replaceChildren(...panels);
 }
 async function buyPlan(plan) {
   if (!confirm(`购买「${plan.name}」并立即从钱包扣除 ${money(plan.price_cents)}？`)) return;
   const order = await api('/commerce/orders', { method: 'POST', body: { plan_id: plan.id } });
   await api(`/commerce/orders/${order.id}/pay`, { method: 'POST' });
   notify('订单已支付。'); await renderCommerce();
+}
+async function externalPayment(order) {
+  const payment = await api(`/commerce/orders/${order.id}/payment`, { method: 'POST' });
+  const body = el('div');
+  body.append(el('p', '把以下付款编号交给支付网关；网关回调必须携带对原始 JSON 的 HMAC-SHA256 签名。回调成功后订单变为已支付，但不会增加钱包余额。', 'fine'));
+  body.append(el('div', payment.id, 'secret-box'), el('p', `回调地址：/api/v1/commerce/payments/callback`, 'mono'), el('p', `金额：${money(payment.amount_cents)} · 状态：${payment.status}`, 'mono'));
+  const actions = el('div', undefined, 'dialog-actions'); actions.append(button('复制付款编号', async () => { await navigator.clipboard.writeText(payment.id); notify('付款编号已复制。'); }, 'primary'), button('关闭', () => $('#dialog').close()));
+  body.append(actions); modal(`外部支付 · ${order.plan_name}`, body);
+}
+function webhookForm() {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'secret', '新 HMAC 密钥（至少 16 字节）', '', 'password').maxLength = 512;
+  select(grid, 'enabled', '回调状态', [['yes', '启用'], ['no', '停用']], 'yes');
+  form.append(grid, el('p', '密钥只用于验证回调，不在接口返回原文。回调头为 X-Relay-Signature，值为原始请求体的 HMAC-SHA256 十六进制（可带 sha256= 前缀）。', 'fine'));
+  submit(form, '保存密钥', async data => {
+    await api('/commerce/webhook', { method: 'PUT', body: { secret: String(data.get('secret')), enabled: data.get('enabled') === 'yes' } });
+    $('#dialog').close(); notify('支付回调密钥已保存。'); await renderCommerce();
+  });
+  modal('配置支付回调', form);
 }
 function planForm(plan) {
   const form = el('form'), grid = el('div', undefined, 'form-grid');

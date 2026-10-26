@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use relay_platform::{
     api::{self, AppState},
-    commerce::{LedgerKind, OrderStatus, PlanInput},
+    commerce::{LedgerKind, OrderStatus, PaymentStatus, PlanInput},
     store::{Rejection, Store},
 };
 use serde_json::{Value, json};
@@ -131,6 +131,114 @@ fn wallet_orders_and_refunds_are_idempotent_and_balanced() {
             .iter()
             .any(|entry| entry.kind == LedgerKind::Refund && entry.delta_cents == 5_000)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn external_payment_webhook_is_signed_idempotent_and_not_wallet_refundable() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let user = store
+        .create_user(
+            &admin,
+            "default",
+            "buyer",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (_, buyer) = store.login("buyer", PASSWORD).unwrap();
+    let secret = "test-webhook-secret-32-bytes-long";
+    store.set_commerce_webhook(&admin, secret, true).unwrap();
+    let plan = store
+        .create_commerce_plan(&admin, plan_input(5_000))
+        .unwrap();
+    let order = store.create_order(&buyer, &plan.id).unwrap();
+    let payment = store.create_payment(&buyer, &order.id).unwrap();
+    assert_eq!(payment.status, PaymentStatus::Pending);
+    let (address, stop) = serve(store.clone()).await;
+    let origin = format!("http://{address}");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let body = json!({
+        "payment_id": payment.id,
+        "status": "paid",
+        "external_id": "gateway-123",
+        "amount_cents": 5_000
+    })
+    .to_string();
+    let sign = |body: &str| {
+        let signature = ring::hmac::sign(
+            &ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes()),
+            body.as_bytes(),
+        );
+        signature
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let wrong = client
+        .post(format!("{origin}/api/v1/commerce/payments/callback"))
+        .header("x-relay-signature", "00".repeat(32))
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401);
+    let paid = client
+        .post(format!("{origin}/api/v1/commerce/payments/callback"))
+        .header("x-relay-signature", sign(&body))
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(paid.status(), 200);
+    let response: Value = paid.json().await.unwrap();
+    assert_eq!(response["duplicate"], false);
+    assert_eq!(response["payment"]["status"], "paid");
+    let duplicate = client
+        .post(format!("{origin}/api/v1/commerce/payments/callback"))
+        .header("x-relay-signature", sign(&body))
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(duplicate.status(), 200);
+    let response: Value = duplicate.json().await.unwrap();
+    assert_eq!(response["duplicate"], true);
+    let admin_session = login(&client, &origin, "admin").await;
+    let orders: Value = client
+        .get(format!("{origin}/api/v1/commerce/orders"))
+        .bearer_auth(&admin_session)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(orders[0]["status"], "paid");
+    assert_eq!(orders[0]["channel"], "external");
+    assert_eq!(
+        client
+            .post(format!(
+                "{origin}/api/v1/commerce/orders/{}/refund",
+                order.id
+            ))
+            .bearer_auth(&admin_session)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let wallet = store.wallet(&buyer, &user.id).unwrap();
+    assert_eq!(
+        wallet.wallet.balance_cents, 0,
+        "external payment must not credit the wallet"
+    );
+    assert_eq!(orders[0]["amount_cents"], 5_000);
+    stop.cancel();
 }
 
 async fn serve(store: Store) -> (SocketAddr, CancellationToken) {
