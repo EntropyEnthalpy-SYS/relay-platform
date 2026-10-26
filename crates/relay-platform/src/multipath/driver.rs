@@ -299,6 +299,93 @@ struct Pending {
     last_path: usize,
     last_sent: Option<Instant>,
     received: bool,
+    retransmitted: bool,
+}
+/// Retransmission timeout of one path from its measured round trips
+/// (RFC 6298), at least the configured interval, so a path whose
+/// acknowledgements take longer than the interval or than another path's is
+/// not copied onto the others. Each expiry doubles it until a frame sent once
+/// is acknowledged (section 5.5); otherwise every frame would be resent before
+/// its first acknowledgement and none could be measured.
+#[derive(Clone, Copy, Default)]
+struct RoundTrip {
+    smoothed: Option<Duration>,
+    variation: Duration,
+    doublings: u32,
+    backed_off: Option<Instant>,
+}
+impl RoundTrip {
+    fn sample(&mut self, rtt: Duration) {
+        self.doublings = 0;
+        match self.smoothed {
+            None => (self.smoothed, self.variation) = (Some(rtt), rtt / 2),
+            Some(srtt) => {
+                self.variation = (self.variation * 3 + srtt.abs_diff(rtt)) / 4;
+                self.smoothed = Some((srtt * 7 + rtt) / 8);
+            }
+        }
+    }
+    fn timeout(&self, floor: Duration, ceiling: Duration) -> Duration {
+        (self
+            .smoothed
+            .map_or(floor, |srtt| srtt + self.variation * 4)
+            * (1 << self.doublings))
+            .clamp(floor, ceiling.max(floor))
+    }
+    /// Doubles the timeout at most once per timeout period.
+    fn expired(&mut self, now: Instant, timeout: Duration) {
+        if self
+            .backed_off
+            .is_none_or(|at| now.duration_since(at) >= timeout)
+        {
+            self.doublings = (self.doublings + 1).min(6);
+            self.backed_off = Some(now);
+        }
+    }
+}
+/// What is known about whether a path delivers.
+#[derive(Clone, Copy, Default)]
+struct Health {
+    round_trip: RoundTrip,
+    /// Its send queue has been full since then.
+    busy_since: Option<Instant>,
+    /// A frame sent only on it went unacknowledged for a timeout. A path can
+    /// accept writes into socket buffers, and keep delivering the peer's
+    /// frames, long after ours stopped arriving; so new frames avoid it until
+    /// then. It is then retried with one frame at a time, each failure backing
+    /// off its timeout, until one sent only on it is acknowledged. Its frames
+    /// meanwhile wait no longer than a trusted path's timeout, so a retry does
+    /// not hold up the frames behind it for long.
+    retry_at: Option<Instant>,
+}
+impl Health {
+    /// 0 when trusted, 1 when it may be retried, 2 while it waits.
+    fn rank(&self, now: Instant) -> u8 {
+        match self.retry_at {
+            None => 0,
+            Some(at) if now >= at => 1,
+            Some(_) => 2,
+        }
+    }
+}
+/// Karn's rule: a retransmitted frame gives no round-trip sample. Replicas
+/// leave together, so the first acknowledgement measures each of their paths
+/// as at most that long. A frame sent on one path only shows that it delivers.
+fn sample(health: &mut [Health; MAX_PATHS], item: &Pending, now: Instant) {
+    let Some(at) = item.last_sent.filter(|_| !item.received) else {
+        return;
+    };
+    for (slot, path) in health.iter_mut().enumerate() {
+        if item.sent & (1 << slot) == 0 {
+            continue;
+        }
+        if !item.retransmitted {
+            path.round_trip.sample(now.duration_since(at));
+        }
+        if item.sent.is_power_of_two() {
+            path.retry_at = None;
+        }
+    }
 }
 fn broadcast_ack(lanes: &[Lane], sequence: u64, pending: &BTreeMap<u64, Arc<Frame>>) {
     let mut received = [0u8; 32];
@@ -315,10 +402,22 @@ fn schedule(
     pending: &mut BTreeMap<u64, Pending>,
     lanes: &[Lane],
     mode: Mode,
-    rto: Duration,
+    (floor, ceiling): (Duration, Duration),
     cursor: &mut usize,
-    busy_since: &mut [Option<Instant>; MAX_PATHS],
+    health: &mut [Health; MAX_PATHS],
 ) {
+    let timeouts: [_; MAX_PATHS] =
+        std::array::from_fn(|slot| health[slot].round_trip.timeout(floor, ceiling));
+    let trusted = lanes
+        .iter()
+        .filter(|lane| lane.live && health[lane.slot].retry_at.is_none())
+        .map(|lane| timeouts[lane.slot])
+        .max();
+    let deadlines: [_; MAX_PATHS] =
+        std::array::from_fn(|slot| match (health[slot].retry_at, trusted) {
+            (Some(_), Some(bound)) => timeouts[slot].min(bound),
+            _ => timeouts[slot],
+        });
     let mut assigned = [0u64; MAX_PATHS];
     for item in pending.values().filter(|item| !item.received) {
         for lane in lanes {
@@ -329,10 +428,11 @@ fn schedule(
     }
     let now = Instant::now();
     for lane in lanes {
+        let health = &mut health[lane.slot];
         if lane.jobs.capacity() > 0 {
-            busy_since[lane.slot] = None;
+            health.busy_since = None;
         } else {
-            busy_since[lane.slot].get_or_insert(now);
+            health.busy_since.get_or_insert(now);
         }
     }
     for item in pending.values_mut() {
@@ -351,9 +451,16 @@ fn schedule(
         if !fresh
             && item
                 .last_sent
-                .is_some_and(|at| now.duration_since(at) < rto)
+                .is_some_and(|at| now.duration_since(at) < deadlines[item.last_path])
         {
             continue;
+        }
+        // A copy on a failed path is resent without waiting, which is not an expiry.
+        let timed_out = !fresh && item.last_sent.is_some();
+        let from = item.last_path;
+        if timed_out && item.sent == 1 << from && health[from].rank(now) < 2 {
+            health[from].retry_at = Some(now + timeouts[from]);
+            tracing::debug!(slot = from, timeout = ?timeouts[from], "multipath path suspected");
         }
         let available: Vec<_> = lanes
             .iter()
@@ -392,19 +499,26 @@ fn schedule(
             // A short scheduling delay in the preferred writer must not turn
             // directional weights into equal alternation. A persistently full
             // queue is excluded after one RTO so another live path can progress.
-            let candidates: Vec<_> = if fresh {
+            let mut candidates: Vec<_> = if fresh {
                 lanes
                     .iter()
                     .filter(|lane| {
                         lane.live
                             && lane.weight > 0
-                            && busy_since[lane.slot]
-                                .is_none_or(|since| now.duration_since(since) < rto)
+                            && health[lane.slot]
+                                .busy_since
+                                .is_none_or(|since| now.duration_since(since) < timeouts[lane.slot])
                     })
                     .collect()
             } else {
                 available.clone()
             };
+            // Only a new frame sent on one path can show that it delivers, so
+            // copies go to trusted paths and new frames may also retry one.
+            if let Some(best) = candidates.iter().map(|l| health[l.slot].rank(now)).min() {
+                let worst = best.max(u8::from(fresh));
+                candidates.retain(|l| health[l.slot].rank(now) <= worst);
+            }
             if candidates.is_empty() {
                 return;
             }
@@ -439,6 +553,13 @@ fn schedule(
             ) {
                 item.sent |= 1 << lane.slot;
                 item.last_path = lane.slot;
+                item.retransmitted |= !fresh;
+                if timed_out {
+                    health[from].round_trip.expired(now, timeouts[from]);
+                }
+                if fresh && health[lane.slot].retry_at.is_some() {
+                    health[lane.slot].retry_at = Some(now + timeouts[lane.slot]);
+                }
                 *cursor = (lane.slot + 1) % MAX_PATHS;
                 assigned[lane.slot] += item.frame.payload().len().max(1) as u64;
             }
@@ -484,7 +605,7 @@ async fn run(
     let mut remote_fin_delivered = false;
     let mut progress = Instant::now();
     let mut cursor = 0;
-    let mut busy_since = [None; MAX_PATHS];
+    let mut health = [Health::default(); MAX_PATHS];
     let mut timer = tokio::time::interval(rto / 2);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -526,7 +647,14 @@ async fn run(
             broadcast_ack(&lanes, rx_next, &receive);
             continue;
         }
-        schedule(&mut send, &lanes, mode, rto, &mut cursor, &mut busy_since);
+        schedule(
+            &mut send,
+            &lanes,
+            mode,
+            (rto, stall / 4),
+            &mut cursor,
+            &mut health,
+        );
         let delivery = receive.get(&rx_next).cloned();
         let payload = delivery.as_deref().map(Frame::payload).unwrap_or(&[]);
         tokio::select! {
@@ -539,7 +667,7 @@ async fn run(
                 if send.is_empty() { progress = Instant::now(); }
                 tx_bytes += n;
                 stats.peak_send_window_bytes.fetch_max(tx_bytes as u64, Ordering::Relaxed);
-                send.insert(sequence, Pending { frame: Arc::new(frame), sent: 0, last_path: 0, last_sent: None, received: false });
+                send.insert(sequence, Pending { frame: Arc::new(frame), sent: 0, last_path: 0, last_sent: None, received: false, retransmitted: false });
             }
             result = app_write.write(&payload[rx_offset..]), if !payload.is_empty() => {
                 let n = result?;
@@ -573,6 +701,7 @@ async fn run(
                 }
                 Event::Frame(slot, Frame::Ack(sequence, received)) => {
                     let _ = slot;
+                    let now = Instant::now();
                     ensure!(sequence <= tx_next && send.range(..sequence).all(|(_, item)| item.sent != 0),
                         "multipath peer acknowledged unsent data");
                     for offset in 0..256 {
@@ -582,13 +711,16 @@ async fn run(
                         ensure!(seq < tx_next, "multipath receipt names unsent data");
                         if let Some(item) = send.get_mut(&seq) {
                             ensure!(item.sent != 0, "multipath receipt names an unscheduled frame");
+                            sample(&mut health, item, now);
                             item.received = true;
                         }
                     }
                     if sequence > tx_ack {
                         tx_ack = sequence; progress = Instant::now();
                         while send.first_key_value().is_some_and(|(&seq, _)| seq < tx_ack) {
-                            tx_bytes -= send.pop_first().unwrap().1.frame.payload().len();
+                            let item = send.pop_first().unwrap().1;
+                            sample(&mut health, &item, now);
+                            tx_bytes -= item.frame.payload().len();
                         }
                     }
                 }

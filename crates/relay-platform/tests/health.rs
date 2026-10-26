@@ -47,6 +47,8 @@ struct Service {
     address: SocketAddr,
     tcp: Arc<AtomicUsize>,
     udp: Arc<AtomicUsize>,
+    /// Milliseconds each TCP reply waits, to give targets different latency.
+    delay: Arc<std::sync::atomic::AtomicU64>,
     stop: CancellationToken,
     tasks: TaskTracker,
 }
@@ -67,7 +69,10 @@ impl Service {
         let udp = Arc::new(AtomicUsize::new(0));
         let stop = CancellationToken::new();
         let tasks = TaskTracker::new();
-        let (mode, cancel, tracker) = (tcp.clone(), stop.clone(), tasks.clone());
+        let delay = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let (mode, cancel, tracker, wait) =
+            (tcp.clone(), stop.clone(), tasks.clone(), delay.clone());
+        let probes = Arc::new(AtomicUsize::new(0));
         tasks.spawn(async move {
             loop {
                 let pair =
@@ -77,6 +82,8 @@ impl Service {
                 };
                 let mode = mode.clone();
                 let cancel = cancel.clone();
+                let wait = wait.clone();
+                let probes = probes.clone();
                 tracker.spawn(async move {
                     let run = async {
                         let mut data = [0; 4];
@@ -85,6 +92,9 @@ impl Service {
                                 match mode.load(Ordering::SeqCst) {
                                     0 => *b"PONG",
                                     1 => *b"FAIL",
+                                    // Lossy: every fourth probe fails, never two in a row.
+                                    3 if probes.fetch_add(1, Ordering::SeqCst) % 4 == 3 => *b"FAIL",
+                                    3 => *b"PONG",
                                     _ => {
                                         std::future::pending::<()>().await;
                                         unreachable!()
@@ -93,6 +103,7 @@ impl Service {
                             } else {
                                 [marker; 4]
                             };
+                            sleep(Duration::from_millis(wait.load(Ordering::SeqCst))).await;
                             if stream.write_all(&reply).await.is_err() {
                                 break;
                             }
@@ -108,6 +119,7 @@ impl Service {
             address,
             tcp,
             udp,
+            delay,
             stop,
             tasks,
         })
@@ -254,6 +266,127 @@ async fn tcp_application_health_fails_over_and_holds_recovery_without_killing_es
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lowest_latency_prefers_the_faster_target_and_follows_a_lasting_change() {
+    let slow = Service::new(b'S').await;
+    let fast = Service::new(b'F').await;
+    slow.delay.store(40, Ordering::SeqCst);
+    let mut r = two(&slow, &fast, Protocol::Tcp);
+    r.targets[1].priority = 0;
+    r.balance = Balance::LowestLatency;
+    let mut unmeasured = r.clone();
+    unmeasured.health_check = None;
+    assert!(unmeasured.validate().is_err());
+    r.health_check.as_mut().unwrap().timeout_ms = 95;
+    let address = r.listen;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    engine.apply(config(r)).await.unwrap();
+    reports(&engine, |r| {
+        r.len() == 2
+            && r.iter()
+                .all(|r| r.status == Status::Healthy && r.latency_ewma_us.is_some())
+    })
+    .await;
+    // The faster target is listed second and still takes every new session.
+    for _ in 0..4 {
+        assert_eq!(marked(address).await, *b"FFFF");
+    }
+    fast.delay.store(80, Ordering::SeqCst);
+    let until = Instant::now() + Duration::from_secs(5);
+    while marked(address).await != *b"SSSS" {
+        assert!(
+            Instant::now() < until,
+            "selection never followed the latency change"
+        );
+        sleep(Duration::from_millis(50)).await;
+    }
+    for _ in 0..4 {
+        assert_eq!(marked(address).await, *b"SSSS");
+    }
+    engine.shutdown().await.unwrap();
+    slow.shutdown().await;
+    fast.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lowest_latency_avoids_a_faster_target_that_loses_probes() {
+    let clean = Service::new(b'C').await;
+    let lossy = Service::new(b'L').await;
+    clean.delay.store(20, Ordering::SeqCst);
+    lossy.tcp.store(3, Ordering::SeqCst);
+    let mut r = two(&clean, &lossy, Protocol::Tcp);
+    r.targets[1].priority = 0;
+    r.balance = Balance::LowestLatency;
+    let address = r.listen;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    engine.apply(config(r)).await.unwrap();
+    // The lossy target stays healthy: its failures never reach two in a row.
+    reports(&engine, |r| {
+        r.len() == 2
+            && r.iter().all(|r| r.status == Status::Healthy)
+            && r[1].window_failures >= 1
+            && r[0].window_checks >= 4
+    })
+    .await;
+    let report = engine.stats().target_health;
+    assert!(report[1].latency_ewma_us < report[0].latency_ewma_us);
+    assert_eq!(report[0].window_failures, 0);
+    for _ in 0..4 {
+        assert_eq!(marked(address).await, *b"CCCC");
+    }
+    engine.shutdown().await.unwrap();
+    clean.shutdown().await;
+    lossy.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn weighted_balancing_skips_a_lossy_target_while_a_clean_one_has_the_same_priority() {
+    let clean = Service::new(b'C').await;
+    let lossy = Service::new(b'L').await;
+    let backup = Service::new(b'B').await;
+    lossy.tcp.store(3, Ordering::SeqCst);
+    let mut r = two(&clean, &lossy, Protocol::Tcp);
+    r.targets[1].priority = 0;
+    let mut third = r.targets[0].clone();
+    third.address = backup.address.to_string();
+    third.priority = 5;
+    r.targets.push(third);
+    let address = r.listen;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    engine.apply(config(r)).await.unwrap();
+    reports(&engine, |r| {
+        r.len() == 3 && r.iter().all(|r| r.status == Status::Healthy) && r[1].window_failures >= 2
+    })
+    .await;
+    let report = engine.stats().target_health;
+    assert_eq!(
+        (
+            report[0].selection_reason.as_str(),
+            report[1].selection_reason.as_str()
+        ),
+        ("eligible", "degraded")
+    );
+    assert!(report[1].eligible);
+    // Equal weights would alternate; the lossy one now waits behind the clean one.
+    for _ in 0..6 {
+        assert_eq!(marked(address).await, *b"CCCC");
+    }
+    // Without a clean target at that priority the lossy one is still used
+    // before the lower-priority backup.
+    clean.tcp.store(1, Ordering::SeqCst);
+    reports(&engine, |r| r[0].status == Status::Unhealthy).await;
+    for _ in 0..4 {
+        assert_eq!(marked(address).await, *b"LLLL");
+    }
+    engine.shutdown().await.unwrap();
+    for service in [clean, lossy, backup] {
+        service.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn udp_health_is_independent_and_retires_existing_session_without_replaying_packets() {
     let a = Service::new(b'A').await;
     let b = Service::new(b'B').await;
@@ -299,6 +432,36 @@ async fn udp_health_is_independent_and_retires_existing_session_without_replayin
     engine.shutdown().await.unwrap();
     a.shutdown().await;
     b.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_probes_through_a_relay_hold_one_session_there() {
+    let service = Service::new(b'A').await;
+    let temp = tempfile::tempdir().unwrap();
+    let downstream = Engine::new(Store::open(&temp.path().join("down.db")).unwrap());
+    let mut relay = rule(service.address, Protocol::Udp);
+    relay.udp_max_sessions = 3;
+    relay.idle_timeout_secs = 60;
+    let relay_address = relay.listen;
+    downstream.apply(config(relay)).await.unwrap();
+    let upstream = Engine::new(Store::open(&temp.path().join("up.db")).unwrap());
+    let mut probed = rule(relay_address, Protocol::Udp);
+    probed.health_check = Some(policy(Protocol::Udp));
+    upstream.apply(config(probed)).await.unwrap();
+    reports(&upstream, |r| {
+        r.len() == 1 && r[0].status == Status::Healthy
+    })
+    .await;
+    // Twenty probe intervals: a new session per probe would exhaust the cap of three.
+    sleep(Duration::from_millis(2000)).await;
+    let report = &upstream.stats().target_health[0];
+    assert_eq!(report.status, Status::Healthy);
+    assert_eq!(report.consecutive_failures, 0);
+    assert!(report.completed_checks >= 15, "{}", report.completed_checks);
+    assert_eq!(downstream.stats().active_udp, 1);
+    upstream.shutdown().await.unwrap();
+    downstream.shutdown().await.unwrap();
+    service.shutdown().await;
 }
 
 #[tokio::test]
@@ -451,6 +614,7 @@ async fn mutual_wss_proxy_probe_checks_end_to_end_reply_and_downstream_metering(
         trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
         placement: ProxyPlacement::InsideTls,
         max_header_bytes: 4096,
+        accept_prewarmed: false,
     });
     let mut entry = rule(exit.listen, Protocol::Tcp);
     entry.id = "entry".into();
@@ -483,7 +647,21 @@ async fn mutual_wss_proxy_probe_checks_end_to_end_reply_and_downstream_metering(
     c.rules.push(exit);
     engine.apply(c.clone()).await.unwrap();
     reports(&engine, |r| r.len() == 1 && r[0].eligible).await;
-    let usage = db.agent_usage(false).unwrap();
+    let until = Instant::now() + Duration::from_secs(3);
+    let usage = loop {
+        let usage = db.agent_usage(false).unwrap();
+        if usage
+            .iter()
+            .any(|r| r.rule_id == "exit" && r.upload_bytes >= 8)
+        {
+            break usage;
+        }
+        assert!(
+            Instant::now() < until,
+            "probe traffic never reached the exit ledger"
+        );
+        sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(
         usage
             .iter()
@@ -696,4 +874,112 @@ async fn ordinary_restart_does_not_trust_old_healthy_observations() {
     reports(&restarted, |r| r[0].status == Status::Unhealthy).await;
     restarted.shutdown().await.unwrap();
     service.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_target_failing_at_first_is_accepted_without_waiting_a_whole_interval_or_the_recovery_delay()
+ {
+    // A downstream relay that is still starting fails the first probes.
+    let a = Service::new(b'A').await;
+    a.tcp.store(1, Ordering::SeqCst);
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    let mut r = rule(a.address, Protocol::Tcp);
+    let mut check = policy(Protocol::Tcp);
+    (
+        check.interval_ms,
+        check.timeout_ms,
+        check.recovery_delay_ms,
+        check.max_age_ms,
+    ) = (1000, 60, 5000, 3000);
+    r.health_check = Some(check);
+    let address = r.listen;
+    engine.apply(config(r)).await.unwrap();
+    reports(&engine, |r| r[0].status == Status::Unhealthy).await;
+    a.tcp.store(0, Ordering::SeqCst);
+    let start = Instant::now();
+    reports(&engine, |r| r[0].status == Status::Healthy).await;
+    // Two successes at the configured 1 s interval, or the 5 s recovery
+    // delay, would each take longer.
+    assert!(
+        start.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(marked(address).await, *b"AAAA");
+    engine.shutdown().await.unwrap();
+    a.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_udp_target_on_a_fast_path_is_removed_within_two_seconds() {
+    let a = Service::new(b'A').await;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    let mut r = rule(a.address, Protocol::Udp);
+    let mut check = policy(Protocol::Udp);
+    (check.interval_ms, check.timeout_ms, check.max_age_ms) = (1000, 1000, 3000);
+    r.health_check = Some(check);
+    engine.apply(config(r)).await.unwrap();
+    // Five replies give the target a probe timeout of its own.
+    timeout(Duration::from_secs(8), async {
+        while engine
+            .stats()
+            .target_health
+            .first()
+            .is_none_or(|r| r.status != Status::Healthy || r.successful_checks < 5)
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    a.udp.store(2, Ordering::SeqCst);
+    let silent = Instant::now();
+    timeout(Duration::from_secs(6), async {
+        while engine.stats().target_health[0].status != Status::Unhealthy {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // With the full 1 s timeout on both failing probes, removal takes more
+    // than 2 s; with 250 ms each it takes at most about 1.5 s.
+    assert!(
+        silent.elapsed() < Duration::from_millis(1800),
+        "{:?}",
+        silent.elapsed()
+    );
+    engine.shutdown().await.unwrap();
+    a.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_healthy_target_that_fails_once_is_rechecked_without_waiting_a_whole_interval() {
+    let a = Service::new(b'A').await;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    let mut r = rule(a.address, Protocol::Tcp);
+    let mut check = policy(Protocol::Tcp);
+    (check.interval_ms, check.timeout_ms, check.max_age_ms) = (1000, 60, 3000);
+    r.health_check = Some(check);
+    engine.apply(config(r)).await.unwrap();
+    reports(&engine, |r| r[0].status == Status::Healthy).await;
+    a.tcp.store(1, Ordering::SeqCst);
+    reports(&engine, |r| r[0].consecutive_failures == 1).await;
+    let first_failure = Instant::now();
+    reports(&engine, |r| r[0].status == Status::Unhealthy).await;
+    // The second failing probe would otherwise come a full second later.
+    assert!(
+        first_failure.elapsed() < Duration::from_millis(600),
+        "{:?}",
+        first_failure.elapsed()
+    );
+    // Once removed, the target is probed at the configured interval again.
+    let checks = engine.stats().target_health[0].completed_checks;
+    sleep(Duration::from_millis(1500)).await;
+    let later = engine.stats().target_health[0].completed_checks;
+    assert!(later - checks <= 2, "{checks} -> {later}");
+    engine.shutdown().await.unwrap();
+    a.shutdown().await;
 }

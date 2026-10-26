@@ -14,6 +14,9 @@ mod credentials;
 mod lease_client;
 use credentials::SharedCredential;
 
+/// Agent metadata key of the user shares in force, restored after a restart.
+const USER_SHARES: &str = "agent_user_shares";
+
 pub struct AgentOptions {
     pub controller: String,
     pub node_id: String,
@@ -171,16 +174,63 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     }
     let mut resume_pending = lease.resuming_budget;
     let mut budget_recovery = None;
+    let mut sampler = crate::system::Sampler::default();
     let engine = Arc::new(Engine::with_tls_directory(
         store.clone(),
         options.tls_directory,
     ));
+    let mut saved_shares = store.metadata(USER_SHARES)?.unwrap_or_default();
+    if let Ok(shares) = serde_json::from_str::<Vec<UserShare>>(&saved_shares) {
+        engine.restore_user_shares(&shares);
+    }
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
     let mut reconciled = false;
     let mut controller_instance: Option<String> = None;
+    // Long-polls the controller so a published revision wakes the sync loop
+    // at once; the poll interval remains the fallback for older controllers.
+    let published = tokio::sync::Notify::new();
+    let watcher = async {
+        let mut seen = 0;
+        loop {
+            let after = engine.revision().await.max(seen);
+            let watched = async {
+                let mut url = base.join("api/v1/agent/watch")?;
+                url.query_pairs_mut()
+                    .append_pair("after", &after.to_string());
+                let response = credential
+                    .send(client.get(url).timeout(Duration::from_secs(35)))
+                    .await?;
+                ensure!(response.status().is_success(), "HTTP {}", response.status());
+                let body: serde_json::Value = bounded_json(response).await?;
+                Ok::<_, anyhow::Error>(body["desired_revision"].as_u64().unwrap_or(0))
+            };
+            match watched.await {
+                Ok(revision) if revision > after => {
+                    seen = revision;
+                    published.notify_one();
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "configuration watch unavailable; polling");
+                    tokio::time::sleep(options.poll_interval).await;
+                }
+            }
+        }
+    };
     let forwarding = async {
+        // Report a new apply result at once instead of after the poll interval.
+        let mut receipt_due = false;
+        // Shares expire on time even while the controller is unreachable, and
+        // an agent holding one syncs every second so shares can move.
+        let user_poll = || {
+            if engine.expire_user_shares() {
+                options.poll_interval.min(Duration::from_secs(1))
+            } else {
+                options.poll_interval
+            }
+        };
         loop {
             lease.ensure_live()?;
             if !reconciled {
@@ -256,7 +306,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     tokio::select! {
                         biased;
                         _ = stop.cancelled() => break,
-                        _ = tokio::time::sleep(options.poll_interval) => {},
+                        _ = tokio::time::sleep(user_poll()) => {},
                     }
                     continue;
                 }
@@ -287,9 +337,11 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 stats: {
                     let mut stats = engine.stats();
                     stats.budget_recovery = budget_recovery.clone();
+                    stats.system = Some(sampler.sample());
                     stats
                 },
             };
+            let sent = tokio::time::Instant::now();
             let response = tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
@@ -349,13 +401,37 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                         store.finish_reconcile()?;
                                         active = true;
                                         apply_error = None;
+                                        receipt_due = true;
                                     }
                                     Err(error) => {
                                         let message = error.to_string();
                                         tracing::warn!(%message, "configuration rejected; retaining previous revision");
-                                        apply_error = Some(message.chars().take(512).collect());
+                                        let message: String = message.chars().take(512).collect();
+                                        receipt_due = apply_error.as_ref() != Some(&message);
+                                        apply_error = Some(message);
                                     }
                                 }
+                            }
+                            engine.set_user_shares(&synced.user_rates.unwrap_or_default(), sent);
+                            // Saved as they would be restored, so the steady
+                            // movement of shares above the fallback writes nothing.
+                            let restored: Vec<UserShare> = engine
+                                .user_shares()
+                                .into_iter()
+                                .map(|share| {
+                                    let rate =
+                                        share.rate_bytes_per_sec.min(share.fallback_bytes_per_sec);
+                                    UserShare {
+                                        rate_bytes_per_sec: rate,
+                                        fallback_bytes_per_sec: rate,
+                                        ..share
+                                    }
+                                })
+                                .collect();
+                            let shares = serde_json::to_string(&restored)?;
+                            if shares != saved_shares {
+                                store.set_metadata(USER_SHARES, &shares)?;
+                                saved_shares = shares;
                             }
                             if let Err(error) = credential
                                 .rotate_if_requested(
@@ -413,13 +489,14 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 active = true;
                 tracing::info!("restored last successful local configuration");
             }
+            let poll_interval = user_poll();
             let interval = if store
                 .agent_config()?
                 .is_some_and(|c| c.rules.iter().any(|r| !r.budget_ids.is_empty()))
             {
-                options.poll_interval.min(Duration::from_millis(500))
+                poll_interval.min(Duration::from_millis(500))
             } else {
-                options.poll_interval
+                poll_interval
             };
             // Coalesce successful refills briefly. Exhaustion and outages must
             // back off instead of turning each waiting payload into an HTTP poll.
@@ -430,10 +507,14 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
             } else {
                 2
             });
+            if std::mem::take(&mut receipt_due) {
+                continue;
+            }
             tokio::select! {
                 biased;
                 _ = stop.cancelled() => break,
                 _ = tokio::time::sleep(interval) => {},
+                _ = published.notified() => {},
                 _ = async {store.budget_refill_needed().await;tokio::time::sleep(refill_delay).await;} => {},
             }
         }
@@ -443,6 +524,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
         _=stop.cancelled()=>Ok(()),
         _=lease.lost.cancelled()=>Err(anyhow::anyhow!("node execution lease lost; forwarding stopped")),
         result=forwarding=>result,
+        _=watcher=>unreachable!("configuration watch never returns"),
     };
     engine.shutdown().await?;
     if resume_pending {

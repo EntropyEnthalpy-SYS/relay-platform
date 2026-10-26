@@ -9,11 +9,11 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | POST | `/auth/login` | `{username,password}` → `{token,user,expires_in_seconds}` |
 | GET | `/session` | 当前用户与角色 |
 | POST | `/auth/logout` | 撤销当前会话 |
-| GET / POST | `/nodes` | 按可选 q/kind/group/tag/lifecycle 筛选可见节点；`{name,tenant_id?,lease_policy?,settings?}` 创建节点并返回一次性注册令牌 |
+| GET / POST | `/nodes` | 按可选 q/kind/group/tag/lifecycle 筛选可见节点；`{name,tenant_id?,lease_policy?,settings?}` 创建节点并返回一次性注册令牌；省略或 `null` 的 `lease_policy` 为离线（可用优先）模式，`{}` 或 `{ttl_ms}` 为严格租约 |
 | PUT | `/nodes/{id}/profile` | `{expected_revision,name,settings}`；更新完整资料，独立于转发修订 |
 | POST | `/nodes/profiles` | `{updates:[{node_id,update}]}`；原子保存 1..100 个节点资料，逐节点返回修订 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |
-| PUT | `/nodes/{id}/config` | `{expected_revision,rules}`；并发冲突返回 409，成功生成下一版本 |
+| PUT | `/nodes/{id}/config` | `{expected_revision,rules,rate_bytes_per_sec?}`；并发冲突返回 409，成功生成下一版本。省略 `rate_bytes_per_sec` 保留节点总限速，`null` 取消 |
 | GET | `/nodes/{id}/credential` | 可见节点的身份阶段/版本、轮换/撤销/替换回执与受保护配额周期；不返回秘密或哈希 |
 | POST | `/nodes/{id}/credential/rotate` | `{expected_revision}` 请求 Agent 自行生成并轮换凭据；权限与版本检查 |
 | POST | `/nodes/{id}/credential/revoke` | `{operation_id,expected_revision,reason}`；退役身份、保留旧窗口与未知预留 |
@@ -21,11 +21,13 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/nodes/{id}/health` | 实际修订对应的目标健康、年龄、候选原因、探测流量与容量；按节点权限过滤 |
 | GET | `/nodes/{id}/history` | 最近 100 次配置修订 |
 | POST | `/nodes/{id}/rollback` | `{revision,expected_revision}`；把历史规则作为新修订发布，账本不回滚 |
+| POST | `/nodes/{id}/drain` | `{draining}`；把所有 `via` 指向该节点的上游目标设为（或取消）维护排空，在一个批次中发布有变化的上游节点；没有上游指向它时返回 409，已是目标状态时返回空结果 |
 | GET | `/topology` | 当前可见节点、配置、声明边、根规则及应用状态 |
 | POST | `/configurations/preview` | `{updates:[{node_id,expected_revision,rules}]}`；只读校验并返回候选配置及完整差异，需要写权限 |
 | POST | `/configurations/publish` | 同预览请求；1..64 个节点的期望配置在同一事务中提交 |
 | GET / POST | `/users` | 列出用户；`{username,password,role,tenant_id?}` 创建用户 |
 | POST | `/users/{id}/revoke-sessions` | 撤销该用户全部现有 Web 会话 |
+| GET / PUT | `/users/{id}/rate` | 跨节点用户总限速。PUT `{rate_bytes_per_sec}`（1024..=2^40，`null` 取消）仅系统管理员；GET 按租户可见，返回总速率和各节点当前份额、实测速率、是否用满、距上次同步毫秒数 |
 | POST | `/tenants` | `{name}`；仅系统管理员 |
 | GET | `/usage` | 最近 2,000 条已上报的规则/周期累计记录，不是全库聚合接口 |
 | GET / POST | `/budgets` | 返回 `{allocation_paused,budgets}`；创建 `{scope,scope_id,name,limit_bytes,quantum_bytes}` |
@@ -34,12 +36,19 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/audit` | 最近 200 条全局审计；仅系统管理员 |
 | GET | `/recovery` | `{enabled,healthy,head}`；仅系统管理员，读取控制器恢复日志状态 |
 | GET | `/control/metrics` | 仅系统管理员；返回本次控制器运行的节点同步统计 |
+| GET | `/telemetry` | 可见节点最近 1 小时的逐次回报采样和事件，供总览页使用；见下文“0.19.0 遥测” |
+| GET | `/alerts` | 仅系统管理员；告警设置、通道（不含地址和密钥）、当前与最近恢复的告警、发送记录；见下文“0.19.0 告警通知” |
+| PUT | `/alerts/settings` | `{maintenance_until_ms}`；仅系统管理员，登录会话 |
+| POST | `/alerts/channels` | `{name,enabled,min_severity,target}`；仅系统管理员，登录会话 |
+| PUT / DELETE | `/alerts/channels/{id}` | 修改或删除通道；修改时留空的地址、令牌和密钥保留原值 |
+| POST | `/alerts/channels/{id}/test` | 立即发送一条测试消息，失败返回 502 和原因 |
 | GET | `/capabilities` | 实现能力与待实现能力目录，不代表完整发布验收 |
 | POST | `/agent/enroll` | `{node_id,enrollment_token,credential,identity_revision_supported?}`；返回 `{enrolled:true,credential_revision}`；替换注册必须声明能力为 true |
 | POST | `/agent/credential/rotate` | `{request_id,expected_revision,credential,lease}`；事务换钥并返回可重试回执 |
 | POST | `/agent/reconcile` | 节点凭据认证；分页获取权威用量下限和相同修订的配置 |
 | POST | `/agent/budgets/recover` | 严格节点在开启监听前验证原状态预留、补报消费和处理待确认请求 |
 | POST | `/agent/sync` | 节点凭据认证，上报用量/状态并获取期望配置 |
+| GET | `/agent/watch?after=N` | 节点凭据认证的长轮询：期望修订号大于 N 时立即返回 `{desired_revision}`，否则最多等待 25 秒返回当前值 |
 
 注册时 Agent 先在本地生成并持久化独立 `credential`，然后请求控制器绑定。一次性令牌只允许首次绑定；相同已绑定凭据可以重试确认，原注册令牌不能绑定第二个凭据。控制器不需要保存可还原的节点秘密。0.16.0 支持管理员发起、Agent 自行执行和中断恢复的常规凭据轮换；完整合同见 [NODE_CREDENTIALS.md](NODE_CREDENTIALS.md)。0.17.0 增加撤销和全新状态替换，包含操作幂等、限时令牌、旧租约窗口和配额周期保护，见 [NODE_IDENTITY.md](NODE_IDENTITY.md)。
 
@@ -97,6 +106,8 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 
 0.5.0 的 `/agent/sync` 在控制器内最多等待 2 ms 合并，单批最多 16 项，等待队列最多 64 项；不是客户端批量接口。满队列返回 429，未入队请求不执行写入。认证、账本和额度检查仍在每项请求的事务保存点内执行；预期输入错误只回滚该项，磁盘或日志错误使整批不返回成功。响应丢失后继续使用原来的幂等请求 ID。管理员其他写入继续独立提交。
 
+0.19.0 的 Agent 在同步循环之外保持一个 `/agent/watch` 长轮询。配置发布事务提交后控制器立即唤醒等待中的请求，Agent 随即同步、应用，并在应用成功（或出现新的应用错误）后马上再同步一次上报回执，不等下一个 `poll_seconds`。该接口只返回修订号，不返回配置、不写数据库、不需要执行租约。旧控制器没有此接口时，Agent 按 `poll_seconds` 退避重试并继续原来的轮询。
+
 `/control/metrics` 字段为 `committed_batches`、`processed_requests`、`largest_batch`、`queue_full_rejections`、`failed_batches`、`batch_limit`、`queue_capacity`、`coalesce_window_ms`。计数在控制器重启时清零，不是流量账本；`processed_requests` 包含完成校验后返回预期错误的请求，整批提交失败单独计入 `failed_batches`。没有数据变更的批次可以不产生日志记录。`/usage` 在上报时间相同的情况下，再按节点、规则、周期稳定排序。
 
 ## 0.6.0 路由字段
@@ -108,6 +119,10 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 规则新增 `inbound_proxy={version,trusted_sources,placement,max_header_bytes}`；每个目标新增 `proxy_protocol={version,placement,checksum}`。字段、默认值、TLS 顺序、可信对端与来源 ACL 的区别、UDP 逐包语义见 [PROXY.md](PROXY.md)。未知字段和不支持的协议组合会被拒绝；节点实际应用失败继续通过 `apply_error` 返回。SQLite schema v4 不变，0.6 Agent 应先升级再发布新字段。
 
 能力目录新增 `proxy-protocol-tcp-v1-v2`、`proxy-protocol-udp-v2`、`udp-destination-tracking`。它们表示代码实现能力，不表示已经通过 Linux、外部 UDP/TLS 互通或生产压力验收。
+
+## 0.19.0 Shadowsocks 字段
+
+规则新增 `inbound_shadowsocks={method,password,allow_private_destinations}`，缺省表示关闭；启用时 `protocol` 可为 `tcp`、`udp` 或 `both`（UDP 为 0.19.0 后续加入，旧版 Agent 上只能用 `tcp`），`targets` 必须为空，不能与入口 TLS、入口 WebSocket、多路聚合或健康检查同时使用。方式、密钥格式、内网目的地策略和拒绝行为见 [SHADOWSOCKS.md](SHADOWSOCKS.md)。旧版 Agent 不接受新字段，应先升级节点再发布。
 
 ## 0.8.0 WebSocket 字段
 
@@ -174,3 +189,98 @@ GET /budgets/{id}/reservations?after=grant_id 使用用户会话，按预算所�
 严格节点暂停后，领取/续租返回 403；到期后返回 410。到期前租约 valid_for_ms 被剩余时间截短，ttl_ms 仍表示策略上限。暂停和到期不阻止尚有效证明的结算，也不自动退还未知余额。离线节点设置暂停/到期返回 400；生效窗口与不能倒改已授截止时间的 409 条件见节点管理文档。
 
 能力目录新增 node-inventory-lifecycle。schema v4 保持不变；旧控制器没有这些生命周期检查，不能直接降级仍在依赖这些约束的状态。
+
+## 0.19.0 两步验证与 API 令牌
+
+`POST /auth/login` 新增可选 `second_factor`（6 位验证码或恢复码，最长 32 字节）。账号已启用两步验证而未提供时返回 401 `{error:"two-factor code required",second_factor_required:true}`；验证码错误返回 401 `invalid two-factor code`。只有密码正确才会出现这两种回复。同一账号 5 分钟内 10 次错误验证码后返回 429，与原有按来源地址的登录限次分别计算。
+
+| 方法 | 路径 | 请求或用途 |
+| --- | --- | --- |
+| GET | `/account/mfa` | `{enabled,pending,recovery_codes_remaining}` |
+| POST | `/account/mfa/setup` | `{password}` → `{secret,otpauth_uri,qr_svg}`；生成待确认密钥，登录行为不变；已启用时 409 |
+| POST | `/account/mfa/enable` | `{code}` → `{recovery_codes}`；8 个恢复码只返回这一次 |
+| POST | `/account/mfa/disable` | `{password,code}`；code 可为验证码或恢复码 |
+| POST | `/users/{id}/mfa/reset` | 管理员重置他人两步验证，并撤销其会话与令牌；不能用于自己（400） |
+| GET / POST | `/api-tokens` | 列出自己的令牌（不含秘密）；`{name,scopes,expires_in_days}` 创建，返回 `{token,api_token}` |
+| DELETE | `/api-tokens/{id}` | 撤销自己的令牌 |
+
+API 令牌使用同一个 `Authorization: Bearer` 头，格式为 `rpat_` 加 64 位十六进制，服务端只保存 SHA-256 哈希。`scopes` 取值：`read`（所有 GET）、`nodes:write`（节点、配置、凭据操作与配置批次）、`budgets:write`、`users:write`（用户、租户、撤销会话）。范围不足返回 403；实际权限仍受账号角色和租户限制，只读用户的写入范围不产生写权限。`/account/*`、`/api-tokens*`、`/users/{id}/mfa/reset` 和 `/auth/logout` 只接受登录会话。有效期 1..365 天，每个用户最多 20 个未过期令牌；`/users/{id}/revoke-sessions` 同时撤销该用户的令牌。
+
+`/users` 每项新增 `mfa_enabled`。审计新增 `mfa.enable`、`mfa.disable`、`mfa.reset`、`mfa.recovery_code_used`、`api_token.create`、`api_token.revoke`。能力目录新增 `two-factor-login` 和 `scoped-api-tokens`。两类状态保存在 metadata 中并进入恢复日志，schema v4 不变；回退到 0.18.0 控制器会忽略两步验证，需要先停用。
+
+## 0.19.0 遥测
+
+0.19.0 的 Agent 在每次同步的 `stats` 中附带 `system`：`cpus`，以及可选的 `cpu_percent`（整机，两次同步之间的占用 0..100）、`process_cpu_percent`（本进程，按单核计，可超过 100）、`rss_bytes`、`memory_total_bytes`、`memory_available_bytes`、`load_1m`。只在 Linux 上从 `/proc` 读取，其他平台只报 `cpus`。控制器丢弃不合理的取值而不是截断。`EngineStats` 拒绝未知字段，所以旧控制器会拒绝新 Agent 的同步：**先升级控制器，再升级 Agent**。
+
+`GET /telemetry` 返回：
+
+```json
+{
+  "generated_at_ms": 0,
+  "window_ms": 3600000,
+  "offline_after_ms": 30000,
+  "nodes": [{"id": "…", "name": "…", "last_seen_ms": 0, "enrolled": true, "samples": [
+    {"at_ms": 0, "forwarded_bytes": 0, "active_sessions": 0, "failed_connections": 0,
+     "cpu_percent": 3.5, "process_cpu_percent": 0.4, "rss_bytes": 0,
+     "memory_total_bytes": 0, "memory_available_bytes": 0,
+     "probe_latency_us": 812, "healthy_targets": 3, "probed_targets": 4}
+  ]}],
+  "events": [{"id": 1, "at_ms": 0, "node_id": "…", "severity": "warning", "kind": "target_down", "subject": "web/0/8443/TCP", "message": "…"}]
+}
+```
+
+每次成功提交的同步记录一个采样，每节点最多 1440 个、最长 1 小时。`forwarded_bytes` 是 Agent 进程启动以来双向转发字节累计，Agent 重启后归零，速率应按相邻采样差值计算并把负差值视为重启。`probe_latency_us` 是当前可选目标最近探测耗时（EWMA）的中位数，是节点到目标的探测往返，不是中转增加的延迟。`severity` 为 `info`、`recovered`、`warning`、`critical`；`kind` 为 `target_down`（由可用变为不可用，或首次出现时就不可用，包括控制器重启后的第一次回报）、`target_recovered`、`target_removed`（不可用的目标从配置中移除）、`config_rejected`、`config_recovered`、`config_applied`、`node_reconnected`（超过 30 秒无回报后恢复），以及读取时生成的 `node_offline`（已注册节点超过 30 秒无回报，`id` 为 0）。事件全局最多保留 500 条，按时间升序。`subject` 是事件在节点内的对象，目标事件为 `规则/目标序号/监听端口/协议`，其他事件为空字符串；同一目标的下线、恢复与移除事件 `subject` 相同。
+
+采样和事件只保存在控制器内存，控制器重启后从空开始；不进入恢复日志，不作为计量、计费或配额依据。权限与 `/nodes` 相同：只读用户可查看本租户，系统管理员可查看全部。
+
+
+## 0.19.0 告警通知
+
+控制器每 2 秒读取新的遥测事件和节点回报时间，把问题归为告警（incident），再通知已启用的通道。三类问题：
+
+| 告警 | 级别 | 开始 | 结束 |
+| --- | --- | --- | --- |
+| `target:{节点}:{subject}` | `warning` | `target_down` | `target_recovered` 或 `target_removed` |
+| `config:{节点}` | `critical` | `config_rejected` | `config_recovered` |
+| `node:{节点}` | `critical` | 已注册且允许运行的节点超过 30 秒无回报 | 恢复回报，或节点被暂停、到期、撤销身份 |
+
+- **分组**：新问题等待 5 秒再通知，同一时刻需要发给某个通道的所有开始与恢复通知合并为一条消息，最多列出 10 条（新问题和严重级别在前），其余计数。只有一条时按单条格式发送。
+- **合并**：同一告警恢复后 5 分钟内再次出现，仍是原告警，`repeats` 加一。距上一条通知不足 5 分钟时不再发送开始通知；5 分钟后仍未恢复则再发一次，并写明反复次数。
+- **恢复通知**：只在开始通知已经发出时发送，所以在保持期内短暂出现又消失的问题不会产生任何通知。
+- **维护模式**：`maintenance_until_ms` 之前不发送开始通知；维护结束时仍未恢复的告警会补发。维护期间出现又恢复的问题不通知。
+- **重试**：发送失败（非 2xx，或企业微信/钉钉 `errcode≠0`、飞书 `code≠0`、Telegram `ok:false`）后在 10 秒、60 秒、300 秒后重试，每次请求超时 10 秒。
+- **级别**：通道 `min_severity` 为 `warning`（全部三类）或 `critical`（仅配置拒绝和节点离线）。
+
+`target` 按 `kind` 取不同字段：
+
+| kind | 字段 | 发送方式 |
+| --- | --- | --- |
+| `webhook` | `url`，可选 `secret` | POST `{"sent_at_ms","text"}`；有密钥时加 `X-Relay-Signature: sha256=<正文 HMAC-SHA256 十六进制>` |
+| `telegram` | `bot_token`、`chat_id` | Bot API `sendMessage` |
+| `wecom` | `url` | 企业微信群机器人文本消息 |
+| `feishu` | `url`，可选 `secret` | 飞书自定义机器人；有密钥时按飞书规则加 `timestamp`（秒）和 `sign` |
+| `dingtalk` | `url`，可选 `secret` | 钉钉自定义机器人；有密钥时在地址上加 `timestamp`（毫秒）和 `sign` |
+
+`GET /alerts` 返回：
+
+```json
+{
+  "settings": {"maintenance_until_ms": null},
+  "channels": [{"id": "…", "name": "值班群", "enabled": true, "min_severity": "warning",
+    "kind": "dingtalk", "destination": "https://oapi.dingtalk.com/…", "secret_set": true}],
+  "incidents": {
+    "open": [{"key": "target:…:web/0/8443/TCP", "node_id": "…", "node_name": "hkg-entry-01",
+      "severity": "warning", "summary": "…", "opened_at_ms": 0, "resolved_at_ms": null,
+      "repeats": 0, "notified": true, "last_notice_ms": 0}],
+    "resolved": [],
+    "deliveries": [{"id": 1, "channel_id": "…", "channel_name": "值班群", "incident_key": "…",
+      "incidents": 1, "notice": "opened", "created_at_ms": 0, "attempts": 1, "status": "sent", "error": null}]
+  }
+}
+```
+
+`incidents` 是这条消息包含的告警数，分组消息的 `incident_key` 是其中第一条；`notice` 为 `opened`（含任何新问题）、`resolved`、`test`；`status` 为 `pending`、`retrying`、`sent`、`failed`。`resolved` 与 `deliveries` 各保留最近 200 条，新的在前。
+
+通道与设置保存在 metadata 中，进入备份和恢复日志，schema v4 不变；最多 20 个通道。API 只返回地址的协议和主机，不返回令牌和密钥。只有系统管理员可读写；写操作只接受登录会话，API 令牌即使带写入范围也返回 403。审计新增 `alerts.settings`、`alerts.channel.create`、`alerts.channel.update`、`alerts.channel.delete`。能力目录新增 `alert-notifications`。
+
+限制：告警状态和发送记录只在控制器内存中，重启后清空；重启后的第一次回报会重新检测不可用的目标，节点离线在启动 60 秒后才判定。通知地址由系统管理员填写，控制器会向其发起请求，包括内网地址，所以只应授予可信管理员。邮件通道、按租户分别配置告警、只读诊断角色和告警自动化动作尚未实现。

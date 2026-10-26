@@ -48,6 +48,7 @@ fn inbound(version: ProxyAccept) -> ProxyInbound {
         trusted_sources: vec!["127.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()],
         placement: ProxyPlacement::BeforeTls,
         max_header_bytes: 4096,
+        accept_prewarmed: false,
     }
 }
 fn outbound(version: ProxyVersion) -> ProxyOutbound {
@@ -887,6 +888,8 @@ async fn source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4() {
         proxy_protocol: None,
         websocket: None,
         via: None,
+        prewarm: None,
+        draining: false,
     });
     let address = r.listen;
     engine.apply(config(r)).await.unwrap();
@@ -965,4 +968,70 @@ async fn inside_tls_proxy_does_not_bypass_required_client_certificate() {
     .unwrap();
     engine.shutdown().await.unwrap();
     assert_eq!(total(&db), 8);
+}
+
+async fn wait_active(engine: &Engine, count: u64) {
+    timeout(Duration::from_secs(3), async {
+        while engine.stats().active_tcp != count {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "expected {count} active, have {}",
+            engine.stats().active_tcp
+        )
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn prewarmed_connections_wait_for_their_header_and_dead_ones_are_skipped() {
+    let echo = tcp_echo().await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut exit = rule(echo.address, Protocol::Tcp);
+    exit.inbound_proxy = Some(ProxyInbound {
+        accept_prewarmed: true,
+        ..inbound(ProxyAccept::V2)
+    });
+    // Waiting connections must outlive the ordinary connect timeout.
+    exit.connect_timeout_ms = 300;
+    let downstream = Engine::new(Store::open(&temp.path().join("down.db")).unwrap());
+    downstream.apply(config(exit.clone())).await.unwrap();
+    let mut entry = rule(exit.listen, Protocol::Tcp);
+    entry.targets[0].proxy_protocol = Some(outbound(ProxyVersion::V2));
+    entry.targets[0].prewarm = Some(2);
+    let upstream = Engine::new(Store::open(&temp.path().join("up.db")).unwrap());
+    upstream.apply(config(entry.clone())).await.unwrap();
+
+    wait_active(&downstream, 2).await;
+    sleep(Duration::from_millis(800)).await;
+    assert_eq!(downstream.stats().active_tcp, 2);
+    assert_eq!(downstream.stats().forwarded_upload_bytes, 0);
+    assert_eq!(exchange(entry.listen, b"warm").await, b"warm");
+    assert_eq!(upstream.stats().prewarmed_connections, 1);
+    // The pool refills behind the finished session.
+    wait_active(&downstream, 2).await;
+
+    // A restarted next hop closes every waiting connection; clients still get
+    // through on a fresh dial instead of a dead pooled connection.
+    downstream.shutdown().await.unwrap();
+    let downstream = Engine::new(Store::open(&temp.path().join("down2.db")).unwrap());
+    downstream.apply(config(exit)).await.unwrap();
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(exchange(entry.listen, b"fresh").await, b"fresh");
+    assert_eq!(upstream.stats().prewarmed_connections, 1);
+    upstream.shutdown().await.unwrap();
+    downstream.shutdown().await.unwrap();
+}
+
+#[test]
+fn prewarm_requires_a_proxy_header_and_a_bounded_count() {
+    let mut r = rule("127.0.0.1:9".parse().unwrap(), Protocol::Tcp);
+    r.targets[0].prewarm = Some(2);
+    assert!(r.validate().unwrap_err().to_string().contains("PROXY"));
+    r.targets[0].proxy_protocol = Some(outbound(ProxyVersion::V2));
+    r.validate().unwrap();
+    r.targets[0].prewarm = Some(MAX_PREWARM + 1);
+    assert!(r.validate().is_err());
 }

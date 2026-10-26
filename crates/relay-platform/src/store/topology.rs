@@ -113,6 +113,7 @@ fn prepare(
             node_id: update.node_id,
             revision: update.expected_revision + 1,
             rules: update.rules,
+            rate_bytes_per_sec: update.rate_bytes_per_sec.unwrap_or(old.rate_bytes_per_sec),
         };
         config.validate().map_err(bad_input)?;
         for rule in &mut config.rules {
@@ -227,7 +228,49 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        self.2.config.notify_waiters();
         Ok(result)
+    }
+    /// Maintenance for `node`: sets `draining` on every target that routes
+    /// through it, publishing each upstream node that changes in one batch.
+    pub fn drain_node(&self, actor: &Actor, node: &str, draining: bool) -> Result<BatchResult> {
+        let updates = {
+            let conn = self.0.lock().unwrap();
+            require_node(&conn, actor, node, true)?;
+            let mut referenced = false;
+            let mut updates = vec![];
+            for config in all_configs(&conn)?.into_values() {
+                let mut rules = config.rules;
+                let mut changed = false;
+                for target in rules.iter_mut().flat_map(|r| &mut r.targets) {
+                    if target.via.as_ref().is_some_and(|via| via.node_id == node) {
+                        referenced = true;
+                        changed |= target.draining != draining;
+                        target.draining = draining;
+                    }
+                }
+                if changed {
+                    updates.push(ConfigUpdate {
+                        node_id: config.node_id,
+                        expected_revision: config.revision,
+                        rules,
+                        rate_bytes_per_sec: None,
+                    });
+                }
+            }
+            if !referenced {
+                return reject(409, "no rule routes through this node");
+            }
+            updates
+        };
+        if updates.is_empty() {
+            return Ok(BatchResult {
+                configs: vec![],
+                changes: vec![],
+            });
+        }
+        // Publishing rechecks each expected revision under its own lock.
+        self.publish_configs(actor, ConfigBatch { updates })
     }
     pub fn topology(&self, actor: &Actor) -> Result<serde_json::Value> {
         // Both snapshots are collected under the same lock, including status.
@@ -251,6 +294,17 @@ impl Store {
         expected: u64,
         rules: Vec<Rule>,
     ) -> Result<NodeConfig> {
+        self.set_config_with_rate(actor, node, expected, rules, None)
+    }
+    /// `rate_bytes_per_sec`: `None` keeps the node cap, `Some(None)` clears it.
+    pub fn set_config_with_rate(
+        &self,
+        actor: &Actor,
+        node: &str,
+        expected: u64,
+        rules: Vec<Rule>,
+        rate_bytes_per_sec: Option<Option<u64>>,
+    ) -> Result<NodeConfig> {
         Ok(self
             .publish_configs(
                 actor,
@@ -259,6 +313,7 @@ impl Store {
                         node_id: node.into(),
                         expected_revision: expected,
                         rules,
+                        rate_bytes_per_sec,
                     }],
                 },
             )?

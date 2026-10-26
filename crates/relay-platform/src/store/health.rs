@@ -82,6 +82,8 @@ pub(super) fn validate_reports(
         if ![
             "unknown",
             "eligible",
+            "degraded",
+            "draining",
             "standby",
             "unhealthy",
             "recovering",

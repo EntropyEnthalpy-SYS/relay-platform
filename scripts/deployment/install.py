@@ -289,9 +289,11 @@ class Layout:
         self.generation(identity)
         return identity
 
-    def switch(self, old, new, index, checkpoint=lambda _: None):
+    def switch(self, old, new, index, checkpoint=lambda _: None, files=None):
         require(not self.pending.exists(), 'recover the pending deployment first')
         operation = {'format': 1, 'from': old, 'to': new, 'index': index}
+        if files:
+            operation['files'] = files
         atomic(self.pending, encoded(operation))
         checkpoint('intent_durable')
         self.finish(operation, checkpoint)
@@ -304,6 +306,16 @@ class Layout:
         self.validate_index(index)
         require(index['settings'] == descriptor['settings'] and index['state_contract'] == verified['manifest']['build']['state_contract'][self.role], 'pending installation receipt differs from target generation')
         require(index['current'] == operation['to'] and index['previous'] == operation['from'], 'pending receipt mismatch')
+        # Service files rendered by a newer installer replace the ones it
+        # recorded; an interrupted switch finds either version and finishes.
+        for path, change in operation.get('files', {}).items():
+            file = self.path(path)
+            self.owned(file)
+            body = change['body'].encode()
+            found = sha(regular(file, 1024 * 1024))
+            require(found in (change['from'], sha(body)), f'managed service file was modified: {file}')
+            if found != sha(body):
+                atomic(file, body, change['mode'])
         self.check_files(index)
         temporary = self.current.with_name('.select-' + uuid.uuid4().hex)
         try:
@@ -402,6 +414,21 @@ def preflight(layout, verified=None, supplied=None):
                             'no firewall, sysctl, routing or low-port capabilities are changed']}
 
 
+def refreshed_files(layout, index):
+    """Managed service files whose rendering changed since they were installed."""
+    manager, user = index['manager'], index['user']
+    wanted = [(layout.service_path(manager), service_text(manager, layout.role, layout.current, layout.state, user, layout.log),
+               0o644 if manager == 'systemd' else 0o755)]
+    if manager == 'openrc':
+        wanted.append((layout.rotation_path(), logrotate_text(layout.log, user), 0o644))
+    changes = {}
+    for path, body, mode in wanted:
+        key = '/' + path.relative_to(layout.root).as_posix()
+        if key in index['managed_files'] and index['managed_files'][key] != sha(body.encode()):
+            changes[key] = {'from': index['managed_files'][key], 'body': body, 'mode': mode}
+    return changes
+
+
 def deploy(layout, verified, supplied, enrollment=None, ca=None, checkpoint=lambda _: None):
     report = preflight(layout, verified, supplied)
     require(report['ready'], '; '.join(report['errors']))
@@ -442,6 +469,9 @@ def deploy(layout, verified, supplied, enrollment=None, ca=None, checkpoint=lamb
             require(token is None, 'existing identity cannot be replaced by an installer enrollment file')
             if layout.role == 'agent':
                 require(all(config[k] == old_index['settings'][k] for k in ('controller', 'node_id')), 'agent identity is fixed to its existing controller and node ID')
+                if ca_bytes is None and not restoring and old_config['ca_sha256']:
+                    # Upgrades keep trusting the controller CA unless a new one is supplied.
+                    ca_bytes = regular(layout.generations / old_index['current'] / 'ca.pem', 1024 * 1024)
         else:
             require(layout.selected() is None, 'unrecorded current selection exists')
             if not provision.exists():
@@ -456,10 +486,16 @@ def deploy(layout, verified, supplied, enrollment=None, ca=None, checkpoint=lamb
         # Execute only the already-verified native payload, before selecting it.
         actual = bundle.build_info(layout.generations / generation / 'relay')
         require(actual == verified['manifest']['build'], 'binary build-info differs from its signed manifest')
-        if old_index and not restoring and generation == old_index['current']:
+        refresh = refreshed_files(layout, old_index) if old_index and not restoring else {}
+        if old_index and not restoring and generation == old_index['current'] and not refresh:
             return {'changed': False, **layout.status()}
         if old_index and not restoring:
-            index = {**old_index, 'current': generation, 'previous': old_index['current'], 'settings': config}
+            managed = {**old_index['managed_files'], **{k: sha(v['body'].encode()) for k, v in refresh.items()}}
+            if generation == old_index['current']:
+                # Same program and settings; only the service files change.
+                index = {**old_index, 'managed_files': managed}
+            else:
+                index = {**old_index, 'current': generation, 'previous': old_index['current'], 'settings': config, 'managed_files': managed}
         else:
             # Exact repeat of the original signed bundle/settings resumes a first
             # provision. No service can start before the selection is committed.
@@ -509,7 +545,7 @@ def deploy(layout, verified, supplied, enrollment=None, ca=None, checkpoint=lamb
                      'uid': uid, 'gid': gid, 'user': user, 'current': generation, 'previous': None,
                      'managed_files': files, 'removed': False, 'settings': config,
                      'state_contract': verified['manifest']['build']['state_contract'][layout.role]}
-        layout.switch(index['previous'], generation, index, checkpoint)
+        layout.switch(index['previous'], generation, index, checkpoint, refresh)
         provision = layout.base / 'provisioning.json'
         if provision.exists():
             provision.unlink()

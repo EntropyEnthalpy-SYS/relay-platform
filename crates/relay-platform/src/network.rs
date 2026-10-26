@@ -148,6 +148,16 @@ fn tcp_socket(bind: Option<&OutboundBind>, ipv4: bool) -> Result<TcpSocket> {
     if let Some(bind) = bind {
         bind_interface(&reference, bind, ipv4)?;
     }
+    // Choose the source port at connect time, per destination. Binding port 0
+    // otherwise reserves a port that is unique across all destinations, so one
+    // node could hold only one ephemeral range of outbound connections in total
+    // and any port in TIME_WAIT would be unusable.
+    #[cfg(target_os = "linux")]
+    nix::sys::socket::setsockopt(
+        &socket,
+        nix::sys::socket::sockopt::IpBindAddressNoPort,
+        &true,
+    )?;
     socket.bind(source_address(bind, ipv4)?)?;
     Ok(socket)
 }
@@ -255,4 +265,21 @@ pub(crate) fn udp_listener(address: SocketAddr) -> Result<UdpSocket> {
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;
     Ok(UdpSocket::from_std(socket.into())?)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    #[tokio::test]
+    async fn outbound_sockets_take_their_port_at_connect_time() {
+        // A port reserved at bind time would be unique across destinations,
+        // capping a node at one ephemeral range of outbound connections.
+        let socket = super::tcp_socket(None, true).unwrap();
+        assert_eq!(socket.local_addr().unwrap().port(), 0);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = socket
+            .connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        assert_ne!(stream.local_addr().unwrap().port(), 0);
+    }
 }

@@ -20,11 +20,7 @@ async fn profile_http_filter_bulk_and_permissions_preserve_configuration() {
     )
     .unwrap();
     let (outsider, _) = db.login("profile-outsider", PASSWORD).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let origin = format!("http://{}/api/v1", http.address);
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let settings = json!({"kinds":["ingress","ix"],"group":"asia","tags":["premium"],"notes":"机柜 B","cost":{"currency":"USD","amount_micros":12345678,"period":"monthly"}});
@@ -250,11 +246,7 @@ async fn pause_closes_active_tcp_udp_without_configuration_republish_and_enable_
     r.owner_id = admin.id.clone();
     let listen = r.listen;
     db.set_config(&admin, &node, 0, vec![r]).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let origin = format!("http://{}", http.address);
     let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
     let mut a = agent(local.clone(), &origin, &node, Some(token));
@@ -316,11 +308,7 @@ async fn expiry_stops_tcp_udp_during_control_outage_and_rejects_expired_restarts
     r.owner_id = admin.id.clone();
     let listen = r.listen;
     db.set_config(&admin, &node, 0, vec![r]).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let address = http.address;
     let origin = format!("http://{address}");
     let expires = now_ms() + 7000;
@@ -363,7 +351,7 @@ async fn expiry_stops_tcp_udp_during_control_outage_and_rejects_expired_restarts
     if now_ms() < expires {
         sleep(Duration::from_millis((expires - now_ms()) as u64 + 10)).await;
     }
-    let mut http = server(api::router(AppState::new(db.clone())), address).await;
+    let mut http = controller(db.clone(), address).await;
     let original_run = local.metadata("agent_budget_run").unwrap();
     let mut expired = agent(local.clone(), &origin, &node, None);
     let error = timeout(Duration::from_secs(3), &mut expired.task)

@@ -1,15 +1,15 @@
 use crate::{
     budget::{Budget, BudgetOverview, BudgetUpdate, NewBudget},
     model::*,
-    store::{Actor, Rejection, Role, Store, reject},
+    store::{Actor, Rejection, Role, Scope, Store, reject},
 };
 use axum::{
     Json, Router,
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -25,8 +25,11 @@ pub struct AppState {
     pub store: Store,
     instance: String,
     login_attempts: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
+    second_factor_failures: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     login_slots: Arc<Semaphore>,
     sync_queue: crate::sync_queue::SyncQueue,
+    /// Ends agent watches so a graceful shutdown need not wait for them.
+    stopping: tokio_util::sync::CancellationToken,
 }
 impl AppState {
     pub fn new(store: Store) -> Self {
@@ -35,8 +38,14 @@ impl AppState {
             store,
             instance: uuid::Uuid::new_v4().to_string(),
             login_attempts: Arc::new(Mutex::new(HashMap::new())),
+            second_factor_failures: Arc::new(Mutex::new(HashMap::new())),
             login_slots: Arc::new(Semaphore::new(4)),
+            stopping: Default::default(),
         }
+    }
+    pub fn with_shutdown(mut self, stopping: tokio_util::sync::CancellationToken) -> Self {
+        self.stopping = stopping;
+        self
     }
     pub fn with_sync_batch_size(mut self, size: usize) -> anyhow::Result<Self> {
         self.sync_queue = crate::sync_queue::SyncQueue::new(self.store.clone(), size)?;
@@ -54,6 +63,18 @@ impl AppState {
             .or_insert((0, now + Duration::from_secs(300)));
         entry.0 += 1;
         entry.0 <= 30
+    }
+    /// Wrong second-factor codes are limited per account, independent of source address.
+    fn second_factor_locked(&self, username: &str, failed: bool) -> bool {
+        let now = Instant::now();
+        let mut map = self.second_factor_failures.lock().unwrap();
+        map.retain(|_, (_, until)| *until > now);
+        if failed && map.len() < 4096 {
+            map.entry(username.to_owned())
+                .or_insert((0, now + Duration::from_secs(300)))
+                .0 += 1;
+        }
+        map.get(username).is_some_and(|(count, _)| *count >= 10)
     }
 }
 
@@ -96,7 +117,10 @@ fn bearer(headers: &HeaderMap) -> anyhow::Result<String> {
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|s| {
+            let secret = s.strip_prefix(crate::store::API_TOKEN_PREFIX).unwrap_or(s);
+            secret.len() == 64 && secret.bytes().all(|b| b.is_ascii_hexdigit())
+        })
     else {
         return reject(401, "Bearer credential required");
     };
@@ -108,9 +132,43 @@ async fn require_session(
     next: Next,
 ) -> Result<Response, ApiError> {
     let token = bearer(request.headers())?;
-    let actor = database(state.store, move |db| db.authenticate(&token)).await?;
+    let (actor, scopes) = database(state.store, move |db| db.authenticate(&token)).await?;
+    if let Some(scopes) = scopes
+        && !scope_permits(&scopes, request.method(), request.uri().path())
+    {
+        return Err(Rejection {
+            status: 403,
+            message: "API token scope does not permit this request".into(),
+        }
+        .into());
+    }
     request.extensions_mut().insert(actor);
     Ok(next.run(request).await)
+}
+/// API tokens narrow the owner's role: reads need `read`, writes need the
+/// scope of their resource. Account security and token management stay
+/// limited to interactive sessions, so a token cannot extend itself.
+fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
+    let path = path.strip_prefix("/api/v1/").unwrap_or(path);
+    if path.starts_with("account/")
+        || path.starts_with("api-tokens")
+        || path.ends_with("/mfa/reset")
+        || path == "auth/logout"
+    {
+        return false;
+    }
+    let needed = if method == Method::GET || method == Method::HEAD {
+        Scope::Read
+    } else if path.starts_with("nodes") || path.starts_with("configurations/") {
+        Scope::NodesWrite
+    } else if path.starts_with("budgets") {
+        Scope::BudgetsWrite
+    } else if path.starts_with("users") || path == "tenants" {
+        Scope::UsersWrite
+    } else {
+        return false;
+    };
+    scopes.contains(&needed)
 }
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
@@ -158,7 +216,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/nodes/{node}/health", get(node_health))
         .route("/api/v1/nodes/{node}/rollback", post(rollback))
+        .route("/api/v1/nodes/{node}/drain", post(drain))
         .route("/api/v1/topology", get(topology))
+        .route("/api/v1/telemetry", get(telemetry))
         .route("/api/v1/configurations/preview", post(preview_batch))
         .route("/api/v1/configurations/publish", post(publish_batch))
         .route("/api/v1/users", get(users).post(create_user))
@@ -166,6 +226,17 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/users/{user}/revoke-sessions",
             post(revoke_sessions),
         )
+        .route("/api/v1/users/{user}/mfa/reset", post(reset_second_factor))
+        .route(
+            "/api/v1/users/{user}/rate",
+            get(user_rate).put(set_user_rate),
+        )
+        .route("/api/v1/account/mfa", get(second_factor_status))
+        .route("/api/v1/account/mfa/setup", post(begin_second_factor))
+        .route("/api/v1/account/mfa/enable", post(enable_second_factor))
+        .route("/api/v1/account/mfa/disable", post(disable_second_factor))
+        .route("/api/v1/api-tokens", get(api_tokens).post(create_api_token))
+        .route("/api/v1/api-tokens/{id}", delete(revoke_api_token))
         .route("/api/v1/tenants", post(create_tenant))
         .route("/api/v1/usage", get(usage))
         .route("/api/v1/budgets", get(budgets).post(create_budget))
@@ -173,6 +244,20 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/budgets/{id}/reservations",
             get(budget_reservations),
+        )
+        .route("/api/v1/alerts", get(alerts))
+        .route(
+            "/api/v1/alerts/settings",
+            axum::routing::put(set_alert_settings),
+        )
+        .route("/api/v1/alerts/channels", post(create_alert_channel))
+        .route(
+            "/api/v1/alerts/channels/{id}",
+            axum::routing::put(update_alert_channel).delete(delete_alert_channel),
+        )
+        .route(
+            "/api/v1/alerts/channels/{id}/test",
+            post(test_alert_channel),
         )
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/recovery", get(recovery_status))
@@ -193,6 +278,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agent/budgets/recover", post(recover_agent_budget))
         .route("/api/v1/agent/reconcile", post(reconcile))
         .route("/api/v1/agent/sync", post(sync))
+        .route("/api/v1/agent/watch", get(watch_config))
         .route(
             "/",
             get(|| async { Html(include_str!("../../../web/index.html")) }),
@@ -231,6 +317,9 @@ pub fn router(state: AppState) -> Router {
 struct Login {
     username: String,
     password: String,
+    /// Six-digit authenticator code or a recovery code; required once two-factor login is on.
+    #[serde(default)]
+    second_factor: Option<String>,
 }
 #[derive(Serialize)]
 struct LoginResponse {
@@ -242,8 +331,11 @@ async fn login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(input): Json<Login>,
-) -> ApiResult<LoginResponse> {
-    if input.username.len() > 80 || input.password.len() > 1024 {
+) -> Result<Response, ApiError> {
+    if input.username.len() > 80
+        || input.password.len() > 1024
+        || input.second_factor.as_ref().is_some_and(|c| c.len() > 32)
+    {
         return Err(Rejection {
             status: 400,
             message: "credentials exceed limits".into(),
@@ -266,15 +358,40 @@ async fn login(
             .into(),
         )
     })?;
-    let (token, user) = database(state.store, move |db| {
-        db.login(&input.username, &input.password)
+    if state.second_factor_locked(&input.username, false) {
+        return Err(Rejection {
+            status: 429,
+            message: "too many invalid two-factor codes; retry in five minutes".into(),
+        }
+        .into());
+    }
+    let username = input.username.clone();
+    let result = database(state.store.clone(), move |db| {
+        db.login_with_second_factor(
+            &input.username,
+            &input.password,
+            input.second_factor.as_deref(),
+        )
     })
-    .await?;
+    .await;
+    let message = match &result {
+        Err(ApiError(e)) => e.downcast_ref::<Rejection>().map(|r| r.message.as_str()),
+        Ok(_) => None,
+    };
+    if message == Some(crate::store::SECOND_FACTOR_INVALID) {
+        state.second_factor_locked(&username, true);
+    }
+    if message == Some(crate::store::SECOND_FACTOR_REQUIRED) {
+        let body = serde_json::json!({"error":crate::store::SECOND_FACTOR_REQUIRED,"second_factor_required":true});
+        return Ok((StatusCode::UNAUTHORIZED, Json(body)).into_response());
+    }
+    let (token, user) = result?;
     Ok(Json(LoginResponse {
         token,
         user,
         expires_in_seconds: 8 * 60 * 60,
-    }))
+    })
+    .into_response())
 }
 impl From<Rejection> for ApiError {
     fn from(value: Rejection) -> Self {
@@ -304,7 +421,9 @@ async fn nodes(
 struct NewNode {
     name: String,
     tenant_id: Option<String>,
-    #[serde(default = "crate::lease::default_policy")]
+    /// Omitted or `null`: availability mode, which keeps forwarding while the
+    /// controller is unreachable. `{}` or `{"ttl_ms":..}`: strict lease.
+    #[serde(default)]
     lease_policy: Option<crate::lease::LeasePolicy>,
     #[serde(default)]
     settings: crate::node::NodeSettings,
@@ -371,6 +490,8 @@ async fn config(
 struct Publish {
     expected_revision: u64,
     rules: Vec<Rule>,
+    #[serde(default, deserialize_with = "crate::model::explicit")]
+    rate_bytes_per_sec: Option<Option<u64>>,
 }
 async fn publish(
     State(state): State<AppState>,
@@ -380,7 +501,13 @@ async fn publish(
 ) -> ApiResult<NodeConfig> {
     Ok(Json(
         database(state.store, move |db| {
-            db.set_config(&actor, &node, input.expected_revision, input.rules)
+            db.set_config_with_rate(
+                &actor,
+                &node,
+                input.expected_revision,
+                input.rules,
+                input.rate_bytes_per_sec,
+            )
         })
         .await?,
     ))
@@ -413,6 +540,14 @@ async fn topology(
         database(state.store, move |db| db.topology(&actor)).await?,
     ))
 }
+async fn telemetry(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(
+        database(state.store, move |db| db.telemetry(&actor)).await?,
+    ))
+}
 async fn preview_batch(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -433,6 +568,24 @@ async fn publish_batch(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct Drain {
+    draining: bool,
+}
+async fn drain(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Json(input): Json<Drain>,
+) -> ApiResult<crate::topology::BatchResult> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.drain_node(&actor, &node, input.draining)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Rollback {
     revision: u64,
     expected_revision: u64,
@@ -446,7 +599,13 @@ async fn rollback(
     Ok(Json(
         database(state.store, move |db| {
             let previous = db.config(&actor, &node, Some(input.revision))?;
-            db.set_config(&actor, &node, input.expected_revision, previous.rules)
+            db.set_config_with_rate(
+                &actor,
+                &node,
+                input.expected_revision,
+                previous.rules,
+                Some(previous.rate_bytes_per_sec),
+            )
         })
         .await?,
     ))
@@ -454,7 +613,7 @@ async fn rollback(
 async fn users(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
-) -> ApiResult<Vec<Actor>> {
+) -> ApiResult<Vec<crate::store::UserSummary>> {
     Ok(Json(
         database(state.store, move |db| db.users(&actor)).await?,
     ))
@@ -492,6 +651,205 @@ async fn revoke_sessions(
     Path(user): Path<String>,
 ) -> ApiResult<serde_json::Value> {
     database(state.store, move |db| db.revoke_sessions(&actor, &user)).await?;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasswordConfirmation {
+    password: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecondFactorCode {
+    code: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisableSecondFactor {
+    password: String,
+    code: String,
+}
+async fn second_factor_status(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::store::SecondFactorStatus> {
+    Ok(Json(
+        database(state.store, move |db| db.second_factor_status(&actor)).await?,
+    ))
+}
+async fn begin_second_factor(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<PasswordConfirmation>,
+) -> ApiResult<serde_json::Value> {
+    let setup = database(state.store, move |db| {
+        db.begin_second_factor(&actor, &input.password)
+    })
+    .await?;
+    let qr = qrcode::QrCode::new(setup.otpauth_uri.as_bytes())
+        .map_err(|e| ApiError(anyhow::anyhow!("QR encoding failed: {e}")))?
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(200, 200)
+        .build();
+    Ok(Json(
+        serde_json::json!({"secret":setup.secret,"otpauth_uri":setup.otpauth_uri,"qr_svg":qr}),
+    ))
+}
+async fn enable_second_factor(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<SecondFactorCode>,
+) -> ApiResult<serde_json::Value> {
+    let codes = database(state.store, move |db| {
+        db.enable_second_factor(&actor, &input.code)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"recovery_codes":codes})))
+}
+async fn disable_second_factor(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<DisableSecondFactor>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.disable_second_factor(&actor, &input.password, &input.code)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserRate {
+    rate_bytes_per_sec: Option<u64>,
+}
+async fn set_user_rate(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+    Json(input): Json<UserRate>,
+) -> ApiResult<crate::store::UserRateView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.set_user_rate(&actor, &user, input.rate_bytes_per_sec)?;
+            db.user_rate(&actor, &user)
+        })
+        .await?,
+    ))
+}
+async fn user_rate(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+) -> ApiResult<crate::store::UserRateView> {
+    Ok(Json(
+        database(state.store, move |db| db.user_rate(&actor, &user)).await?,
+    ))
+}
+async fn reset_second_factor(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.reset_second_factor(&actor, &user)).await?;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewApiToken {
+    name: String,
+    scopes: Vec<Scope>,
+    expires_in_days: u32,
+}
+async fn api_tokens(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::store::ApiToken>> {
+    Ok(Json(
+        database(state.store, move |db| db.api_tokens(&actor)).await?,
+    ))
+}
+async fn create_api_token(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NewApiToken>,
+) -> ApiResult<serde_json::Value> {
+    let (token, record) = database(state.store, move |db| {
+        db.create_api_token(&actor, &input.name, &input.scopes, input.expires_in_days)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"token":token,"api_token":record})))
+}
+async fn revoke_api_token(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.revoke_api_token(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
+async fn alerts(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(
+        database(state.store, move |db| db.alert_overview(&actor)).await?,
+    ))
+}
+async fn set_alert_settings(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(settings): Json<crate::alerts::Settings>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.set_alert_settings(&actor, settings)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
+async fn create_alert_channel(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(channel): Json<crate::alerts::Channel>,
+) -> ApiResult<crate::alerts::ChannelView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.save_alert_channel(&actor, None, channel)
+        })
+        .await?,
+    ))
+}
+async fn update_alert_channel(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(channel): Json<crate::alerts::Channel>,
+) -> ApiResult<crate::alerts::ChannelView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.save_alert_channel(&actor, Some(&id), channel)
+        })
+        .await?,
+    ))
+}
+async fn delete_alert_channel(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_alert_channel(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok":true})))
+}
+async fn test_alert_channel(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    let store = state.store.clone();
+    let channel = database(state.store, move |db| db.alert_channel(&actor, &id)).await?;
+    crate::alerts::test(&channel, &store.alerts())
+        .await
+        .or_else(|error| reject(502, format!("test message failed: {error:#}")))
+        .map_err(ApiError)?;
     Ok(Json(serde_json::json!({"ok":true})))
 }
 #[derive(Deserialize)]
@@ -689,6 +1047,39 @@ async fn sync(
     result.controller_instance = state.instance;
     Ok(Json(result))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WatchQuery {
+    after: u64,
+}
+/// Long poll: answers once the node's desired revision exceeds `after`, or
+/// after 25 s with the unchanged revision. Agents then sync immediately.
+async fn watch_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WatchQuery>,
+) -> ApiResult<serde_json::Value> {
+    let token = bearer(&headers)?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(25);
+    loop {
+        let published = state.store.config_published();
+        let credential = token.clone();
+        let revision = database(state.store.clone(), move |db| {
+            db.node_desired_revision(&credential)
+        })
+        .await?;
+        let reply = Json(serde_json::json!({ "desired_revision": revision }));
+        if revision > query.after {
+            return Ok(reply);
+        }
+        tokio::select! {
+            changed = tokio::time::timeout_at(deadline, published) => if changed.is_err() {
+                return Ok(reply);
+            },
+            _ = state.stopping.cancelled() => return Ok(reply),
+        }
+    }
+}
 async fn control_metrics(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -720,8 +1111,8 @@ async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
-        "pending":["mptcp","budget-disaster-recovery","global-rate-limits","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce","subscriptions","dns-management","federation","postgresql-ha"]
     }))
 }
 

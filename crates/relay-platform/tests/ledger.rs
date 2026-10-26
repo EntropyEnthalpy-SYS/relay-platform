@@ -231,7 +231,7 @@ fn authorization_is_enforced_at_store_boundary_and_sessions_revoke() {
     );
     let (token, actor) = db.login("viewer", PASSWORD).unwrap();
     assert_eq!(actor.id, viewer.id);
-    assert_eq!(db.authenticate(&token).unwrap().id, viewer.id);
+    assert_eq!(db.authenticate(&token).unwrap().0.id, viewer.id);
     db.revoke_sessions(&admin, &viewer.id).unwrap();
     assert_eq!(rejection(db.authenticate(&token)), 401);
     assert_eq!(rejection(db.login("missing", PASSWORD)), 401);

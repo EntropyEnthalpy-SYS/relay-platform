@@ -13,8 +13,10 @@ impl Store {
             request.lease.as_ref(),
             request.budget.as_ref().map(|b| b.run_id.as_str()),
         )?;
-        let response = apply_sync(&tx, node, request)?;
+        let report = Report::of(&request);
+        let response = apply_sync(&tx, node, request, &self.6)?;
         tx.commit()?;
+        report.record(&self.4, node);
         Ok(response)
     }
 
@@ -29,6 +31,7 @@ impl Store {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut responses = Vec::with_capacity(inputs.len());
+        let mut reports = vec![];
         for (credential, input) in inputs {
             tx.execute_batch("SAVEPOINT agent_sync_request")?;
             let result = (|| {
@@ -49,7 +52,10 @@ impl Store {
                     input.lease.as_ref(),
                     input.budget.as_ref().map(|b| b.run_id.as_str()),
                 )?;
-                apply_sync(&tx, &node, input)
+                let report = Report::of(&input);
+                let response = apply_sync(&tx, &node, input, &self.6)?;
+                reports.push((node, report));
+                Ok(response)
             })();
             if let Err(error) = &result {
                 if !error.is::<Rejection>() {
@@ -61,12 +67,40 @@ impl Store {
             responses.push(result);
         }
         tx.commit()?;
+        for (node, report) in reports {
+            report.record(&self.4, &node);
+        }
         Ok(responses)
     }
 }
 
-fn apply_sync(tx: &Transaction<'_>, node: &str, request: SyncRequest) -> Result<SyncResponse> {
-    if request.usage.len() > 1024 || request.apply_error.as_ref().is_some_and(|e| e.len() > 2048) {
+/// What the dashboard keeps from a report, recorded only once it is committed.
+struct Report(u64, Option<String>, EngineStats);
+
+impl Report {
+    fn of(request: &SyncRequest) -> Self {
+        Self(
+            request.applied_revision,
+            request.apply_error.clone(),
+            request.stats.clone(),
+        )
+    }
+
+    fn record(self, telemetry: &crate::telemetry::Telemetry, node: &str) {
+        telemetry.record(node, self.0, self.1.as_deref(), &self.2);
+    }
+}
+
+fn apply_sync(
+    tx: &Transaction<'_>,
+    node: &str,
+    request: SyncRequest,
+    rates: &std::sync::Mutex<super::user_rates::UserRates>,
+) -> Result<SyncResponse> {
+    if request.usage.len() > 1024
+        || request.stats.user_rates.len() > 1024
+        || request.apply_error.as_ref().is_some_and(|e| e.len() > 2048)
+    {
         return reject(400, "sync payload exceeds limits");
     }
     let ledger: Option<String> =
@@ -137,7 +171,14 @@ fn apply_sync(tx: &Transaction<'_>, node: &str, request: SyncRequest) -> Result<
     } else {
         None
     };
+    let user_rates = super::user_rates::shares(
+        tx,
+        &mut rates.lock().unwrap(),
+        node,
+        &request.stats.user_rates,
+    )?;
     Ok(SyncResponse {
+        user_rates: Some(user_rates),
         credential_rotation: super::credentials::read(tx, node)?.pending,
         budget,
         controller_instance: "store-direct".into(),

@@ -187,7 +187,10 @@ class DeploymentTests(unittest.TestCase):
     def test_deploy_upgrade_and_rollback_preserve_every_runtime_byte(self):
         first = self.deploy()
         private = self.layout.state / 'do-not-rollback.sqlite'; private.write_bytes(b'newly-admitted-usage')
-        second = self.deploy(1, {'listen': '127.0.0.1:8081'})
+        with socket.socket() as reserve:
+            reserve.bind(('127.0.0.1', 0))
+            changed = {'listen': '127.0.0.1:' + str(reserve.getsockname()[1])}
+        second = self.deploy(1, changed)
         self.assertNotEqual(first['current'], second['current'])
         self.assertEqual(second['previous'], first['current'])
         result = install.rollback(self.layout)
@@ -243,6 +246,30 @@ class DeploymentTests(unittest.TestCase):
                 self.assertEqual((self.layout.state / 'usage').read_bytes(), b'keep')
                 self.assertIsNone(result['pending'])
 
+    def test_upgrades_install_service_files_from_a_newer_installer_even_if_interrupted(self):
+        original = install.service_text
+        def newer(suffix):
+            return patch.object(install, 'service_text', lambda *a: original(*a) + suffix)
+        for boundary in ('intent_durable', 'selection_durable'):
+            with self.subTest(boundary=boundary):
+                self.layout = install.Layout(self.root / boundary, 'controller', 'systemd')
+                first = self.deploy()
+                service = self.layout.service_path('systemd')
+                with newer('# v2\n'):
+                    with self.assertRaises(Interrupted):
+                        self.deploy(1, checkpoint=self.break_at(boundary))
+                    result = install.recover(self.layout)
+                    self.assertNotEqual(result['current'], first['current'])
+                    self.assertTrue(service.read_text().endswith('# v2\n'))
+                    self.assertEqual(service.stat().st_mode & 0o777, 0o644)
+                    self.assertFalse(self.deploy(1)['changed'])
+                # Same program and settings: only the service file changes.
+                with newer('# v3\n'):
+                    again = self.deploy(1)
+                self.assertTrue(again['changed'])
+                self.assertEqual(again['current'], result['current'])
+                self.assertTrue(service.read_text().endswith('# v3\n'))
+
     def test_unexpected_current_link_and_modified_service_prevent_mutation(self):
         self.deploy()
         service = self.layout.service_path('systemd'); original = service.read_bytes(); service.write_bytes(original + b'# user edit\n')
@@ -275,15 +302,33 @@ class DeploymentTests(unittest.TestCase):
     def test_agent_secret_permissions_identity_guard_and_private_key_rejection(self):
         self.layout = install.Layout(self.root, 'agent', 'systemd')
         token = self.root / 'token.secret'; token.write_text('a' * 64)
+        ca = self.root / 'panel-ca.pem'; ca.write_text('-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n')
         config = {'controller': 'https://relay.example.test', 'node_id': 'node-one'}
-        result = self.deploy(config=config, enrollment=token)
+        result = self.deploy(config=config, enrollment=token, ca=ca)
         installed = self.layout.config / 'enrollment.secret'
         self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+        # Without netlink the agent cannot list local addresses and rejects
+        # every configuration (seen under real systemd on Debian 13).
+        families = next(line for line in self.layout.service_path('systemd').read_text().splitlines()
+                        if line.startswith('RestrictAddressFamilies='))
+        self.assertIn('AF_NETLINK', families.split('=', 1)[1].split())
+        # Each relayed TCP connection holds two descriptors; 65536 ran out
+        # near 32k connections.
+        limit = next(line for line in self.layout.service_path('systemd').read_text().splitlines()
+                     if line.startswith('LimitNOFILE='))
+        self.assertGreaterEqual(int(limit.split('=', 1)[1]), 1 << 20)
         self.assertNotIn('a' * 64, json.dumps(result))
         with self.assertRaises(DeployError):
             self.deploy(1, config={**config, 'node_id': 'another'})
         with self.assertRaises(DeployError):
             self.deploy(1, config=config, enrollment=token)
+        # An upgrade without --ca-certificate keeps trusting the controller CA
+        # (it was silently dropped once, cutting a VPS agent off its panel).
+        upgraded = self.deploy(1, config=config)
+        self.assertNotEqual(upgraded['current'], result['current'])
+        folder = self.layout.generations / upgraded['current']
+        self.assertEqual((folder / 'ca.pem').read_bytes(), ca.read_bytes())
+        self.assertIn('--ca-certificate', (folder / 'run').read_text())
         key = self.root / 'ca.pem'; key.write_text('-----BEGIN CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----')
         with self.assertRaises(DeployError):
             self.deploy(1, config=config, ca=key)

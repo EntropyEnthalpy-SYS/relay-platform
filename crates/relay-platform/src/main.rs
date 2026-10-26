@@ -166,10 +166,19 @@ async fn main() -> Result<()> {
             }
             let listener = tokio::net::TcpListener::bind(listen).await?;
             tracing::info!(address=%listener.local_addr()?,"controller listening");
+            tokio::spawn(relay_platform::alerts::run(
+                store.clone(),
+                Duration::from_secs(2),
+                stop.clone(),
+            ));
             axum::serve(
                 listener,
-                api::router(AppState::new(store).with_sync_batch_size(sync_batch_size as usize)?)
-                    .into_make_service_with_connect_info::<SocketAddr>(),
+                api::router(
+                    AppState::new(store)
+                        .with_sync_batch_size(sync_batch_size as usize)?
+                        .with_shutdown(stop.clone()),
+                )
+                .into_make_service_with_connect_info::<SocketAddr>(),
             )
             .with_graceful_shutdown(stop.cancelled_owned())
             .await?;

@@ -317,6 +317,7 @@ async fn ws_and_mutual_wss_hops_preserve_payload_with_both_proxy_positions() {
                 trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
                 placement,
                 max_header_bytes: 4096,
+                accept_prewarmed: false,
             });
             end.allow_sources = vec!["198.51.100.7/32".parse().unwrap()];
         }
@@ -339,6 +340,7 @@ async fn ws_and_mutual_wss_hops_preserve_payload_with_both_proxy_positions() {
                 trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
                 placement: ProxyPlacement::BeforeTls,
                 max_header_bytes: 4096,
+                accept_prewarmed: false,
             });
             start.targets[0].proxy_protocol = Some(ProxyOutbound {
                 version: ProxyVersion::V2,

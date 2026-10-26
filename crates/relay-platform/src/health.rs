@@ -19,13 +19,13 @@ pub const MAX_ENDPOINTS: usize = 256;
 pub(crate) const MAX_CONCURRENT: usize = 16;
 pub const MAX_PROBE_BYTES: usize = 1024;
 fn interval() -> u64 {
-    5000
+    1000
 }
 fn timeout() -> u64 {
-    2000
+    1000
 }
 fn failures() -> u16 {
-    3
+    2
 }
 fn successes() -> u16 {
     2
@@ -34,7 +34,7 @@ fn recovery() -> u64 {
     5000
 }
 fn max_age() -> u64 {
-    20000
+    10000
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +162,19 @@ pub enum Failure {
     UnexpectedResponse,
     Expired,
 }
+impl Failure {
+    /// Wording shared with the console's health page.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dns => "域名解析失败",
+            Self::Transport => "连接、握手或路径检查失败",
+            Self::Timeout => "探测超时",
+            Self::Io => "收发失败",
+            Self::UnexpectedResponse => "回复不符或提前关闭",
+            Self::Expired => "规则已到期",
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeKind {
@@ -194,6 +207,15 @@ pub struct TargetHealthReport {
     pub max_age_ms: u64,
     pub checked_at_ms: Option<i64>,
     pub latency_ewma_us: Option<u64>,
+    /// Probes in the recent window (at most `QUALITY_WINDOW`) and how many failed.
+    #[serde(default)]
+    pub window_checks: u32,
+    #[serde(default)]
+    pub window_failures: u32,
+    /// Mean absolute difference between consecutive successful probe
+    /// latencies in the window; a failure in between breaks the pair.
+    #[serde(default)]
+    pub jitter_us: Option<u64>,
     pub consecutive_successes: u16,
     pub consecutive_failures: u16,
     pub completed_checks: u64,
@@ -206,11 +228,26 @@ pub struct TargetHealthReport {
     pub max_sessions: Option<u32>,
 }
 
+/// Probe outcomes kept for loss and jitter.
+pub const QUALITY_WINDOW: usize = 20;
+/// Selection cost of a lost probe: the initial TCP retransmission timeout
+/// (RFC 6298, 2.1), which a lost SYN or SYN-ACK adds to connection setup.
+const LOSS_PENALTY_US: u64 = 1_000_000;
+/// Selection uses the median of this many newest successful probes: one slow
+/// reply does not move it, a change lasting three probes does.
+const SELECTION_SAMPLES: usize = 5;
+
 struct Sample {
     status: Status,
+    /// Latest outcomes, oldest first: the latency of a success, `None` for a failure.
+    recent: std::collections::VecDeque<Option<u64>>,
     checked: Option<Instant>,
     checked_at_ms: Option<i64>,
     recovery_since: Option<Instant>,
+    /// Accepted at least once since probing began. Until then there is no
+    /// outage to guard against, so the first acceptance skips the recovery
+    /// delay even after failed probes (a downstream relay still starting).
+    accepted: bool,
     consecutive_successes: u16,
     consecutive_failures: u16,
     completed: u64,
@@ -232,9 +269,11 @@ impl Observation {
             policy,
             sample: Mutex::new(Sample {
                 status: Status::Unknown,
+                recent: Default::default(),
                 checked: None,
                 checked_at_ms: None,
                 recovery_since: None,
+                accepted: false,
                 consecutive_successes: 0,
                 consecutive_failures: 0,
                 completed: 0,
@@ -279,6 +318,10 @@ impl Observation {
         s.checked = Some(now);
         s.checked_at_ms = Some(timestamp);
         s.completed = s.completed.saturating_add(1);
+        if s.recent.len() == QUALITY_WINDOW {
+            s.recent.pop_front();
+        }
+        s.recent.push_back(result.ok());
         match result {
             Ok(latency) => {
                 s.successful = s.successful.saturating_add(1);
@@ -291,7 +334,7 @@ impl Observation {
                 if s.status != Status::Healthy
                     && s.consecutive_successes >= self.policy.healthy_threshold
                 {
-                    if s.status == Status::Unknown {
+                    if !s.accepted {
                         s.status = Status::Healthy;
                     } else {
                         let since = *s.recovery_since.get_or_insert(now);
@@ -303,6 +346,7 @@ impl Observation {
                             Status::Recovering
                         };
                     }
+                    s.accepted |= s.status == Status::Healthy;
                 }
             }
             Err(error) => {
@@ -332,6 +376,59 @@ impl Observation {
             s.status
         }
     }
+    /// Delay until the next probe: a quarter of the interval (at least
+    /// 100 ms) before the first acceptance and while a healthy target is
+    /// failing, so acceptance and removal settle sooner; the interval otherwise.
+    pub(crate) fn probe_period(&self) -> Duration {
+        let interval = Duration::from_millis(self.policy.interval_ms);
+        let s = self.sample.lock().unwrap();
+        if !s.accepted || (s.status == Status::Healthy && s.consecutive_failures > 0) {
+            (interval / 4).max(Duration::from_millis(100)).min(interval)
+        } else {
+            interval
+        }
+    }
+    /// How long the next probe may wait for its reply. A healthy target with
+    /// at least five recent replies gets twice its slowest one (at least
+    /// 250 ms, at most `timeout_ms`), so a target that goes silent on a fast
+    /// path is removed in about a second instead of after two full timeouts.
+    /// Unknown, failing-over and recovering targets wait the full timeout.
+    pub(crate) fn probe_timeout(&self) -> Duration {
+        let full = Duration::from_millis(self.policy.timeout_ms);
+        let s = self.sample.lock().unwrap();
+        let replies = s.recent.iter().flatten();
+        if s.status != Status::Healthy || replies.clone().count() < 5 {
+            return full;
+        }
+        let slowest = replies.max().copied().unwrap_or_default();
+        Duration::from_micros(slowest.saturating_mul(2))
+            .max(Duration::from_millis(250))
+            .min(full)
+    }
+    /// Latency for selection: the median of the newest successful probes
+    /// plus the expected cost of the recent failure rate, so a fast path that
+    /// drops probes ranks behind a clean one.
+    pub(crate) fn selection_latency_us(&self) -> Option<u64> {
+        let s = self.sample.lock().unwrap();
+        let (checks, failures, _) = quality(&s.recent);
+        let mut newest: Vec<u64> = s
+            .recent
+            .iter()
+            .rev()
+            .flatten()
+            .take(SELECTION_SAMPLES)
+            .copied()
+            .collect();
+        newest.sort_unstable();
+        let median = *newest.get(newest.len() / 2)?;
+        Some(median + failures as u64 * LOSS_PENALTY_US / checks.max(1) as u64)
+    }
+    /// Losing probes while still eligible; see `degraded`.
+    pub(crate) fn degraded(&self) -> bool {
+        let s = self.sample.lock().unwrap();
+        let (checks, failures, _) = quality(&s.recent);
+        degraded(checks, failures)
+    }
     pub fn eligible(&self) -> bool {
         let s = self.sample.lock().unwrap();
         self.status_at(&s, Instant::now()) == Status::Healthy
@@ -351,6 +448,7 @@ impl Observation {
     }
     fn report(&self, rule: &Rule, key: Key, active: u64) -> TargetHealthReport {
         let s = self.sample.lock().unwrap();
+        let (window_checks, window_failures, jitter_us) = quality(&s.recent);
         let now = Instant::now();
         let status = self.status_at(&s, now);
         let target = &rule.targets[key.index];
@@ -365,6 +463,13 @@ impl Observation {
         } else {
             match status {
                 Status::Unknown => "unknown",
+                Status::Healthy if target.draining => "draining",
+                Status::Healthy
+                    if rule.balance != crate::model::Balance::LowestLatency
+                        && degraded(window_checks, window_failures) =>
+                {
+                    "degraded"
+                }
                 Status::Healthy => "eligible",
                 Status::Unhealthy => "unhealthy",
                 Status::Recovering => "recovering",
@@ -393,6 +498,9 @@ impl Observation {
             max_age_ms: self.policy.max_age_ms,
             checked_at_ms: s.checked_at_ms,
             latency_ewma_us: s.latency,
+            window_checks,
+            window_failures,
+            jitter_us,
             consecutive_successes: s.consecutive_successes,
             consecutive_failures: s.consecutive_failures,
             completed_checks: s.completed,
@@ -478,6 +586,28 @@ impl HealthSet {
     }
 }
 
+/// At least 2 failures making up at least 10% of the recent window. Weighted,
+/// source-hash and least-connections balancing put such targets behind clean
+/// targets of the same priority.
+fn degraded(checks: u32, failures: u32) -> bool {
+    failures >= 2 && failures * 10 >= checks
+}
+
+/// Checks, failures and jitter over the recent window.
+fn quality(recent: &std::collections::VecDeque<Option<u64>>) -> (u32, u32, Option<u64>) {
+    let failures = recent.iter().filter(|o| o.is_none()).count() as u32;
+    let steps: Vec<u64> = recent
+        .iter()
+        .zip(recent.iter().skip(1))
+        .filter_map(|pair| match pair {
+            (Some(a), Some(b)) => Some(a.abs_diff(*b)),
+            _ => None,
+        })
+        .collect();
+    let jitter = (!steps.is_empty()).then(|| steps.iter().sum::<u64>() / steps.len() as u64);
+    (recent.len() as u32, failures, jitter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,6 +658,113 @@ mod tests {
         );
         observation.observe_at(start + Duration::from_millis(1100), 8, Ok(100));
         assert_eq!(status(start + Duration::from_millis(1100)), Status::Healthy);
+    }
+    #[test]
+    fn a_target_never_accepted_yet_skips_the_recovery_delay() {
+        // A downstream relay still starting fails the first probes. Its first
+        // acceptance waits only for the success threshold; later outages wait
+        // for the recovery delay as before.
+        let observation = Observation::new(policy());
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let status = |ms| {
+            let s = observation.sample.lock().unwrap();
+            observation.status_at(&s, at(ms))
+        };
+        observation.observe_at(at(0), 1, Err(Failure::Io));
+        observation.observe_at(at(100), 2, Err(Failure::Io));
+        assert_eq!(status(100), Status::Unhealthy);
+        observation.observe_at(at(200), 3, Ok(100));
+        assert_eq!(status(200), Status::Unhealthy);
+        observation.observe_at(at(300), 4, Ok(100));
+        assert_eq!(status(300), Status::Healthy);
+        observation.observe_at(at(400), 5, Err(Failure::Io));
+        observation.observe_at(at(500), 6, Err(Failure::Io));
+        observation.observe_at(at(600), 7, Ok(100));
+        observation.observe_at(at(700), 8, Ok(100));
+        assert_eq!(status(700), Status::Recovering);
+    }
+    #[test]
+    fn one_slow_probe_does_not_move_selection_but_a_lasting_change_does() {
+        let observation = Observation::new(policy());
+        let start = Instant::now();
+        let mut at = 0;
+        let mut probe = |latency: u64| {
+            at += 100;
+            observation.observe_at(start + Duration::from_millis(at), 1, Ok(latency));
+            observation.selection_latency_us().unwrap()
+        };
+        for _ in 0..5 {
+            probe(50_000);
+        }
+        // A single 2 s reply would have added 244 ms to a 1/8 EWMA.
+        assert_eq!(probe(2_000_000), 50_000);
+        for _ in 0..5 {
+            assert_eq!(probe(50_000), 50_000);
+        }
+        // The path becomes 300 ms slower and stays so.
+        assert_eq!(probe(350_000), 50_000);
+        assert_eq!(probe(350_000), 50_000);
+        assert_eq!(probe(350_000), 350_000);
+    }
+    #[test]
+    fn loss_and_jitter_come_from_the_recent_window_and_loss_costs_selection() {
+        let observation = Observation::new(policy());
+        let start = Instant::now();
+        for (i, outcome) in [
+            Ok(10_000),
+            Ok(14_000),
+            Err(Failure::Timeout),
+            Ok(12_000),
+            Ok(17_000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            observation.observe_at(start + Duration::from_millis(100 * i as u64), 1, outcome);
+        }
+        let s = observation.sample.lock().unwrap();
+        // Pairs (10, 14) and (12, 17): the failure breaks (14, 12).
+        assert_eq!(quality(&s.recent), (5, 1, Some(4_500)));
+        drop(s);
+        // The median of 10, 14, 12 and 17 ms, plus a fifth of the 1 s penalty
+        // for one failure in five probes.
+        assert_eq!(observation.selection_latency_us(), Some(14_000 + 200_000));
+        // Only the newest QUALITY_WINDOW outcomes count.
+        for i in 0..QUALITY_WINDOW as u64 {
+            observation.observe_at(start + Duration::from_millis(600 + 100 * i), 1, Ok(10_000));
+        }
+        let s = observation.sample.lock().unwrap();
+        assert_eq!(quality(&s.recent), (QUALITY_WINDOW as u32, 0, Some(0)));
+    }
+    #[test]
+    fn healthy_targets_get_a_probe_timeout_from_their_slowest_recent_reply() {
+        let mut slow = policy();
+        (slow.interval_ms, slow.timeout_ms, slow.max_age_ms) = (1000, 1000, 3000);
+        let observation = Observation::new(slow);
+        let start = Instant::now();
+        let mut ms = 0;
+        let mut observe = |outcome| {
+            ms += 100;
+            observation.observe_at(start + Duration::from_millis(ms), 1, outcome);
+            observation.probe_timeout().as_millis()
+        };
+        // Healthy after two replies, but four are too few to judge.
+        for _ in 0..3 {
+            assert_eq!(observe(Ok(3_000)), 1000);
+        }
+        assert_eq!(observe(Ok(3_000)), 1000);
+        assert_eq!(observe(Ok(3_000)), 250);
+        assert_eq!(observe(Ok(400_000)), 800);
+        assert_eq!(observe(Ok(700_000)), 1000);
+        // A single failure keeps the short limit for the confirming probe.
+        for _ in 0..QUALITY_WINDOW {
+            observe(Ok(3_000));
+        }
+        assert_eq!(observe(Err(Failure::Timeout)), 250);
+        // A removed target waits the full timeout so a slow path can recover.
+        assert_eq!(observe(Err(Failure::Timeout)), 1000);
+        assert_eq!(observe(Ok(3_000)), 1000);
     }
     #[test]
     fn stale_success_does_not_immediately_reactivate_a_target() {

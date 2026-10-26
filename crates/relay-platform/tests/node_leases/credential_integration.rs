@@ -284,11 +284,7 @@ async fn credential_api_is_tenant_scoped_readable_by_viewer_and_rejects_stale_or
     )
     .unwrap();
     let (foreign, _) = db.login("rotation-foreign", PASSWORD).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let url = format!("http://{}/api/v1/nodes/{node}/credential", http.address);
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     assert_eq!(client.get(&url).send().await.unwrap().status(), 401);

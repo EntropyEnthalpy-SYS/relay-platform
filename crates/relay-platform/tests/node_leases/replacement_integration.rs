@@ -429,11 +429,7 @@ async fn identity_http_permissions_do_not_leak_tickets_and_retired_state_cannot_
     )
     .unwrap();
     let (foreign, _) = db.login("identity-foreign", PASSWORD).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let origin = format!("http://{}", http.address);
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let file = temp.path().join("enrollment.secret");

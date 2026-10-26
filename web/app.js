@@ -1,8 +1,14 @@
 const $ = (s, root = document) => root.querySelector(s);
-const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'nodes', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, config: null, busy: false };
-const titles = { nodes: '节点总览', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', budgets: '共享额度', users: '用户与权限', audit: '操作审计', recovery: '恢复保护', capabilities: '功能进度' };
+const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, config: null, busy: false };
+const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
+const scopeNames = { read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' };
+// Dark is the stylesheet default; a saved choice of light overrides it.
+// Switch without per-element color fades, which briefly mix the two themes.
+const applyTheme = theme => { const root = document.documentElement; root.classList.add('theme-switching'); root.dataset.theme = theme; localStorage.setItem('relay-theme', theme); requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching'))); };
+if (localStorage.getItem('relay-theme') === 'light') applyTheme('light');
+$('#theme').onclick = () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
 function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
 function notify(message, failure = false) { const n = $('#notification'); n.textContent = message; n.classList.remove('hidden'); n.classList.toggle('failure', failure); }
 function button(text, handler, cls = 'subtle') { const n = el('button', text, cls); n.type = 'button'; n.addEventListener('click', () => Promise.resolve().then(handler).catch(e => notify(e.message, true))); return n; }
@@ -13,12 +19,13 @@ function online(node) { return node.last_seen_ms && Date.now() - node.last_seen_
 async function api(path, options = {}) {
   const response = await fetch(`/api/v1${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}), ...options.headers }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = { error: text || `HTTP ${response.status}` }; }
-  if (!response.ok) { if (response.status === 401 && path !== '/auth/login') loggedOut(); throw new Error(result.error || `请求失败 HTTP ${response.status}`); } return result;
+  if (!response.ok) { if (response.status === 401 && path !== '/auth/login') loggedOut(); throw Object.assign(new Error(result.error || `请求失败 HTTP ${response.status}`), { detail: result }); } return result;
 }
-function loggedOut() { state.token = null; state.actor = null; state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); }
+function loggedOut() { state.token = null; state.actor = null; state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); resetSecondFactor(); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); }
 function modal(title, content) { $('#dialog-title').textContent = title; $('#dialog-body').replaceChildren(content); $('#dialog').showModal(); }
 $('#dialog-close').onclick = () => { $('#dialog').close(); $('#dialog-body').replaceChildren(); };
-$('#dialog').addEventListener('close', () => $('#dialog-body').replaceChildren());
+// The close event is queued; a follow-up modal may already have reopened the dialog with new content.
+$('#dialog').addEventListener('close', () => { if (!$('#dialog').open) $('#dialog-body').replaceChildren(); });
 function panel(title, description, action) { const n = el('section', undefined, 'panel'); const head = el('div', undefined, 'panel-head'); const info = el('div'); info.append(el('h2', title)); if (description) info.append(el('p', description)); head.append(info); if (action) head.append(action); n.append(head); return n; }
 function empty(title, description, action) { const n = el('div', undefined, 'empty'); n.append(el('div', '◇', 'empty-symbol'), el('h2', title), el('p', description)); if (action) n.append(action); return n; }
 function table(headers, rows) { const wrap = el('div', undefined, 'table-wrap'), t = el('table'), head = el('thead'), tr = el('tr'), body = el('tbody'); headers.forEach(h => tr.append(el('th', h))); head.append(tr); rows.forEach(values => { const row = el('tr'); values.forEach(value => { const cell = el('td'); value instanceof Node ? cell.append(value) : cell.textContent = value; row.append(cell); }); body.append(row); }); t.append(head, body); wrap.append(t); return wrap; }
@@ -58,6 +65,7 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     const weight = field(grid, `target-weight-${id}`, '权重', target.weight, 'number'); weight.min = 1; weight.max = 1000;
     const priority = field(grid, `target-priority-${id}`, '优先级（越小越优先，同级按均衡策略）', target.priority ?? 0, 'number'); priority.min = 0; priority.max = 65535;
     const maximum = field(grid, `target-max-${id}`, '目标会话上限（TCP + UDP，留空不限）', target.max_sessions, 'number', false); maximum.min = 1; maximum.max = 1000000;
+    const prewarm = field(grid, `target-prewarm-${id}`, '预热连接数（提前建好、待用的 TCP 连接，留空关闭；需启用 PROXY）', target.prewarm, 'number', false); prewarm.min = 1; prewarm.max = 32;
     const mode = select(grid, `target-mode-${id}`, '连接目标的安全方式', [['plain', '普通 TCP / UDP'], ['tls', 'TLS（验证目标证书）']], target.tls ? 'tls' : 'plain'); box.append(grid);
     const secure = el('div', undefined, 'form-grid');
     const name = field(secure, `target-server-name-${id}`, '证书中的服务名或 IP', target.tls?.server_name || '', 'text', false);
@@ -78,13 +86,13 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     mp.append(el('p', '目标必须汇聚到同一条规则。引用汇聚端口段时，可为各子流填写段内不同端口。不同端口本身不代表独立带宽。', 'fine'));
     function showMultipath() { const on = !!multipathMode && multipathMode.value !== 'off'; mp.classList.toggle('hidden', !on); mp.querySelectorAll('input').forEach(input => { input.disabled = !on; }); }
     multipathMode?.addEventListener('change', showMultipath); showMultipath();
-    const row = { box, address, via, weight, priority, maximum, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws, up, down, bindIp, bindInterface }; rows.push(row);
+    const row = { box, address, via, weight, priority, maximum, prewarm, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws, up, down, bindIp, bindInterface }; rows.push(row);
     function showSecurity() { const enabled = mode.value === 'tls'; secure.classList.toggle('hidden', !enabled); name.required = enabled; [name, ca, identity].forEach(input => { input.disabled = !enabled; }); }
     mode.onchange = showSecurity; showSecurity(); box.append(secure, proxyFields, ws.box, mp, button('移除此目标', () => { multipathMode?.removeEventListener('change', showMultipath); rows.splice(rows.indexOf(row), 1); box.remove(); }, 'table-action danger')); container.append(box);
   }
   targets.forEach((target, index) => add(target, multipathPaths?.[index])); form.append(container, button('＋ 添加目标', () => add()));
   const read = () => { if (!rows.length) throw new Error('至少保留一个转发目标'); return rows.map(row => {
-    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), max_sessions: row.maximum.value === '' ? null : Number(row.maximum.value), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
+    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), max_sessions: row.maximum.value === '' ? null : Number(row.maximum.value), ...(row.prewarm.value === '' ? {} : { prewarm: Number(row.prewarm.value) }), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
     if (row.proxyMode.value !== 'off') {
       if (row.proxyPlacement.value === 'inside_tls' && row.mode.value !== 'tls') throw new Error('将 PROXY 放入加密连接前，请启用目标 TLS');
       target.proxy_protocol = { version: row.proxyMode.value, placement: row.proxyPlacement.value, checksum: row.proxyMode.value === 'v2' && row.proxyCrc.value === 'on' };
@@ -143,21 +151,190 @@ function multipathEditor(form, rule) {
   } };
 }
 
-$('#login-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget, b = $('button', form); b.disabled = true; $('#login-error').textContent = ''; try { const f = new FormData(form); const result = await api('/auth/login', { method: 'POST', body: { username: f.get('username'), password: f.get('password') } }); state.token = result.token; state.actor = result.user; sessionStorage.setItem('relay-session', result.token); $('[name=password]', form).value = ''; await enter(); } catch (error) { $('#login-error').textContent = error.message; } finally { b.disabled = false; } };
+$('#login-form').onsubmit = async event => { event.preventDefault(); const form = event.currentTarget, b = $('button', form), factor = $('#second-factor-field'); b.disabled = true; $('#login-error').textContent = ''; try { const f = new FormData(form); const result = await api('/auth/login', { method: 'POST', body: { username: f.get('username'), password: f.get('password'), ...(factor.classList.contains('hidden') ? {} : { second_factor: String(f.get('second_factor')).trim() }) } }); state.token = result.token; state.actor = result.user; sessionStorage.setItem('relay-session', result.token); $('[name=password]', form).value = ''; resetSecondFactor(); await enter(); } catch (error) { const code = $('input', factor); if (error.detail?.second_factor_required) { factor.classList.remove('hidden'); code.required = true; code.focus(); $('#login-error').textContent = '此账号已启用两步验证，请输入身份验证器中的验证码。'; } else { code.value = ''; $('#login-error').textContent = error.message; } } finally { b.disabled = false; } };
+function resetSecondFactor() { const factor = $('#second-factor-field'), code = $('input', factor); factor.classList.add('hidden'); code.required = false; code.value = ''; }
 document.querySelectorAll('[data-logout]').forEach(b => { b.onclick = async () => { try { await api('/auth/logout', { method: 'POST' }); } finally { loggedOut(); } }; });
 $('#refresh').onclick = () => refresh().catch(e => notify(e.message, true));
 document.querySelectorAll('[data-view]').forEach(n => n.addEventListener('click', () => navigate(n.dataset.view)));
 async function enter() { $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden'); $('#identity').textContent = `${state.actor.username} · ${roleNames[state.actor.role]}`; document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin')); await refresh(); }
-async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; try { await refresh(); } catch (e) { notify(e.message, true); } }
+async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ nodes: renderNodes, rules: renderRules, usage: renderUsage, budgets: renderBudgets, users: renderUsers, audit: renderAudit, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
+}
+
+// Overview: per-node samples from /telemetry over the last 15 minutes, drawn as
+// sparklines; the chain graph comes from declared `via` targets in /topology.
+const SPAN_MS = 15 * 60_000, BINS = 60, BIN_MS = SPAN_MS / BINS;
+function svg(tag, attrs = {}, cls) { const n = document.createElementNS('http://www.w3.org/2000/svg', tag); for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v); if (cls) n.setAttribute('class', cls); return n; }
+function bits(bytesPerSecond) { let n = bytesPerSecond * 8, i = 0; const u = ['bit/s', 'Kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s']; while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; } return `${n.toFixed(i === 0 || n >= 100 ? 0 : n >= 10 ? 1 : 2)} ${u[i]}`; }
+function millis(us) { if (us == null) return '—'; const n = us / 1000; return `${n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0)} ms`; }
+function ago(at, now) { const s = Math.max(0, Math.round((now - at) / 1000)); return s < 60 ? `${s} 秒前` : s < 3600 ? `${Math.floor(s / 60)} 分钟前` : `${Math.floor(s / 3600)} 小时前`; }
+function median(values) { const v = values.filter(x => x != null).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : null; }
+// Each report's byte delta is spread over the bins its interval covers.
+// Counters restart with the agent process, so a falling counter contributes nothing.
+function nodeSeries(samples, now) {
+  const start = now - SPAN_MS, bin = t => Math.min(BINS - 1, Math.floor((t - start) / BIN_MS));
+  const rate = Array(BINS).fill(null), sessions = Array(BINS).fill(null), latency = Array.from({ length: BINS }, () => []);
+  samples.forEach((s, i) => {
+    const b = bin(s.at_ms); if (b < 0) return;
+    sessions[b] = s.active_sessions; if (s.probe_latency_us != null) latency[b].push(s.probe_latency_us);
+    const prev = samples[i - 1]; if (!prev || s.forwarded_bytes < prev.forwarded_bytes || s.at_ms <= prev.at_ms) { rate[b] ??= 0; return; }
+    const perMs = (s.forwarded_bytes - prev.forwarded_bytes) / (s.at_ms - prev.at_ms);
+    for (let k = Math.max(0, bin(prev.at_ms)); k <= b; k++) {
+      const overlap = Math.min(s.at_ms, start + (k + 1) * BIN_MS) - Math.max(prev.at_ms, start + k * BIN_MS);
+      rate[k] = (rate[k] ?? 0) + Math.max(0, overlap) * perMs / (BIN_MS / 1000);
+    }
+  });
+  return { rate, sessions, latency };
+}
+function currentRate(samples) {
+  const last = samples.at(-1), first = samples.find(s => s.at_ms >= last?.at_ms - 20_000);
+  if (!last || first === last || last.forwarded_bytes < first.forwarded_bytes) return null;
+  return (last.forwarded_bytes - first.forwarded_bytes) / ((last.at_ms - first.at_ms) / 1000);
+}
+function sumBins(list) { return Array.from({ length: BINS }, (_, i) => { const v = list.map(s => s[i]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; }); }
+function spark(values, cls, width = 160, height = 44) {
+  const box = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, `spark ${cls}`);
+  const top = Math.max(0, ...values.filter(v => v != null)) || 1, x = i => i / (values.length - 1) * width, y = v => height - 2 - v / top * (height - 6);
+  const runs = []; let run = [];
+  values.forEach((v, i) => { if (v == null) { if (run.length) runs.push(run); run = []; } else run.push([x(i), y(v)]); }); if (run.length) runs.push(run);
+  box.append(svg('line', { x1: 0, x2: width, y1: height - 2, y2: height - 2 }, 'spark-empty'));
+  for (const r of runs) {
+    if (r.length === 1) r.push([r[0][0] + 2, r[0][1]]);
+    const line = r.map(([px, py], i) => `${i ? 'L' : 'M'}${px.toFixed(1)} ${py.toFixed(1)}`).join('');
+    box.append(svg('path', { d: `${line}L${r.at(-1)[0].toFixed(1)} ${height}L${r[0][0].toFixed(1)} ${height}Z` }, 'spark-area'), svg('path', { d: line }, 'spark-line'));
+  }
+  return box;
+}
+function meter(ratio, label) {
+  const cell = el('div', undefined, 'meter'), bar = svg('svg', { viewBox: '0 0 100 6', preserveAspectRatio: 'none', 'aria-hidden': 'true' });
+  const level = ratio == null ? '' : ratio >= .85 ? 'high' : ratio >= .6 ? 'mid' : 'low';
+  bar.append(svg('rect', { width: 100, height: 6, rx: 3 }, 'meter-track'), svg('rect', { width: Math.max(0, Math.min(1, ratio ?? 0)) * 100, height: 6, rx: 3 }, `meter-fill ${level}`));
+  cell.append(el('span', label, 'meter-label'), bar); return cell;
+}
+function kpi(label, value, foot, chart) { const n = el('div', undefined, 'kpi'), text = el('div', undefined, 'kpi-text'); text.append(el('div', label, 'metric-label'), el('div', value, 'metric-value'), el('div', foot, 'metric-foot')); n.append(text, chart); return n; }
+function overviewStatus(node, latest) {
+  if (!node.enrolled) return ['待注册', '', 'idle'];
+  if (!online(node)) return ['离线', 'red', 'down'];
+  if (node.lifecycle && node.lifecycle !== 'active') return ['已暂停', 'orange', 'partial'];
+  if (node.apply_error) return ['配置异常', 'orange', 'partial'];
+  if (latest && latest.healthy_targets < latest.probed_targets) return ['降级', 'orange', 'partial'];
+  return ['正常', 'green', 'up'];
+}
+async function renderOverview() {
+  const [telemetry, nodes, topology] = await Promise.all([api('/telemetry'), api('/nodes'), api('/topology')]);
+  const now = telemetry.generated_at_ms, byId = new Map(nodes.map(n => [n.id, n]));
+  const rows = telemetry.nodes.filter(t => byId.has(t.id)).map(t => { const node = byId.get(t.id), latest = online(node) ? t.samples.at(-1) : null; return { node, samples: t.samples, latest, series: nodeSeries(t.samples, now), rate: online(node) ? currentRate(t.samples) : null, status: overviewStatus(node, latest) }; });
+  const live = rows.filter(r => r.latest), enrolled = rows.filter(r => r.node.enrolled);
+  const rate = sumBins(rows.map(r => r.series.rate)), sessions = sumBins(rows.map(r => r.series.sessions));
+  const latency = Array.from({ length: BINS }, (_, i) => median(rows.flatMap(r => r.series.latency[i])));
+  const healthy = live.reduce((s, r) => s + r.latest.healthy_targets, 0), probed = live.reduce((s, r) => s + r.latest.probed_targets, 0);
+  const peak = Math.max(0, ...rate.filter(v => v != null));
+  const fleet = el('div', undefined, 'fleet-bar'); enrolled.forEach(r => fleet.append(el('i', undefined, r.status[2])));
+  const kpis = el('div', undefined, 'kpis');
+  kpis.append(
+    kpi('实时吞吐', live.length ? bits(live.reduce((s, r) => s + (r.rate ?? 0), 0)) : '—', `多跳流量逐跳计入 · 峰值 ${bits(peak)}`, spark(rate, 'accent')),
+    kpi('活跃会话', String(live.reduce((s, r) => s + r.latest.active_sessions, 0)), 'TCP 连接 + UDP 会话', spark(sessions, 'blue')),
+    kpi('探测往返中位数', millis(median(live.map(r => r.latest.probe_latency_us))), '节点到目标的探测，不含客户端一段', spark(latency, 'violet')),
+    kpi('节点在线', `${live.length} / ${enrolled.length}`, probed ? `目标可用 ${healthy} / ${probed}` : '尚无目标探测', fleet));
+  const events = telemetry.events.slice().reverse(), attention = rows.filter(r => r.status[2] === 'down' || r.status[2] === 'partial').length;
+  const pill = $('#status-pill'); pill.className = `status-pill ${rows.some(r => r.status[2] === 'down') ? 'red' : attention ? 'orange' : 'green'}`;
+  pill.textContent = attention ? `${attention} 个节点需要关注` : `运行正常 · ${enrolled.length} 个节点`;
+  const graphPanel = panel('转发链路', '按规则声明的下一跳绘制；连线颜色为该段目标的最新探测结果，点击节点查看规则。', legend());
+  graphPanel.classList.add('graph-panel'); graphPanel.append(chainGraph(topology, byId));
+  const incidents = panel('事件', `最近 1 小时 · 共 ${events.length} 条`, events.length ? button('全部事件', () => modal('全部事件', eventTable(events, byId, now)), 'table-action') : undefined);
+  incidents.classList.add('incident-panel');
+  const list = el('ol', undefined, 'incidents');
+  if (!events.length) list.append(el('li', '最近 1 小时没有目标故障、配置拒绝或节点离线。', 'incident-empty'));
+  events.slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', e.message, 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
+  incidents.append(list);
+  const middle = el('div', undefined, 'overview-grid'); middle.append(graphPanel, incidents);
+  const search = el('input'); search.type = 'search'; search.placeholder = '按名称、ID 或分组筛选'; search.value = state.overviewFilter || ''; search.setAttribute('aria-label', '筛选节点');
+  const nodePanel = panel('中转节点', `${enrolled.length} 个已注册 · 采样来自每次节点回报`, search);
+  const t = table(['节点', '状态', '探测往返', '吞吐（15 分钟）', 'CPU', '内存', '会话', '配置修订', '最近回报', ''], rows.map(r => {
+    const { node, latest } = r, memory = latest?.memory_total_bytes ? 1 - latest.memory_available_bytes / latest.memory_total_bytes : null;
+    const throughput = el('div', undefined, 'throughput'); throughput.append(spark(r.series.rate, 'accent'), el('span', r.rate == null ? '—' : bits(r.rate)));
+    return [namedCell(node.name, node.profile?.settings.group || node.id.slice(0, 8)), badge(r.status[0], r.status[1]), latest ? millis(latest.probe_latency_us) : '—', throughput,
+      latest?.cpu_percent != null ? meter(latest.cpu_percent / 100, `${latest.cpu_percent.toFixed(0)}%`) : '—',
+      memory != null ? meter(memory, `${bytes(latest.memory_total_bytes - latest.memory_available_bytes)} / ${bytes(latest.memory_total_bytes)}`) : '—',
+      latest ? (node.stats?.prewarmed_connections ? namedCell(String(latest.active_sessions), `预热接手 ${node.stats.prewarmed_connections}`) : String(latest.active_sessions)) : '—', node.apply_error ? namedCell(`${node.applied_revision} / ${node.desired_revision}`, '应用失败') : `${node.applied_revision} / ${node.desired_revision}`,
+      node.last_seen_ms ? ago(node.last_seen_ms, now) : '尚未回报', button('规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action')];
+  }));
+  const trs = [...t.querySelectorAll('tbody tr')], keys = rows.map(r => [r.node.name, r.node.id, r.node.profile?.settings.group || ''].join(' ').toLowerCase());
+  const filter = () => { state.overviewFilter = search.value; const q = search.value.trim().toLowerCase(); trs.forEach((tr, i) => tr.classList.toggle('hidden', !!q && !keys[i].includes(q))); };
+  search.addEventListener('input', filter); filter();
+  nodePanel.append(rows.length ? t : empty('还没有节点', '注册节点并启动 Agent 后，这里会显示实时吞吐、资源和事件。', button('前往节点管理', () => navigate('nodes'))));
+  if (state.view === 'overview') $('#content').replaceChildren(kpis, middle, nodePanel);
+}
+function legend() { const n = el('div', undefined, 'legend'); for (const [text, cls] of [['正常', 'up'], ['部分可用', 'partial'], ['不可用', 'down'], ['未探测', 'unknown']]) { const item = el('span'); item.append(el('i', undefined, cls), text); n.append(item); } return n; }
+function eventTable(events, byId, now) {
+  const names = { info: '信息', recovered: '恢复', warning: '警告', critical: '严重' }, colors = { recovered: 'green', warning: 'orange', critical: 'red' };
+  return table(['时间', '节点', '级别', '内容'], events.map(e => [`${timestamp(e.at_ms)} · ${ago(e.at_ms, now)}`, byId.get(e.node_id)?.name || e.node_id, badge(names[e.severity] || e.severity, colors[e.severity]), e.message]));
+}
+// Columns follow the longest declared path from an entry node; external
+// targets share one sink so each node shows one summarized outgoing link.
+function chainGraph(topology, byId) {
+  const health = new Map(), edges = new Map(), referenced = new Set(), ruleCount = new Map();
+  for (const n of topology.nodes) for (const h of n.stats?.target_health || []) { const key = `${n.id}/${h.rule_id}/${h.target_index}`; health.set(key, [...(health.get(key) || []), h]); }
+  const addEdge = (from, to, reports) => {
+    const key = `${from}>${to}`, e = edges.get(key) || { from, to, states: [], latency: [] }; edges.set(key, e);
+    e.states.push(!reports.length ? 'unknown' : reports.every(h => h.eligible) ? 'up' : reports.some(h => h.eligible) ? 'partial' : 'down');
+    e.latency.push(...reports.filter(h => h.eligible).map(h => h.latency_ewma_us));
+  };
+  for (const config of topology.configs || []) for (const rule of config.rules) {
+    if (!rule.enabled) continue; ruleCount.set(config.node_id, (ruleCount.get(config.node_id) || 0) + 1);
+    rule.targets.forEach((target, i) => { if (target.via) referenced.add(`${target.via.node_id}/${target.via.rule_id}`); addEdge(config.node_id, target.via ? target.via.node_id : 'sink', health.get(`${config.node_id}/${rule.id}/${i}`) || []); });
+  }
+  for (const config of topology.configs || []) if (config.rules.some(rule => rule.enabled && !referenced.has(`${config.node_id}/${rule.id}`))) addEdge('client', config.node_id, []);
+  const ids = topology.nodes.filter(n => n.enrolled || ruleCount.has(n.id)).map(n => n.id), depth = new Map();
+  const depthOf = (id, seen = new Set()) => { if (depth.has(id)) return depth.get(id); if (seen.has(id)) return 1; seen.add(id); const parents = [...edges.values()].filter(e => e.to === id && e.from !== 'client').map(e => depthOf(e.from, seen)); const d = parents.length ? Math.max(...parents) + 1 : 1; depth.set(id, d); return d; };
+  ids.forEach(id => depthOf(id));
+  const last = Math.max(1, ...depth.values()) + 1, columns = Array.from({ length: last + 1 }, () => []);
+  ids.forEach(id => columns[depth.get(id)].push(id)); if ([...edges.values()].some(e => e.from === 'client')) columns[0].push('client'); if ([...edges.values()].some(e => e.to === 'sink')) columns[last].push('sink');
+  // Lay out at the panel's current pixel size so text stays at its CSS size; the viewBox rescales between refreshes.
+  const beside = window.innerWidth > 1600, W = Math.max(640, ($('#content').clientWidth || 1100) - (beside ? 376 : 0) - 36);
+  // Client and target terminals are narrow; node columns share the width between them.
+  const tw = 80, left = 12 + (columns[0].length ? tw + 40 : 0), right = W - 12 - (columns[last].length ? tw + 40 : 0), step = (right - left) / (last - 1);
+  const bw = Math.max(112, Math.min(176, step - 44)), bh = 52, gap = 84, H = Math.max(beside ? 400 : 300, Math.max(...columns.map(c => c.length)) * gap + 60), pos = new Map(), labels = [];
+  columns.forEach((column, c) => column.forEach((id, r) => pos.set(id, [c === 0 ? 12 : c === last ? W - 12 - tw : left + (c - 1) * step + (step - bw) / 2, (H - column.length * gap) / 2 + r * gap + (gap - bh) / 2, c === 0 || c === last ? tw : bw])));
+  const box = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': '转发链路图' }, 'chain');
+  // A link is up only if every probed target is, and down only if none is; unprobed targets do not count.
+  const summary = states => { const known = states.filter(s => s !== 'unknown'); return !known.length ? 'unknown' : known.every(s => s === 'up') ? 'up' : known.every(s => s === 'down') ? 'down' : 'partial'; };
+  for (const e of edges.values()) {
+    const a = pos.get(e.from), b = pos.get(e.to); if (!a || !b) continue;
+    const x1 = a[0] + a[2], y1 = a[1] + bh / 2, x2 = b[0], y2 = b[1] + bh / 2, dx = (x2 - x1) / 2, state = e.from === 'client' ? 'client' : summary(e.states);
+    box.append(svg('path', { d: `M${x1} ${y1}C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}` }, `edge ${state}`));
+    const lat = median(e.latency); if (lat != null) { const label = svg('text', { x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 7, 'text-anchor': 'middle' }, 'edge-label'); label.textContent = millis(lat); labels.push(label); }
+  }
+  for (const [id, [x, y, w]] of pos) {
+    const g = svg('g', { transform: `translate(${x} ${y})` }), node = byId.get(id);
+    if (id === 'client' || id === 'sink') {
+      g.setAttribute('class', 'terminal'); g.append(svg('rect', { width: w, height: bh, rx: 26 }));
+      const title = svg('text', { x: w / 2, y: bh / 2 + 4, 'text-anchor': 'middle' }); title.textContent = id === 'client' ? '客户端' : '目标服务'; g.append(title);
+    } else {
+      const status = node ? overviewStatus(node, null)[2] : 'idle';
+      g.setAttribute('class', `chain-node ${status}`); g.setAttribute('tabindex', '0'); g.setAttribute('role', 'button'); g.setAttribute('aria-label', `${node?.name || id} 的规则`);
+      const open = async () => { state.selectedNode = id; await navigate('rules'); };
+      g.addEventListener('click', open); g.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); } });
+      g.append(svg('rect', { width: w, height: bh, rx: 9 }), svg('circle', { cx: 14, cy: 19, r: 4.5 }, 'dot'));
+      const full = node?.name || id, fit = Math.floor((w - 32) / 7.4), name = svg('text', { x: 26, y: 23 }, 'name'), sub = svg('text', { x: 14, y: 41 }, 'sub');
+      name.textContent = full.length > fit ? full.slice(0, fit - 1) + '…' : full; name.append(svg('title')); name.lastChild.textContent = full; sub.textContent = !node?.enrolled ? '待注册' : !online(node) ? '离线' : `${ruleCount.get(id) || 0} 条规则 · ${node.stats.active_tcp + node.stats.active_udp} 会话`;
+      g.append(name, sub);
+    }
+    box.append(g);
+  }
+  box.append(...labels);
+  const wrap = el('div', undefined, 'chain-wrap'); wrap.append(box);
+  if (!ids.length) return empty('还没有节点', '注册节点并配置规则后显示转发链路。');
+  return wrap;
 }
 
 async function renderNodes() {
   const query = new URLSearchParams(state.nodeFilter).toString();
-  const [nodes, usage] = await Promise.all([api('/nodes' + (query ? '?' + query : '')), api('/usage')]); state.nodes = nodes; state.usage = usage;
+  const [nodes, usage, topology] = await Promise.all([api('/nodes' + (query ? '?' + query : '')), api('/usage'), api('/topology').catch(() => null)]); state.nodes = nodes; state.usage = usage;
+  state.inbound = {}; for (const c of topology?.configs || []) for (const r of c.rules) for (const t of r.targets) if (t.via) { const n = state.inbound[t.via.node_id] ||= { total: 0, draining: 0 }; n.total++; if (t.draining) n.draining++; }
   state.selectedNodes = new Set([...state.selectedNodes].filter(id => nodes.some(n => n.id === id)));
   const metric = el('div', undefined, 'metrics');
   [['节点数量', nodes.length, query ? '当前筛选范围' : '当前账号可见的节点'], ['控制在线', nodes.filter(online).length, '最近 30 秒收到心跳'], ['活跃连接', nodes.filter(online).reduce((s,n) => s+n.stats.active_tcp+n.stats.active_udp,0), '当前范围的 TCP + UDP 会话'], ['近期上报负载', bytes(usage.reduce((s,u) => s+u.upload_bytes+u.download_bytes,0)), '全部可见节点最近 2,000 个计量周期']].forEach(([title,value,foot]) => { const n=el('div',undefined,'metric'); n.append(el('div',title,'metric-label'),el('div',String(value),'metric-value'),el('div',foot,'metric-foot'));metric.append(n); });
@@ -168,7 +345,8 @@ async function renderNodes() {
   if(!nodes.length) p.append(empty(query?'没有匹配的节点':'接入你的第一个节点',query?'调整筛选条件后重试。':'注册后启动 Agent，再配置转发。'));
   else p.append(table(['选择','节点 / ID','类型 / 分组 / 成本','运行许可 / 到期','控制连接','运行保护','配置修订','活跃会话','操作'],nodes.map(node=>{
     let choice='—';if(canWrite()){choice=el('input');choice.className='node-choice';choice.type='checkbox';choice.checked=state.selectedNodes.has(node.id);choice.setAttribute('aria-label','选择 '+node.name);choice.onchange=()=>choice.checked?state.selectedNodes.add(node.id):state.selectedNodes.delete(node.id);}
-    return [choice,namedCell(node.name,node.id),nodeInventoryCell(node),nodeLifecycleCell(node),namedCell(node.credential_phase==='revoked'?'身份已撤销':node.credential_phase==='replacement_pending'?'等待替换注册':node.enrolled?online(node)?'控制在线':'无近期回报':'待注册',timestamp(node.last_seen_ms)),nodeLeaseBadge(node),node.apply_error?namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`,node.apply_error):`${node.applied_revision} / ${node.desired_revision}`,online(node)?`${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP`:'—',nodeActions(node)];
+    const id=namedCell(node.name,node.id.slice(0,8)+'…');id.title=node.id;
+    return [choice,id,nodeInventoryCell(node),nodeLifecycleCell(node),namedCell(node.credential_phase==='revoked'?'身份已撤销':node.credential_phase==='replacement_pending'?'等待替换注册':node.enrolled?online(node)?'控制在线':'无近期回报':'待注册',timestamp(node.last_seen_ms)),nodeLeaseBadge(node),node.apply_error?namedCell(`应用失败 · ${node.applied_revision} / ${node.desired_revision}`,node.apply_error):`${node.applied_revision} / ${node.desired_revision}`,nodeSessionsCell(node),nodeActions(node)];
   })));
   if(state.view==='nodes') $('#content').replaceChildren(metric,p);
 }
@@ -183,8 +361,20 @@ function timingRow(label, value) {
   if (!value) return [label, '未提供', '—', '—'];
   return [label, String(value.samples), value.samples ? (value.total_us / value.samples / 1000).toFixed(3) : '—', value.samples ? (value.max_us / 1000).toFixed(3) : '—'];
 }
+function nodeSessionsCell(node) {
+  const text = online(node) ? `${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP` : '—';
+  return state.inbound?.[node.id]?.draining ? namedCell(text, '维护中 · 不接新连接') : text;
+}
+async function drainNode(node, draining) {
+  const inbound = state.inbound[node.id];
+  if (!confirm(draining ? `「${node.name}」有 ${inbound.total} 个上游目标指向它。排空后，新连接改走其他目标（没有其他可用目标时仍会使用它），已有连接继续直到结束。会话数降到 0 后即可安全重启或升级。` : `结束「${node.name}」的维护，上游恢复按原优先级和权重分配新连接？`)) return;
+  const result = await api(`/nodes/${node.id}/drain`, { method: 'POST', body: { draining } });
+  notify(draining ? `已排空：${result.configs.length} 个上游节点发布了新修订。` : `已结束维护：${result.configs.length} 个上游节点发布了新修订。`); await renderNodes();
+}
 function nodeActions(node) {
-  const actions = el('div');
+  const actions = el('div', undefined, 'node-actions');
+  const inbound = state.inbound?.[node.id];
+  if (canWrite() && inbound?.total) actions.append(button(inbound.draining ? '结束维护' : '维护排空', () => drainNode(node, !inbound.draining), 'table-action'));
   actions.append(button(canWrite() ? '编辑资料' : '查看资料', () => editNode(node), 'table-action'), button('管理规则 →', async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button('运行诊断', () => nodeDiagnostics(node), 'table-action'));
   actions.append(button('节点身份', () => nodeCredential(node), 'table-action'));
   return actions;
@@ -369,25 +559,31 @@ function nodeLifecycleCell(node) { const cell = el('div'), names = { active: '�
 
 function newNode() {
   const form=el('form');field(form,'name','节点名称','','text').maxLength=120;
-  const mode=select(form,'lease_mode','运行保护策略',[['strict','严格租约（推荐）'],['offline','离线运行']],'strict');
-  const ttl=field(form,'lease_ttl','租约窗口 / 秒',30,'number');ttl.min=5;ttl.max=120;
+  const mode=select(form,'lease_mode','运行保护策略',[['offline','可用优先（推荐）：控制器离线时继续转发'],['strict','严格租约：按量计费节点']],'offline');
+  const ttl=field(form,'lease_ttl','租约窗口 / 秒',30,'number');ttl.min=5;ttl.max=120;ttl.disabled=true;
   const editor=nodeSettingsEditor(form,{},()=>mode.value==='strict');mode.onchange=()=>{ttl.disabled=mode.value!=='strict';editor.policy();};
-  form.append(el('p','节点归属当前租户。严格模式失联超过授权窗口会停止转发；离线模式不支持暂停或到期。运行策略创建后固定。注册令牌只显示一次。','fine'));
+  form.append(el('p','节点归属当前租户。可用优先：控制器离线时按最后配置继续转发，崩溃后约 1 秒恢复；不能阻止复制的节点身份同时运行，控制器离线期间额度不能严格限制，也不支持暂停或到期。严格租约：与控制器失联超过租约窗口会停止转发，崩溃后要等旧租约过期。运行策略创建后固定。注册令牌只显示一次。','fine'));
   submit(form,'创建节点',async data=>{const result=await api('/nodes',{method:'POST',body:{name:String(data.get('name')).trim(),lease_policy:mode.value==='strict'?{ttl_ms:number(data,'lease_ttl')*1000}:null,settings:editor.read(data)}});const body=el('div');body.append(el('p','请将此令牌保存为节点上的私有文件（权限 0600）。'),el('div',result.enrollment_token,'secret-box'));body.append(el('p','节点启动命令','fine'),el('pre',`relay agent --controller ${location.origin} --node-id ${result.node.id} --enrollment-token-file /path/to/enrollment.secret --state /var/lib/relay-agent`),el('p','跨机器接入须使用 HTTPS。本机 HTTP 地址仅用于本地验收。','fine'),button('我已保存令牌',()=>$('#dialog').close(),'primary'));$('#dialog').close();modal('节点已创建 · 保存一次性令牌',body);state.selectedNode=result.node.id;await renderNodes();});modal('注册节点',form);
 }
 
 
 async function renderRules() {
   state.nodes = await api('/nodes'); const content = $('#content');
-  if (!state.nodes.length) { content.replaceChildren(empty('还没有节点', '先注册节点，再创建规则。', button('前往节点总览', () => navigate('nodes'), 'primary'))); return; }
+  if (!state.nodes.length) { content.replaceChildren(empty('还没有节点', '先注册节点，再创建规则。', button('前往节点管理', () => navigate('nodes'), 'primary'))); return; }
   if (!state.nodes.some(n => n.id === state.selectedNode)) state.selectedNode = state.nodes[0].id;
   const toolbar = el('div', undefined, 'toolbar'), selector = el('select'); selector.setAttribute('aria-label', '选择节点'); state.nodes.forEach(n => { const option = el('option', n.name); option.value = n.id; selector.append(option); }); selector.value = state.selectedNode; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; toolbar.append(selector);
   const nodeId = state.selectedNode; const config = await api(`/nodes/${nodeId}/config`); if (state.view !== 'rules' || state.selectedNode !== nodeId) return; state.config = config;
-  toolbar.append(badge(`期望修订 v${config.revision}`), button('版本历史', history));
+  toolbar.append(badge(`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? `节点总限速 ${mbit(config.rate_bytes_per_sec)}` : '节点不限速', config.rate_bytes_per_sec ? 'orange' : ''), button('版本历史', history)); if (canWrite()) toolbar.append(button('节点总限速', () => editNodeRate(config)));
   const p = panel('转发规则', '配额按上下行接纳字节合计。更改安全策略会终止关联会话。', canWrite() ? button('＋ 添加规则', () => editRule(), 'primary') : null);
   if (!config.rules.length) p.append(empty('创建一条真实转发规则', '支持 TCP、UDP 和双协议，可设置多个目标、配额、速率和来源网段。', canWrite() ? button('添加规则', () => editRule(), 'primary') : null));
-  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (canWrite()) { actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell(rule.listen + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
+  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button('分享链接', () => shareShadowsocks(rule), 'table-action')); if (canWrite()) { actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell(rule.listen + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.inbound_shadowsocks ? namedCell('Shadowsocks 代理服务', rule.inbound_shadowsocks.method) : namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
   content.replaceChildren(toolbar, p);
+}
+function mbit(rate) { return `${+(rate * 8 / 1e6).toFixed(2)} Mbit/s`; }
+function editNodeRate(baseConfig) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid'); const input = field(grid, 'mbit', '本节点所有规则上下行合计 / Mbit/s（留空不限速）', baseConfig.rate_bytes_per_sec ? +(baseConfig.rate_bytes_per_sec * 8 / 1e6).toFixed(3) : '', 'number', false); input.min = 0.008; input.step = 'any'; form.append(grid, el('p', '与规则自身的限速同时生效，取较严者。立即作用于已有连接，不会断开会话；健康探测不计入。', 'muted'));
+  submit(form, '发布限速', async data => { const raw = String(data.get('mbit')).trim(); const rate = raw === '' ? null : Math.round(Number(raw) * 1e6 / 8); if (rate !== null && !(rate >= 1 && rate <= 1e12)) throw new Error('请输入 0.008 到 8,000,000 之间的 Mbit/s'); await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision: baseConfig.revision, rules: baseConfig.rules, rate_bytes_per_sec: rate } }); $('#dialog').close(); notify(rate ? `已发布节点总限速 ${mbit(rate)}。` : '已取消节点总限速。'); await renderRules(); });
+  modal('节点总限速', form);
 }
 async function saveRules(rules, baseConfig) { const expected_revision = baseConfig.revision; await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision, rules } }); $('#dialog').close(); notify('配置已发布。请在节点总览确认实际应用修订号。'); await renderRules(); }
 async function editRule(existing) {
@@ -398,10 +594,14 @@ async function editRule(existing) {
   field(grid, 'advertise', '供其他节点连接的地址（跨节点引用时填写）', r.advertise || '', 'text', false);
   const endPort = field(grid, 'listen_end_port', '结束端口（留空只监听一个端口，最多 256 个）', r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
   select(grid, 'port_mapping', '端口段的目标映射', [['fixed', '全部入口连接同一目标端口'], ['offset', '按入口端口偏移目标端口']], r.port_mapping || 'fixed');
-  select(grid, 'balance', '目标分配', [['weighted_round_robin', '加权轮询'], ['source_hash', '来源 IP 哈希'], ['least_connections', '最少连接']], r.balance || 'weighted_round_robin'); form.append(grid);
-  const readHealth = healthEditor(form, r.health_check, protocolControl);
-  const multipath = multipathEditor(form, r);
-  const readTargets = targetEditor(form, r.targets || [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id, r.outbound_multipath?.paths, multipath.mode);
+  const balance = select(grid, 'balance', '目标分配', [['weighted_round_robin', '加权轮询'], ['source_hash', '来源 IP 哈希'], ['least_connections', '最少连接'], ['lowest_latency', '最低延迟（须启用健康探测）']], r.balance || 'weighted_round_robin'); form.append(grid);
+  const shadowsocks = shadowsocksEditor(r.inbound_shadowsocks); form.append(shadowsocks.box);
+  const routed = el('div'); form.append(routed);
+  const readHealth = healthEditor(routed, r.health_check, protocolControl);
+  const multipath = multipathEditor(routed, r);
+  const readTargets = targetEditor(routed, r.targets?.length ? r.targets : [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id, r.outbound_multipath?.paths, multipath.mode);
+  // A Shadowsocks server goes where each client asks, so it has no targets.
+  function showRouted() { const server = shadowsocks.enabled(), parts = [routed, transport, inboundWs.box]; parts.forEach(part => part.classList.toggle('hidden', server)); balance.parentElement.classList.toggle('hidden', server); parts.flatMap(part => [...part.querySelectorAll('input, select, textarea')]).forEach(input => { if (server) { input.dataset.wasDisabled ??= String(input.disabled); input.disabled = true; } else if (input.dataset.wasDisabled !== undefined) { input.disabled = input.dataset.wasDisabled === 'true'; delete input.dataset.wasDisabled; } }); }
   const routing = el('details'); routing.append(el('summary', '出口绑定与 DNS 缓存')); const routeFields = el('div', undefined, 'form-grid');
   field(routeFields, 'outbound_ip', '出口源 IP（留空由系统选择）', r.outbound_bind?.ip || '', 'text', false);
   field(routeFields, 'outbound_interface', '出口网卡名称（留空由系统选择）', r.outbound_bind?.interface || '', 'text', false);
@@ -415,12 +615,15 @@ async function editRule(existing) {
   field(tlsFields, 'tls_identity', '入口证书编号（留空使用普通连接）', r.inbound_tls?.identity || '', 'text', false);
   field(tlsFields, 'tls_client_ca', '允许客户端的 CA 编号（留空不要求客户端证书）', r.inbound_tls?.client_ca || '', 'text', false); transport.append(tlsFields, el('p', '证书和私钥预先放在节点本地，面板只保存编号。TLS 仅用于 TCP；一条规则的所有出口必须使用相同的安全方式。', 'fine')); form.append(transport);
   const inboundWs = websocketEditor('inbound-ws', r.inbound_websocket, true); form.append(inboundWs.box);
+  // Clients also send QUIC, DNS and games over UDP, so a new server carries both.
+  shadowsocks.onchange(() => { if (!existing && shadowsocks.enabled() && protocolControl.value === 'tcp') protocolControl.value = 'both'; showRouted(); }); showRouted();
   const proxyInput = el('details'); proxyInput.append(el('summary', '接收可信上游传递的原始地址（PROXY protocol）'));
   const proxyMode = select(proxyInput, 'proxy_input_version', '入口 PROXY 报头', [['off', '关闭'], ['v1', '要求 v1 · 仅 TCP'], ['v2', '要求 v2 · TCP / UDP'], ['any', '要求 v1 或 v2 · 仅 TCP']], r.inbound_proxy?.version || 'off');
   const proxyOptions = el('div', undefined, 'form-grid');
   textarea(proxyOptions, 'proxy_trusted_sources', '允许发送报头的代理 CIDR（每行一个，不能为空）', (r.inbound_proxy?.trusted_sources || ['127.0.0.0/8', '::1/128']).join('\n'), true);
   select(proxyOptions, 'proxy_input_placement', 'PROXY 报头位置', [['before_tls', 'TLS 之前（普通连接也选此项）'], ['inside_tls', 'TLS 加密连接内（须同时启用入口 TLS）']], r.inbound_proxy?.placement || 'before_tls');
   const proxyLimit = field(proxyOptions, 'proxy_header_limit', '报头字节上限', r.inbound_proxy?.max_header_bytes ?? 4096, 'number'); proxyLimit.min = 16; proxyLimit.max = 65551;
+  select(proxyOptions, 'proxy_accept_prewarmed', '接受上一跳的预热连接', [['no', '不接受 · 报头须在连接超时内到达'], ['yes', '接受 · 最长等待 30 秒报头再连接目标']], r.inbound_proxy?.accept_prewarmed ? 'yes' : 'no');
   function showProxyInput() { const enabled = proxyMode.value !== 'off'; proxyOptions.classList.toggle('hidden', !enabled); proxyOptions.querySelectorAll('input, select, textarea').forEach(input => { input.disabled = !enabled; }); } proxyMode.addEventListener('change', showProxyInput); showProxyInput();
   proxyInput.append(proxyOptions, el('p', '启用后必须携带正确报头；直接客户端将被拒绝。来源 ACL 和来源哈希按报头中的客户端地址执行。PROXY 和 CRC32C 不提供身份认证；可信网段应只包含你的代理。UDP 每包都须携带 v2，回复为普通业务数据。', 'fine')); form.append(proxyInput);
   const limits = el('div', undefined, 'form-grid'); field(limits, 'quota_bytes', '合并配额 / bytes（留空不限，0 禁止流量）', r.quota_bytes, 'number', false).min = 0; field(limits, 'rate_bytes_per_sec', '合并速率 / bytes/s（留空不限）', r.rate_bytes_per_sec, 'number', false).min = 1; form.append(limits);
@@ -432,32 +635,193 @@ async function editRule(existing) {
   form.append(el('p', '同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。', 'fine'));
   submit(form, existing ? '发布修改' : '创建并发布', async data => {
     const node = state.nodes.find(n => n.id === baseConfig.node_id), lines = key => String(data.get(key)).split('\n').map(s => s.trim()).filter(Boolean);
-    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
-    rule.health_check = readHealth();
-    Object.assign(rule, multipath.read(readTargets.multipathPaths()));
+    const server = shadowsocks.read();
+    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: server ? [] : readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
+    if (server) rule.inbound_shadowsocks = server;
+    else { rule.health_check = readHealth(); Object.assign(rule, multipath.read(readTargets.multipathPaths())); }
     rule.advertise = String(data.get('advertise')).trim() || null;
     rule.listen_end_port = number(data, 'listen_end_port'); rule.port_mapping = data.get('port_mapping');
     const outboundIp = String(data.get('outbound_ip')).trim(), outboundInterface = String(data.get('outbound_interface')).trim();
     if (outboundIp || outboundInterface) rule.outbound_bind = { ip: outboundIp || null, interface: outboundInterface || null };
     if (data.get('dns_mode') === 'cache') rule.dns_cache = { servers: lines('dns_servers'), capacity: number(data, 'dns_capacity'), max_ttl_secs: number(data, 'dns_max_ttl_secs'), negative_max_ttl_secs: number(data, 'dns_negative_max_ttl_secs') };
-    const identity = String(data.get('tls_identity')).trim(), clientCa = String(data.get('tls_client_ca')).trim();
+    // Hidden for a Shadowsocks server, so absent from the form data.
+    const identity = String(data.get('tls_identity') ?? '').trim(), clientCa = String(data.get('tls_client_ca') ?? '').trim();
     if (clientCa && !identity) throw new Error('要求客户端证书时，请同时填写入口证书编号');
     if (identity) rule.inbound_tls = { identity, client_ca: clientCa || null };
     const websocket = inboundWs.read(); if (websocket) rule.inbound_websocket = websocket;
     if (rule.protocol !== 'tcp' && (websocket || rule.targets.some(target => target.websocket))) throw new Error('WebSocket / WSS 流隧道只支持 TCP，请调整规则协议');
-    if (data.get('proxy_input_version') !== 'off') rule.inbound_proxy = { version: data.get('proxy_input_version'), trusted_sources: lines('proxy_trusted_sources'), placement: data.get('proxy_input_placement'), max_header_bytes: number(data, 'proxy_header_limit') };
+    if (data.get('proxy_input_version') !== 'off') rule.inbound_proxy = { version: data.get('proxy_input_version'), trusted_sources: lines('proxy_trusted_sources'), placement: data.get('proxy_input_placement'), max_header_bytes: number(data, 'proxy_header_limit'), accept_prewarmed: data.get('proxy_accept_prewarmed') === 'yes' };
     for (const key of ['quota_bytes', 'rate_bytes_per_sec', 'expires_at_ms', 'connect_timeout_ms', 'idle_timeout_secs', 'max_connections', 'udp_max_sessions']) rule[key] = number(data, key);
     await saveRules(existing ? baseConfig.rules.map(item => item.id === r.id ? rule : item) : [...baseConfig.rules, rule], baseConfig);
   }); modal(existing ? '编辑转发规则' : '添加转发规则', form);
 }
+const shadowsocksMethods = [['2022-blake3-aes-256-gcm', '2022-blake3-aes-256-gcm（推荐 · 防重放）'], ['2022-blake3-aes-128-gcm', '2022-blake3-aes-128-gcm（防重放）'], ['2022-blake3-chacha20-poly1305', '2022-blake3-chacha20-poly1305（无 AES 加速的设备）'], ['aes-256-gcm', 'aes-256-gcm（旧客户端兼容）'], ['aes-128-gcm', 'aes-128-gcm（旧客户端兼容）'], ['chacha20-ietf-poly1305', 'chacha20-ietf-poly1305（旧客户端兼容）']];
+function shadowsocksKey(method) {
+  const bytes = crypto.getRandomValues(new Uint8Array(method.includes('128') ? 16 : 32)), text = btoa(String.fromCharCode(...bytes));
+  // 2022 methods take a key of exactly this length; older ones a password.
+  return method.startsWith('2022-') ? text : text.replace(/[+/=]/g, '').slice(0, 24);
+}
+function shadowsocksEditor(spec) {
+  const box = el('details'); box.open = !!spec; box.append(el('summary', 'Shadowsocks 代理服务（客户端自选目的地）'));
+  const method = select(box, 'ss_method', '加密方式', [['off', '关闭 · 按下方目标转发'], ...shadowsocksMethods], spec?.method || 'off');
+  const fields = el('div', undefined, 'form-grid');
+  const password = field(fields, 'ss_password', '密钥', spec?.password || ''); password.autocomplete = 'off'; password.classList.add('mono');
+  select(fields, 'ss_private', '允许访问内网 / 本机地址', [['no', '不允许（推荐）'], ['yes', '允许 · 客户端可访问本节点所在内网']], spec?.allow_private_destinations ? 'yes' : 'no');
+  const regenerate = button('生成新密钥', () => { password.value = shadowsocksKey(method.value); });
+  let last = method.value;
+  function show() {
+    const enabled = method.value !== 'off'; box.querySelectorAll('.ss-fields').forEach(n => n.classList.toggle('hidden', !enabled)); fields.querySelectorAll('input, select').forEach(input => { input.disabled = !enabled; });
+    // Key lengths differ between methods; a key that no longer fits is replaced.
+    if (enabled && (!password.value || last.startsWith('2022-') !== method.value.startsWith('2022-') || (method.value.startsWith('2022-') && last.includes('128') !== method.value.includes('128')))) password.value = shadowsocksKey(method.value);
+    last = method.value;
+  }
+  const note = el('p', '启用后本规则不设目标：客户端（Shadowrocket、Clash、sing-box、v2rayN 等）在每个连接里指定要访问的网站，本节点直接连接。保存后在规则列表点“分享链接”导入客户端。协议选 TCP + UDP 时客户端的 QUIC、DNS、游戏和语音也经过本节点。2022 方式要求两端时钟误差在 30 秒内。', 'fine');
+  fields.classList.add('ss-fields'); regenerate.classList.add('ss-fields'); note.classList.add('ss-fields');
+  box.append(fields, regenerate, note);
+  method.addEventListener('change', show); show();
+  return { box, enabled: () => method.value !== 'off', onchange: f => method.addEventListener('change', f), read: () => method.value === 'off' ? null : { method: method.value, password: password.value.trim(), allow_private_destinations: fields.querySelector('[name=ss_private]').value === 'yes' } };
+}
+function shadowsocksLink(spec, host, port, tag) {
+  const userinfo = spec.method.startsWith('2022-') ? `${encodeURIComponent(spec.method)}:${encodeURIComponent(spec.password)}`
+    : btoa(String.fromCharCode(...new TextEncoder().encode(`${spec.method}:${spec.password}`))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `ss://${userinfo}@${host.includes(':') && !host.startsWith('[') ? `[${host}]` : host}:${port}#${encodeURIComponent(tag)}`;
+}
+function shareShadowsocks(rule) {
+  const split = address => { const at = address.lastIndexOf(':'); return [address.slice(0, at).replace(/^\[|\]$/g, ''), address.slice(at + 1)]; };
+  const [listenHost, listenPort] = split(rule.listen), [advertiseHost, advertisePort] = rule.advertise ? split(rule.advertise) : [];
+  const body = el('div'), grid = el('div', undefined, 'form-grid');
+  const host = field(grid, 'host', '客户端连接的地址（公网 IP 或域名）', advertiseHost || (['0.0.0.0', '::'].includes(listenHost) ? location.hostname : listenHost));
+  const port = field(grid, 'port', '端口', advertisePort || listenPort, 'number'); port.min = 1; port.max = 65535;
+  const tag = field(grid, 'tag', '客户端里显示的名称', rule.name);
+  const link = el('div', '', 'secret-box mono');
+  const update = () => { link.textContent = shadowsocksLink(rule.inbound_shadowsocks, host.value.trim(), port.value.trim(), tag.value.trim()); };
+  [host, port, tag].forEach(input => input.addEventListener('input', update)); update();
+  const actions = el('div', undefined, 'dialog-actions'); actions.append(button('关闭', () => $('#dialog').close()), button('复制链接', async () => { await navigator.clipboard.writeText(link.textContent); notify('链接已复制。'); }, 'primary'));
+  body.append(grid, link, el('p', '客户端先连到入口节点再中转到这里时，请填写入口节点的地址和端口。链接包含密钥，持有者即可使用本节点上网，请只发给使用者本人；需要停用时更换密钥或停用规则。', 'fine'), actions);
+  modal(`分享 ${rule.name}`, body);
+}
 async function history() { const baseConfig = state.config; const revisions = await api(`/nodes/${baseConfig.node_id}/history`); const body = table(['修订', '操作者', '时间', '操作'], revisions.map(r => [`v${r.revision}`, r.actor_id, timestamp(r.created_at_ms), canWrite() ? button('发布此版本', async () => { await api(`/nodes/${baseConfig.node_id}/rollback`, { method: 'POST', body: { revision: r.revision, expected_revision: baseConfig.revision } }); $('#dialog').close(); notify('历史配置已作为新修订发布。账本不回滚。'); await renderRules(); }, 'table-action') : '只读'])); modal('最近 100 次配置修订', body); }
 async function renderUsage() { const records = await api('/usage'); const p = panel('已接纳应用负载', '累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。'); if (!records.length) p.append(empty('还没有流量记录', '让一条转发规则通过真实流量，Agent 会在同步后上报。')); else p.append(table(['规则 / 周期', '节点', '上行', '下行', '序号', '最近上报'], records.map(r => [namedCell(r.rule_id, r.meter_epoch), r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)]))); if (state.view === 'usage') $('#content').replaceChildren(p); }
-async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后已有 Web 会话立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, canWrite() || u.id === state.actor.id ? button('撤销全部会话', async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify('该用户现有会话已撤销。'); }, 'table-action') : '—']))); if (state.view === 'users') $('#content').replaceChildren(p); }
+async function renderUsers() { const users = await api('/users'); const p = panel('用户与会话', '权限由服务端校验；撤销后该用户已有的 Web 会话和 API 令牌立即失效。', canWrite() ? button('＋ 添加用户', newUser, 'primary') : null); p.append(table(['账号', '角色', '租户', '两步验证', '跨节点总限速', '操作'], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.mfa_enabled ? badge('已启用', 'green') : badge('未启用'), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge('不限速'), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
+function userActions(u) {
+  if (!canWrite() && u.id !== state.actor.id) return '—';
+  const actions = el('div');
+  actions.append(button('撤销全部会话', async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify('该用户现有会话和 API 令牌已撤销。'); }, 'table-action'));
+  if (state.actor.role === 'system_admin' || u.rate_bytes_per_sec) actions.append(button('总限速', () => editUserRate(u), 'table-action'));
+  if (canWrite() && u.mfa_enabled && u.id !== state.actor.id) actions.append(button('重置两步验证', async () => { if (!confirm(`重置 ${u.username} 的两步验证？其会话和 API 令牌会同时失效；之后可只用密码登录并重新启用。`)) return; await api(`/users/${u.id}/mfa/reset`, { method: 'POST' }); notify(`${u.username} 的两步验证已重置。`); await renderUsers(); }, 'table-action danger'));
+  return actions;
+}
+async function editUserRate(u) {
+  const [view, nodes] = await Promise.all([api(`/users/${u.id}/rate`), api('/nodes').catch(() => [])]);
+  const names = Object.fromEntries(nodes.map(n => [n.id, n.name]));
+  const form = el('form');
+  if (state.actor.role === 'system_admin') {
+    const grid = el('div', undefined, 'form-grid'); const input = field(grid, 'mbit', '该用户所有节点入口规则的上下行合计 / Mbit/s（留空不限速）', view.rate_bytes_per_sec ? +(view.rate_bytes_per_sec * 8 / 1e6).toFixed(3) : '', 'number', false); input.min = 0.009; input.step = 'any';
+    form.append(grid, el('p', '控制器按各节点的实际用量动态分配份额，忙的节点多分；节点与控制器失联 15 秒后退回平均份额。与规则、节点限速同时生效，取较严者。只计入口规则；已停用或到期的节点不占份额，长期离线的节点请停用。', 'muted'));
+  }
+  if (view.nodes.length) form.append(table(['节点', '当前份额', '实测', '状态'], view.nodes.map(n => [namedCell(names[n.node_id] || n.node_id, n.node_id), mbit(n.share_bytes_per_sec), n.measured_bytes_per_sec == null ? '—' : mbit(n.measured_bytes_per_sec), n.seen_ms_ago == null ? badge('未连接，预留平均份额', 'red') : n.seen_ms_ago > 20000 ? badge('失联，按平均份额', 'red') : n.saturated ? badge('已用满', 'orange') : badge('有余量', 'green')])));
+  else if (view.rate_bytes_per_sec) form.append(el('p', '各节点下次同步后显示份额。', 'muted'));
+  if (state.actor.role === 'system_admin') submit(form, '保存总限速', async data => { const raw = String(data.get('mbit')).trim(); const rate = raw === '' ? null : Math.round(Number(raw) * 1e6 / 8); if (rate !== null && !(rate >= 1024 && rate <= 2 ** 40)) throw new Error('请输入 0.009 到 8,796,093 之间的 Mbit/s'); await api(`/users/${u.id}/rate`, { method: 'PUT', body: { rate_bytes_per_sec: rate } }); $('#dialog').close(); notify(rate ? `${u.username} 的跨节点总限速为 ${mbit(rate)}。` : `已取消 ${u.username} 的跨节点总限速。`); await renderUsers(); });
+  modal(`${u.username} 的跨节点总限速`, form);
+}
+async function renderAccount() {
+  const [factor, tokens] = await Promise.all([api('/account/mfa'), api('/api-tokens')]);
+  const security = panel('两步验证', '登录时除密码外，还需输入手机身份验证器（如 Google Authenticator、Microsoft Authenticator、1Password）生成的 6 位验证码。', factor.enabled ? button('停用两步验证', disableSecondFactor, 'subtle danger') : button('启用两步验证', setupSecondFactor, 'primary'));
+  const status = el('div', undefined, 'panel-body');
+  for (const [label, value] of [['状态', factor.enabled ? badge('已启用', 'green') : badge(factor.pending ? '设置未完成' : '未启用', factor.pending ? 'orange' : '')], ...(factor.enabled ? [['剩余恢复码', badge(`${factor.recovery_codes_remaining} 个`, factor.recovery_codes_remaining <= 2 ? 'orange' : '')]] : [])]) { const row = el('div', undefined, 'capability'); row.append(el('span', label), value); status.append(row); }
+  status.append(el('p', factor.enabled ? '手机丢失时可用恢复码登录；恢复码用完或丢失时，请其他管理员在“用户与权限”中重置。' : '启用后，此账号的每次登录都需要验证码。API 令牌不受影响，但只能在登录后创建。', 'fine'));
+  security.append(status);
+  const keys = panel('API 令牌', '供脚本和自动化调用 API。令牌权限是所选范围与你的角色权限的交集；令牌不能创建令牌或修改两步验证。', button('＋ 创建令牌', createApiToken, 'primary'));
+  if (!tokens.length) keys.append(empty('尚无 API 令牌', '令牌创建后只显示一次，到期后自动失效。'));
+  else keys.append(table(['名称', '权限范围', '创建时间', '到期时间', '操作'], tokens.map(t => [namedCell(t.name, t.id), t.scopes.map(scope => scopeNames[scope] || scope).join('、'), timestamp(t.created_at_ms), t.expires_at_ms <= Date.now() ? badge('已过期', 'red') : timestamp(t.expires_at_ms), button('撤销', async () => { if (!confirm(`撤销令牌“${t.name}”？使用它的脚本将立即失效。`)) return; await api(`/api-tokens/${t.id}`, { method: 'DELETE' }); notify('令牌已撤销。'); await renderAccount(); }, 'table-action danger')])));
+  const page = el('div'); page.append(security, keys);
+  if (state.view === 'account') $('#content').replaceChildren(page);
+}
+function setupSecondFactor() {
+  const form = el('form'); form.append(el('p', '为防止他人用未关闭的浏览器绑定自己的手机，请先确认当前密码。', 'fine'));
+  field(form, 'password', '当前密码', '', 'password').autocomplete = 'current-password';
+  submit(form, '下一步', async data => { const setup = await api('/account/mfa/setup', { method: 'POST', body: { password: data.get('password') } }); $('#dialog').close(); confirmSecondFactor(setup); });
+  modal('启用两步验证', form);
+}
+function confirmSecondFactor(setup) {
+  const form = el('form'), qr = el('img', undefined, 'qr-code'); qr.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(setup.qr_svg)}`; qr.alt = '两步验证二维码';
+  form.append(el('p', '1. 用身份验证器扫描二维码。无法扫描时，选择手动输入并填写下面的密钥（基于时间）。'), qr, el('div', setup.secret.match(/.{1,4}/g).join(' '), 'secret-box'), el('p', '2. 输入应用当前显示的 6 位验证码完成启用。'));
+  const code = field(form, 'code', '验证码'); code.inputMode = 'numeric'; code.autocomplete = 'one-time-code'; code.maxLength = 6; code.pattern = '[0-9]{6}';
+  submit(form, '确认启用', async data => { const result = await api('/account/mfa/enable', { method: 'POST', body: { code: String(data.get('code')).trim() } }); $('#dialog').close(); showRecoveryCodes(result.recovery_codes); });
+  modal('启用两步验证', form); code.focus();
+}
+function showRecoveryCodes(codes) {
+  const body = el('div'); body.append(el('p', '两步验证已启用。手机丢失时，每个恢复码可代替验证码登录一次。请离线保存，关闭后无法再次查看。'), el('div', codes.join('\n'), 'secret-box recovery-codes'), button('我已保存恢复码', () => $('#dialog').close(), 'primary'));
+  modal('保存恢复码', body); renderAccount().catch(e => notify(e.message, true));
+}
+function disableSecondFactor() {
+  const form = el('form'); form.append(el('p', '停用后登录只需要密码。请确认密码，并输入当前验证码或一个恢复码。', 'fine'));
+  field(form, 'password', '当前密码', '', 'password').autocomplete = 'current-password';
+  const code = field(form, 'code', '验证码或恢复码'); code.autocomplete = 'one-time-code'; code.maxLength = 32;
+  submit(form, '停用两步验证', async data => { await api('/account/mfa/disable', { method: 'POST', body: { password: data.get('password'), code: String(data.get('code')).trim() } }); $('#dialog').close(); notify('两步验证已停用。'); await renderAccount(); });
+  modal('停用两步验证', form);
+}
+function createApiToken() {
+  const form = el('form'); field(form, 'name', '名称（说明用途，如“监控脚本”）').maxLength = 80;
+  const scopes = el('fieldset'); scopes.append(el('legend', '权限范围'));
+  for (const [value, label] of Object.entries(scopeNames)) { const item = el('label', label, 'inline-check'), input = el('input'); input.type = 'checkbox'; input.name = 'scope'; input.value = value; input.checked = value === 'read'; item.prepend(input); scopes.append(item); }
+  scopes.append(el('p', '写入范围通常还需要“读取”，以便先取得当前版本号。只读用户的令牌仍不能写入。', 'fine')); form.append(scopes);
+  const days = field(form, 'days', '有效天数（1–365）', 90, 'number'); days.min = 1; days.max = 365;
+  submit(form, '创建令牌', async data => { if (!data.getAll('scope').length) throw new Error('至少选择一个权限范围'); const result = await api('/api-tokens', { method: 'POST', body: { name: String(data.get('name')).trim(), scopes: data.getAll('scope'), expires_in_days: number(data, 'days') } }); const body = el('div'); body.append(el('p', '令牌只显示这一次。请保存到密码管理器或脚本的密钥配置中，不要写入代码仓库或聊天记录。'), el('div', result.token, 'secret-box'), el('p', '调用示例（先把令牌放入环境变量 RELAY_TOKEN）', 'fine'), el('pre', `curl -H "Authorization: Bearer $RELAY_TOKEN" ${location.origin}/api/v1/nodes`), button('我已保存令牌', () => $('#dialog').close(), 'primary')); $('#dialog').close(); modal('API 令牌已创建', body); await renderAccount(); });
+  modal('创建 API 令牌', form);
+}
 function newUser() { const form = el('form'); field(form, 'username', '用户名').maxLength = 80; const p = field(form, 'password', '初始密码（至少 12 个字节）', '', 'password'); p.minLength = 12; p.autocomplete = 'new-password'; const roles = [['viewer', '只读用户'], ['tenant_admin', '租户管理员']]; if (state.actor.role === 'system_admin') roles.push(['system_admin', '系统管理员']); select(form, 'role', '角色', roles, 'viewer'); submit(form, '创建用户', async data => { await api('/users', { method: 'POST', body: Object.fromEntries(data) }); $('#dialog').close(); await renderUsers(); }); modal('添加用户', form); }
 async function renderAudit() { const rows = await api('/audit'); const p = panel('操作审计', '记录配置发布、节点注册、身份及会话操作。最近 200 条。'); p.append(table(['时间', '操作者', '操作', '对象', '详情'], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+const alertKinds = { webhook: 'Webhook', telegram: 'Telegram', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' };
+const alertFields = { webhook: [['url', 'Webhook 地址'], ['secret', '签名密钥（可选，HMAC-SHA256）', true]], telegram: [['bot_token', 'Bot Token'], ['chat_id', 'Chat ID']], wecom: [['url', '群机器人 Webhook 地址']], feishu: [['url', '自定义机器人 Webhook 地址'], ['secret', '签名校验密钥（可选）', true]], dingtalk: [['url', '自定义机器人 Webhook 地址'], ['secret', '加签密钥（可选）', true]] };
+const severityNames = { warning: '警告及以上', critical: '仅严重' };
+async function renderAlerts() {
+  const data = await api('/alerts'), now = Date.now(), { settings, channels, incidents } = data;
+  const until = settings.maintenance_until_ms, maintaining = until && until > now;
+  const grid = el('div', undefined, 'alert-grid');
+  const status = panel('通知状态', maintaining ? `维护模式至 ${timestamp(until)}。期间不发送新告警，结束时仍未恢复的问题会补发。` : '目标不可用、节点拒绝配置和节点离线会通知已启用的通道。同时出现的问题合并为一条消息；同一问题 5 分钟内反复出现只算一次。');
+  const strip = el('div', undefined, 'alert-status');
+  for (const [label, value, color] of [['当前告警', incidents.open.length, incidents.open.length ? 'red' : 'green'], ['启用通道', channels.filter(c => c.enabled).length, channels.some(c => c.enabled) ? 'green' : 'orange'], ['发送失败', incidents.deliveries.filter(d => d.status === 'failed').length, incidents.deliveries.some(d => d.status === 'failed') ? 'red' : '']]) { const item = el('div', undefined, `alert-stat ${color}`); item.append(el('div', String(value), 'metric-value'), el('div', label, 'metric-label')); strip.append(item); }
+  const actions = el('div', undefined, 'alert-actions');
+  const maintain = ms => api('/alerts/settings', { method: 'PUT', body: { maintenance_until_ms: ms } }).then(renderAlerts);
+  actions.append(maintaining ? button('结束维护', () => maintain(null), 'primary') : badge('正常通知', 'green'), button('维护 1 小时', () => maintain(Date.now() + 3600_000)), button('维护 4 小时', () => maintain(Date.now() + 4 * 3600_000)));
+  strip.append(actions); status.append(strip); grid.append(status);
+  const list = panel('通知通道', '地址、令牌和密钥保存后不再显示。编辑时留空表示保留原值。最多 20 个。', button('＋ 添加通道', () => editAlertChannel(), 'primary'));
+  if (!channels.length) list.append(empty('还没有通知通道', '添加一个 Webhook、Telegram、企业微信、飞书或钉钉机器人，然后发送测试消息确认可以收到。', button('＋ 添加通道', () => editAlertChannel(), 'primary')));
+  else list.append(table(['名称', '类型', '发送到', '级别', '状态', '操作'], channels.map(c => { const ops = el('div', undefined, 'row-actions'); ops.append(button('测试', async () => { notify(`正在向 ${c.name} 发送测试消息…`); try { await api(`/alerts/channels/${c.id}/test`, { method: 'POST' }); notify(`测试消息已发送到 ${c.name}，请确认已收到。`); } finally { await renderAlerts(); } }, 'table-action'), button('编辑', () => editAlertChannel(c), 'table-action'), button('删除', async () => { if (!confirm(`删除通知通道“${c.name}”？`)) return; await api(`/alerts/channels/${c.id}`, { method: 'DELETE' }); await renderAlerts(); }, 'table-action danger')); return [namedCell(c.name, c.secret_set ? '已设置密钥' : '未设置密钥'), alertKinds[c.kind], el('span', c.destination, 'mono'), severityNames[c.min_severity], badge(c.enabled ? '已启用' : '已停用', c.enabled ? 'green' : ''), ops]; })));
+  grid.append(list);
+  const levels = { warning: ['警告', 'orange'], critical: ['严重', 'red'] };
+  const incidentRows = (items, resolved) => items.map(i => [resolved ? `${timestamp(i.resolved_at_ms)} · ${ago(i.resolved_at_ms, now)}` : `${timestamp(i.opened_at_ms)} · ${ago(i.opened_at_ms, now)}`, i.node_name, badge(...(levels[i.severity] || [i.severity])), el('span', i.summary, 'wrap'), i.repeats ? `${i.repeats} 次` : '—', resolved ? (i.last_notice_ms ? '已通知恢复' : '未通知') : i.notified ? badge('已通知', 'green') : badge(maintaining ? '维护中暂缓' : '等待发送', 'orange')]);
+  const open = panel('当前告警', '仍未恢复的问题。控制器重启后会在 1 分钟内重新检测。');
+  open.append(incidents.open.length ? table(['开始', '节点', '级别', '内容', '反复', '通知'], incidentRows(incidents.open, false)) : empty('一切正常', '没有未恢复的告警。'));
+  grid.append(open);
+  if (incidents.resolved.length) { const done = panel('最近恢复', '最近 200 条，保存在控制器内存中。'); done.append(table(['恢复', '节点', '级别', '内容', '反复', '通知'], incidentRows(incidents.resolved.slice(0, 50), true))); grid.append(done); }
+  const statusNames = { sent: ['已送达', 'green'], failed: ['失败', 'red'], retrying: ['重试中', 'orange'], pending: ['发送中', ''] }, noticeNames = { opened: '告警', resolved: '恢复', test: '测试' };
+  const log = panel('发送记录', '失败会在 10 秒、1 分钟、5 分钟后重试。最近 200 条。');
+  log.append(incidents.deliveries.length ? table(['时间', '通道', '类型', '结果', '尝试', '错误'], incidents.deliveries.slice(0, 100).map(d => [timestamp(d.created_at_ms), d.channel_name, d.incidents > 1 ? `${noticeNames[d.notice]} · 合并 ${d.incidents} 条` : noticeNames[d.notice], badge(...statusNames[d.status]), String(d.attempts), d.error ? Object.assign(el('span', d.error, 'clip mono'), { title: d.error }) : '—'])) : empty('还没有发送记录', '发送测试消息或出现告警后会显示在这里。'));
+  grid.append(log);
+  if (state.view === 'alerts') $('#content').replaceChildren(grid);
+}
+function editAlertChannel(existing) {
+  const form = el('form'), kind = existing?.kind || 'webhook';
+  field(form, 'name', '名称（如“值班群”）', existing?.name).maxLength = 80;
+  const kindSelect = select(form, 'kind', '类型', Object.entries(alertKinds), kind);
+  select(form, 'min_severity', '通知级别', [['warning', '警告及以上（目标不可用、配置拒绝、节点离线）'], ['critical', '仅严重（配置拒绝、节点离线）']], existing?.min_severity || 'warning');
+  const enabled = el('label', '启用', 'inline-check'), check = el('input'); check.type = 'checkbox'; check.name = 'enabled'; check.checked = existing?.enabled ?? true; enabled.prepend(check); form.append(enabled);
+  const box = el('div', undefined, 'alert-fields'); form.append(box);
+  const fillFields = () => { box.replaceChildren(); const keep = existing && kindSelect.value === existing.kind; for (const [name, label, optional] of alertFields[kindSelect.value]) { const input = field(box, name, label, '', name === 'url' ? 'url' : 'text', !optional && !keep); input.autocomplete = 'off'; if (keep) input.placeholder = '留空则保留原值'; } if (kindSelect.value === 'webhook') box.append(el('p', '以 JSON POST {"text","sent_at_ms"}。设置密钥后请求头带 X-Relay-Signature: sha256=<正文的 HMAC 十六进制>。', 'fine')); };
+  kindSelect.onchange = fillFields; fillFields();
+  submit(form, existing ? '保存' : '添加通道', async data => {
+    const target = { kind: data.get('kind') }; for (const [name] of alertFields[target.kind]) target[name] = String(data.get(name) || '').trim();
+    const body = { name: String(data.get('name')).trim(), enabled: data.get('enabled') === 'on', min_severity: data.get('min_severity'), target };
+    await api(existing ? `/alerts/channels/${existing.id}` : '/alerts/channels', { method: existing ? 'PUT' : 'POST', body }); $('#dialog').close(); notify(existing ? '通知通道已保存。' : '通知通道已添加。建议点击“测试”确认可以收到。'); await renderAlerts();
+  });
+  modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
+}
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', subscriptions: '客户端订阅', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
-setInterval(() => { if (state.actor && !document.hidden && !$('#dialog').open && ['nodes', 'usage', 'budgets', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
+// Skip while typing in the page so a re-render does not take the input away.
+setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
 if (state.token) { api('/session').then(user => { state.actor = user; return enter(); }).catch(e => { loggedOut(); $('#login-error').textContent = e.message; }); }
 
 const budgetScopeNames = { user: '用户', tenant: '租户', node: '节点' };
@@ -639,7 +1003,7 @@ function healthEditor(form, spec, protocol) {
   const box = el('details'); box.open = !!spec; box.append(el('summary', '目标健康、故障摘除与恢复'));
   const enabled = select(box, 'health_enabled', '主动探测', [['off', '关闭'], ['on', '启用 · 仅选择已通过探测的目标']], spec ? 'on' : 'off');
   const grid = el('div', undefined, 'form-grid'), numbers = {};
-  for (const [key, label, fallback, min, max] of [['interval_ms', '探测间隔 / 毫秒', 5000, 100, 300000], ['timeout_ms', '单次超时 / 毫秒（不超过间隔）', 2000, 25, 60000], ['unhealthy_threshold', '连续失败几次摘除', 3, 1, 20], ['healthy_threshold', '连续成功几次接纳 / 恢复', 2, 1, 20], ['recovery_delay_ms', '恢复后的持续观察 / 毫秒', 5000, 0, 600000], ['max_age_ms', '结果有效期 / 毫秒（至少间隔 + 超时）', 20000, 125, 3600000]]) { const input = field(grid, `health_${key}`, label, spec?.[key] ?? fallback, 'number'); input.min = min; input.max = max; numbers[key] = input; }
+  for (const [key, label, fallback, min, max] of [['interval_ms', '探测间隔 / 毫秒', 1000, 100, 300000], ['timeout_ms', '单次超时 / 毫秒（不超过间隔）', 1000, 25, 60000], ['unhealthy_threshold', '连续失败几次摘除', 2, 1, 20], ['healthy_threshold', '连续成功几次接纳 / 恢复', 2, 1, 20], ['recovery_delay_ms', '恢复后的持续观察 / 毫秒', 5000, 0, 600000], ['max_age_ms', '结果有效期 / 毫秒（至少间隔 + 超时）', 10000, 125, 3600000]]) { const input = field(grid, `health_${key}`, label, spec?.[key] ?? fallback, 'number'); input.min = min; input.max = max; numbers[key] = input; }
   const tcp = el('fieldset'); tcp.append(el('legend', 'TCP 目标'));
   const tcpMode = select(tcp, 'health_tcp_kind', '成功条件', [['connect', '建立传输 · 含 TLS / WS 握手，不验证业务回复'], ['exchange', '发送探测请求，并校验响应前缀']], spec?.tcp?.kind || 'connect');
   const tcpFields = el('div');
@@ -680,16 +1044,16 @@ async function renderHealth() {
   if (state.view !== 'health' || state.selectedNode !== selected) return;
   const node = nodes.find(n => n.id === selected);
   toolbar.append(badge(`生效 v${snapshot.applied_revision} / 期望 v${snapshot.desired_revision}`), badge(online(node) ? '控制在线' : '无近期控制回报', online(node) ? 'green' : 'orange'), button('配置规则', () => navigate('rules')));
-  const panelHealth = panel('目标观测与选路', 'TCP 与 UDP 独立判断；同优先级按规则的均衡策略分配，低优先级目标作为候选后备。已有 TCP 不会因单次健康状态变化被强制迁移。');
+  const panelHealth = panel('目标观测与选路', 'TCP 与 UDP 独立判断；同优先级按规则的均衡策略分配，低优先级目标作为候选后备。已有 TCP 不会因单次健康状态变化被强制迁移。丢包与抖动按每个端点最近 20 次探测计算；“最低延迟”选路把丢包计入耗时。');
   const kinds = { tcp_connect: '传输建立', tcp_exchange: 'TCP 响应前缀', udp_exchange: 'UDP 完整回复' };
   const statuses = { unknown: '尚未确认', healthy: '探测通过', unhealthy: '已摘除', recovering: '恢复观察', stale: '结果过期' };
   const reasons = { eligible: '参与优先池', standby: '后备候选', unknown: '等待探测确认', unhealthy: '故障排除', recovering: '等待持续成功', stale: '等待新结果', at_capacity: '会话已满', expired: '规则已到期' };
   const errors = { dns: '域名解析失败', transport: '连接、握手或路径检查失败', timeout: '探测超时', io: '收发失败', unexpected_response: '回复不符或提前关闭', expired: '规则已到期' };
   const info = el('div', undefined, 'panel-body'); info.append(el('p', `最近节点回报：${timestamp(snapshot.last_seen_ms)} · ${snapshot.reports.length} / ${snapshot.expected_endpoints} 个配置端点有记录 · 当前探测 ${snapshot.active_probes} 个`)); if (snapshot.apply_error) info.append(el('p', `配置应用失败：${snapshot.apply_error}`, 'error')); panelHealth.append(info);
   if (!snapshot.reports.length) panelHealth.append(empty('暂无目标探测结果', snapshot.expected_endpoints ? '节点尚未上报这些端点的结果，不能视为健康。' : '在规则编辑器启用健康探测，填写对应业务的成功条件。'));
-  else panelHealth.append(table(['规则 / 目标', '端口 / 成功条件', '观测状态', '选路原因', '优先级 / 会话', '耗时 EWMA', '结果年龄', '连续成功 / 失败', '诊断'], snapshot.reports.map(r => {
-    const diagnostic = el('details'); diagnostic.append(el('summary', r.last_error ? errors[r.last_error] : '查看探测统计'), el('p', `完成 ${r.completed_checks} 次，成功 ${r.successful_checks} 次`), el('p', `源节点探测应用量：发送 ${bytes(r.probe_sent_bytes)} / 接收 ${bytes(r.probe_received_bytes)}`), el('p', `节点记录时间：${timestamp(r.checked_at_ms)}`));
-    return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), `${r.listen_port} / ${kinds[r.probe_kind]}`, badge(statuses[r.status], r.eligible ? 'green' : 'orange'), reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? '不限'}`, r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.sample_age_ms === null ? '—' : `${(r.sample_age_ms / 1000).toFixed(1)} / ${(r.max_age_ms / 1000).toFixed(1)} s`, `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
+  else panelHealth.append(table(['规则 / 目标', '端口 / 成功条件', '观测状态', '选路原因', '优先级 / 会话', '耗时 / 丢包 · 抖动', '连续成功 / 失败', '诊断'], snapshot.reports.map(r => {
+    const diagnostic = el('details'); diagnostic.append(el('summary', r.last_error ? errors[r.last_error] : '查看探测统计'), el('p', `完成 ${r.completed_checks} 次，成功 ${r.successful_checks} 次`), el('p', `结果年龄 ${r.sample_age_ms === null ? '—' : `${(r.sample_age_ms / 1000).toFixed(1)} 秒`}，有效期 ${(r.max_age_ms / 1000).toFixed(1)} 秒`), el('p', `源节点探测应用量：发送 ${bytes(r.probe_sent_bytes)} / 接收 ${bytes(r.probe_received_bytes)}`), el('p', `节点记录时间：${timestamp(r.checked_at_ms)}`));
+    return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), `${r.listen_port} / ${kinds[r.probe_kind]}`, badge(statuses[r.status], r.eligible ? 'green' : 'orange'), r.selection_reason === 'degraded' ? namedCell('丢包降级', '同级暂作后备') : r.selection_reason === 'draining' ? namedCell('维护排空', '仅作最后备用') : reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? '不限'}`, namedCell(r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.window_checks ? `丢包 ${Math.round(100 * r.window_failures / r.window_checks)}% · 抖动 ${r.jitter_us == null ? '—' : `${(r.jitter_us / 1000).toFixed(2)} ms`}` : '尚无探测'), `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
   })));
   $('#content').replaceChildren(toolbar, panelHealth);
 }

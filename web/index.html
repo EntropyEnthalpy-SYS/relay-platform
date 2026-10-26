@@ -13,32 +13,52 @@
     <p class="muted">使用控制服务初始化时生成的管理员凭据登录。</p>
     <label>用户名<input name="username" value="admin" autocomplete="username" required maxlength="80"></label>
     <label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label>
+    <label id="second-factor-field" class="hidden">两步验证码<input name="second_factor" inputmode="numeric" autocomplete="one-time-code" maxlength="32" placeholder="身份验证器中的 6 位数字，或一个恢复码"></label>
     <button type="submit" class="primary">登录控制台 <span aria-hidden="true">→</span></button>
     <p id="login-error" class="error" role="alert"></p>
     <p class="fine">首次密码位于控制节点的 <code>admin-password.secret</code>，不会写入运行日志。</p>
   </form>
-  <div class="login-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="network-core">R</div><span class="network-label">CONTROL / FORWARD / OBSERVE</span></div>
+  <div class="login-art" aria-hidden="true">
+    <div class="route-card">
+      <div class="route-head"><span class="dots"><i></i><i></i><i></i></span><span>relay · 自托管转发网络</span><span class="route-state">控制面</span></div>
+      <div class="route">
+        <div class="hop end"><b></b><span>客户端</span></div>
+        <div class="hop"><b>ENTRY</b><span>入口节点</span></div>
+        <div class="hop"><b>EXIT</b><span>落地节点</span></div>
+        <div class="hop end"><b></b><span>目标服务</span></div>
+      </div>
+      <div class="route-log">
+        <div><em>publish</em> 配置提交后立即推送到节点</div>
+        <div><em>failover</em> 目标失败时在同一次连接内改用后备</div>
+        <div><em>ledger</em> 每个字节按规则与周期记账</div>
+      </div>
+    </div>
+    <span class="network-label">CONTROL / FORWARD / OBSERVE</span>
+  </div>
 </div>
 <div id="application" class="application hidden">
   <aside class="sidebar">
     <a class="brand" href="/"><span class="brand-mark small">R</span><span>Relay<span class="brand-sub">独立转发平台</span></span></a>
     <span class="nav-label">工作空间</span>
     <nav aria-label="主导航">
-      <button data-view="nodes" class="nav-button active"><span>◉</span>节点总览</button>
+      <button data-view="overview" class="nav-button active"><span>◧</span>运行总览</button>
+      <button data-view="nodes" class="nav-button"><span>◉</span>节点管理</button>
       <button data-view="rules" class="nav-button"><span>⇄</span>转发规则</button>
       <button data-view="topology" class="nav-button"><span>⇢</span>多跳拓扑</button>
       <button data-view="health" class="nav-button"><span>⌁</span>目标健康</button>
       <button data-view="budgets" class="nav-button"><span>◎</span>共享额度</button>
       <button data-view="usage" class="nav-button"><span>▥</span>流量账本</button>
       <button data-view="users" class="nav-button"><span>♧</span>用户与权限</button>
+      <button data-view="account" class="nav-button"><span>◈</span>账户安全</button>
       <button data-view="audit" class="nav-button admin-only"><span>≡</span>操作审计</button>
+      <button data-view="alerts" class="nav-button admin-only"><span>◬</span>告警通知</button>
       <button data-view="recovery" class="nav-button admin-only"><span>↺</span>恢复保护</button>
       <button data-view="capabilities" class="nav-button"><span>◇</span>功能进度</button>
     </nav>
-    <div class="sidebar-bottom"><span class="version">DEVELOPMENT 0.11</span><p>完整范围持续开发中<br>数据来自实际节点回报</p><button id="logout" data-logout class="subtle">退出登录</button></div>
+    <div class="sidebar-bottom"><span class="version">DEVELOPMENT 0.19</span><p>完整范围持续开发中<br>数据来自实际节点回报</p><button id="logout" data-logout class="subtle">退出登录</button></div>
   </aside>
   <main>
-    <header><div><p class="eyebrow">YOUR INFRASTRUCTURE</p><h1 id="view-title">节点总览</h1></div><div class="header-right"><span id="identity" class="identity"></span><button id="refresh" class="subtle">刷新数据 ↻</button><button data-logout class="subtle mobile-only">退出</button></div></header>
+    <header><div><p class="eyebrow">YOUR INFRASTRUCTURE</p><h1 id="view-title">运行总览</h1></div><div class="header-right"><span id="status-pill" class="status-pill" role="status"></span><span id="identity" class="identity"></span><button id="theme" class="subtle" type="button" aria-label="切换深色或浅色主题" title="切换深色或浅色主题">◐</button><button id="refresh" class="subtle">刷新数据 ↻</button><button data-logout class="subtle mobile-only">退出</button></div></header>
     <div id="notification" class="notification hidden" role="status"></div>
     <div id="content"></div>
     <footer>控制在线仅表示 Agent 可以联系控制服务，业务可用性须另行探测。<span id="refreshed"></span></footer>

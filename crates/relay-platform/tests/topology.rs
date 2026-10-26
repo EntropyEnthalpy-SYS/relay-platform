@@ -23,6 +23,7 @@ fn batch(configs: &[NodeConfig]) -> ConfigBatch {
                 node_id: c.node_id.clone(),
                 expected_revision: c.revision,
                 rules: c.rules.clone(),
+                rate_bytes_per_sec: None,
             })
             .collect(),
     }
@@ -54,6 +55,7 @@ impl Fixture {
                 node_id: node.id,
                 revision: 0,
                 rules: vec![r],
+                rate_bytes_per_sec: None,
             });
             tokens.push(token);
         }
@@ -123,6 +125,80 @@ impl Fixture {
                 .unwrap();
         }
     }
+}
+
+#[test]
+fn draining_a_node_marks_every_route_into_it_without_tripping_the_rewire_barrier() {
+    let mut f = Fixture::new();
+    f.publish();
+    let (entry, middle) = (f.configs[0].node_id.clone(), f.configs[1].node_id.clone());
+    let drained = f.store.drain_node(&f.admin, &middle, true).unwrap();
+    // Only the upstream hop changes; the drained node's own rules do not.
+    assert_eq!(drained.configs.len(), 1);
+    assert_eq!(drained.configs[0].node_id, entry);
+    assert_eq!(drained.configs[0].revision, 2);
+    assert!(drained.configs[0].rules[0].targets[0].draining);
+    let config = |node: &str| f.store.config(&f.admin, node, None).unwrap();
+    assert_eq!(config(&middle).revision, 1);
+    assert!(
+        f.store
+            .drain_node(&f.admin, &middle, true)
+            .unwrap()
+            .configs
+            .is_empty(),
+        "draining twice publishes nothing"
+    );
+    assert_eq!(rejection(f.store.drain_node(&f.admin, &entry, true)), 409);
+    let restored = f.store.drain_node(&f.admin, &middle, false).unwrap();
+    assert_eq!(restored.configs[0].revision, 3);
+    assert!(!config(&entry).rules[0].targets[0].draining);
+    assert!(
+        !serde_json::to_string(&config(&entry))
+            .unwrap()
+            .contains("draining"),
+        "an undrained target serializes as before for older agents"
+    );
+}
+
+#[test]
+fn node_rate_survives_publishes_that_omit_it_and_null_clears_it() {
+    let mut f = Fixture::new();
+    f.publish();
+    let node = f.configs[0].node_id.clone();
+    let set: ConfigBatch = serde_json::from_value(serde_json::json!({"updates": [{
+        "node_id": node, "expected_revision": 1, "rules": f.configs[0].rules,
+        "rate_bytes_per_sec": 1_048_576
+    }]}))
+    .unwrap();
+    let rate = |c: &NodeConfig| c.rate_bytes_per_sec;
+    assert_eq!(
+        rate(&f.store.publish_configs(&f.admin, set).unwrap().configs[0]),
+        Some(1_048_576)
+    );
+    // Rule edits from clients that predate the field keep the cap.
+    let kept = f
+        .store
+        .set_config(&f.admin, &node, 2, f.configs[0].rules.clone())
+        .unwrap();
+    assert_eq!(rate(&kept), Some(1_048_576));
+    let clear: ConfigBatch = serde_json::from_value(serde_json::json!({"updates": [{
+        "node_id": node, "expected_revision": 3, "rules": f.configs[0].rules,
+        "rate_bytes_per_sec": null
+    }]}))
+    .unwrap();
+    let cleared = &f.store.publish_configs(&f.admin, clear).unwrap().configs[0];
+    assert_eq!(rate(cleared), None);
+    assert!(!serde_json::to_value(cleared).unwrap()["rate_bytes_per_sec"].is_number());
+    assert_eq!(
+        rejection(f.store.set_config_with_rate(
+            &f.admin,
+            &node,
+            4,
+            f.configs[0].rules.clone(),
+            Some(Some(0)),
+        )),
+        400
+    );
 }
 
 #[test]
@@ -448,6 +524,7 @@ fn range_protocol_and_security_combinations_are_checked_at_both_ends() {
         trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
         placement: ProxyPlacement::BeforeTls,
         max_header_bytes: 4096,
+        accept_prewarmed: false,
     });
     assert!(topology::validate(&configs).is_err());
     configs[0].rules[0].targets[0].proxy_protocol = Some(ProxyOutbound {
@@ -455,6 +532,19 @@ fn range_protocol_and_security_combinations_are_checked_at_both_ends() {
         placement: ProxyPlacement::BeforeTls,
         checksum: true,
     });
+    assert!(topology::validate(&configs).is_ok());
+    configs[0].rules[0].targets[0].prewarm = Some(4);
+    assert!(
+        topology::validate(&configs)
+            .unwrap_err()
+            .to_string()
+            .contains("pre-warmed")
+    );
+    configs[1].rules[0]
+        .inbound_proxy
+        .as_mut()
+        .unwrap()
+        .accept_prewarmed = true;
     assert!(topology::validate(&configs).is_ok());
 }
 
@@ -549,6 +639,7 @@ fn tenant_read_isolation_and_write_permissions_include_batch_and_topology() {
             node_id: node.id,
             expected_revision: 0,
             rules: vec![other],
+            rate_bytes_per_sec: None,
         }],
     };
     assert_eq!(rejection(f.store.publish_configs(&f.admin, input)), 400);

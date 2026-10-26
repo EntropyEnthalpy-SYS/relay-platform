@@ -44,6 +44,7 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         inbound_tls: None,
         inbound_proxy: None,
         inbound_websocket: None,
+        inbound_shadowsocks: None,
         advertise: None,
         targets: vec![Target {
             priority: 0,
@@ -54,6 +55,8 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
             proxy_protocol: None,
             websocket: None,
             via: None,
+            prewarm: None,
+            draining: false,
         }],
         balance: Balance::WeightedRoundRobin,
         enabled: true,
@@ -75,6 +78,7 @@ pub fn config(rule: Rule) -> NodeConfig {
         node_id: "node-one".into(),
         revision: 1,
         rules: vec![rule],
+        rate_bytes_per_sec: None,
     }
 }
 pub struct Echo {

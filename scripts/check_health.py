@@ -171,7 +171,7 @@ async def run(args):
             token = session['token']
             baseline = root / 'baseline.sqlite'
             await cli('backup', '--database', state / 'controller.sqlite', '--output', baseline)
-            created = await api('POST', '/nodes', {'name': 'health-release-agent'})
+            created = await api('POST', '/nodes', {'name': 'health-release-agent', 'lease_policy': {}})
             node = created['node']
             enrollment = root / 'enrollment.secret'
             enrollment.write_text(created['enrollment_token'])

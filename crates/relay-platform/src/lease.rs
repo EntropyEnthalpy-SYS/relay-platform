@@ -27,9 +27,6 @@ impl LeasePolicy {
         Ok(())
     }
 }
-pub fn default_policy() -> Option<LeasePolicy> {
-    Some(LeasePolicy::default())
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

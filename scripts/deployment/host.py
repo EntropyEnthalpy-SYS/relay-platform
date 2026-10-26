@@ -134,14 +134,17 @@ def account(role, state, staged=False):
 
 def service_text(manager, role, current, state, user, log):
     name = 'relay-platform-' + role
+    # The agent lists local addresses through netlink for loop protection;
+    # reading them needs no capability.
+    families = 'AF_UNIX AF_INET AF_INET6' + (' AF_NETLINK' if role == 'agent' else '')
     if manager == 'systemd':
         # Fixed native paths contain no whitespace. Staging roots are validated.
         return f'''[Unit]
 Description=Relay independent {role}
 After=network-online.target
 Wants=network-online.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# A relay should recover from any crash loop on its own: never stop retrying.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -150,7 +153,11 @@ Group={user}
 ExecStart={current}/run
 WorkingDirectory={state}
 Restart=on-failure
-RestartSec=5
+# 1 s after a crash, growing to 30 s while it keeps failing (systemd 254+;
+# older versions ignore the step settings and keep 1 s).
+RestartSec=1
+RestartSteps=5
+RestartMaxDelaySec=30
 TimeoutStopSec=30
 KillMode=control-group
 UMask=0077
@@ -159,8 +166,8 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths={state}
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-LimitNOFILE=65536
+RestrictAddressFamilies={families}
+LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
@@ -172,9 +179,11 @@ command="{current}/run"
 command_user="{user}:{user}"
 directory="{state}"
 umask="0077"
-respawn_delay=5
-respawn_max=5
-respawn_period=60
+respawn_delay=2
+# 0: keep restarting; a relay should recover from a crash loop on its own.
+respawn_max=0
+# Each relayed TCP connection holds two descriptors.
+rc_ulimit="-n 1048576"
 retry="TERM/30/KILL/5"
 output_log="{log}"
 error_log="{log}"

@@ -285,6 +285,7 @@ async fn proxy_settings_roundtrip_http_and_managed_agent_enforces_them() {
         trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
         placement: ProxyPlacement::BeforeTls,
         max_header_bytes: 4096,
+        accept_prewarmed: false,
     });
     r.targets[0].proxy_protocol = Some(ProxyOutbound {
         version: ProxyVersion::V2,
@@ -390,13 +391,76 @@ async fn proxy_settings_roundtrip_http_and_managed_agent_enforces_them() {
     );
     stop_server(server_instance).await;
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_agent_takes_its_user_share_and_then_syncs_every_second() {
+    let temp = tempfile::tempdir().unwrap();
+    let echo = tcp_echo().await;
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    control.set_kind("controller").unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (node, enrollment) = control.create_node(&admin, "default", "limited").unwrap();
+    let mut r = rule(echo.address, Protocol::Tcp);
+    r.owner_id = admin.id.clone();
+    control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+    let server_instance = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let secret_path = temp.path().join("enroll.secret");
+    write_secret(&secret_path, enrollment.as_bytes()).unwrap();
+    let agent_db = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let mut opts = options(
+        &format!("http://{}", server_instance.address),
+        &node.id,
+        Some(secret_path),
+    );
+    opts.poll_interval = Duration::from_secs(3);
+    let running = tokio::spawn(agent::run(agent_db.clone(), opts, stop.clone()));
+    wait_applied(&control, &admin, 1).await;
+    control
+        .set_user_rate(&admin, &admin.id, Some(1 << 20))
+        .unwrap();
+    let seat = || control.user_rate(&admin, &admin.id).unwrap().nodes[0].clone();
+    // The share goes out at the next ordinary poll...
+    let until = Instant::now() + Duration::from_secs(5);
+    while seat().seen_ms_ago.is_none() {
+        assert!(Instant::now() < until, "no share granted");
+        sleep(Duration::from_millis(20)).await;
+    }
+    let granted = Instant::now();
+    // ...and from then on the agent syncs every second, reporting it in force.
+    while seat().enforced_bytes_per_sec.is_none() {
+        assert!(
+            granted.elapsed() < Duration::from_secs(2),
+            "agent kept its 3 s poll after taking a share"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(seat().enforced_bytes_per_sec, Some(1 << 20));
+    let saved = agent_db.metadata("agent_user_shares").unwrap().unwrap();
+    assert!(saved.contains(&admin.id), "{saved}");
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(server_instance).await;
+}
+
 async fn server(db: Store, bind: SocketAddr) -> Server {
-    server_with_router(api::router(AppState::new(db)), bind).await
+    let stop = CancellationToken::new();
+    let router = api::router(AppState::new(db).with_shutdown(stop.clone()));
+    server_stopped_by(router, bind, stop).await
 }
 async fn server_with_router(router: axum::Router, bind: SocketAddr) -> Server {
+    server_stopped_by(router, bind, CancellationToken::new()).await
+}
+async fn server_stopped_by(
+    router: axum::Router,
+    bind: SocketAddr,
+    stop: CancellationToken,
+) -> Server {
     let listener = TcpListener::bind(bind).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let stop = CancellationToken::new();
     let shutdown = stop.clone();
     let task = tokio::spawn(async move {
         axum::serve(
@@ -677,6 +741,455 @@ async fn http_auth_role_and_schema_enforcement() {
             .contains("script-src 'self'")
     );
     assert!(html.text().await.unwrap().contains("自己的控制台"));
+    stop_server(s).await;
+}
+
+#[tokio::test]
+async fn http_two_factor_login_and_scoped_api_tokens() {
+    use relay_platform::totp;
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    let viewer = db
+        .create_user(
+            &admin,
+            "default",
+            "viewer",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (node, _) = db.create_node(&admin, "default", "node").unwrap();
+    let s = server(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let call = |method: reqwest::Method, path: &str, token: &str, body: Option<Value>| {
+        let request = client
+            .request(method, format!("{origin}/api/v1{path}"))
+            .bearer_auth(token);
+        let request = match body {
+            Some(body) => request.json(&body),
+            None => request,
+        };
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status().as_u16();
+            (
+                status,
+                response.json::<Value>().await.unwrap_or(Value::Null),
+            )
+        }
+    };
+    let login = |username: &str, code: Option<&str>| {
+        let body = json!({"username":username,"password":PASSWORD,"second_factor":code});
+        let request = client
+            .post(format!("{origin}/api/v1/auth/login"))
+            .json(&body);
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status().as_u16();
+            (status, response.json::<Value>().await.unwrap())
+        }
+    };
+    let step = || relay_platform::model::now_ms() as u64 / 1000 / totp::STEP_SECONDS;
+    let code_at = |secret: &str, step: u64| {
+        format!(
+            "{:06}",
+            totp::code(&totp::decode_base32(secret).unwrap(), step)
+        )
+    };
+    use reqwest::Method;
+
+    let session = login("admin", None).await.1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, _) = call(
+        Method::POST,
+        "/account/mfa/setup",
+        &session,
+        Some(json!({"password":"not-the-password"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (_, setup) = call(
+        Method::POST,
+        "/account/mfa/setup",
+        &session,
+        Some(json!({"password":PASSWORD})),
+    )
+    .await;
+    let secret = setup["secret"].as_str().unwrap().to_owned();
+    assert!(setup["otpauth_uri"].as_str().unwrap().contains(&secret));
+    assert!(setup["qr_svg"].as_str().unwrap().contains("<svg"));
+    // A pending secret does not change login until it is confirmed.
+    assert_eq!(login("admin", None).await.0, 200);
+    let (status, _) = call(
+        Method::POST,
+        "/account/mfa/enable",
+        &session,
+        Some(json!({"code":"000000"})),
+    )
+    .await;
+    assert_eq!(status, 400);
+    let enabled_step = step();
+    let (status, enabled) = call(
+        Method::POST,
+        "/account/mfa/enable",
+        &session,
+        Some(json!({"code":code_at(&secret, enabled_step)})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let recovery: Vec<String> = serde_json::from_value(enabled["recovery_codes"].clone()).unwrap();
+    assert_eq!(recovery.len(), 8);
+
+    let (status, body) = login("admin", None).await;
+    assert_eq!(
+        (status, body["second_factor_required"].clone()),
+        (401, json!(true))
+    );
+    let rejected_login = client
+        .post(format!("{origin}/api/v1/auth/login"))
+        .json(&json!({"username":"admin","password":"wrong-password-12"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected_login.status(), 401);
+    assert!(
+        rejected_login
+            .json::<Value>()
+            .await
+            .unwrap()
+            .get("second_factor_required")
+            .is_none()
+    );
+    // The code that enabled the factor, and anything older, cannot be replayed.
+    assert_eq!(
+        login("admin", Some(&code_at(&secret, enabled_step)))
+            .await
+            .0,
+        401
+    );
+    assert_eq!(
+        login("admin", Some(&code_at(&secret, enabled_step - 1)))
+            .await
+            .0,
+        401
+    );
+    let next = code_at(&secret, enabled_step + 1);
+    assert_eq!(login("admin", Some(&next)).await.0, 200);
+    assert_eq!(login("admin", Some(&next)).await.0, 401);
+    let spaced = recovery[0].to_uppercase().replace('-', " ");
+    assert_eq!(login("admin", Some(&spaced)).await.0, 200);
+    assert_eq!(login("admin", Some(&recovery[0])).await.0, 401);
+    let (_, status_body) = call(Method::GET, "/account/mfa", &session, None).await;
+    assert_eq!(
+        status_body,
+        json!({"enabled":true,"pending":false,"recovery_codes_remaining":7})
+    );
+    let (_, users) = call(Method::GET, "/users", &session, None).await;
+    let flags: Vec<(String, bool)> = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| {
+            (
+                u["username"].as_str().unwrap().into(),
+                u["mfa_enabled"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        flags,
+        vec![("admin".into(), true), ("viewer".into(), false)]
+    );
+
+    // Read-only token: reads succeed, writes and self-extension do not.
+    let (status, created) = call(
+        Method::POST,
+        "/api-tokens",
+        &session,
+        Some(json!({"name":"monitoring","scopes":["read"],"expires_in_days":30})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let reader = created["token"].as_str().unwrap().to_owned();
+    assert!(reader.starts_with("rpat_"));
+    assert_eq!(call(Method::GET, "/nodes", &reader, None).await.0, 200);
+    let publish = json!({"expected_revision":0,"rules":[]});
+    let config_path = format!("/nodes/{}/config", node.id);
+    assert_eq!(
+        call(Method::PUT, &config_path, &reader, Some(publish.clone()))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        call(
+            Method::POST,
+            "/api-tokens",
+            &reader,
+            Some(json!({"name":"escalate","scopes":["nodes:write"],"expires_in_days":30}))
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call(Method::GET, "/account/mfa", &reader, None).await.0,
+        403
+    );
+    assert_eq!(
+        call(
+            Method::POST,
+            "/tenants",
+            &reader,
+            Some(json!({"name":"other"}))
+        )
+        .await
+        .0,
+        403
+    );
+    let writer = call(
+        Method::POST,
+        "/api-tokens",
+        &session,
+        Some(json!({"name":"deploy","scopes":["nodes:write","read"],"expires_in_days":1})),
+    )
+    .await
+    .1;
+    let writer_token = writer["token"].as_str().unwrap().to_owned();
+    assert_eq!(
+        call(
+            Method::PUT,
+            &config_path,
+            &writer_token,
+            Some(publish.clone())
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(Method::POST, "/budgets", &writer_token, Some(json!({})))
+            .await
+            .0,
+        403
+    );
+    let (_, listed) = call(Method::GET, "/api-tokens", &session, None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 2);
+    let text = listed.to_string();
+    assert!(!text.contains(&reader) && !text.contains(&reader[5..]));
+    let reader_id = created["api_token"]["id"].as_str().unwrap();
+    assert_eq!(
+        call(
+            Method::DELETE,
+            &format!("/api-tokens/{reader_id}"),
+            &session,
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(call(Method::GET, "/nodes", &reader, None).await.0, 401);
+    assert_eq!(
+        call(Method::GET, "/nodes", &writer_token, None).await.0,
+        200
+    );
+
+    // A viewer's write-scoped token stays bounded by the viewer role.
+    let viewer_session = login("viewer", None).await.1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let viewer_token = call(
+        Method::POST,
+        "/api-tokens",
+        &viewer_session,
+        Some(json!({"name":"viewer","scopes":["read","nodes:write"],"expires_in_days":7})),
+    )
+    .await
+    .1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        call(Method::GET, "/nodes", &viewer_token, None).await.0,
+        200
+    );
+    assert_eq!(
+        call(
+            Method::PUT,
+            &config_path,
+            &viewer_token,
+            Some(json!({"expected_revision":1,"rules":[]}))
+        )
+        .await
+        .0,
+        403
+    );
+    // The viewer enables a factor and loses the device; the administrator resets it.
+    let viewer_secret = call(
+        Method::POST,
+        "/account/mfa/setup",
+        &viewer_session,
+        Some(json!({"password":PASSWORD})),
+    )
+    .await
+    .1["secret"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        call(
+            Method::POST,
+            "/account/mfa/enable",
+            &viewer_session,
+            Some(json!({"code":code_at(&viewer_secret, step())}))
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(login("viewer", None).await.0, 401);
+    assert_eq!(
+        call(
+            Method::POST,
+            &format!("/users/{}/mfa/reset", viewer.id),
+            &viewer_session,
+            None
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        call(
+            Method::POST,
+            &format!("/users/{}/mfa/reset", admin.id),
+            &viewer_session,
+            None
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call(
+            Method::POST,
+            &format!("/users/{}/mfa/reset", viewer.id),
+            &writer_token,
+            None
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        call(
+            Method::POST,
+            &format!("/users/{}/mfa/reset", viewer.id),
+            &session,
+            None
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        call(Method::GET, "/session", &viewer_session, None).await.0,
+        401
+    );
+    assert_eq!(
+        call(Method::GET, "/nodes", &viewer_token, None).await.0,
+        401
+    );
+    assert_eq!(login("viewer", None).await.0, 200);
+
+    // Disabling needs the password and a current factor.
+    let (status, _) = call(
+        Method::POST,
+        "/account/mfa/disable",
+        &session,
+        Some(json!({"password":PASSWORD,"code":"123456"})),
+    )
+    .await;
+    assert_eq!(status, 403);
+    let (status, _) = call(
+        Method::POST,
+        "/account/mfa/disable",
+        &session,
+        Some(json!({"password":PASSWORD,"code":recovery[1]})),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(login("admin", None).await.0, 200);
+    let audit: Vec<String> = db
+        .audit_log(&admin)
+        .unwrap()
+        .iter()
+        .map(|r| r["action"].as_str().unwrap().to_owned())
+        .collect();
+    for action in [
+        "mfa.enable",
+        "mfa.recovery_code_used",
+        "api_token.create",
+        "api_token.revoke",
+        "mfa.reset",
+        "mfa.disable",
+    ] {
+        assert!(
+            audit.iter().any(|a| a == action),
+            "{action} missing from audit"
+        );
+    }
+
+    // Ten wrong codes lock the account's second factor even for a correct code.
+    let locked_secret = call(
+        Method::POST,
+        "/account/mfa/setup",
+        &viewer_session,
+        Some(json!({"password":PASSWORD})),
+    )
+    .await;
+    assert_eq!(
+        locked_secret.0, 401,
+        "the reset ended the old viewer session"
+    );
+    let viewer_session = login("viewer", None).await.1["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let viewer_secret = call(
+        Method::POST,
+        "/account/mfa/setup",
+        &viewer_session,
+        Some(json!({"password":PASSWORD})),
+    )
+    .await
+    .1["secret"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let start = step();
+    call(
+        Method::POST,
+        "/account/mfa/enable",
+        &viewer_session,
+        Some(json!({"code":code_at(&viewer_secret, start)})),
+    )
+    .await;
+    for _ in 0..10 {
+        assert_eq!(login("viewer", Some("000000")).await.0, 401);
+    }
+    assert_eq!(
+        login("viewer", Some(&code_at(&viewer_secret, start + 1)))
+            .await
+            .0,
+        429
+    );
     stop_server(s).await;
 }
 
@@ -1292,6 +1805,126 @@ async fn udp_larger_than_the_reservation_quantum_preserves_the_whole_datagram() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn published_revision_reaches_a_long_polling_agent_without_waiting_for_the_poll() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let (node, token) = control.create_node(&admin, "default", "watch").unwrap();
+    let echo = tcp_echo().await;
+    let first = rule(echo.address, Protocol::Tcp);
+    control
+        .set_config(&admin, &node.id, 0, vec![first.clone()])
+        .unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let mut opts = options(&origin, &node.id, Some(token_path));
+    opts.poll_interval = Duration::from_secs(300);
+    let running = tokio::spawn(agent::run(local.clone(), opts, stop.clone()));
+    wait_applied(&control, &admin, 1).await;
+    // Let the agent settle into its long poll before publishing.
+    sleep(Duration::from_millis(300)).await;
+    let mut second = rule(echo.address, Protocol::Tcp);
+    second.id = "second".into();
+    control
+        .set_config(&admin, &node.id, 1, vec![first, second.clone()])
+        .unwrap();
+    let published = Instant::now();
+    wait_listening(second.listen).await;
+    wait_applied(&control, &admin, 2).await;
+    assert!(published.elapsed() < Duration::from_secs(2));
+    assert_eq!(exchange(second.listen, b"pushed").await, b"pushed");
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_reports_become_telemetry_visible_only_to_the_owning_tenant() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let tenant = control.create_tenant(&admin, "separate").unwrap();
+    let outsider = control
+        .create_user(
+            &admin,
+            &tenant,
+            "outsider",
+            PASSWORD,
+            relay_platform::store::Role::TenantAdmin,
+        )
+        .unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", s.address);
+    let (node, token) = control.create_node(&admin, "default", "metered").unwrap();
+    let echo = tcp_echo().await;
+    let forward = rule(echo.address, Protocol::Tcp);
+    control
+        .set_config(&admin, &node.id, 0, vec![forward.clone()])
+        .unwrap();
+    let token_path = temp.path().join("enroll.secret");
+    write_secret(&token_path, token.as_bytes()).unwrap();
+    let local = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        local.clone(),
+        options(&origin, &node.id, Some(token_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    wait_listening(forward.listen).await;
+    let payload = vec![7u8; 50_000];
+    assert_eq!(exchange(forward.listen, &payload).await, payload);
+
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let get = |token: String| {
+        let request = client
+            .get(format!("{origin}/api/v1/telemetry"))
+            .bearer_auth(token);
+        async move { request.send().await.unwrap().json::<Value>().await.unwrap() }
+    };
+    let (admin_token, _) = control.login(&admin.username, PASSWORD).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    let latest = loop {
+        let body = get(admin_token.clone()).await;
+        assert_eq!(body["nodes"][0]["id"], node.id.as_str());
+        let latest = body["nodes"][0]["samples"]
+            .as_array()
+            .and_then(|s| s.last().cloned())
+            .unwrap_or(Value::Null);
+        // Both directions of the echo, and a CPU share needs two samples.
+        if latest["forwarded_bytes"].as_u64() >= Some(100_000) && latest["cpu_percent"].is_number()
+        {
+            break latest;
+        }
+        assert!(Instant::now() < until, "no telemetry sample: {body}");
+        sleep(Duration::from_millis(50)).await;
+    };
+    assert!(latest["rss_bytes"].as_u64() > Some(0));
+    assert!(latest["memory_total_bytes"].as_u64() > Some(0));
+
+    let (outside_token, _) = control.login(&outsider.username, PASSWORD).unwrap();
+    let hidden = get(outside_token).await;
+    assert_eq!(hidden["nodes"], json!([]));
+    assert_eq!(hidden["events"], json!([]));
+
+    stop.cancel();
+    timeout(Duration::from_secs(3), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(s).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat() {
     let temp = tempfile::tempdir().unwrap();
     let control = Store::open(&temp.path().join("control.db")).unwrap();
@@ -1317,7 +1950,20 @@ async fn graceful_shutdown_flushes_unbudgeted_usage_before_the_next_heartbeat() 
         exchange(forwarding, b"final-counter").await,
         b"final-counter"
     );
-    assert_eq!(local.agent_usage(true).unwrap()[0].upload_bytes, 13);
+    let until = Instant::now() + Duration::from_secs(3);
+    while local
+        .agent_usage(true)
+        .unwrap()
+        .first()
+        .map(|u| u.upload_bytes)
+        != Some(13)
+    {
+        assert!(
+            Instant::now() < until,
+            "usage never reached the local ledger"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
     assert!(control.reported_usage(&admin).unwrap().is_empty());
     stop.cancel();
     timeout(Duration::from_secs(3), running)
@@ -1500,6 +2146,7 @@ fn topology_batch(configs: &[NodeConfig]) -> relay_platform::topology::ConfigBat
                 node_id: c.node_id.clone(),
                 expected_revision: c.revision,
                 rules: c.rules.clone(),
+                rate_bytes_per_sec: None,
             })
             .collect(),
     }
@@ -1550,6 +2197,7 @@ fn topology_link(configs: &mut [NodeConfig], order: &[usize], target: SocketAddr
             placement,
             trusted_sources: vec!["127.0.0.0/8".parse().unwrap()],
             max_header_bytes: 4096,
+            accept_prewarmed: false,
         });
         if secure {
             dest.inbound_tls = Some(TlsServer {
@@ -1632,6 +2280,7 @@ async fn three_agent_topology(secure: bool) {
             node_id: node.id,
             revision: 0,
             rules: vec![r],
+            rate_bytes_per_sec: None,
         });
     }
     topology_link(&mut configs, &[0, 1, 2], echo.address, secure);

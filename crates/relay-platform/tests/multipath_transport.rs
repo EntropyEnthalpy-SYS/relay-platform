@@ -182,8 +182,19 @@ async fn directional_path_selection_is_observable_and_policy_change_cancels_acti
         .unwrap()
         .unwrap();
     assert_eq!(response, vec![42; 131_072]);
-    let up = entry.stats().multipath.unwrap();
-    let down = exit.stats().multipath.unwrap();
+    // Senders count a frame after writing it, so the reply can arrive first.
+    let until = tokio::time::Instant::now() + Duration::from_secs(2);
+    let (up, down) = loop {
+        let up = entry.stats().multipath.unwrap();
+        let down = exit.stats().multipath.unwrap();
+        if up.path_sent_payload_bytes.iter().sum::<u64>() >= 131_072
+            && down.path_sent_payload_bytes.iter().sum::<u64>() >= 131_072
+            || tokio::time::Instant::now() > until
+        {
+            break (up, down);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(up.path_sent_payload_bytes[0], 131_072);
     assert_eq!(up.path_sent_payload_bytes[1], 0);
     assert_eq!(down.path_sent_payload_bytes[0], 0);

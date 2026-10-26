@@ -51,6 +51,9 @@ pub enum Balance {
     WeightedRoundRobin,
     SourceHash,
     LeastConnections,
+    /// Lowest probe latency among healthy targets of the best priority. Exchange
+    /// probes measure through any downstream relays to the final service.
+    LowestLatency,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +76,17 @@ pub struct Target {
     pub proxy_protocol: Option<ProxyOutbound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub websocket: Option<WebSocketClient>,
+    /// TCP connections kept open to this target ahead of demand, ready up to
+    /// their PROXY header. The next hop must accept pre-warmed connections.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prewarm: Option<u16>,
+    /// Maintenance: new sessions use this target only when no other target
+    /// is usable; existing sessions continue. Omitted when false so agents
+    /// older than this field accept the config.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draining: bool,
 }
+pub const MAX_PREWARM: u16 = 32;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,7 +149,16 @@ pub struct ProxyInbound {
     pub placement: ProxyPlacement,
     #[serde(default = "proxy_header_limit")]
     pub max_header_bytes: u32,
+    /// Wait up to [`PREWARM_WAIT_MS`] instead of the connect timeout for the
+    /// header, so an upstream relay can open connections before clients arrive.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_prewarmed: bool,
 }
+/// How long a relay accepting pre-warmed connections waits for their header.
+pub const PREWARM_WAIT_MS: u64 = 30_000;
+/// How long an upstream keeps a pre-warmed connection before replacing it,
+/// well inside the downstream's wait.
+pub const PREWARM_MAX_AGE_MS: u64 = 20_000;
 fn proxy_header_limit() -> u32 {
     4096
 }
@@ -310,6 +332,10 @@ pub struct Rule {
     pub inbound_proxy: Option<ProxyInbound>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_websocket: Option<WebSocketServer>,
+    /// A Shadowsocks server: each client names its destination, so the rule
+    /// has no targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_shadowsocks: Option<crate::shadowsocks::ServerConfig>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -369,9 +395,14 @@ impl Rule {
     }
     pub fn validate(&self) -> Result<()> {
         crate::multipath::validate_rule(self)?;
+        crate::shadowsocks::validate_rule(self)?;
         if let Some(health) = &self.health_check {
             health.validate(self.protocol)?;
         }
+        ensure!(
+            self.balance != Balance::LowestLatency || self.health_check.is_some(),
+            "lowest_latency selection requires a health check to measure targets"
+        );
         if let Some(address) = &self.advertise {
             validate_target(address)?;
         }
@@ -465,12 +496,19 @@ impl Rule {
                 "DNS cache limits exceeded"
             );
         }
-        ensure!(
-            !self.targets.is_empty() && self.targets.len() <= 32,
-            "requires 1..32 targets"
-        );
+        if self.inbound_shadowsocks.is_some() {
+            ensure!(
+                self.targets.is_empty(),
+                "a Shadowsocks server connects where each client asks; it has no targets"
+            );
+        } else {
+            ensure!(
+                !self.targets.is_empty() && self.targets.len() <= 32,
+                "requires 1..32 targets"
+            );
+        }
         let mut targets = HashSet::new();
-        let encrypted_targets = self.targets[0].tls.is_some();
+        let encrypted_targets = self.targets.first().is_some_and(|t| t.tls.is_some());
         for target in &self.targets {
             ensure!(
                 target
@@ -486,6 +524,24 @@ impl Rule {
             }
             if let Some(ws) = &target.websocket {
                 crate::websocket::validate_client(ws)?;
+            }
+            if let Some(count) = target.prewarm {
+                ensure!(
+                    (1..=MAX_PREWARM).contains(&count),
+                    "pre-warmed connections must be 1..{MAX_PREWARM}"
+                );
+                ensure!(
+                    target.proxy_protocol.is_some(),
+                    "pre-warmed connections are activated by a PROXY header; enable PROXY for the target"
+                );
+                ensure!(
+                    self.protocol.tcp() && self.outbound_multipath.is_none(),
+                    "pre-warmed connections apply to plain TCP targets"
+                );
+                ensure!(
+                    self.port_mapping == PortMapping::Fixed || self.listen_end_port.is_none(),
+                    "pre-warmed connections require one target port"
+                );
             }
             if let Some(proxy) = &target.proxy_protocol {
                 ensure!(
@@ -627,6 +683,20 @@ pub struct NodeConfig {
     pub node_id: String,
     pub revision: u64,
     pub rules: Vec<Rule>,
+    /// Combined application bytes/second across every rule on this node.
+    /// Omitted when unset so agents older than this field accept the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_bytes_per_sec: Option<u64>,
+}
+
+/// For publish requests: a missing field is `None` (keep), `null` is
+/// `Some(None)` (clear) and a number is `Some(Some(n))` (set).
+pub fn explicit<'de, D, T>(d: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 impl NodeConfig {
@@ -638,6 +708,11 @@ impl NodeConfig {
         ensure!(identifier(&self.node_id), "invalid node_id");
         ensure!(self.revision <= MAX_COUNTER, "revision out of range");
         ensure!(self.rules.len() <= MAX_RULES, "too many rules");
+        ensure!(
+            self.rate_bytes_per_sec
+                .is_none_or(|q| (1..=1_000_000_000_000).contains(&q)),
+            "invalid node byte rate"
+        );
         let multipath_payload: u64 = self
             .rules
             .iter()
@@ -725,6 +800,8 @@ pub struct EngineStats {
     pub active_probes: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub target_health: Vec<crate::health::TargetHealthReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<crate::system::SystemStats>,
     pub active_tcp: u64,
     pub active_udp: u64,
     pub accepted_tcp: u64,
@@ -733,6 +810,36 @@ pub struct EngineStats {
     pub dropped_datagrams: u64,
     pub forwarded_upload_bytes: u64,
     pub forwarded_download_bytes: u64,
+    /// New TCP connections served by a pre-warmed target connection.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub prewarmed_connections: u64,
+    /// Users whose cross-node limit this agent holds a share of. Omitted when
+    /// empty so controllers older than this field accept the stats.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_rates: Vec<UserRateReport>,
+}
+/// An agent's counters for one user under a cross-node speed limit.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserRateReport {
+    pub tenant_id: String,
+    pub owner_id: String,
+    /// Application bytes of this user's rules since the agent started.
+    pub bytes: u64,
+    /// Time sends waited for this user's share since the agent started.
+    pub waited_ms: u64,
+    /// The bytes/second in force now.
+    pub enforced_bytes_per_sec: Option<u64>,
+}
+/// This node's part of a user's total speed limit, kept for
+/// [`crate::user_rate::LEASE`]; afterwards at most `fallback_bytes_per_sec`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserShare {
+    pub tenant_id: String,
+    pub owner_id: String,
+    pub rate_bytes_per_sec: u64,
+    pub fallback_bytes_per_sec: u64,
 }
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
@@ -774,6 +881,10 @@ pub struct SyncResponse {
     pub config: Option<NodeConfig>,
     pub acknowledgements: Vec<UsageAck>,
     pub server_time_ms: i64,
+    /// Every user limit this node takes part in; `None` from controllers
+    /// older than cross-node limits, which agents treat as no limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_rates: Option<Vec<UserShare>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

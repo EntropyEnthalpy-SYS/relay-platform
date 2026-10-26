@@ -11,6 +11,13 @@ pub struct ConfigUpdate {
     pub node_id: String,
     pub expected_revision: u64,
     pub rules: Vec<Rule>,
+    /// Node-wide byte rate: omit to keep the current cap, `null` clears it.
+    #[serde(
+        default,
+        deserialize_with = "explicit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rate_bytes_per_sec: Option<Option<u64>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -151,6 +158,10 @@ fn compatible(source: &Rule, target: &Target, destination: &Rule) -> Result<()> 
                         | (ProxyVersion::V2, ProxyAccept::V2)
                 ),
                 "next-hop PROXY version mismatch"
+            );
+            ensure!(
+                target.prewarm.is_none() || server.accept_prewarmed,
+                "next hop does not accept pre-warmed connections"
             );
         }
         _ => anyhow::bail!("next-hop PROXY settings do not match"),

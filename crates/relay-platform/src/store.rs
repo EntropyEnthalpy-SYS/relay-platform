@@ -13,14 +13,25 @@ use std::{
 };
 use uuid::Uuid;
 
+mod accounts;
+mod alert_config;
 mod budgets;
 mod credentials;
 mod health;
 mod leases;
 mod node_profiles;
 mod recovery;
+mod reservations;
 mod sync;
 mod topology;
+mod user_rates;
+pub use accounts::{
+    API_TOKEN_PREFIX, ApiToken, SECOND_FACTOR_INVALID, SECOND_FACTOR_REQUIRED, Scope,
+    SecondFactorSetup, SecondFactorStatus, UserSummary,
+};
+pub use alert_config::AlertNode;
+pub use reservations::MeterFlush;
+pub use user_rates::{MAX_USER_RATE, MIN_USER_RATE, UserRateView};
 
 fn acknowledge_usage(tx: &Transaction<'_>, acks: &[UsageAck]) -> Result<()> {
     ensure!(acks.len() <= 1024, "too many usage acknowledgements");
@@ -64,11 +75,16 @@ pub struct Store(
     Arc<PathBuf>,
     Arc<BudgetSignals>,
     Arc<Mutex<leases::LeaseClocks>>,
+    Arc<crate::telemetry::Telemetry>,
+    Arc<crate::alerts::Alerts>,
+    Arc<Mutex<user_rates::UserRates>>,
 );
 #[derive(Default)]
 struct BudgetSignals {
     refill: tokio::sync::Notify,
     updated: tokio::sync::Notify,
+    /// Wakes agent watches after any node's desired configuration changes.
+    config: tokio::sync::Notify,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -159,6 +175,13 @@ pub fn password_hash(password: &str) -> Result<String> {
         .hash_password(password.as_bytes(), &salt)
         .map(|p| p.to_string())
         .map_err(|e| anyhow::anyhow!("password hash failed: {e}"))
+}
+fn password_matches(hash: &str, password: &str) -> Result<bool> {
+    let parsed =
+        PasswordHash::new(hash).map_err(|_| anyhow::anyhow!("stored password hash invalid"))?;
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
 }
 
 pub fn private_directory(path: &Path) -> Result<()> {
@@ -255,6 +278,9 @@ impl Store {
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
             Arc::new(Mutex::new(leases::LeaseClocks::default())),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
         ))
     }
 
@@ -327,6 +353,14 @@ impl Store {
     }
 
     pub fn login(&self, username: &str, password: &str) -> Result<(String, Actor)> {
+        self.login_with_second_factor(username, password, None)
+    }
+    pub fn login_with_second_factor(
+        &self,
+        username: &str,
+        password: &str,
+        second_factor: Option<&str>,
+    ) -> Result<(String, Actor)> {
         let record = {
             let conn = self.0.lock().unwrap();
             conn.query_row("SELECT id,tenant_id,username,role,password_hash FROM users WHERE username=?1 AND disabled=0", [username], |r| {
@@ -336,43 +370,29 @@ impl Store {
         // A dummy hash keeps unknown usernames on the same expensive verification path.
         let dummy = "$argon2id$v=19$m=19456,t=2,p=1$cmVsYXktZHVtbXktc2FsdA$cqS/K9c47e2jdQad9yP11mC/2ZWE1pgbdIoV/OOdSNA";
         let hash = record.as_ref().map(|(_, h)| h.as_str()).unwrap_or(dummy);
-        let parsed =
-            PasswordHash::new(hash).map_err(|_| anyhow::anyhow!("stored password hash invalid"))?;
-        if Argon2::default()
-            .verify_password(password.as_bytes(), &parsed)
-            .is_err()
-            || record.is_none()
-        {
+        if !password_matches(hash, password)? || record.is_none() {
             return reject(401, "invalid username or password");
         }
         let (actor, _) = record.unwrap();
         let token = secret();
-        let conn = self.0.lock().unwrap();
-        conn.execute("DELETE FROM sessions WHERE expires_at_ms<=?1", [now_ms()])?;
-        conn.execute(
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        accounts::check_second_factor(&tx, &actor.id, second_factor)?;
+        tx.execute("DELETE FROM sessions WHERE expires_at_ms<=?1", [now_ms()])?;
+        tx.execute(
             "INSERT INTO sessions(hash,user_id,expires_at_ms) VALUES(?1,?2,?3)",
             params![token_hash(&token), actor.id, now_ms() + 8 * 60 * 60 * 1000],
         )?;
+        tx.commit()?;
         Ok((token, actor))
     }
 
-    pub fn authenticate(&self, token: &str) -> Result<Actor> {
-        self.0.lock().unwrap().query_row("SELECT u.id,u.tenant_id,u.username,u.role FROM sessions s JOIN users u ON s.user_id=u.id WHERE s.hash=?1 AND s.expires_at_ms>?2 AND u.disabled=0", params![token_hash(token),now_ms()], actor_row).optional()?.map(Ok).unwrap_or_else(|| reject(401,"session expired or invalid"))
-    }
     pub fn logout(&self, token: &str) -> Result<()> {
         self.0
             .lock()
             .unwrap()
             .execute("DELETE FROM sessions WHERE hash=?1", [token_hash(token)])?;
         Ok(())
-    }
-    pub fn users(&self, actor: &Actor) -> Result<Vec<Actor>> {
-        let conn = self.0.lock().unwrap();
-        let mut q = conn.prepare("SELECT id,tenant_id,username,role FROM users WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY username")?;
-        Ok(
-            q.query_map(params![actor.role.as_str(), actor.tenant_id], actor_row)?
-                .collect::<rusqlite::Result<_>>()?,
-        )
     }
     pub fn create_tenant(&self, actor: &Actor, name: &str) -> Result<String> {
         if actor.role != Role::SystemAdmin {
@@ -446,24 +466,10 @@ impl Store {
     pub fn revoke_sessions(&self, actor: &Actor, user_id: &str) -> Result<()> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        let user = tx
-            .query_row(
-                "SELECT id,tenant_id,username,role FROM users WHERE id=?1",
-                [user_id],
-                actor_row,
-            )
-            .optional()?;
-        let Some(user) = user else {
-            return reject(404, "user not found");
-        };
-        if actor.id != user_id
-            && (!actor.may_write()
-                || !actor.permits_tenant(&user.tenant_id)
-                || (user.role == Role::SystemAdmin && actor.role != Role::SystemAdmin))
-        {
-            return reject(403, "insufficient user scope");
+        if actor.id != user_id {
+            accounts::require_user_manager(&tx, actor, user_id)?;
         }
-        tx.execute("DELETE FROM sessions WHERE user_id=?1", [user_id])?;
+        accounts::end_credentials(&tx, user_id)?;
         audit(&tx, &actor.id, "session.revoke", user_id, "{}")?;
         tx.commit()?;
         Ok(())
@@ -507,6 +513,7 @@ impl Store {
             node_id: id.clone(),
             revision: 0,
             rules: vec![],
+            rate_bytes_per_sec: None,
         };
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
@@ -650,6 +657,51 @@ impl Store {
         }
         Ok(nodes)
     }
+    /// Recent per-node samples and incidents for the nodes the actor can see.
+    pub fn telemetry(&self, actor: &Actor) -> Result<serde_json::Value> {
+        use crate::telemetry::OFFLINE_AFTER_MS;
+        let rows: Vec<(String, String, Option<i64>, bool)> = {
+            let conn = self.0.lock().unwrap();
+            let mut q = conn.prepare("SELECT id,name,last_seen_ms,token_hash IS NOT NULL FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY name,id")?;
+            q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        let visible: Vec<String> = rows.iter().map(|r| r.0.clone()).collect();
+        let (mut samples, mut events) = self.4.snapshot(&visible);
+        let now = now_ms();
+        // Silence produces no report, so offline incidents are derived on read.
+        for (id, name, last_seen, enrolled) in &rows {
+            if let Some(last) = last_seen.filter(|last| *enrolled && now - last > OFFLINE_AFTER_MS)
+            {
+                events.push(crate::telemetry::Event {
+                    id: 0,
+                    at_ms: last + OFFLINE_AFTER_MS,
+                    node_id: id.clone(),
+                    severity: crate::telemetry::Severity::Critical,
+                    kind: "node_offline",
+                    subject: String::new(),
+                    message: format!("节点 {name} 已 {} 秒无回报", (now - last) / 1000),
+                });
+            }
+        }
+        events.sort_by_key(|e| e.at_ms);
+        let nodes: Vec<_> = rows
+            .into_iter()
+            .map(|(id, name, last_seen_ms, enrolled)| {
+                let samples = samples.remove(&id).unwrap_or_default();
+                serde_json::json!({"id": id, "name": name, "last_seen_ms": last_seen_ms, "enrolled": enrolled, "samples": samples})
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "generated_at_ms": now,
+            "window_ms": crate::telemetry::WINDOW_MS,
+            "offline_after_ms": OFFLINE_AFTER_MS,
+            "nodes": nodes,
+            "events": events,
+        }))
+    }
     pub fn config(&self, actor: &Actor, node: &str, revision: Option<u64>) -> Result<NodeConfig> {
         let conn = self.0.lock().unwrap();
         require_node(&conn, actor, node, false)?;
@@ -743,6 +795,20 @@ impl Store {
                 _ => None,
             })
             .collect())
+    }
+    /// Construct before reading the revision, as with [`Self::budget_updated`].
+    pub fn config_published(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.2.config.notified()
+    }
+    pub fn node_desired_revision(&self, credential: &str) -> Result<u64> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let node = leases::authenticated(&tx, credential)?;
+        Ok(tx.query_row(
+            "SELECT desired_revision FROM nodes WHERE id=?1",
+            [node],
+            |r| r.get(0),
+        )?)
     }
     pub async fn budget_refill_needed(&self) {
         self.2.refill.notified().await;

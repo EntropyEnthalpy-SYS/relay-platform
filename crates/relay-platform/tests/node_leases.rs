@@ -44,9 +44,21 @@ impl Drop for Server {
     }
 }
 async fn server(router: axum::Router, address: SocketAddr) -> Server {
+    server_stopped_by(router, address, CancellationToken::new()).await
+}
+/// A controller whose stop also ends agent watches, as the `relay server` binary does.
+async fn controller(db: Store, address: SocketAddr) -> Server {
+    let stop = CancellationToken::new();
+    let router = api::router(AppState::new(db).with_shutdown(stop.clone()));
+    server_stopped_by(router, address, stop).await
+}
+async fn server_stopped_by(
+    router: axum::Router,
+    address: SocketAddr,
+    stop: CancellationToken,
+) -> Server {
     let listener = TcpListener::bind(address).await.unwrap();
     let address = listener.local_addr().unwrap();
-    let stop = CancellationToken::new();
     let shutdown = stop.clone();
     let task = tokio::spawn(async move {
         axum::serve(
@@ -166,11 +178,7 @@ async fn budget_reservation_api_enforces_tenant_session_and_node_recovery_creden
         .create_user(&admin, &tenant, "outsider", PASSWORD, Role::TenantAdmin)
         .unwrap();
     let (outside_token, _) = db.login(&outsider.username, PASSWORD).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db)),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db, "127.0.0.1:0".parse().unwrap()).await;
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let base = format!("http://{}/api/v1", http.address);
     let url = format!("{base}/budgets/{}/reservations", budget.id);
@@ -466,11 +474,7 @@ async fn intervening_backup_takeover_prevents_original_state_from_reclaiming_old
     r.owner_id = admin.id.clone();
     let listen = r.listen;
     db.set_config(&admin, &node, 0, vec![r]).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let origin = format!("http://{}", http.address);
     let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
     let mut a = agent(local.clone(), &origin, &node, Some(token));
@@ -526,11 +530,7 @@ async fn strict_node_api_defaults_permissions_and_proof_enforcement_are_visible(
         .create_user(&admin, "default", "viewer", PASSWORD, Role::Viewer)
         .unwrap();
     let (viewer_token, _) = db.login(&viewer.username, PASSWORD).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let origin = format!("http://{}/api/v1", http.address);
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let url = format!("{origin}/nodes");
@@ -559,7 +559,7 @@ async fn strict_node_api_defaults_permissions_and_proof_enforcement_are_visible(
     let node: Value = client
         .post(&url)
         .bearer_auth(&admin_token)
-        .json(&json!({"name":"strict-default"}))
+        .json(&json!({"name":"explicit-strict","lease_policy":{}}))
         .send()
         .await
         .unwrap()
@@ -569,19 +569,24 @@ async fn strict_node_api_defaults_permissions_and_proof_enforcement_are_visible(
         .await
         .unwrap();
     assert_eq!(node["node"]["lease"]["policy"]["ttl_ms"], 30000);
-    let offline: Value = client
-        .post(&url)
-        .bearer_auth(&admin_token)
-        .json(&json!({"name":"explicit-offline","lease_policy":null}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert!(offline["node"]["lease"]["policy"].is_null());
+    for body in [
+        json!({"name":"availability-default"}),
+        json!({"name":"explicit-offline","lease_policy":null}),
+    ] {
+        let offline: Value = client
+            .post(&url)
+            .bearer_auth(&admin_token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(offline["node"]["lease"]["policy"].is_null(), "{body}");
+    }
     let id = node["node"]["id"].as_str().unwrap();
     let credential = secret();
     db.enroll(id, node["enrollment_token"].as_str().unwrap(), &credential)
@@ -713,11 +718,7 @@ async fn cloned_state_waits_through_renewals_then_reconciles_and_takes_over_afte
     let r = rule(echo.address, Protocol::Tcp);
     let listen = r.listen;
     db.set_config(&admin, &node, 0, vec![r]).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let origin = format!("http://{}", http.address);
     let first = Store::open(&temp.path().join("first.sqlite")).unwrap();
     let mut a = agent(first.clone(), &origin, &node, Some(token));
@@ -888,11 +889,7 @@ async fn strict_offline_restart_keeps_cached_listeners_closed_until_new_ownershi
     let r = rule(echo.address, Protocol::Tcp);
     let listen = r.listen;
     db.set_config(&admin, &node, 0, vec![r]).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let address = http.address;
     let origin = format!("http://{address}");
     let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
@@ -908,7 +905,7 @@ async fn strict_offline_restart_keeps_cached_listeners_closed_until_new_ownershi
     assert!(TcpStream::connect(listen).await.is_err());
     let recovered = Store::open(&control_path).unwrap();
     let began = Instant::now();
-    let mut http = server(api::router(AppState::new(recovered.clone())), address).await;
+    let mut http = controller(recovered.clone(), address).await;
     sleep(Duration::from_millis(1000)).await;
     assert!(TcpStream::connect(listen).await.is_err());
     until(|| {
@@ -935,11 +932,7 @@ async fn aborting_agent_task_closes_data_plane_without_releasing_ownership_early
     let r = rule(echo.address, Protocol::Tcp);
     let listen = r.listen;
     db.set_config(&admin, &node, 0, vec![r]).unwrap();
-    let mut http = server(
-        api::router(AppState::new(db.clone())),
-        "127.0.0.1:0".parse().unwrap(),
-    )
-    .await;
+    let mut http = controller(db.clone(), "127.0.0.1:0".parse().unwrap()).await;
     let origin = format!("http://{}", http.address);
     let local = Store::open(&temp.path().join("agent.sqlite")).unwrap();
     let mut a = agent(local.clone(), &origin, &node, Some(token));

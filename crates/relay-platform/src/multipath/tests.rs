@@ -397,3 +397,151 @@ async fn selective_receipts_do_not_release_the_bounded_window_before_cumulative_
     drop((app, peer));
     drain(tasks, &[stats]).await;
 }
+
+/// A stream pair whose bytes arrive `delay` after they were written, in order,
+/// and not before `closed_until` for that direction (first to second, then
+/// back). Writes never block, like large socket buffers.
+fn delayed_pair(
+    delay: Duration,
+    closed_until: [tokio::time::Instant; 2],
+) -> (tokio::io::DuplexStream, tokio::io::DuplexStream) {
+    let (a, a_inner) = tokio::io::duplex(1 << 20);
+    let (b_inner, b) = tokio::io::duplex(1 << 20);
+    let (a_read, a_write) = tokio::io::split(a_inner);
+    let (b_read, b_write) = tokio::io::split(b_inner);
+    for ((mut from, mut to), closed_until) in [(a_read, b_write), (b_read, a_write)]
+        .into_iter()
+        .zip(closed_until)
+    {
+        let (queue, mut due) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut buffer = vec![0; 65536];
+            while let Ok(n @ 1..) = from.read(&mut buffer).await {
+                let _ = queue.send((tokio::time::Instant::now() + delay, buffer[..n].to_vec()));
+            }
+        });
+        tokio::spawn(async move {
+            while let Some((at, bytes)) = due.recv().await {
+                tokio::time::sleep_until(at.max(closed_until)).await;
+                if to.write_all(&bytes).await.is_err() {
+                    return;
+                }
+            }
+            let _ = to.shutdown().await;
+        });
+    }
+    (a, b)
+}
+#[tokio::test]
+async fn a_round_trip_longer_than_the_retransmit_interval_is_not_copied_onto_other_paths() {
+    let tasks = TaskTracker::new();
+    let a = Arc::new(Counters::default());
+    let b = Arc::new(Counters::default());
+    let spec = Limits {
+        window_frames: 32,
+        ..limits()
+    };
+    let mut client = vec![];
+    let mut server = vec![];
+    for slot in 0..2 {
+        let (c, s) = delayed_pair(Duration::from_millis(100), [tokio::time::Instant::now(); 2]);
+        client.push(path(c, slot));
+        server.push(path(s, slot));
+    }
+    let client = bridge(
+        client,
+        spec.clone(),
+        Mode::Stripe,
+        a.clone(),
+        tasks.clone(),
+        Box::new(()),
+    );
+    let server = bridge(
+        server,
+        spec,
+        Mode::Stripe,
+        b.clone(),
+        tasks.clone(),
+        Box::new(()),
+    );
+    let payload: Vec<_> = (0..4 * 1024 * 1024).map(|i| (i % 241) as u8).collect();
+    let n = payload.len() as u64;
+    tokio::time::timeout(Duration::from_secs(20), exchange(client, server, payload))
+        .await
+        .unwrap();
+    drain(tasks, &[a.clone(), b.clone()]).await;
+    for counters in [a, b] {
+        let stats = counters.snapshot();
+        assert_eq!(stats.delivered_payload_bytes, n);
+        // Only the first window goes out before a round trip is measured.
+        assert!(
+            stats.retransmitted_payload_bytes <= n / 4,
+            "{} of {n} bytes retransmitted on a path that lost nothing",
+            stats.retransmitted_payload_bytes
+        );
+    }
+}
+#[tokio::test]
+async fn a_path_that_stops_delivering_one_way_gets_fewer_new_frames_until_it_recovers() {
+    let tasks = TaskTracker::new();
+    let a = Arc::new(Counters::default());
+    let b = Arc::new(Counters::default());
+    let spec = Limits {
+        window_frames: 32,
+        stall_timeout_ms: 30_000,
+        ..limits()
+    };
+    let now = tokio::time::Instant::now();
+    let opens = now + Duration::from_millis(1000);
+    // Only the client's frames stop; the server's still arrive on it.
+    let (silent_client, silent_server) = delayed_pair(Duration::ZERO, [opens, now]);
+    let (good_client, good_server) = delayed_pair(Duration::from_millis(50), [now; 2]);
+    let client = bridge(
+        vec![path(silent_client, 0), path(good_client, 1)],
+        spec.clone(),
+        Mode::Stripe,
+        a.clone(),
+        tasks.clone(),
+        Box::new(()),
+    );
+    let server = bridge(
+        vec![path(silent_server, 0), path(good_server, 1)],
+        spec,
+        Mode::Stripe,
+        b.clone(),
+        tasks.clone(),
+        Box::new(()),
+    );
+    let silent_sent = tokio::spawn({
+        let a = a.clone();
+        async move {
+            tokio::time::sleep_until(opens - Duration::from_millis(50)).await;
+            a.snapshot().path_sent_payload_bytes[0]
+        }
+    });
+    let payload: Vec<_> = (0..12 * 1024 * 1024).map(|i| (i % 239) as u8).collect();
+    let n = payload.len() as u64;
+    tokio::time::timeout(Duration::from_secs(20), exchange(client, server, payload))
+        .await
+        .unwrap();
+    let silent_sent = silent_sent.await.unwrap();
+    drain(tasks, &[a.clone(), b.clone()]).await;
+    for counters in [&a, &b] {
+        let stats = counters.snapshot();
+        assert_eq!(stats.delivered_payload_bytes, n);
+        // Without suspicion the silent path keeps taking new frames, and
+        // without its own timeout the slower path's frames are copied too:
+        // either way about 40% is resent.
+        assert!(
+            stats.retransmitted_payload_bytes <= n / 6,
+            "{} of {n} bytes resent",
+            stats.retransmitted_payload_bytes
+        );
+    }
+    // Once a retry is acknowledged, it carries new frames again.
+    let recovered = a.snapshot().path_sent_payload_bytes[0] - silent_sent;
+    assert!(
+        recovered >= n / 16,
+        "{recovered} bytes sent on the recovered path"
+    );
+}

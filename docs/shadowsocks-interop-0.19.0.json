@@ -1,0 +1,191 @@
+{
+  "at_utc": "2026-10-26T16:00:18.340503+00:00",
+  "platform": "Linux-6.1.158+-x86_64-with-glibc2.36",
+  "relay_binary_sha256": "a3e9f9cfb6b7fb1503b56b7191c634b4f17faf7e6921e9867f1abdabe5962e7e",
+  "client": "shadowsocks 1.25.0",
+  "client_sha256": "370ee507bc94d05b03cebec6aa72d3bae2335a11a12d5a863a897f70acafe2ae",
+  "topology": "TCP / UDP -> SOCKS5 -> sslocal -> relay standalone -> echo",
+  "cases": [
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "bytes_each_direction": 4194341,
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "half_close": "passed",
+      "seconds": 0.015
+    },
+    {
+      "method": "2022-blake3-aes-256-gcm",
+      "bytes_each_direction": 4194341,
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "half_close": "passed",
+      "seconds": 0.015
+    },
+    {
+      "method": "2022-blake3-chacha20-poly1305",
+      "bytes_each_direction": 4194341,
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "half_close": "passed",
+      "seconds": 0.016
+    },
+    {
+      "method": "aes-128-gcm",
+      "bytes_each_direction": 4194341,
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "half_close": "passed",
+      "seconds": 0.013
+    },
+    {
+      "method": "aes-256-gcm",
+      "bytes_each_direction": 4194341,
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "half_close": "passed",
+      "seconds": 0.015
+    },
+    {
+      "method": "chacha20-ietf-poly1305",
+      "bytes_each_direction": 4194341,
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "half_close": "passed",
+      "seconds": 0.017
+    }
+  ],
+  "udp_cases": [
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "datagram_sizes": [
+        0,
+        1,
+        64,
+        512,
+        1200,
+        1400,
+        1472,
+        4096,
+        16384,
+        60000
+      ],
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "reply_source": "echo address"
+    },
+    {
+      "method": "2022-blake3-aes-256-gcm",
+      "datagram_sizes": [
+        0,
+        1,
+        64,
+        512,
+        1200,
+        1400,
+        1472,
+        4096,
+        16384,
+        60000
+      ],
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "reply_source": "echo address"
+    },
+    {
+      "method": "2022-blake3-chacha20-poly1305",
+      "datagram_sizes": [
+        0,
+        1,
+        64,
+        512,
+        1200,
+        1400,
+        1472,
+        4096,
+        16384,
+        60000
+      ],
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "reply_source": "echo address"
+    },
+    {
+      "method": "aes-128-gcm",
+      "datagram_sizes": [
+        0,
+        1,
+        64,
+        512,
+        1200,
+        1400,
+        1472,
+        4096,
+        16384,
+        60000
+      ],
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "reply_source": "echo address"
+    },
+    {
+      "method": "aes-256-gcm",
+      "datagram_sizes": [
+        0,
+        1,
+        64,
+        512,
+        1200,
+        1400,
+        1472,
+        4096,
+        16384,
+        60000
+      ],
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "reply_source": "echo address"
+    },
+    {
+      "method": "chacha20-ietf-poly1305",
+      "datagram_sizes": [
+        0,
+        1,
+        64,
+        512,
+        1200,
+        1400,
+        1472,
+        4096,
+        16384,
+        60000
+      ],
+      "by_ip": "verified",
+      "by_domain_name": "verified",
+      "reply_source": "echo address"
+    }
+  ],
+  "rejections": {
+    "loopback_under_default_policy": true,
+    "udp_loopback_under_default_policy": true,
+    "wrong_key": true,
+    "udp_wrong_key": true,
+    "udp_replay": true,
+    "udp_client_moves": true,
+    "udp_reordered_once": true,
+    "udp_reordered_replay": true,
+    "udp_replay_after_rule_change": true,
+    "udp_next_datagram_after_rule_change": true,
+    "replay": true
+  },
+  "ledger": {
+    "expected_payload_bytes": 52140216,
+    "recorded_bytes": 52140216,
+    "framing_excluded": true
+  },
+  "limits": [
+    "loopback only",
+    "replay of older-method datagrams is not detected (no timestamp)",
+    "timings include Python client and echo, not a benchmark"
+  ]
+}

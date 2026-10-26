@@ -6,10 +6,12 @@
 
 0.7.0 增加 crc32c 0.6.8；Linux/macOS 的 UDP packet-info 使用 nix 0.31.3（间接增加 memoffset 0.9.1）。HAProxy 仅作为外部互通测试程序，没有链接进平台或包含在源码交付包中。
 
-0.8.0 增加 tokio-tungstenite / tungstenite 0.30.0 及其 SHA-1 依赖，用于标准 WebSocket 握手与帧；TLS 仍由既有 rustls 路径处理。共 273 个第三方元数据条目。0.13.0 的节点租约复用既有 Tokio、UUID、随机数、SHA256 和 SQLite，没有新增平台依赖；独立 CLI 验收脚本只使用 Python 标准库。Python websockets 17.2（BSD-3-Clause）仅用于独立互通测试，单独安装，不链接进平台或打入源码包。0.9.0 没有增加平台依赖；三节点 CLI 验证复用该隔离测试环境中的临时证书工具。0.10.0 没有新增平台依赖，健康检查使用现有传输栈；独立健康服务与性能脚本使用 Python 标准库。0.11.0 使用既有 Tokio 通知和原子计数实现诊断，没有新增依赖。0.12.0 自有聚合协议复用既有 Tokio、rustls、rand 与 SHA256，没有新增平台依赖；独立线格式客户端使用 Python 标准库/OpenSSL，临时证书生成复用既有隔离互通环境。
+0.8.0 增加 tokio-tungstenite / tungstenite 0.30.0 及其 SHA-1 依赖，用于标准 WebSocket 握手与帧；TLS 仍由既有 rustls 路径处理。共 273 个第三方元数据条目。0.13.0 的节点租约复用既有 Tokio、UUID、随机数、SHA256 和 SQLite，没有新增平台依赖；独立 CLI 验收脚本只使用 Python 标准库。Python websockets 17.2（BSD-3-Clause）仅用于独立互通测试，单独安装，不链接进平台或打入源码包。0.9.0 没有增加平台依赖；三节点 CLI 验证复用该隔离测试环境中的临时证书工具。0.10.0 没有新增平台依赖，健康检查使用现有传输栈；独立健康服务与性能脚本使用 Python 标准库。0.11.0 使用既有 Tokio 通知和原子计数实现诊断，没有新增依赖。0.12.0 自有聚合协议复用既有 Tokio、rustls、rand 与 SHA256，没有新增平台依赖；独立线格式客户端使用 Python 标准库/OpenSSL，临时证书生成复用既有隔离互通环境。0.19.0 增加 qrcode 0.14.1（仅启用 SVG 输出，没有间接依赖），用于两步验证二维码；TOTP 的 HMAC-SHA1 使用已经随 rustls 链接的 ring 0.17。Shadowsocks 服务增加 blake3 1.8.7（2022 版会话子密钥派生，间接增加 arrayvec 0.7.8 和 constant_time_eq 0.4.2）与 md-5 0.11.0（旧版 AEAD 方式的密码转密钥）；AEAD 加密与 HKDF-SHA1 使用既有 ring。shadowsocks-rust 1.25.0（MIT）的 sslocal 仅作为外部互通测试程序，不链接进平台。Shadowsocks UDP 增加 aes 0.9.3（2022 版数据报的会话头块加密）与 chacha20poly1305 0.11.0（2022-blake3-chacha20-poly1305 数据报使用的 XChaCha20-Poly1305，复用既有 chacha20 0.10.2），间接增加 aead 0.6.1、cipher 0.5.2、cmov 0.5.4、cpubits 0.1.1、ctutils 0.4.6、inout 0.2.5、poly1305 0.9.1 和 universal-hash 0.6.1；数据报正文的 AES-GCM 仍使用 ring。
 
 | 包 | 版本 | 声明许可 | 源码/项目 |
 | --- | --- | --- | --- |
+| aead | 0.6.1 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/traits) |
+| aes | 0.9.3 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/block-ciphers) |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | [项目](https://github.com/BurntSushi/aho-corasick) |
 | anstream | 1.0.0 | MIT OR Apache-2.0 | [项目](https://github.com/rust-cli/anstyle.git) |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 | [项目](https://github.com/rust-cli/anstyle.git) |
@@ -18,6 +20,7 @@
 | anstyle-wincon | 3.0.11 | MIT OR Apache-2.0 | [项目](https://github.com/rust-cli/anstyle.git) |
 | anyhow | 1.0.104 | MIT OR Apache-2.0 | [项目](https://github.com/dtolnay/anyhow) |
 | argon2 | 0.5.3 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/password-hashes/tree/master/argon2) |
+| arrayvec | 0.7.8 | MIT OR Apache-2.0 | [项目](https://github.com/bluss/arrayvec) |
 | async-trait | 0.1.92 | MIT OR Apache-2.0 | [项目](https://github.com/dtolnay/async-trait) |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT | [项目](https://github.com/smol-rs/atomic-waker) |
 | autocfg | 1.5.1 | Apache-2.0 OR MIT | [项目](https://github.com/cuviper/autocfg) |
@@ -29,6 +32,7 @@
 | bindgen | 0.72.1 | BSD-3-Clause | [项目](https://github.com/rust-lang/rust-bindgen) |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | [项目](https://github.com/bitflags/bitflags) |
 | blake2 | 0.10.6 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/hashes) |
+| blake3 | 1.8.7 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | [项目](https://github.com/BLAKE3-team/BLAKE3) |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
 | block-buffer | 0.12.1 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
 | bumpalo | 3.20.3 | MIT OR Apache-2.0 | [项目](https://github.com/fitzgen/bumpalo) |
@@ -38,16 +42,21 @@
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | [项目](https://github.com/rust-lang/cfg-if) |
 | cfg_aliases | 0.2.2 | MIT | [项目](https://github.com/katharostech/cfg_aliases) |
 | chacha20 | 0.10.2 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/stream-ciphers) |
+| chacha20poly1305 | 0.11.0 | Apache-2.0 OR MIT | [项目](https://github.com/RustCrypto/AEADs) |
+| cipher | 0.5.2 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/traits) |
 | clang-sys | 1.9.1 | Apache-2.0 | [项目](https://github.com/KyleMayes/clang-sys) |
 | clap | 4.6.7 | MIT OR Apache-2.0 | [项目](https://github.com/clap-rs/clap) |
 | clap_builder | 4.6.7 | MIT OR Apache-2.0 | [项目](https://github.com/clap-rs/clap) |
 | clap_derive | 4.6.7 | MIT OR Apache-2.0 | [项目](https://github.com/clap-rs/clap) |
 | clap_lex | 1.1.1 | MIT OR Apache-2.0 | [项目](https://github.com/clap-rs/clap) |
+| cmov | 0.5.4 | Apache-2.0 OR MIT | [项目](https://github.com/RustCrypto/utils) |
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 | [项目](https://github.com/rust-cli/anstyle.git) |
 | combine | 4.6.9 | MIT | [项目](https://github.com/Marwes/combine) |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT | [项目](https://github.com/RustCrypto/formats) |
+| constant_time_eq | 0.4.2 | CC0-1.0 OR MIT-0 OR Apache-2.0 | [项目](https://github.com/cesarb/constant_time_eq) |
 | core-foundation | 0.9.4 | MIT OR Apache-2.0 | [项目](https://github.com/servo/core-foundation-rs) |
 | core-foundation-sys | 0.8.7 | MIT OR Apache-2.0 | [项目](https://github.com/servo/core-foundation-rs) |
+| cpubits | 0.1.1 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
 | cpufeatures | 0.2.17 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
 | cpufeatures | 0.3.1 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
 | crc32c | 0.6.8 | Apache-2.0/MIT | [项目](https://github.com/zowens/crc32c) |
@@ -57,6 +66,7 @@
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | [项目](https://github.com/crossbeam-rs/crossbeam) |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/traits) |
 | crypto-common | 0.2.2 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/traits) |
+| ctutils | 0.4.6 | Apache-2.0 OR MIT | [项目](https://github.com/RustCrypto/utils) |
 | data-encoding | 2.11.1 | MIT | [项目](https://github.com/ia0/data-encoding) |
 | digest | 0.10.7 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/traits) |
 | digest | 0.11.3 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/traits) |
@@ -107,6 +117,7 @@
 | idna | 1.1.0 | MIT OR Apache-2.0 | [项目](https://github.com/servo/rust-url/) |
 | idna_adapter | 1.2.2 | Apache-2.0 OR MIT | [项目](https://github.com/hsivonen/idna_adapter) |
 | if-addrs | 0.15.0 | MIT OR BSD-3-Clause | [项目](https://github.com/messense/if-addrs) |
+| inout | 0.2.5 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/utils) |
 | ipconfig | 0.3.4 | MIT/Apache-2.0 | [项目](https://github.com/liranringel/ipconfig) |
 | ipnet | 2.12.2 | MIT OR Apache-2.0 | [项目](https://github.com/krisprice/ipnet) |
 | is_terminal_polyfill | 1.70.2 | MIT OR Apache-2.0 | [项目](https://github.com/polyfill-rs/is_terminal_polyfill) |
@@ -128,6 +139,7 @@
 | lru-slab | 0.1.3 | MIT OR Apache-2.0 OR Zlib | [项目](https://github.com/Ralith/lru-slab) |
 | matchers | 0.2.0 | MIT | [项目](https://github.com/hawkw/matchers) |
 | matchit | 0.8.4 | MIT AND BSD-3-Clause | [项目](https://github.com/ibraheemdev/matchit) |
+| md-5 | 0.11.0 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/hashes) |
 | memchr | 2.8.3 | Unlicense OR MIT | [项目](https://github.com/BurntSushi/memchr) |
 | memoffset | 0.9.1 | MIT | [项目](https://github.com/Gilnaa/memoffset) |
 | mime | 0.3.17 | MIT OR Apache-2.0 | [项目](https://github.com/hyperium/mime) |
@@ -147,11 +159,13 @@
 | percent-encoding | 2.3.2 | MIT OR Apache-2.0 | [项目](https://github.com/servo/rust-url/) |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT | [项目](https://github.com/taiki-e/pin-project-lite) |
 | pkg-config | 0.3.34 | MIT OR Apache-2.0 | [项目](https://github.com/rust-lang/pkg-config-rs) |
+| poly1305 | 0.9.1 | Apache-2.0 OR MIT | [项目](https://github.com/RustCrypto/universal-hashes) |
 | portable-atomic | 1.15.0 | Apache-2.0 OR MIT | [项目](https://github.com/taiki-e/portable-atomic) |
 | potential_utf | 0.1.6 | Unicode-3.0 | [项目](https://github.com/unicode-org/icu4x) |
 | ppv-lite86 | 0.2.21 | MIT OR Apache-2.0 | [项目](https://github.com/cryptocorrosion/cryptocorrosion) |
 | prefix-trie | 0.8.4 | MIT OR Apache-2.0 | [项目](https://github.com/tiborschneider/prefix-trie) |
 | proc-macro2 | 1.0.107 | MIT OR Apache-2.0 | [项目](https://github.com/dtolnay/proc-macro2) |
+| qrcode | 0.14.1 | MIT OR Apache-2.0 | [项目](https://github.com/kennytm/qrcode-rust) |
 | quinn | 0.11.12 | MIT OR Apache-2.0 | [项目](https://github.com/quinn-rs/quinn) |
 | quinn-proto | 0.11.19 | MIT OR Apache-2.0 | [项目](https://github.com/quinn-rs/quinn) |
 | quinn-udp | 0.5.16 | MIT OR Apache-2.0 | [项目](https://github.com/quinn-rs/quinn) |
@@ -235,6 +249,7 @@
 | tungstenite | 0.30.0 | MIT OR Apache-2.0 | [项目](https://github.com/snapview/tungstenite-rs) |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | [项目](https://github.com/paholg/typenum) |
 | unicode-ident | 1.0.27 | (MIT OR Apache-2.0) AND Unicode-3.0 | [项目](https://github.com/dtolnay/unicode-ident) |
+| universal-hash | 0.6.1 | MIT OR Apache-2.0 | [项目](https://github.com/RustCrypto/traits) |
 | untrusted | 0.9.0 | ISC | [项目](https://github.com/briansmith/untrusted) |
 | url | 2.5.8 | MIT OR Apache-2.0 | [项目](https://github.com/servo/rust-url) |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | [项目](https://github.com/hsivonen/utf8_iter) |
