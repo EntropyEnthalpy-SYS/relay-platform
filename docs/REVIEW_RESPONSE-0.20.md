@@ -76,7 +76,7 @@ output to schema 5.
 checks the fence does not rewrite tables. `scripts/check_state_fence.py` runs real
 binaries and reports: 0.20 password-only login after enabling MFA = 401; 0.19 and
 0.18 refuse the state with `database schema newer than this binary`; 0.20 reopens
-with TOTP = 200; a 0.19 schema-4 state migrates with recovery sequence 3→5→6 and
+with a recovery code = 200 and the revoked API token still 401; a 0.19 schema-4 state migrates with recovery sequence 3→5→6 and
 then rejects 0.19; a 0.19 backup plus log restores under 0.20 with login 200.
 
 **Boundary.** The fence applies to state after a 0.20 controller has opened it.

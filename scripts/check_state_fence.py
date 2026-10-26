@@ -34,12 +34,12 @@ def build_info(binary):
     return json.loads(subprocess.check_output([str(binary), 'build-info'], timeout=20))
 
 
-def request(origin, path, body=None, token=None):
+def request(origin, path, body=None, token=None, method=None):
     headers = {'Content-Type': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(origin + path, data, headers)
+    req = urllib.request.Request(origin + path, data, headers, method=method)
     try:
         with opener.open(req, timeout=5) as response:
             return response.status, json.load(response)
@@ -136,8 +136,26 @@ def fresh_mfa_fence(new, old_binaries):
             assert status == 200, setup
             status, body = request(origin, '/api/v1/account/mfa/enable', {'code': totp(setup['secret'])}, token)
             assert status == 200, body
+            recovery = body['recovery_codes'][0]
             protected, _ = login(origin)
             assert protected == 401, protected
+            # API-token revocation is part of the same persisted security
+            # state; it must remain revoked after the schema upgrade too.
+            status, body = login(origin, {'second_factor': totp(setup['secret'], 1)})
+            assert status == 200, body
+            session = body['token']
+            status, created = request(origin, '/api/v1/api-tokens', {
+                'name': 'fence-token', 'scopes': ['read'], 'expires_in_days': 1,
+            }, session)
+            assert status == 200, created
+            api_token = created['token']
+            token_id = created['api_token']['id']
+            usable, _ = request(origin, '/api/v1/session', token=api_token)
+            assert usable == 200, usable
+            status, _ = request(origin, f'/api/v1/api-tokens/{token_id}', token=session, method='DELETE')
+            assert status == 200, status
+            revoked, _ = request(origin, '/api/v1/session', token=api_token)
+            assert revoked == 401, revoked
         finally:
             stop(process)
         refusals = []
@@ -152,15 +170,20 @@ def fresh_mfa_fence(new, old_binaries):
         assert process, '0.20.0 could not reopen its own state'
         try:
             password_only, _ = login(origin)
-            status, body = login(origin, {'second_factor': totp(setup['secret'], 1)})
+            status, body = login(origin, {'second_factor': recovery})
             assert status == 200, body
+            revoked_after, _ = request(origin, '/api/v1/session', token=api_token)
+            assert revoked_after == 401, revoked_after
             head = recovery_head(origin, body['token'])
         finally:
             stop(process)
         return {
             'mfa_password_only_020': protected,
             'password_only_after_reopen': password_only,
-            'mfa_totp_after_reopen': status,
+            'mfa_recovery_after_reopen': status,
+            'api_token_before_revoke': usable,
+            'api_token_after_revoke': revoked,
+            'api_token_after_reopen': revoked_after,
             'recovery_schema': head['schema'],
             'refusals': refusals,
         }

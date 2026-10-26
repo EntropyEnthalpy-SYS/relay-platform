@@ -15,7 +15,7 @@
 | R5 | 规则编辑器保留 `target.draining`，并提供显式结束维护 | `scripts/test_web_editor.cjs` 执行随包 `targetEditor`，覆盖保留、显式关闭和普通目标 |
 | R6 | macOS 遥测只要求流量样本；监听迁移按平台门控；故障切换改用确定性的 TLS 握手停滞 | `agent_reports_become_telemetry_visible_only_to_the_owning_tenant`、`listen_address_moves_between_one_address_and_all_addresses_on_the_same_port`、`stalled_primary_falls_back_within_one_connect_and_is_tried_last_afterwards` |
 
-跨版本围栏脚本（本机，三个临时状态目录）：0.20.0 启用两步验证后密码登录 401；0.19.0 与 0.18.0 启动同一状态均以 `database schema newer than this binary` 退出；0.20.0 重新打开后密码登录仍 401、下一步时间片 TOTP 返回 200。0.19.0 创建的 schema v4 状态由 0.20.0 原地迁移，恢复日志序列 3→5→6 连续，旧二进制随后被拒绝。0.19.0 备份加日志由 0.20.0 `restore` 重放（备份序列 3、恢复序列 3），恢复后的控制器登录 200。
+跨版本围栏脚本（本机，三个临时状态目录）：0.20.0 启用两步验证后密码登录 401；0.19.0 与 0.18.0 启动同一状态均以 `database schema newer than this binary` 退出；0.20.0 重新打开后密码登录仍 401、恢复码登录返回 200；撤销后的 API 令牌在重开前后均返回 401。0.19.0 创建的 schema v4 状态由 0.20.0 原地迁移，恢复日志序列 3→5→6 连续，旧二进制随后被拒绝。0.19.0 备份加日志由 0.20.0 `restore` 重放（备份序列 3、恢复序列 3），恢复后的控制器登录 200。
 
 完整检查命令：
 
