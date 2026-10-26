@@ -486,6 +486,7 @@ mod tests {
                 password: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
                 allow_private_destinations: false,
             }),
+            inbound_socks5: None,
             advertise: Some("edge.example.com:9000".into()),
             targets: vec![],
             balance: crate::model::Balance::WeightedRoundRobin,

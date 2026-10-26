@@ -347,3 +347,13 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | DELETE | `/users/{id}` | 删除账号；禁止删除自己；目标有规则或订阅时 409；删除会话、令牌、MFA 和限速元数据 |
 
 `/account/password` 只接受登录会话，API 令牌按 `account/` 前缀拒绝。`/users/*` 写入仍受角色、租户和 `users:write` 范围约束。密码 12..1024 字节。停用/启用不恢复旧会话或 API 令牌；删除用户前必须删除或转移其规则/订阅。用户列表新增 `disabled` 字段。
+
+## 0.25.0 SOCKS5 入口
+
+规则可增加：
+
+```json
+{"inbound_socks5":{"username":"user","password":"secret","allow_private_destinations":false}}
+```
+
+`username`/`password` 必须同时出现或同时省略（1..255 字节）。规则必须 `protocol=tcp` 且 `targets=[]`；不能同时设置 `inbound_shadowsocks`。只支持 CONNECT；BIND/UDP ASSOCIATE 返回 SOCKS5 状态 7。默认拒绝非公网目的地，测试可显式允许。可与入口 TLS/WebSocket/PROXY 组合。分享链接为 `socks5://[user:password@]host:port#name`。详见 [SOCKS5.md](SOCKS5.md)。

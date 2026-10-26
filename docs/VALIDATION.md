@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.24.0 开发版在 macOS 27.0.1 arm64 通过 **339 项自动化测试（310 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 340 项。日志见 [verification-0.24.0.txt](verification-0.24.0.txt)，逐项清单见 [validation-evidence-0.24.0.json](validation-evidence-0.24.0.json)。
+0.25.0 开发版在 macOS 27.0.1 arm64 通过 **345 项自动化测试（316 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 346 项。日志见 [verification-0.25.0.txt](verification-0.25.0.txt)，逐项清单见 [validation-evidence-0.25.0.json](validation-evidence-0.25.0.json)。
 
-## 0.24.0 账号生命周期验证
+## 0.25.0 SOCKS5 入口验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 协议单元 | 4 项：无认证域名 CONNECT、成功回复编码、用户名/密码、错误密码、UDP ASSOCIATE 拒绝 |
+| 规则校验 | TCP-only、无固定目标、认证成对、SOCKS5/Shadowsocks 互斥 |
+| Engine | 真实监听、CONNECT 到 TCP 回显目标、状态 0 回复与双向字节转发 |
+| 面板 | `node --check web/app.js`；规则编辑器/分享链接源码检查，未做浏览器点击验收 |
+
+## 0.24.0 账号生命周期验证（历史）
+
+0.24.0 开发版在 macOS 27.0.1 arm64 通过 **339 项自动化测试（310 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 340 项。日志见 [verification-0.24.0.txt](verification-0.24.0.txt)，逐项清单见 [validation-evidence-0.24.0.json](validation-evidence-0.24.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

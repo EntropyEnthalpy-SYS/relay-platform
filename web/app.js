@@ -577,7 +577,7 @@ async function renderRules() {
   toolbar.append(badge(`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? `节点总限速 ${mbit(config.rate_bytes_per_sec)}` : '节点不限速', config.rate_bytes_per_sec ? 'orange' : ''), button('版本历史', history)); if (canWrite()) toolbar.append(button('节点总限速', () => editNodeRate(config)));
   const p = panel('转发规则', '配额按上下行接纳字节合计。更改安全策略会终止关联会话。', canWrite() ? button('＋ 添加规则', () => editRule(), 'primary') : null);
   if (!config.rules.length) p.append(empty('创建一条真实转发规则', '支持 TCP、UDP 和双协议，可设置多个目标、配额、速率和来源网段。', canWrite() ? button('添加规则', () => editRule(), 'primary') : null));
-  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button('分享链接', () => shareShadowsocks(rule), 'table-action')); if (canWrite()) { actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell(rule.listen + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.inbound_shadowsocks ? namedCell('Shadowsocks 代理服务', rule.inbound_shadowsocks.method) : namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
+  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button('分享链接', () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button('分享链接', () => shareSocks5(rule), 'table-action')); if (canWrite()) { actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell(rule.listen + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.inbound_shadowsocks ? namedCell('Shadowsocks 代理服务', rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell('SOCKS5 代理服务', rule.inbound_socks5.username ? '用户名密码认证' : '无认证') : namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
   content.replaceChildren(toolbar, p);
 }
 function mbit(rate) { return `${+(rate * 8 / 1e6).toFixed(2)} Mbit/s`; }
@@ -597,12 +597,13 @@ async function editRule(existing) {
   select(grid, 'port_mapping', '端口段的目标映射', [['fixed', '全部入口连接同一目标端口'], ['offset', '按入口端口偏移目标端口']], r.port_mapping || 'fixed');
   const balance = select(grid, 'balance', '目标分配', [['weighted_round_robin', '加权轮询'], ['source_hash', '来源 IP 哈希'], ['least_connections', '最少连接'], ['lowest_latency', '最低延迟（须启用健康探测）']], r.balance || 'weighted_round_robin'); form.append(grid);
   const shadowsocks = shadowsocksEditor(r.inbound_shadowsocks); form.append(shadowsocks.box);
+  const socks5 = socks5Editor(r.inbound_socks5); form.append(socks5.box);
   const routed = el('div'); form.append(routed);
   const readHealth = healthEditor(routed, r.health_check, protocolControl);
   const multipath = multipathEditor(routed, r);
   const readTargets = targetEditor(routed, r.targets?.length ? r.targets : [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id, r.outbound_multipath?.paths, multipath.mode);
   // A Shadowsocks server goes where each client asks, so it has no targets.
-  function showRouted() { const server = shadowsocks.enabled(), parts = [routed, transport, inboundWs.box]; parts.forEach(part => part.classList.toggle('hidden', server)); balance.parentElement.classList.toggle('hidden', server); parts.flatMap(part => [...part.querySelectorAll('input, select, textarea')]).forEach(input => { if (server) { input.dataset.wasDisabled ??= String(input.disabled); input.disabled = true; } else if (input.dataset.wasDisabled !== undefined) { input.disabled = input.dataset.wasDisabled === 'true'; delete input.dataset.wasDisabled; } }); }
+  function showRouted() { const server = shadowsocks.enabled() || socks5.enabled(), parts = [routed, transport, inboundWs.box]; parts.forEach(part => part.classList.toggle('hidden', server)); balance.parentElement.classList.toggle('hidden', server); parts.flatMap(part => [...part.querySelectorAll('input, select, textarea')]).forEach(input => { if (server) { input.dataset.wasDisabled ??= String(input.disabled); input.disabled = true; } else if (input.dataset.wasDisabled !== undefined) { input.disabled = input.dataset.wasDisabled === 'true'; delete input.dataset.wasDisabled; } }); }
   const routing = el('details'); routing.append(el('summary', '出口绑定与 DNS 缓存')); const routeFields = el('div', undefined, 'form-grid');
   field(routeFields, 'outbound_ip', '出口源 IP（留空由系统选择）', r.outbound_bind?.ip || '', 'text', false);
   field(routeFields, 'outbound_interface', '出口网卡名称（留空由系统选择）', r.outbound_bind?.interface || '', 'text', false);
@@ -617,7 +618,7 @@ async function editRule(existing) {
   field(tlsFields, 'tls_client_ca', '允许客户端的 CA 编号（留空不要求客户端证书）', r.inbound_tls?.client_ca || '', 'text', false); transport.append(tlsFields, el('p', '证书和私钥预先放在节点本地，面板只保存编号。TLS 仅用于 TCP；一条规则的所有出口必须使用相同的安全方式。', 'fine')); form.append(transport);
   const inboundWs = websocketEditor('inbound-ws', r.inbound_websocket, true); form.append(inboundWs.box);
   // Clients also send QUIC, DNS and games over UDP, so a new server carries both.
-  shadowsocks.onchange(() => { if (!existing && shadowsocks.enabled() && protocolControl.value === 'tcp') protocolControl.value = 'both'; showRouted(); }); showRouted();
+  shadowsocks.onchange(() => { if (!existing && shadowsocks.enabled() && protocolControl.value === 'tcp') protocolControl.value = 'both'; showRouted(); }); socks5.onchange(() => { if (!existing && socks5.enabled()) protocolControl.value = 'tcp'; showRouted(); }); showRouted();
   const proxyInput = el('details'); proxyInput.append(el('summary', '接收可信上游传递的原始地址（PROXY protocol）'));
   const proxyMode = select(proxyInput, 'proxy_input_version', '入口 PROXY 报头', [['off', '关闭'], ['v1', '要求 v1 · 仅 TCP'], ['v2', '要求 v2 · TCP / UDP'], ['any', '要求 v1 或 v2 · 仅 TCP']], r.inbound_proxy?.version || 'off');
   const proxyOptions = el('div', undefined, 'form-grid');
@@ -636,9 +637,10 @@ async function editRule(existing) {
   form.append(el('p', '同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。', 'fine'));
   submit(form, existing ? '发布修改' : '创建并发布', async data => {
     const node = state.nodes.find(n => n.id === baseConfig.node_id), lines = key => String(data.get(key)).split('\n').map(s => s.trim()).filter(Boolean);
-    const server = shadowsocks.read();
-    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: server ? [] : readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
+    const server = shadowsocks.read(), socks = socks5.read();
+    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: server || socks ? [] : readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources') };
     if (server) rule.inbound_shadowsocks = server;
+    else if (socks) rule.inbound_socks5 = socks;
     else { rule.health_check = readHealth(); Object.assign(rule, multipath.read(readTargets.multipathPaths())); }
     rule.advertise = String(data.get('advertise')).trim() || null;
     rule.listen_end_port = number(data, 'listen_end_port'); rule.port_mapping = data.get('port_mapping');
@@ -702,6 +704,39 @@ function shareShadowsocks(rule) {
   modal(`分享 ${rule.name}`, body);
 }
 async function history() { const baseConfig = state.config; const revisions = await api(`/nodes/${baseConfig.node_id}/history`); const body = table(['修订', '操作者', '时间', '操作'], revisions.map(r => [`v${r.revision}`, r.actor_id, timestamp(r.created_at_ms), canWrite() ? button('发布此版本', async () => { await api(`/nodes/${baseConfig.node_id}/rollback`, { method: 'POST', body: { revision: r.revision, expected_revision: baseConfig.revision } }); $('#dialog').close(); notify('历史配置已作为新修订发布。账本不回滚。'); await renderRules(); }, 'table-action') : '只读'])); modal('最近 100 次配置修订', body); }
+function socks5Editor(spec) {
+  const box = el('details'); box.open = !!spec; box.append(el('summary', 'SOCKS5 入口（TCP CONNECT）'));
+  const fields = el('div', undefined, 'form-grid');
+  const enabled = select(fields, 'socks5_enabled', 'SOCKS5 服务', [['off', '关闭 · 按下方目标转发'], ['on', '启用 · 客户端指定目的地']], spec ? 'on' : 'off');
+  const username = field(fields, 'socks5_user', '用户名（留空不认证）', spec?.username || '', 'text', false); username.maxLength = 255;
+  const password = field(fields, 'socks5_password', '密码（与用户名同时填写）', spec?.password || '', 'password', false); password.maxLength = 255;
+  select(fields, 'socks5_private', '允许连接内网/回环目的地', [['no', '拒绝（推荐）'], ['yes', '允许']], spec?.allow_private_destinations ? 'yes' : 'no');
+  const note = el('p', 'SOCKS5 仅支持 TCP CONNECT；UDP ASSOCIATE 会返回“命令不支持”。启用后规则不能有固定目标，协议必须为 TCP。用户名和密码要么都留空（无认证），要么都填写。分享链接包含密码，请只发给使用者。', 'fine');
+  function show() { const on = enabled.value === 'on'; username.disabled = password.disabled = !on; fields.querySelectorAll('select')[1].disabled = !on; note.classList.toggle('hidden', !on); }
+  enabled.addEventListener('change', show); show(); box.append(fields, note);
+  return { box, enabled: () => enabled.value === 'on', onchange: fn => enabled.addEventListener('change', fn), read: () => {
+    if (enabled.value !== 'on') return null;
+    const user = username.value.trim(), pass = password.value;
+    if (!!user !== !!pass) throw new Error('SOCKS5 用户名和密码必须同时填写或同时留空');
+    return { username: user || null, password: pass || null, allow_private_destinations: fields.querySelector('[name=socks5_private]').value === 'yes' };
+  }};
+}
+function socks5Link(config, host, port, tag) {
+  const auth = config.username ? `${encodeURIComponent(config.username)}:${encodeURIComponent(config.password)}@` : '';
+  const address = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  return `socks5://${auth}${address}:${port}#${encodeURIComponent(tag)}`;
+}
+function shareSocks5(rule) {
+  const body = el('div'); const grid = el('div', undefined, 'form-grid');
+  const host = field(grid, 'host', '客户端连接的地址', location.hostname || '127.0.0.1');
+  const port = field(grid, 'port', '端口', rule.listen.split(':').pop(), 'number');
+  const tag = field(grid, 'tag', '显示名称', rule.name);
+  const link = el('div', undefined, 'secret-box'); const update = () => { link.textContent = socks5Link(rule.inbound_socks5, host.value.trim(), port.value.trim(), tag.value.trim()); };
+  [host, port, tag].forEach(input => input.addEventListener('input', update)); update();
+  const actions = el('div', undefined, 'dialog-actions'); actions.append(button('复制链接', async () => { await navigator.clipboard.writeText(link.textContent); notify('SOCKS5 链接已复制。'); }, 'primary'));
+  body.append(grid, link, el('p', '链接包含认证信息；需要停用时删除规则或修改用户名/密码。', 'fine'), actions);
+  modal(`分享 ${rule.name}`, body);
+}
 const subscriptionFormats = { v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'Clash / mihomo（YAML）', surge: 'Surge（文本）', shadowrocket: 'Shadowrocket（ss:// 列表）' };
 const dnsModes = { observe: '观察（只读，不写服务商）', apply: '应用（创建/更新/删除托管记录）' };
 const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];

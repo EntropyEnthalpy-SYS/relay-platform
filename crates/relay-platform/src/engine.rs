@@ -7,7 +7,7 @@ use crate::{
     network::{self, TargetResolver},
     proxy::{self, ConnectionInfo},
     routing::{Endpoint as ListenerKey, LoopGuard, Routes, Topology, local_ips},
-    shadowsocks,
+    shadowsocks, socks5,
     store::{Admission, AdmissionDecision, MeterFlush, Store},
     transport::{self, BoxStream, PreparedTls},
     websocket,
@@ -860,6 +860,7 @@ struct RuleResources {
 
 struct RuntimeRule {
     shadowsocks: Option<shadowsocks::Server>,
+    socks5: Option<socks5::Server>,
     multipath_server: Option<Arc<multipath::Server>>,
     multipath_client: Option<Arc<Semaphore>>,
     health: Option<Arc<HealthSet>>,
@@ -930,6 +931,10 @@ impl RuntimeRule {
                 )
                 .expect("validated configuration")
             }),
+            socks5: spec
+                .inbound_socks5
+                .as_ref()
+                .map(|config| socks5::Server::new(config).expect("validated configuration")),
             multipath_server: spec
                 .inbound_multipath
                 .clone()
@@ -1948,6 +1953,7 @@ fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
                 .collect::<Vec<_>>()
         || old.inbound_proxy != new.inbound_proxy
         || old.inbound_shadowsocks != new.inbound_shadowsocks
+        || old.inbound_socks5 != new.inbound_socks5
         || old.targets.iter().any(|previous| {
             new.targets.iter().any(|current| {
                 current.address == previous.address
@@ -2432,6 +2438,35 @@ async fn connect_destination(
     .context("destination connection timed out")?
 }
 
+async fn connect_socks5_destination(
+    rule: &RuntimeRule,
+    server: &socks5::Server,
+    destination: &shadowsocks::Destination,
+    inlet: ListenerKey,
+) -> Result<BoxStream> {
+    let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
+    timeout_at(deadline, async {
+        let mut last = None;
+        for address in rule.resolver.resolve(&destination.to_string()).await? {
+            if !server.permits(address.ip()) {
+                last = Some(anyhow::anyhow!("{destination} is not a public address"));
+                continue;
+            }
+            let route = rule.routes.reserve(inlet, address)?;
+            match network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true)?;
+                    return Ok(transport::hold(Box::new(stream), route));
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("{destination} has no addresses")))
+    })
+    .await
+    .context("SOCKS5 destination connection timed out")?
+}
+
 async fn open_multipath_path(
     rule: &RuntimeRule,
     index: usize,
@@ -2589,7 +2624,7 @@ async fn tcp_session(
         client
     };
     let client = transport::hold(client, guard);
-    let client = if let Some(server) = &rule.multipath_server {
+    let mut client = if let Some(server) = &rule.multipath_server {
         let identity =
             certificate.context("multipath requires a verified TLS client certificate")?;
         let accepted = timeout_at(
@@ -2611,7 +2646,27 @@ async fn tcp_session(
     } else {
         client
     };
-    let (client, target) = if let Some(server) = &rule.shadowsocks {
+    let (client, target) = if let Some(server) = &rule.socks5 {
+        let destination = match server.accept(&mut client, handshake_deadline).await {
+            Ok(destination) => destination,
+            Err(error) => {
+                stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(%error, rule = %rule.spec.id, "SOCKS5 request rejected");
+                return Ok(());
+            }
+        };
+        let target = match connect_socks5_destination(&rule, server, &destination, inlet).await {
+            Ok(target) => {
+                socks5::reply(&mut client, 0).await?;
+                target
+            }
+            Err(error) => {
+                let _ = socks5::reply(&mut client, 5).await;
+                return Err(error);
+            }
+        };
+        (client, target)
+    } else if let Some(server) = &rule.shadowsocks {
         let (destination, session) = match server.accept(client, handshake_deadline).await {
             Ok(accepted) => accepted,
             Err(error) => {

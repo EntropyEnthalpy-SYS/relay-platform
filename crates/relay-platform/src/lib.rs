@@ -17,6 +17,7 @@ pub mod node;
 pub mod proxy;
 mod routing;
 pub mod shadowsocks;
+pub mod socks5;
 pub mod store;
 pub mod subscription;
 mod sync_queue;

@@ -336,6 +336,9 @@ pub struct Rule {
     /// has no targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_shadowsocks: Option<crate::shadowsocks::ServerConfig>,
+    /// A SOCKS5 CONNECT server with optional username/password authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_socks5: Option<crate::socks5::ServerConfig>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -396,6 +399,17 @@ impl Rule {
     pub fn validate(&self) -> Result<()> {
         crate::multipath::validate_rule(self)?;
         crate::shadowsocks::validate_rule(self)?;
+        if let Some(config) = &self.inbound_socks5 {
+            crate::socks5::validate(config)?;
+            ensure!(
+                self.inbound_shadowsocks.is_none(),
+                "a rule cannot be both a Shadowsocks and SOCKS5 inbound"
+            );
+            ensure!(
+                self.protocol == Protocol::Tcp,
+                "the SOCKS5 inbound currently supports TCP CONNECT only"
+            );
+        }
         if let Some(health) = &self.health_check {
             health.validate(self.protocol)?;
         }
@@ -496,10 +510,10 @@ impl Rule {
                 "DNS cache limits exceeded"
             );
         }
-        if self.inbound_shadowsocks.is_some() {
+        if self.inbound_shadowsocks.is_some() || self.inbound_socks5.is_some() {
             ensure!(
                 self.targets.is_empty(),
-                "a Shadowsocks server connects where each client asks; it has no targets"
+                "a proxy inbound connects where each client asks; it has no targets"
             );
         } else {
             ensure!(
