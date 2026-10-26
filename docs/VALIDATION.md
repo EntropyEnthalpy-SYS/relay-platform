@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.25.0 开发版在 macOS 27.0.1 arm64 通过 **345 项自动化测试（316 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 346 项。日志见 [verification-0.25.0.txt](verification-0.25.0.txt)，逐项清单见 [validation-evidence-0.25.0.json](validation-evidence-0.25.0.json)。
+0.26.0 开发版在 macOS 27.0.1 arm64 通过 **347 项自动化测试（318 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 348 项。日志见 [verification-0.26.0.txt](verification-0.26.0.txt)，逐项清单见 [validation-evidence-0.26.0.json](validation-evidence-0.26.0.json)。
 
-## 0.25.0 SOCKS5 入口验证
+## 0.26.0 公告验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 全局/租户可见性、其他租户隔离、未来公告隐藏、租户管理员全局只读/本租户可写、删除 |
+| HTTP | 管理员发布、普通用户读取、普通用户写 403、管理列表 403、删除 |
+| 面板 | `node --check web/app.js` 与视图结构检查；公告页源码，未做浏览器点击验收 |
+
+## 0.25.0 SOCKS5 入口验证（历史）
+
+0.25.0 开发版在 macOS 27.0.1 arm64 通过 **345 项自动化测试（316 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 346 项。日志见 [verification-0.25.0.txt](verification-0.25.0.txt)，逐项清单见 [validation-evidence-0.25.0.json](validation-evidence-0.25.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

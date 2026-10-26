@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 mod accounts;
 mod alert_config;
+mod announcements;
 mod budgets;
 mod credentials;
 mod dns;

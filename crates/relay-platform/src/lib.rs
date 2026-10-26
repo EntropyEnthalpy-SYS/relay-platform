@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod alerts;
+pub mod announcement;
 pub mod api;
 pub mod budget;
 pub mod credential;

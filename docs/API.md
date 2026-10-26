@@ -357,3 +357,14 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 ```
 
 `username`/`password` 必须同时出现或同时省略（1..255 字节）。规则必须 `protocol=tcp` 且 `targets=[]`；不能同时设置 `inbound_shadowsocks`。只支持 CONNECT；BIND/UDP ASSOCIATE 返回 SOCKS5 状态 7。默认拒绝非公网目的地，测试可显式允许。可与入口 TLS/WebSocket/PROXY 组合。分享链接为 `socks5://[user:password@]host:port#name`。详见 [SOCKS5.md](SOCKS5.md)。
+
+## 0.26.0 公告
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/announcements` | 当前账号可见的生效公告 |
+| GET | `/announcements/manage` | 管理员列表；租户管理员含全局只读 |
+| POST | `/announcements` | `{tenant_id,title,body,severity,starts_at_ms,ends_at_ms,enabled}`；全局仅系统管理员 |
+| PUT/DELETE | `/announcements/{id}` | 编辑/删除，受租户边界约束 |
+
+`severity` 为 `info`、`warning`、`critical`；标题 1..200 字节，正文最多 10,000 字节，`ends_at_ms` 必须晚于开始或为空。读取需要 `read`，写入需要 `users:write`，并受账号角色约束。记录在 metadata，schema v5、恢复日志格式 4 不变。详见 [ANNOUNCEMENTS.md](ANNOUNCEMENTS.md)。

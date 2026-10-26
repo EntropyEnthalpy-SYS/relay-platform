@@ -1,6 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
-const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
+const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = { read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' };
@@ -161,7 +161,7 @@ async function enter() { $('#login-screen').classList.add('hidden'); $('#applica
 async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
@@ -740,6 +740,63 @@ function shareSocks5(rule) {
 const subscriptionFormats = { v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'Clash / mihomo（YAML）', surge: 'Surge（文本）', shadowrocket: 'Shadowrocket（ss:// 列表）' };
 const dnsModes = { observe: '观察（只读，不写服务商）', apply: '应用（创建/更新/删除托管记录）' };
 const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];
+const announcementSeverities = { info: '信息', warning: '警告', critical: '严重' };
+function announcementTime(ms) { return timestamp(ms); }
+function announcementDateTime(ms) { const d = new Date(ms || Date.now()); const pad = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+async function renderAnnouncements() {
+  const active = await api('/announcements');
+  const canManage = state.actor.role !== 'viewer';
+  const managed = canManage ? await api('/announcements/manage') : [];
+  const p = panel('当前公告', '只显示已启用且处于发布窗口内的公告；全局公告对所有租户可见。', canManage ? button('＋ 新建公告', () => announcementForm(null), 'primary') : null);
+  if (!active.length) p.append(empty('没有生效中的公告', '管理员可以创建全局或租户范围内的维护、变更和安全公告。'));
+  else p.append(table(['级别', '标题', '内容', '生效时间'], active.map(item => [badge(announcementSeverities[item.severity], item.severity === 'critical' ? 'red' : item.severity === 'warning' ? 'orange' : 'green'), item.title, item.body, `${announcementTime(item.starts_at_ms)}${item.ends_at_ms ? ' → ' + announcementTime(item.ends_at_ms) : ''}`])));
+  const page = el('div'); page.append(p);
+  if (canManage) {
+    const m = panel('公告管理', '租户管理员只能编辑/删除本租户公告；全局公告只读。', null);
+    if (!managed.length) m.append(empty('还没有公告', '新建一条公告后，用户会在发布窗口内看到。'));
+    else m.append(table(['范围', '级别', '标题', '开始', '结束', '状态', '操作'], managed.map(item => {
+      const actions = el('div');
+      const editable = state.actor.role === 'system_admin' || item.tenant_id === state.actor.tenant_id;
+      if (editable) actions.append(button('编辑', () => announcementForm(item), 'table-action'), button('删除', () => deleteAnnouncement(item), 'table-action danger'));
+      else actions.append(el('span', '只读', 'muted'));
+      return [item.tenant_id || '全局', announcementSeverities[item.severity], item.title, announcementTime(item.starts_at_ms), item.ends_at_ms ? announcementTime(item.ends_at_ms) : '长期', item.enabled ? badge('启用', 'green') : badge('停用', '') , actions];
+    })));
+    page.append(m);
+  }
+  $('#content').replaceChildren(page);
+}
+function announcementForm(item) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'title', '标题', item?.title || '').maxLength = 200;
+  textarea(grid, 'body', '内容（最多 10000 字节）', item?.body || '').maxLength = 10000;
+  select(grid, 'severity', '级别', Object.entries(announcementSeverities), item?.severity || 'info');
+  const tenant = field(grid, 'tenant_id', '租户 ID（留空为全局；租户管理员必须填写自己的租户）', item?.tenant_id || '', 'text', false); tenant.maxLength = 120;
+  const starts = field(grid, 'starts', '开始时间（本地）', announcementDateTime(item?.starts_at_ms), 'datetime-local'); starts.required = true;
+  const ends = field(grid, 'ends', '结束时间（本地，留空长期）', item?.ends_at_ms ? announcementDateTime(item.ends_at_ms) : '', 'datetime-local', false);
+  select(grid, 'enabled', '状态', [['yes', '启用'], ['no', '停用']], item?.enabled === false ? 'no' : 'yes');
+  form.append(grid, el('p', '全局公告只有系统管理员可以创建；租户管理员只能发布到自己的租户。时间按浏览器本地时区输入，服务端保存 Unix 毫秒。', 'fine'));
+  submit(form, item ? '保存公告' : '发布公告', async data => {
+    const body = {
+      title: String(data.get('title')).trim(),
+      body: String(data.get('body')),
+      severity: data.get('severity'),
+      tenant_id: String(data.get('tenant_id') || '').trim() || null,
+      starts_at_ms: new Date(String(data.get('starts'))).getTime(),
+      ends_at_ms: String(data.get('ends') || '') ? new Date(String(data.get('ends'))).getTime() : null,
+      enabled: data.get('enabled') === 'yes'
+    };
+    if (!Number.isFinite(body.starts_at_ms) || (body.ends_at_ms !== null && !Number.isFinite(body.ends_at_ms))) throw new Error('时间格式无效');
+    if (item) await api(`/announcements/${item.id}`, { method: 'PUT', body });
+    else await api('/announcements', { method: 'POST', body });
+    $('#dialog').close(); notify('公告已保存。'); await renderAnnouncements();
+  });
+  modal(item ? `编辑公告 · ${item.title}` : '新建公告', form);
+}
+async function deleteAnnouncement(item) {
+  if (!confirm(`删除公告「${item.title}」？`)) return;
+  await api(`/announcements/${item.id}`, { method: 'DELETE' }); notify('公告已删除。'); await renderAnnouncements();
+}
+
 async function renderDns() {
   if (state.actor.role !== 'system_admin') { $('#content').replaceChildren(empty('仅系统管理员可见', 'DNS 服务商令牌可修改外部 DNS，因此只向系统管理员开放。')); return; }
   const [providers, zones, nodes] = await Promise.all([api('/dns/providers'), api('/dns/zones'), api('/nodes')]);
@@ -1096,7 +1153,7 @@ function editAlertChannel(existing) {
   });
   modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
 }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', 'client-subscriptions': '客户端订阅', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
