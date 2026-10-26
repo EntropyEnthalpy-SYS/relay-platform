@@ -170,6 +170,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     let path = path.strip_prefix("/api/v1/").unwrap_or(path);
     if path.starts_with("account/")
         || path.starts_with("dns/")
+        || path.starts_with("commerce/")
         || path.starts_with("api-tokens")
         || path.ends_with("/mfa/reset")
         || path == "auth/logout"
@@ -293,6 +294,25 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/subscriptions/{id}/preview",
             get(preview_subscription),
         )
+        .route(
+            "/api/v1/commerce/plans",
+            get(commerce_plans).post(create_commerce_plan),
+        )
+        .route(
+            "/api/v1/commerce/plans/{id}",
+            axum::routing::put(update_commerce_plan).delete(delete_commerce_plan),
+        )
+        .route("/api/v1/commerce/wallet", get(commerce_wallet))
+        .route(
+            "/api/v1/commerce/wallets/{user}/adjust",
+            post(adjust_wallet),
+        )
+        .route(
+            "/api/v1/commerce/orders",
+            get(commerce_orders).post(create_order),
+        )
+        .route("/api/v1/commerce/orders/{id}/pay", post(pay_order))
+        .route("/api/v1/commerce/orders/{id}/refund", post(refund_order))
         .route(
             "/api/v1/announcements",
             get(announcements).post(create_announcement),
@@ -1373,6 +1393,154 @@ async fn public_subscription(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CommercePlanInput {
+    name: String,
+    #[serde(default)]
+    description: String,
+    price_cents: i64,
+    duration_days: u32,
+    #[serde(default)]
+    traffic_bytes: Option<u64>,
+    #[serde(default = "commerce_enabled")]
+    enabled: bool,
+}
+fn commerce_enabled() -> bool {
+    true
+}
+impl From<CommercePlanInput> for crate::commerce::PlanInput {
+    fn from(value: CommercePlanInput) -> Self {
+        Self {
+            name: value.name,
+            description: value.description,
+            price_cents: value.price_cents,
+            duration_days: value.duration_days,
+            traffic_bytes: value.traffic_bytes,
+            enabled: value.enabled,
+        }
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalletAdjustment {
+    delta_cents: i64,
+    reference: String,
+    #[serde(default)]
+    description: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewOrder {
+    plan_id: String,
+}
+async fn commerce_plans(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::commerce::Plan>> {
+    Ok(Json(
+        database(state.store, move |db| db.commerce_plans(&actor)).await?,
+    ))
+}
+async fn create_commerce_plan(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<CommercePlanInput>,
+) -> ApiResult<crate::commerce::Plan> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_commerce_plan(&actor, input.into())
+        })
+        .await?,
+    ))
+}
+async fn update_commerce_plan(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<CommercePlanInput>,
+) -> ApiResult<crate::commerce::Plan> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_commerce_plan(&actor, &id, input.into())
+        })
+        .await?,
+    ))
+}
+async fn delete_commerce_plan(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_commerce_plan(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn commerce_wallet(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::commerce::WalletView> {
+    let user = actor.id.clone();
+    Ok(Json(
+        database(state.store, move |db| db.wallet(&actor, &user)).await?,
+    ))
+}
+async fn adjust_wallet(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+    Json(input): Json<WalletAdjustment>,
+) -> ApiResult<crate::commerce::Wallet> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.adjust_wallet(
+                &actor,
+                &user,
+                input.delta_cents,
+                &input.reference,
+                &input.description,
+            )
+        })
+        .await?,
+    ))
+}
+async fn commerce_orders(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::commerce::Order>> {
+    Ok(Json(
+        database(state.store, move |db| db.orders(&actor)).await?,
+    ))
+}
+async fn create_order(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NewOrder>,
+) -> ApiResult<crate::commerce::Order> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_order(&actor, &input.plan_id)
+        })
+        .await?,
+    ))
+}
+async fn pay_order(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::commerce::Order> {
+    Ok(Json(
+        database(state.store, move |db| db.pay_order(&actor, &id)).await?,
+    ))
+}
+async fn refund_order(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::commerce::Order> {
+    Ok(Json(
+        database(state.store, move |db| db.refund_order(&actor, &id)).await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnnouncementInput {
     #[serde(default)]
     tenant_id: Option<String>,
@@ -1820,8 +1988,8 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
-        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-payments","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
 

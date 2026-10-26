@@ -3,6 +3,7 @@ pub mod alerts;
 pub mod announcement;
 pub mod api;
 pub mod budget;
+pub mod commerce;
 pub mod credential;
 mod datagram;
 pub mod dns;

@@ -1,0 +1,346 @@
+//! Commerce persistence in metadata. Money moves only inside a SQLite
+//! transaction together with its ledger entry and order/wallet state.
+use super::*;
+use crate::commerce::{
+    CURRENCY, LedgerEntry, LedgerKind, Order, OrderStatus, Plan, PlanInput, Wallet, WalletView,
+    validate_adjustment, validate_plan,
+};
+
+fn plan_key(id: &str) -> String {
+    format!("commerce_plan:{id}")
+}
+fn wallet_key(user: &str) -> String {
+    format!("commerce_wallet:{user}")
+}
+fn ledger_key(id: &str) -> String {
+    format!("commerce_ledger:{id}")
+}
+fn ledger_ref_key(reference: &str) -> String {
+    format!("commerce_ledger_ref:{reference}")
+}
+fn order_key(id: &str) -> String {
+    format!("commerce_order:{id}")
+}
+fn read_plan(conn: &Connection, id: &str) -> Result<Option<Plan>> {
+    read_json(conn, &plan_key(id))
+}
+fn read_wallet(conn: &Connection, user: &str) -> Result<Wallet> {
+    Ok(
+        read_json::<Wallet>(conn, &wallet_key(user))?.unwrap_or(Wallet {
+            user_id: user.into(),
+            balance_cents: 0,
+            currency: CURRENCY.into(),
+            updated_at_ms: now_ms(),
+        }),
+    )
+}
+fn write_wallet(tx: &Transaction<'_>, wallet: &Wallet) -> Result<()> {
+    write_json(tx, &wallet_key(&wallet.user_id), wallet)
+}
+fn read_order(conn: &Connection, id: &str) -> Result<Option<Order>> {
+    read_json(conn, &order_key(id))
+}
+fn write_order(tx: &Transaction<'_>, order: &Order) -> Result<()> {
+    write_json(tx, &order_key(&order.id), order)
+}
+fn read_ledger_ref(conn: &Connection, reference: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM metadata WHERE key=?1",
+        [ledger_ref_key(reference)],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+fn post_ledger(
+    tx: &Transaction<'_>,
+    user_id: &str,
+    delta_cents: i64,
+    kind: LedgerKind,
+    reference: &str,
+    description: &str,
+) -> Result<LedgerEntry> {
+    if read_ledger_ref(tx, reference)?.is_some() {
+        return reject(
+            409,
+            "ledger reference already used; refusing a duplicate money entry",
+        );
+    }
+    let entry = LedgerEntry {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.into(),
+        delta_cents,
+        currency: CURRENCY.into(),
+        kind,
+        reference: reference.into(),
+        description: description.into(),
+        created_at_ms: now_ms(),
+    };
+    write_json(tx, &ledger_key(&entry.id), &entry)?;
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES(?1,?2)",
+        params![ledger_ref_key(reference), entry.id],
+    )?;
+    Ok(entry)
+}
+
+// Small JSON helpers local to this module.
+fn read_json<T: serde::de::DeserializeOwned>(conn: &Connection, key: &str) -> Result<Option<T>> {
+    let raw: Option<String> = conn
+        .query_row("SELECT value FROM metadata WHERE key=?1", [key], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(raw.map(|value| serde_json::from_str(&value)).transpose()?)
+}
+fn write_json<T: Serialize>(tx: &Transaction<'_>, key: &str, value: &T) -> Result<()> {
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![key, serde_json::to_string(value)?],
+    )?;
+    Ok(())
+}
+fn all<T: serde::de::DeserializeOwned>(conn: &Connection, prefix: &str) -> Result<Vec<T>> {
+    let mut q = conn.prepare("SELECT value FROM metadata WHERE key GLOB ?1 ORDER BY key")?;
+    let rows: Vec<String> = q
+        .query_map([format!("{prefix}*")], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    rows.into_iter()
+        .map(|value| serde_json::from_str(&value).context("invalid stored commerce record"))
+        .collect()
+}
+fn require_admin(actor: &Actor) -> Result<()> {
+    if actor.role != Role::SystemAdmin {
+        return reject(
+            403,
+            "commerce plan/wallet operations require a system administrator",
+        );
+    }
+    Ok(())
+}
+fn require_user(actor: &Actor, user: &str) -> Result<()> {
+    if actor.id != user && actor.role != Role::SystemAdmin {
+        return reject(403, "wallet belongs to another user");
+    }
+    Ok(())
+}
+
+impl Store {
+    pub fn commerce_plans(&self, actor: &Actor) -> Result<Vec<Plan>> {
+        let conn = self.0.lock().unwrap();
+        let mut plans = all::<Plan>(&conn, "commerce_plan:")?;
+        if actor.role != Role::SystemAdmin {
+            plans.retain(|plan| plan.enabled);
+        }
+        plans.sort_by_key(|plan| plan.price_cents);
+        Ok(plans)
+    }
+    pub fn create_commerce_plan(&self, actor: &Actor, input: PlanInput) -> Result<Plan> {
+        require_admin(actor)?;
+        validate_plan(&input)?;
+        let plan = Plan {
+            id: Uuid::new_v4().to_string(),
+            name: input.name,
+            description: input.description,
+            price_cents: input.price_cents,
+            duration_days: input.duration_days,
+            traffic_bytes: input.traffic_bytes,
+            enabled: input.enabled,
+            created_at_ms: now_ms(),
+        };
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        write_json(&tx, &plan_key(&plan.id), &plan)?;
+        audit(&tx, &actor.id, "commerce.plan.create", &plan.id, "{}")?;
+        tx.commit()?;
+        Ok(plan)
+    }
+    pub fn update_commerce_plan(&self, actor: &Actor, id: &str, input: PlanInput) -> Result<Plan> {
+        require_admin(actor)?;
+        validate_plan(&input)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut plan = read_plan(&tx, id)?.context("plan not found")?;
+        plan.name = input.name;
+        plan.description = input.description;
+        plan.price_cents = input.price_cents;
+        plan.duration_days = input.duration_days;
+        plan.traffic_bytes = input.traffic_bytes;
+        plan.enabled = input.enabled;
+        write_json(&tx, &plan_key(&plan.id), &plan)?;
+        audit(&tx, &actor.id, "commerce.plan.update", &plan.id, "{}")?;
+        tx.commit()?;
+        Ok(plan)
+    }
+    pub fn delete_commerce_plan(&self, actor: &Actor, id: &str) -> Result<()> {
+        require_admin(actor)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let plan = read_plan(&tx, id)?.context("plan not found")?;
+        let orders: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key GLOB 'commerce_order:*' AND json_extract(value,'$.plan_id')=?1",
+            [&plan.id],
+            |r| r.get(0),
+        )?;
+        if orders > 0 {
+            return reject(409, "disable the plan; it already has orders");
+        }
+        tx.execute("DELETE FROM metadata WHERE key=?1", [plan_key(id)])?;
+        audit(&tx, &actor.id, "commerce.plan.delete", id, "{}")?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn wallet(&self, actor: &Actor, user: &str) -> Result<WalletView> {
+        require_user(actor, user)?;
+        let conn = self.0.lock().unwrap();
+        let wallet = read_wallet(&conn, user)?;
+        let mut entries = all::<LedgerEntry>(&conn, "commerce_ledger:")?;
+        entries.retain(|entry| entry.user_id == user);
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.created_at_ms));
+        Ok(WalletView { wallet, entries })
+    }
+    pub fn adjust_wallet(
+        &self,
+        actor: &Actor,
+        user: &str,
+        delta_cents: i64,
+        reference: &str,
+        description: &str,
+    ) -> Result<Wallet> {
+        require_admin(actor)?;
+        validate_adjustment(delta_cents, reference, description)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        // Ensure the target exists.
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id=?1)",
+            [user],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return reject(404, "user not found");
+        }
+        let mut wallet = read_wallet(&tx, user)?;
+        let balance = wallet
+            .balance_cents
+            .checked_add(delta_cents)
+            .context("wallet balance overflow")?;
+        if balance < 0 {
+            return reject(409, "wallet has insufficient funds");
+        }
+        wallet.balance_cents = balance;
+        wallet.updated_at_ms = now_ms();
+        write_wallet(&tx, &wallet)?;
+        post_ledger(
+            &tx,
+            user,
+            delta_cents,
+            LedgerKind::Adjustment,
+            reference,
+            description,
+        )?;
+        audit(&tx, &actor.id, "commerce.wallet.adjust", user, "{}")?;
+        tx.commit()?;
+        Ok(wallet)
+    }
+    pub fn orders(&self, actor: &Actor) -> Result<Vec<Order>> {
+        let conn = self.0.lock().unwrap();
+        let mut orders = all::<Order>(&conn, "commerce_order:")?;
+        if actor.role != Role::SystemAdmin {
+            orders.retain(|order| order.user_id == actor.id);
+        }
+        orders.sort_by_key(|order| std::cmp::Reverse(order.created_at_ms));
+        Ok(orders)
+    }
+    pub fn create_order(&self, actor: &Actor, plan_id: &str) -> Result<Order> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let plan = read_plan(&tx, plan_id)?.context("plan not found")?;
+        if !plan.enabled {
+            return reject(409, "plan is disabled");
+        }
+        let order = Order {
+            id: Uuid::new_v4().to_string(),
+            user_id: actor.id.clone(),
+            plan_id: plan.id.clone(),
+            plan_name: plan.name.clone(),
+            amount_cents: plan.price_cents,
+            currency: CURRENCY.into(),
+            duration_days: plan.duration_days,
+            traffic_bytes: plan.traffic_bytes,
+            status: OrderStatus::Pending,
+            created_at_ms: now_ms(),
+            paid_at_ms: None,
+            refunded_at_ms: None,
+        };
+        write_order(&tx, &order)?;
+        audit(&tx, &actor.id, "commerce.order.create", &order.id, "{}")?;
+        tx.commit()?;
+        Ok(order)
+    }
+    pub fn pay_order(&self, actor: &Actor, id: &str) -> Result<Order> {
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut order = read_order(&tx, id)?.context("order not found")?;
+        if order.user_id != actor.id && actor.role != Role::SystemAdmin {
+            return reject(403, "order belongs to another user");
+        }
+        if order.status != OrderStatus::Pending {
+            return reject(409, "order is not pending");
+        }
+        let mut wallet = read_wallet(&tx, &order.user_id)?;
+        if wallet.balance_cents < order.amount_cents {
+            return reject(409, "wallet has insufficient funds");
+        }
+        if order.amount_cents > 0 {
+            wallet.balance_cents -= order.amount_cents;
+            wallet.updated_at_ms = now_ms();
+            write_wallet(&tx, &wallet)?;
+            post_ledger(
+                &tx,
+                &order.user_id,
+                -order.amount_cents,
+                LedgerKind::Purchase,
+                &format!("order:{}", order.id),
+                &format!("purchase {}", order.plan_name),
+            )?;
+        }
+        order.status = OrderStatus::Paid;
+        order.paid_at_ms = Some(now_ms());
+        write_order(&tx, &order)?;
+        audit(&tx, &actor.id, "commerce.order.pay", &order.id, "{}")?;
+        tx.commit()?;
+        Ok(order)
+    }
+    pub fn refund_order(&self, actor: &Actor, id: &str) -> Result<Order> {
+        require_admin(actor)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut order = read_order(&tx, id)?.context("order not found")?;
+        if order.status != OrderStatus::Paid {
+            return reject(409, "only a paid order can be refunded");
+        }
+        if order.amount_cents > 0 {
+            let mut wallet = read_wallet(&tx, &order.user_id)?;
+            wallet.balance_cents = wallet
+                .balance_cents
+                .checked_add(order.amount_cents)
+                .context("wallet balance overflow")?;
+            wallet.updated_at_ms = now_ms();
+            write_wallet(&tx, &wallet)?;
+            post_ledger(
+                &tx,
+                &order.user_id,
+                order.amount_cents,
+                LedgerKind::Refund,
+                &format!("refund:{}", order.id),
+                &format!("refund {}", order.plan_name),
+            )?;
+        }
+        order.status = OrderStatus::Refunded;
+        order.refunded_at_ms = Some(now_ms());
+        write_order(&tx, &order)?;
+        audit(&tx, &actor.id, "commerce.order.refund", &order.id, "{}")?;
+        tx.commit()?;
+        Ok(order)
+    }
+}

@@ -17,6 +17,7 @@ mod accounts;
 mod alert_config;
 mod announcements;
 mod budgets;
+mod commerce;
 mod credentials;
 mod dns;
 mod health;

@@ -1,6 +1,6 @@
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
-const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
+const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = { read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' };
@@ -161,7 +161,7 @@ async function enter() { $('#login-screen').classList.add('hidden'); $('#applica
 async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
@@ -743,6 +743,75 @@ const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];
 const announcementSeverities = { info: '信息', warning: '警告', critical: '严重' };
 function announcementTime(ms) { return timestamp(ms); }
 function announcementDateTime(ms) { const d = new Date(ms || Date.now()); const pad = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+const orderStatuses = { pending: '待支付', paid: '已支付', refunded: '已退款' };
+const ledgerKinds = { adjustment: '调整', credit: '充值', purchase: '购买', refund: '退款' };
+function money(cents) { return `¥${(cents / 100).toFixed(2)}`; }
+async function renderCommerce() {
+  const [wallet, plans, orders] = await Promise.all([api('/commerce/wallet'), api('/commerce/plans'), api('/commerce/orders')]);
+  const p = panel('钱包', `余额 ${money(wallet.wallet.balance_cents)} · ${wallet.wallet.currency}。余额只能通过管理员调整或退款入账；购买会即时扣款。`, state.actor.role === 'system_admin' ? button('调整用户钱包', adjustWallet, 'primary') : null);
+  p.append(table(['金额', '类型', '说明', '引用', '时间'], wallet.entries.map(entry => [money(entry.delta_cents), ledgerKinds[entry.kind] || entry.kind, entry.description, entry.reference, timestamp(entry.created_at_ms)])));
+  if (!wallet.entries.length) p.append(el('p', '还没有资金流水。', 'muted'));
+  const plansPanel = panel('套餐', '价格以人民币分保存；购买订单保存套餐快照，后续改价不影响已创建订单。', state.actor.role === 'system_admin' ? button('＋ 新建套餐', () => planForm(null), 'primary') : null);
+  if (!plans.length) plansPanel.append(empty('暂无可用套餐', '管理员创建并启用套餐后，用户可以创建订单。'));
+  else plansPanel.append(table(['套餐', '说明', '价格', '时长', '流量', '操作'], plans.map(plan => {
+    const actions = el('div'); actions.append(button('购买', () => buyPlan(plan), 'table-action'));
+    if (state.actor.role === 'system_admin') actions.append(button('编辑', () => planForm(plan), 'table-action'), button('删除', () => deletePlan(plan), 'table-action danger'));
+    return [namedCell(plan.name, plan.id), plan.description || '—', money(plan.price_cents), `${plan.duration_days} 天`, plan.traffic_bytes ? bytes(plan.traffic_bytes) : '不限', actions];
+  })));
+  const ordersPanel = panel('订单', '订单只记录计费结果；套餐权益的自动发放/到期执行仍未实现。', null);
+  if (!orders.length) ordersPanel.append(empty('还没有订单', '选择套餐购买后会生成订单。'));
+  else ordersPanel.append(table(['套餐', '金额', '状态', '创建', '支付/退款', '操作'], orders.map(order => {
+    const actions = el('div');
+    if (order.status === 'pending') actions.append(button('支付', async () => { await api(`/commerce/orders/${order.id}/pay`, { method: 'POST' }); notify('订单已支付。'); await renderCommerce(); }, 'table-action'));
+    if (order.status === 'paid' && state.actor.role === 'system_admin') actions.append(button('退款', async () => { if (!confirm(`退款 ${money(order.amount_cents)} 到用户钱包？`)) return; await api(`/commerce/orders/${order.id}/refund`, { method: 'POST' }); notify('订单已退款。'); await renderCommerce(); }, 'table-action danger'));
+    return [order.plan_name, money(order.amount_cents), badge(orderStatuses[order.status] || order.status, order.status === 'paid' ? 'green' : order.status === 'refunded' ? 'orange' : ''), timestamp(order.created_at_ms), order.paid_at_ms ? timestamp(order.paid_at_ms) : order.refunded_at_ms ? timestamp(order.refunded_at_ms) : '—', actions];
+  })));
+  $('#content').replaceChildren(p, plansPanel, ordersPanel);
+}
+async function buyPlan(plan) {
+  if (!confirm(`购买「${plan.name}」并立即从钱包扣除 ${money(plan.price_cents)}？`)) return;
+  const order = await api('/commerce/orders', { method: 'POST', body: { plan_id: plan.id } });
+  await api(`/commerce/orders/${order.id}/pay`, { method: 'POST' });
+  notify('订单已支付。'); await renderCommerce();
+}
+function planForm(plan) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', '套餐名称', plan?.name || '').maxLength = 120;
+  textarea(grid, 'description', '说明', plan?.description || '').maxLength = 5000;
+  const price = field(grid, 'price', '价格（元）', plan ? (plan.price_cents / 100).toFixed(2) : '0.00', 'number'); price.min = 0; price.step = '0.01';
+  const days = field(grid, 'days', '时长 / 天', plan?.duration_days ?? 30, 'number'); days.min = 1; days.max = 3650;
+  field(grid, 'traffic', '流量 / bytes（留空不限）', plan?.traffic_bytes ?? '', 'number', false).min = 1;
+  select(grid, 'enabled', '状态', [['yes', '启用'], ['no', '停用']], plan?.enabled === false ? 'no' : 'yes');
+  form.append(grid, el('p', '价格转换为人民币分保存；已有订单使用创建时快照。', 'fine'));
+  submit(form, plan ? '保存套餐' : '创建套餐', async data => {
+    const body = { name: String(data.get('name')).trim(), description: String(data.get('description')), price_cents: Math.round(Number(data.get('price')) * 100), duration_days: number(data, 'days'), traffic_bytes: number(data, 'traffic'), enabled: data.get('enabled') === 'yes' };
+    if (!Number.isSafeInteger(body.price_cents) || body.price_cents < 0) throw new Error('价格无效');
+    if (plan) await api(`/commerce/plans/${plan.id}`, { method: 'PUT', body });
+    else await api('/commerce/plans', { method: 'POST', body });
+    $('#dialog').close(); notify('套餐已保存。'); await renderCommerce();
+  });
+  modal(plan ? `编辑套餐 · ${plan.name}` : '新建套餐', form);
+}
+async function deletePlan(plan) {
+  if (!confirm(`删除套餐「${plan.name}」？已有订单时会被拒绝。`)) return;
+  await api(`/commerce/plans/${plan.id}`, { method: 'DELETE' }); notify('套餐已删除。'); await renderCommerce();
+}
+function adjustWallet() {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'user_id', '用户 ID', '', 'text').maxLength = 120;
+  const delta = field(grid, 'delta', '调整金额（元，正数入账/负数扣款）', '', 'number'); delta.step = '0.01';
+  field(grid, 'reference', '幂等引用（唯一，如 bank-2026-001）', '', 'text').maxLength = 120;
+  field(grid, 'description', '说明', '', 'text', false).maxLength = 500;
+  form.append(grid, el('p', '同一引用只能入账一次；余额不得为负。此操作只调整钱包，不创建订单或发放权益。', 'fine'));
+  submit(form, '调整钱包', async data => {
+    const body = { delta_cents: Math.round(Number(data.get('delta')) * 100), reference: String(data.get('reference')).trim(), description: String(data.get('description')) };
+    if (!Number.isSafeInteger(body.delta_cents) || body.delta_cents === 0) throw new Error('调整金额无效');
+    await api(`/commerce/wallets/${String(data.get('user_id')).trim()}/adjust`, { method: 'POST', body });
+    $('#dialog').close(); notify('钱包已调整。'); await renderCommerce();
+  });
+  modal('调整用户钱包', form);
+}
+
 async function renderAnnouncements() {
   const active = await api('/announcements');
   const canManage = state.actor.role !== 'viewer';
@@ -1153,7 +1222,7 @@ function editAlertChannel(existing) {
   });
   modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
 }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

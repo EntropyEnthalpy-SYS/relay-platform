@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.26.0 开发版在 macOS 27.0.1 arm64 通过 **347 项自动化测试（318 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 348 项。日志见 [verification-0.26.0.txt](verification-0.26.0.txt)，逐项清单见 [validation-evidence-0.26.0.json](validation-evidence-0.26.0.json)。
+0.27.0 开发版在 macOS 27.0.1 arm64 通过 **349 项自动化测试（320 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 350 项。日志见 [verification-0.27.0.txt](verification-0.27.0.txt)，逐项清单见 [validation-evidence-0.27.0.json](validation-evidence-0.27.0.json)。
 
-## 0.26.0 公告验证
+## 0.27.0 套餐、钱包与订单验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 套餐启停可见性、非管理员 403、钱包入账/重复引用 409/负余额拒绝、订单快照、支付扣款、重复支付/退款 409、用户退款 403、余额与流水 |
+| HTTP | 创建套餐、买家 403 建套餐、管理员调钱包、买家建单/支付、余额、管理员退款、最终余额 |
+| 面板 | `node --check web/app.js` 与视图结构检查；钱包/订单页源码，未做浏览器点击验收 |
+
+## 0.26.0 公告验证（历史）
+
+0.26.0 开发版在 macOS 27.0.1 arm64 通过 **347 项自动化测试（318 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 348 项。日志见 [verification-0.26.0.txt](verification-0.26.0.txt)，逐项清单见 [validation-evidence-0.26.0.json](validation-evidence-0.26.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

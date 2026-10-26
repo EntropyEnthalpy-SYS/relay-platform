@@ -368,3 +368,19 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | PUT/DELETE | `/announcements/{id}` | 编辑/删除，受租户边界约束 |
 
 `severity` 为 `info`、`warning`、`critical`；标题 1..200 字节，正文最多 10,000 字节，`ends_at_ms` 必须晚于开始或为空。读取需要 `read`，写入需要 `users:write`，并受账号角色约束。记录在 metadata，schema v5、恢复日志格式 4 不变。详见 [ANNOUNCEMENTS.md](ANNOUNCEMENTS.md)。
+
+## 0.27.0 套餐、钱包与订单
+
+金额以人民币分（`i64`）保存，固定 `CNY`。所有 `/commerce/*` 仅登录会话，API 令牌访问 403。
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/commerce/plans` | 启用套餐列表（管理员含停用）/创建；写仅系统管理员 |
+| PUT/DELETE | `/commerce/plans/{id}` | 编辑/删除；有订单时删除 409 |
+| GET | `/commerce/wallet` | 自己的余额与流水 |
+| POST | `/commerce/wallets/{user}/adjust` | 管理员 `{delta_cents,reference,description}`；引用唯一、余额非负 |
+| GET/POST | `/commerce/orders` | 自己的订单（管理员全部）/创建 `{plan_id}` |
+| POST | `/commerce/orders/{id}/pay` | 钱包支付，重复支付 409 |
+| POST | `/commerce/orders/{id}/refund` | 管理员退款，重复退款 409 |
+
+套餐/订单保存价格快照。支付/退款不自动创建订阅、规则或流量权益。详见 [COMMERCE.md](COMMERCE.md)。
