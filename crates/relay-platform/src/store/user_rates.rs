@@ -17,7 +17,7 @@ fn rate_key(user: &str) -> String {
 #[derive(Default)]
 pub struct UserRates {
     allocator: Allocator,
-    signature: Option<(u64, u64, u64, i64)>,
+    signature: Option<(u64, u64, u64, u64, i64)>,
     /// Owner id to (tenant id, node ids).
     nodes: HashMap<String, (String, Vec<String>)>,
 }
@@ -25,19 +25,20 @@ impl UserRates {
     fn refresh(&mut self, tx: &Transaction<'_>) -> Result<()> {
         let now = now_ms();
         let signature = tx.query_row(
-            "SELECT COUNT(*),COALESCE(SUM(desired_revision),0),(SELECT COALESCE(SUM(json_extract(value,'$.revision')),0) FROM metadata WHERE key GLOB 'node_profile:*') FROM nodes",
+            "SELECT COUNT(*),(SELECT COALESCE(MAX(rowid),0) FROM config_history),COALESCE(SUM(applied_revision),0),(SELECT COALESCE(SUM(json_extract(value,'$.revision')),0) FROM metadata WHERE key GLOB 'node_profile:*') FROM nodes",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, now / 60_000)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, now / 60_000)),
         )?;
         if self.signature == Some(signature) {
             return Ok(());
         }
-        let mut q = tx.prepare("SELECT n.id,c.config_json FROM nodes n JOIN config_history c ON c.node_id=n.id AND c.revision=n.desired_revision ORDER BY n.id")?;
-        let rows: Vec<(String, String)> = q
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        let mut q =
+            tx.prepare("SELECT id,desired_revision,applied_revision FROM nodes ORDER BY id")?;
+        let rows: Vec<(String, u64, u64)> = q
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
         self.nodes.clear();
-        for (node, config) in rows {
+        for (node, desired, applied) in rows {
             // A paused or expired node forwards nothing, so it holds no share.
             if super::node_profiles::read(tx, &node)?
                 .settings
@@ -46,19 +47,38 @@ impl UserRates {
             {
                 continue;
             }
-            let config: NodeConfig = serde_json::from_str(&config)?;
-            // Traffic enters a chain once; later hops would count it again.
-            for rule in config
-                .rules
-                .iter()
-                .filter(|r| r.enabled && r.advertise.is_none())
-            {
-                let (_, nodes) = self
-                    .nodes
-                    .entry(rule.owner_id.clone())
-                    .or_insert_with(|| (rule.tenant_id.clone(), vec![]));
-                if !nodes.contains(&node) {
-                    nodes.push(node.clone());
+            // The desired revision has not necessarily been activated. Keep
+            // every still-running revision too, so a rejected update cannot
+            // retire a limit that the old listener is still enforcing. An
+            // agent confirms removal by reporting the new applied revision.
+            let mut revisions = vec![desired];
+            if applied != 0 && applied != desired {
+                revisions.push(applied);
+            }
+            for revision in revisions {
+                let Some(json) = tx
+                    .query_row(
+                        "SELECT config_json FROM config_history WHERE node_id=?1 AND revision=?2",
+                        params![node, revision],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()?
+                else {
+                    continue;
+                };
+                let config: NodeConfig = serde_json::from_str(&json)?;
+                // Advertised listeners are counted too. An advertised address
+                // can be reached directly, and the rule cannot prove an
+                // already metered upstream, so excluding it would lift the
+                // owner's limit.
+                for rule in config.rules.iter().filter(|r| r.enabled) {
+                    let (_, nodes) = self
+                        .nodes
+                        .entry(rule.owner_id.clone())
+                        .or_insert_with(|| (rule.tenant_id.clone(), vec![]));
+                    if !nodes.contains(&node) {
+                        nodes.push(node.clone());
+                    }
                 }
             }
         }

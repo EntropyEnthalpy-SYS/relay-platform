@@ -64,6 +64,7 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     via.addEventListener('change', () => chooseEndpoint(true)); chooseEndpoint(false);
     const weight = field(grid, `target-weight-${id}`, '权重', target.weight, 'number'); weight.min = 1; weight.max = 1000;
     const priority = field(grid, `target-priority-${id}`, '优先级（越小越优先，同级按均衡策略）', target.priority ?? 0, 'number'); priority.min = 0; priority.max = 65535;
+    const draining = select(grid, `target-draining-${id}`, '维护排空（新会话优先走其他目标，已有会话保持）', [['off', '正常使用'], ['on', '维护排空']], target.draining ? 'on' : 'off');
     const maximum = field(grid, `target-max-${id}`, '目标会话上限（TCP + UDP，留空不限）', target.max_sessions, 'number', false); maximum.min = 1; maximum.max = 1000000;
     const prewarm = field(grid, `target-prewarm-${id}`, '预热连接数（提前建好、待用的 TCP 连接，留空关闭；需启用 PROXY）', target.prewarm, 'number', false); prewarm.min = 1; prewarm.max = 32;
     const mode = select(grid, `target-mode-${id}`, '连接目标的安全方式', [['plain', '普通 TCP / UDP'], ['tls', 'TLS（验证目标证书）']], target.tls ? 'tls' : 'plain'); box.append(grid);
@@ -86,13 +87,13 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     mp.append(el('p', '目标必须汇聚到同一条规则。引用汇聚端口段时，可为各子流填写段内不同端口。不同端口本身不代表独立带宽。', 'fine'));
     function showMultipath() { const on = !!multipathMode && multipathMode.value !== 'off'; mp.classList.toggle('hidden', !on); mp.querySelectorAll('input').forEach(input => { input.disabled = !on; }); }
     multipathMode?.addEventListener('change', showMultipath); showMultipath();
-    const row = { box, address, via, weight, priority, maximum, prewarm, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws, up, down, bindIp, bindInterface }; rows.push(row);
+    const row = { box, address, via, weight, priority, draining, maximum, prewarm, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws, up, down, bindIp, bindInterface }; rows.push(row);
     function showSecurity() { const enabled = mode.value === 'tls'; secure.classList.toggle('hidden', !enabled); name.required = enabled; [name, ca, identity].forEach(input => { input.disabled = !enabled; }); }
     mode.onchange = showSecurity; showSecurity(); box.append(secure, proxyFields, ws.box, mp, button('移除此目标', () => { multipathMode?.removeEventListener('change', showMultipath); rows.splice(rows.indexOf(row), 1); box.remove(); }, 'table-action danger')); container.append(box);
   }
   targets.forEach((target, index) => add(target, multipathPaths?.[index])); form.append(container, button('＋ 添加目标', () => add()));
   const read = () => { if (!rows.length) throw new Error('至少保留一个转发目标'); return rows.map(row => {
-    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), max_sessions: row.maximum.value === '' ? null : Number(row.maximum.value), ...(row.prewarm.value === '' ? {} : { prewarm: Number(row.prewarm.value) }), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
+    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), max_sessions: row.maximum.value === '' ? null : Number(row.maximum.value), ...(row.draining.value === 'on' ? { draining: true } : {}), ...(row.prewarm.value === '' ? {} : { prewarm: Number(row.prewarm.value) }), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
     if (row.proxyMode.value !== 'off') {
       if (row.proxyPlacement.value === 'inside_tls' && row.mode.value !== 'tls') throw new Error('将 PROXY 放入加密连接前，请启用目标 TLS');
       target.proxy_protocol = { version: row.proxyMode.value, placement: row.proxyPlacement.value, checksum: row.proxyMode.value === 'v2' && row.proxyCrc.value === 'on' };

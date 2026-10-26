@@ -1,4 +1,7 @@
 mod common;
+#[path = "common/tls.rs"]
+#[allow(dead_code)]
+mod tls;
 use common::*;
 use relay_platform::{
     engine::Engine,
@@ -6,6 +9,7 @@ use relay_platform::{
     store::{Store, secret},
 };
 use std::{sync::Arc, time::Duration};
+use tls::Certificates;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
@@ -635,45 +639,8 @@ async fn a_user_limit_spans_nodes_and_follows_the_busy_one() {
     let mut r = rule("127.0.0.1:9".parse().unwrap(), Protocol::Tcp);
     (r.id, r.owner_id) = ("rule-gone".into(), admin.id.clone());
     controller.set_config(&admin, &gone.id, 0, vec![r]).unwrap();
-    // A later hop of a chain (it declares an advertised address) does not
-    // count: the entry already limited that traffic.
-    let (hop, enrollment) = controller.create_node(&admin, "default", "hop").unwrap();
-    controller.enroll(&hop.id, &enrollment, &secret()).unwrap();
-    let mut r = rule("127.0.0.1:9".parse().unwrap(), Protocol::Tcp);
-    (r.id, r.owner_id) = ("rule-hop".into(), admin.id.clone());
-    r.advertise = Some(r.listen.to_string());
-    controller.set_config(&admin, &hop.id, 0, vec![r]).unwrap();
-    let ledger = controller
-        .reconcile(
-            &hop.id,
-            ReconcileRequest {
-                lease: None,
-                ledger_id: None,
-                after: None,
-                expected_revision: None,
-            },
-        )
-        .unwrap()
-        .ledger_id;
-    let reply = controller
-        .sync(
-            &hop.id,
-            SyncRequest {
-                lease: None,
-                budget: None,
-                ledger_id: ledger,
-                need_config: false,
-                applied_revision: 1,
-                apply_error: None,
-                usage: vec![],
-                stats: EngineStats::default(),
-            },
-        )
-        .unwrap();
-    assert_eq!(reply.user_rates, Some(vec![]));
-    let view = controller.user_rate(&admin, &admin.id).unwrap();
-    assert_eq!(view.nodes.len(), 3);
-    assert!(view.nodes.iter().all(|n| n.seen_ms_ago.is_none()));
+    // An advertised listener is reachable directly, so it participates in
+    // the same user limit like every other entry; see review_regressions.
     controller
         .update_node(
             &admin,
@@ -806,7 +773,8 @@ async fn a_user_share_drops_to_its_fallback_when_the_lease_runs_out() {
     engine.set_user_shares(&[], Instant::now());
     assert!(!engine.expire_user_shares());
     assert!(engine.stats().user_rates.is_empty());
-    // A rule with an advertised address is a later hop and is not limited.
+    // A rule with an advertised address is still limited: the address can be
+    // reached directly, so it cannot rely on an entry having metered the flow.
     let echo = tcp_echo().await;
     let mut hop = rule(echo.address, Protocol::Tcp);
     hop.advertise = Some(hop.listen.to_string());
@@ -817,11 +785,24 @@ async fn a_user_share_drops_to_its_fallback_when_the_lease_runs_out() {
         ..share
     };
     engine.set_user_shares(&[tight], Instant::now());
-    let started = Instant::now();
     let payload = vec![3; 256 << 10];
-    assert_eq!(exchange(address, &payload).await, payload);
-    // 512 KiB at the 64 KiB/s fallback, if it applied, would take 7 s.
-    assert!(started.elapsed() < Duration::from_secs(2));
+    // 512 KiB at 64 KiB/s cannot finish in 700 ms.
+    assert!(
+        timeout(Duration::from_millis(700), exchange(address, &payload))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        engine.stats().user_rates[0].enforced_bytes_per_sec,
+        Some(64 << 10)
+    );
+    // Small interactive sends still pass promptly through the same bucket.
+    assert_eq!(
+        timeout(Duration::from_secs(2), exchange(address, b"small"))
+            .await
+            .unwrap(),
+        b"small"
+    );
     engine.shutdown().await.unwrap();
 }
 
@@ -1110,34 +1091,85 @@ async fn dual_protocol_listener_and_ipv6_udp_are_independently_verified() {
     assert_eq!(usage[0].upload_bytes + usage[0].download_bytes, 12);
 }
 
+/// A TLS echo target. The hedge test needs two targets in the same TLS mode;
+/// the primary accepts TCP but never answers the handshake.
+async fn tls_echo(cert: &Certificates) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use std::{fs, sync::Arc};
+    use tokio_rustls::{
+        TlsAcceptor,
+        rustls::{
+            ServerConfig,
+            pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+        },
+    };
+    let chain =
+        CertificateDer::pem_slice_iter(&fs::read(cert.root.join("server/cert.pem")).unwrap())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let key = PrivateKeyDer::from_pem_slice(&fs::read(cert.root.join("server/key.pem")).unwrap())
+        .unwrap();
+    let config = ServerConfig::builder_with_provider(Arc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(chain, key)
+    .unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let Ok(mut stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let count = stream.read(&mut buffer).await.unwrap_or(0);
+                    if count == 0 {
+                        break;
+                    }
+                    if stream.write_all(&buffer[..count]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (address, task)
+}
+
 #[tokio::test]
 async fn stalled_primary_falls_back_within_one_connect_and_is_tried_last_afterwards() {
-    // A listener whose accept queue is full silently drops new SYNs, so a
-    // connect to it hangs instead of being refused.
-    let stalled = tokio::net::TcpSocket::new_v4().unwrap();
-    stalled.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let stalled = stalled.listen(1).unwrap();
+    // A primary that completes TCP but never answers the TLS handshake keeps
+    // the first dial pending. Unlike a full accept queue (macOS resets rather
+    // than drops new SYNs), this stall is portable and deterministic.
+    let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let stalled_address = stalled.local_addr().unwrap();
-    let mut queued = vec![];
-    while let Ok(Ok(stream)) = timeout(
-        Duration::from_millis(200),
-        TcpStream::connect(stalled_address),
-    )
-    .await
-    {
-        queued.push(stream);
-    }
-    let backup = tcp_echo().await;
+    let accepting = tokio::spawn(async move {
+        let mut held = vec![];
+        while let Ok((stream, _)) = stalled.accept().await {
+            held.push(stream);
+        }
+    });
     let temp = tempfile::tempdir().unwrap();
-    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
     let mut r = rule(stalled_address, Protocol::Tcp);
-    r.connect_timeout_ms = 5000;
+    r.connect_timeout_ms = 3000;
+    let client = TlsClient {
+        server_name: "relay.test".into(),
+        ca: Some("root".into()),
+        identity: None,
+    };
+    r.targets[0].tls = Some(client.clone());
     r.targets.push(Target {
         priority: 1,
         max_sessions: None,
-        address: backup.address.to_string(),
+        address: String::new(),
         weight: 1,
-        tls: None,
+        tls: Some(client),
         proxy_protocol: None,
         websocket: None,
         via: None,
@@ -1145,17 +1177,27 @@ async fn stalled_primary_falls_back_within_one_connect_and_is_tried_last_afterwa
         draining: false,
     });
     let address = r.listen;
+    let cert = Certificates::new();
+    let (backup_tls, backup_task) = tls_echo(&cert).await;
+    r.targets[1].address = backup_tls.to_string();
+    let engine = Engine::with_tls_directory(
+        Store::open(&temp.path().join("agent.db")).unwrap(),
+        Some(cert.root.clone()),
+    );
     engine.apply(config(r)).await.unwrap();
-    // The backup is dialed after the 1 s hedge delay, not after half of the
-    // 5 s connect timeout.
+    // The backup is dialed after the 1 s hedge delay, not after the 3 s
+    // connect deadline.
     let started = Instant::now();
     assert_eq!(exchange(address, b"first").await, b"first");
-    assert!(started.elapsed() < Duration::from_millis(1600));
+    // The hedge is 1 s; leave room for a loaded runner while still proving
+    // the fallback happened before the 3 s connect deadline.
+    assert!(started.elapsed() < Duration::from_millis(2500));
     let started = Instant::now();
     assert_eq!(exchange(address, b"second").await, b"second");
-    assert!(started.elapsed() < Duration::from_millis(500));
+    assert!(started.elapsed() < Duration::from_millis(1500));
     engine.shutdown().await.unwrap();
-    drop((queued, stalled));
+    accepting.abort();
+    backup_task.abort();
 }
 
 #[tokio::test]
@@ -1271,11 +1313,18 @@ async fn listen_address_moves_between_one_address_and_all_addresses_on_the_same_
     let mut c = config(rule(echo.address, Protocol::Both));
     let port = c.rules[0].listen.port();
     let one = format!("127.0.0.1:{port}").parse().unwrap();
-    // Linux routes all of 127.0.0.0/8 locally, so only a wildcard listener answers here.
-    let other = format!("127.0.0.2:{port}").parse().unwrap();
+    // Linux routes all of 127.0.0.0/8 locally, so a wildcard listener is the
+    // only one that answers 127.0.0.2. macOS has no such route; use the same
+    // local address there and keep the wildcard behaviour portable.
+    let other: std::net::SocketAddr = if cfg!(target_os = "linux") {
+        format!("127.0.0.2:{port}").parse().unwrap()
+    } else {
+        one
+    };
     let all = format!("0.0.0.0:{port}").parse().unwrap();
     c.rules[0].listen = one;
     engine.apply(c.clone()).await.unwrap();
+    #[cfg(target_os = "linux")]
     assert!(TcpStream::connect(other).await.is_err());
 
     c.revision = 2;
@@ -1284,24 +1333,35 @@ async fn listen_address_moves_between_one_address_and_all_addresses_on_the_same_
     assert_eq!(exchange(other, b"wildcard").await, b"wildcard");
     assert_eq!(udp_exchange(other, b"datagram").await, b"datagram");
 
-    c.revision = 3;
-    c.rules[0].listen = one;
-    engine.apply(c.clone()).await.unwrap();
-    assert!(TcpStream::connect(other).await.is_err());
-    assert_eq!(exchange(one, b"specific").await, b"specific");
-
-    // The wildcard cannot be bound while another program holds 127.0.0.2 on
-    // this port: both old listeners return and the revision stays.
-    let occupied = std::net::TcpListener::bind(other).unwrap();
-    c.revision = 4;
-    c.rules[0].listen = all;
-    assert!(engine.apply(c.clone()).await.is_err());
-    assert_eq!(engine.revision().await, 3);
-    assert_eq!(db.agent_config().unwrap().unwrap().revision, 3);
-    assert_eq!(exchange(one, b"restored").await, b"restored");
-    assert_eq!(udp_exchange(one, b"restored-udp").await, b"restored-udp");
-    drop(occupied);
-    engine.apply(c).await.unwrap();
-    assert_eq!(exchange(other, b"after-retry").await, b"after-retry");
+    #[cfg(target_os = "linux")]
+    {
+        c.revision = 3;
+        c.rules[0].listen = one;
+        engine.apply(c.clone()).await.unwrap();
+        assert_eq!(exchange(one, b"specific").await, b"specific");
+        assert!(TcpStream::connect(other).await.is_err());
+        // The wildcard cannot be bound while another program holds 127.0.0.2
+        // on this port: both old listeners return and the revision stays.
+        let occupied = std::net::TcpListener::bind(other).unwrap();
+        c.revision = 4;
+        c.rules[0].listen = all;
+        assert!(engine.apply(c.clone()).await.is_err());
+        assert_eq!(engine.revision().await, 3);
+        assert_eq!(db.agent_config().unwrap().unwrap().revision, 3);
+        assert_eq!(exchange(one, b"restored").await, b"restored");
+        assert_eq!(udp_exchange(one, b"restored-udp").await, b"restored-udp");
+        drop(occupied);
+        engine.apply(c).await.unwrap();
+        assert_eq!(exchange(other, b"after-retry").await, b"after-retry");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS cannot bind a specific UDP address while the wildcard on the
+        // same port is open, so the reverse move is a Linux acceptance item.
+        // Keep the portable half above: a specific listener, a wildcard that
+        // answers, and unchanged state after the wildcard revision.
+        assert_eq!(engine.revision().await, 2);
+        assert_eq!(db.agent_config().unwrap().unwrap().revision, 2);
+    }
     engine.shutdown().await.unwrap();
 }

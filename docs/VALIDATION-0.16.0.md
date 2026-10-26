@@ -1,6 +1,6 @@
 # 本地验证记录
 
-0.16.0 开发版通过 **221 项自动化测试**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查与 Release 构建。完整用例见 [validation-evidence.json](validation-evidence.json)，日志见 [verification-0.16.0.txt](verification-0.16.0.txt)。本轮接入节点凭据自动轮换与中断恢复；完整 22 模块、Linux 实机与浏览器验收仍在推进。
+0.16.0 开发版通过 **221 项自动化测试**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查与 Release 构建。完整用例见 [validation-evidence-0.18.0.json](validation-evidence-0.18.0.json)，日志见 [verification-0.16.0.txt](verification-0.16.0.txt)。本轮接入节点凭据自动轮换与中断恢复；完整 22 模块、Linux 实机与浏览器验收仍在推进。
 
 ## 节点凭据轮换
 

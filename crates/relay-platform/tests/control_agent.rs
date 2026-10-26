@@ -446,6 +446,101 @@ async fn a_running_agent_takes_its_user_share_and_then_syncs_every_second() {
     stop_server(server_instance).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rejected_config_keeps_the_running_user_share_on_a_managed_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    let echo = tcp_echo().await;
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    control.set_kind("controller").unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let other = control
+        .create_user(
+            &admin,
+            "default",
+            "other",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (node, enrollment) = control.create_node(&admin, "default", "fenced").unwrap();
+    let mut r = rule(echo.address, Protocol::Tcp);
+    r.owner_id = admin.id.clone();
+    let listen = r.listen;
+    control
+        .set_config(&admin, &node.id, 0, vec![r.clone()])
+        .unwrap();
+    let server_instance = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let secret_path = temp.path().join("enroll.secret");
+    write_secret(&secret_path, enrollment.as_bytes()).unwrap();
+    let agent_db = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let mut opts = options(
+        &format!("http://{}", server_instance.address),
+        &node.id,
+        Some(secret_path),
+    );
+    opts.poll_interval = Duration::from_millis(50);
+    let running = tokio::spawn(agent::run(agent_db.clone(), opts, stop.clone()));
+    wait_applied(&control, &admin, 1).await;
+    control
+        .set_user_rate(&admin, &admin.id, Some(256 << 10))
+        .unwrap();
+    let seat = || control.user_rate(&admin, &admin.id).unwrap().nodes[0].clone();
+    let until = Instant::now() + Duration::from_secs(5);
+    while seat().enforced_bytes_per_sec.is_none() {
+        assert!(Instant::now() < until, "agent never enforced the share");
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(seat().enforced_bytes_per_sec, Some(256 << 10));
+
+    // Revision 2 moves the rule to another owner on an occupied port. The
+    // managed agent must keep revision 1 and its share while retrying.
+    let blocker = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    r.id = "replacement".into();
+    r.owner_id = other.id;
+    r.listen = blocker.local_addr().unwrap();
+    control.set_config(&admin, &node.id, 1, vec![r]).unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let node = control.nodes(&admin).unwrap().remove(0);
+        if node.apply_error.is_some() {
+            assert_eq!(node.applied_revision, 1);
+            break;
+        }
+        assert!(Instant::now() < until, "agent did not reject revision 2");
+        sleep(Duration::from_millis(20)).await;
+    }
+    sleep(Duration::from_millis(1200)).await;
+    assert_eq!(
+        seat().enforced_bytes_per_sec,
+        Some(256 << 10),
+        "the failed revision's share list removed the running limit"
+    );
+    assert_eq!(control.nodes(&admin).unwrap()[0].applied_revision, 1);
+    assert!(TcpStream::connect(listen).await.is_ok());
+
+    // Releasing the port lets the retry activate and retire the old share.
+    drop(blocker);
+    wait_applied(&control, &admin, 2).await;
+    let until = Instant::now() + Duration::from_secs(3);
+    while !control
+        .user_rate(&admin, &admin.id)
+        .unwrap()
+        .nodes
+        .is_empty()
+    {
+        assert!(Instant::now() < until, "old share was not retired");
+        sleep(Duration::from_millis(20)).await;
+    }
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(server_instance).await;
+}
+
 async fn server(db: Store, bind: SocketAddr) -> Server {
     let stop = CancellationToken::new();
     let router = api::router(AppState::new(db).with_shutdown(stop.clone()));
@@ -1899,16 +1994,31 @@ async fn agent_reports_become_telemetry_visible_only_to_the_owning_tenant() {
             .as_array()
             .and_then(|s| s.last().cloned())
             .unwrap_or(Value::Null);
-        // Both directions of the echo, and a CPU share needs two samples.
-        if latest["forwarded_bytes"].as_u64() >= Some(100_000) && latest["cpu_percent"].is_number()
+        // Both directions of the echo; CPU needs two samples and is only
+        // measured on Linux. Other platforms report null resource fields but
+        // must still expose the tenant-scoped traffic sample.
+        let measured = cfg!(target_os = "linux");
+        if latest["forwarded_bytes"].as_u64() >= Some(100_000)
+            && (!measured || latest["cpu_percent"].is_number())
         {
             break latest;
         }
         assert!(Instant::now() < until, "no telemetry sample: {body}");
         sleep(Duration::from_millis(50)).await;
     };
-    assert!(latest["rss_bytes"].as_u64() > Some(0));
-    assert!(latest["memory_total_bytes"].as_u64() > Some(0));
+    #[cfg(target_os = "linux")]
+    {
+        assert!(latest["rss_bytes"].as_u64() > Some(0));
+        assert!(latest["memory_total_bytes"].as_u64() > Some(0));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `system.rs` has no /proc outside Linux; the sample keeps explicit
+        // nulls instead of failing the portable telemetry path.
+        assert!(latest["cpu_percent"].is_null());
+        assert!(latest["rss_bytes"].is_null());
+        assert!(latest["memory_total_bytes"].is_null());
+    }
 
     let (outside_token, _) = control.login(&outsider.username, PASSWORD).unwrap();
     let hidden = get(outside_token).await;

@@ -412,7 +412,20 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                     }
                                 }
                             }
-                            engine.set_user_shares(&synced.user_rates.unwrap_or_default(), sent);
+                            if apply_error.is_none() {
+                                engine
+                                    .set_user_shares(&synced.user_rates.unwrap_or_default(), sent);
+                            } else {
+                                // The controller computes shares from the desired
+                                // revision. A rejected activation still leaves the
+                                // old listener running, so keep its limits: renew
+                                // the shares already in force instead of applying a
+                                // list that no longer names the old owner.
+                                engine.renew_user_shares(sent);
+                                tracing::info!(
+                                    "share update deferred: configuration activation is pending"
+                                );
+                            }
                             // Saved as they would be restored, so the steady
                             // movement of shares above the fallback writes nothing.
                             let restored: Vec<UserShare> = engine

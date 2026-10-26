@@ -283,3 +283,42 @@ fn unrelated_and_future_databases_are_rejected_without_schema_migration() {
     db.execute_batch("PRAGMA user_version=99").unwrap();
     assert!(Store::open(&path).is_err());
 }
+
+#[test]
+fn application_schema_five_fences_downgrades_without_rewriting_tables() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("controller.db");
+    drop(Store::open(&path).unwrap());
+    // A 0.19.0 database is schema 4. Opening it with 0.20.0 performs only the
+    // compatibility bump; no table or recovery-log fingerprint changes.
+    let legacy = rusqlite::Connection::open(&path).unwrap();
+    legacy.execute_batch("PRAGMA user_version=4").unwrap();
+    let before: Vec<(String, String)> = legacy
+        .prepare(
+            "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    drop(legacy);
+    drop(Store::open(&path).unwrap());
+    let upgraded = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        upgraded
+            .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        5
+    );
+    let after: Vec<(String, String)> = upgraded
+        .prepare(
+            "SELECT type,name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(before, after, "the fence must not rewrite the schema");
+}

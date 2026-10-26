@@ -852,6 +852,12 @@ impl Drop for TargetGuard {
     }
 }
 
+struct RuleResources {
+    node_rate: Arc<Limiter>,
+    user_limit: Option<Arc<UserLimit>>,
+    salts: Option<shadowsocks::SaltCache>,
+}
+
 struct RuntimeRule {
     shadowsocks: Option<shadowsocks::Server>,
     multipath_server: Option<Arc<multipath::Server>>,
@@ -873,8 +879,9 @@ struct RuntimeRule {
     preferred: AtomicUsize,
     /// The rule's owner; a node cap rotates between owners.
     user: u64,
-    /// Entry rules only: a rule with an advertised address is a later hop of
-    /// a chain whose traffic the entry already counted.
+    /// The owner's cross-node share. Every listener enforces it, including an
+    /// advertised one, because an advertised address can also be reached
+    /// directly and topology metadata alone proves no metered upstream.
     user_limit: Option<Arc<UserLimit>>,
 }
 /// Orders same-priority targets by probe latency, unmeasured ones last. The
@@ -909,16 +916,20 @@ impl RuntimeRule {
         tls: PreparedTls,
         resolver: Arc<TargetResolver>,
         routes: Arc<Routes>,
-        node_rate: Arc<Limiter>,
-        user_limit: Option<Arc<UserLimit>>,
+        resources: RuleResources,
     ) -> Self {
         let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(spec.rate_bytes_per_sec)));
         let target_active = shared.target_counters(&spec.targets);
         Self {
-            shadowsocks: spec
-                .inbound_shadowsocks
-                .as_ref()
-                .map(|config| shadowsocks::Server::new(config).expect("validated configuration")),
+            shadowsocks: spec.inbound_shadowsocks.as_ref().map(|config| {
+                shadowsocks::Server::with_salts(
+                    config,
+                    resources
+                        .salts
+                        .unwrap_or_else(|| Arc::new(StdMutex::new(shadowsocks::Salts::default()))),
+                )
+                .expect("validated configuration")
+            }),
             multipath_server: spec
                 .inbound_multipath
                 .clone()
@@ -932,13 +943,13 @@ impl RuntimeRule {
             target_cooldown: spec.targets.iter().map(|_| AtomicU64::new(0)).collect(),
             preferred: AtomicUsize::new(usize::MAX),
             user: user_key(&spec.tenant_id, &spec.owner_id),
-            user_limit,
+            user_limit: resources.user_limit,
             spec,
             resolver,
             routes,
             tls,
             shared,
-            node_rate,
+            node_rate: resources.node_rate,
             cancel: CancellationToken::new(),
             cursor: AtomicU64::new(0),
             target_active,
@@ -1371,6 +1382,9 @@ struct EngineInner {
     listeners: HashMap<ListenerKey, ListenerHandle>,
     rules: HashMap<String, Arc<RuntimeRule>>,
     resolvers: HashMap<Option<DnsCache>, Arc<TargetResolver>>,
+    /// Replay state per (method, key), shared by rule revisions so a rename
+    /// or rate change keeps a captured request unacceptable.
+    shadowsocks_salts: HashMap<Vec<u8>, shadowsocks::SaltCache>,
     stopped: bool,
 }
 
@@ -1441,6 +1455,13 @@ impl Engine {
     /// Users left out lose their limit.
     pub fn set_user_shares(&self, shares: &[UserShare], sent: Instant) {
         self.hold_user_shares(shares, sent + crate::user_rate::LEASE);
+    }
+    /// Extends the shares in force without changing them. Used while a new
+    /// configuration is rejected: its listener is still the old one, so its
+    /// limit must not expire or be replaced by the failed revision's list.
+    pub fn renew_user_shares(&self, sent: Instant) {
+        let shares = self.user_shares();
+        self.hold_user_shares(&shares, sent + crate::user_rate::LEASE);
     }
     fn hold_user_shares(&self, shares: &[UserShare], until: Instant) {
         let mut kept = std::collections::HashSet::new();
@@ -1577,6 +1598,9 @@ impl Engine {
         }
         let mut wanted = HashMap::new();
         let mut rules = HashMap::new();
+        // Cloned so an early rejection leaves the running rules' replay state
+        // untouched; the pruned map is installed only after a successful swap.
+        let mut salts = inner.shadowsocks_salts.clone();
         let mut staged = HashMap::new();
         let mut resolvers = HashMap::new();
         let mut deferred = vec![];
@@ -1612,10 +1636,20 @@ impl Engine {
                     tls,
                     resolver,
                     self.routes.clone(),
-                    self.node_rate.clone(),
-                    spec.advertise
-                        .is_none()
-                        .then(|| self.user_limits.get(&spec.tenant_id, &spec.owner_id)),
+                    RuleResources {
+                        node_rate: self.node_rate.clone(),
+                        user_limit: Some(self.user_limits.get(&spec.tenant_id, &spec.owner_id)),
+                        salts: spec.inbound_shadowsocks.as_ref().map(|config| {
+                            let key = shadowsocks::replay_key(config)
+                                .expect("Shadowsocks configuration validated above");
+                            salts
+                                .entry(key)
+                                .or_insert_with(|| {
+                                    Arc::new(StdMutex::new(shadowsocks::Salts::default()))
+                                })
+                                .clone()
+                        }),
+                    },
                 );
                 if let Some(old) = inner.rules.get(&spec.id)
                     && old.spec.health_check == spec.health_check
@@ -1813,6 +1847,9 @@ impl Engine {
         inner.rules = rules;
         inner.resolvers = resolvers;
         inner.config = Some(config);
+        // Old runtimes are gone now; keep only replay state still in use.
+        salts.retain(|_, cache| Arc::strong_count(cache) > 1);
+        inner.shadowsocks_salts = salts;
         Ok(())
     }
 

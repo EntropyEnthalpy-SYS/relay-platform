@@ -237,7 +237,7 @@ impl Store {
         let mut conn = Connection::open(path)?;
         conn.busy_timeout(Duration::from_secs(5))?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        ensure!(version <= 4, "database schema newer than this binary");
+        ensure!(version <= 5, "database schema newer than this binary");
         if version == 0 {
             let tables: u64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", [], |r| r.get(0))?;
             ensure!(tables == 0, "refusing to initialize an unrelated database");
@@ -272,6 +272,15 @@ impl Store {
         }
         if version < 4 {
             conn.execute_batch("BEGIN; CREATE TABLE recovery_state(id INTEGER PRIMARY KEY CHECK(id=1),journal_id TEXT NOT NULL,sequence INTEGER NOT NULL CHECK(sequence>=0),digest TEXT NOT NULL); CREATE TABLE cancelled_budget_requests(node_id TEXT NOT NULL REFERENCES nodes(id),run_id TEXT NOT NULL,request_id TEXT NOT NULL,budget_id TEXT NOT NULL REFERENCES budgets(id),PRIMARY KEY(node_id,run_id,request_id)); PRAGMA user_version=4; COMMIT;")?;
+        }
+        // 0.20.0: the security state introduced in 0.19.0 (MFA, scoped API
+        // tokens) is not understood by 0.18.0/0.19.0. Bumping the persisted
+        // application schema makes every older binary refuse the database
+        // before it opens a listener or serves a password-only login. The
+        // table layout is unchanged, so the recovery-log format and its
+        // schema fingerprint stay valid and no journal rewrite is needed.
+        if version < 5 {
+            conn.execute_batch("PRAGMA user_version=5")?;
         }
         Ok(Self(
             Arc::new(Mutex::new(crate::journal::LoggedConnection::new(conn)?)),

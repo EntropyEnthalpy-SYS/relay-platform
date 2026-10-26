@@ -16,7 +16,7 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     pin::Pin,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     task::{Context, Poll, ready},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -83,6 +83,26 @@ impl Method {
     fn max_chunk(self) -> usize {
         if self.edition_2022() { 0xFFFF } else { 0x3FFF }
     }
+    /// Stable identity of the wire method, used to scope replay state.
+    fn id(self) -> u8 {
+        match self {
+            Self::Blake3Aes128Gcm => 1,
+            Self::Blake3Aes256Gcm => 2,
+            Self::Blake3Chacha20Poly1305 => 3,
+            Self::Aes128Gcm => 4,
+            Self::Aes256Gcm => 5,
+            Self::Chacha20IetfPoly1305 => 6,
+        }
+    }
+}
+
+/// Replay state is scoped to the cryptographic identity, not to one rule
+/// revision: a rename, rate change or other edit that keeps the key and
+/// method must not make captured requests acceptable again.
+pub(crate) fn replay_key(config: &ServerConfig) -> Result<Vec<u8>> {
+    let mut key = vec![config.method.id()];
+    key.extend(config.key()?);
+    Ok(key)
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,7 +342,7 @@ impl Cipher {
 
 /// Salts seen in the last [`SALT_MEMORY`]; a repeat is a replayed request.
 #[derive(Default)]
-struct Salts {
+pub(crate) struct Salts {
     seen: HashSet<Vec<u8>>,
     order: VecDeque<(Instant, Vec<u8>)>,
 }
@@ -343,15 +363,23 @@ impl Salts {
     }
 }
 
+/// TCP request salts shared by every runtime that uses the same key and
+/// method. The engine keeps one cache per cryptographic identity while a
+/// rule uses it, so replacing a rule does not forget replayed requests.
+pub(crate) type SaltCache = Arc<Mutex<Salts>>;
+
 pub struct Server {
     method: Method,
     key: Vec<u8>,
     allow_private: bool,
-    salts: Mutex<Salts>,
+    salts: SaltCache,
     udp: UdpKeys,
 }
 impl Server {
     pub fn new(config: &ServerConfig) -> Result<Self> {
+        Self::with_salts(config, Arc::new(Mutex::new(Salts::default())))
+    }
+    pub(crate) fn with_salts(config: &ServerConfig, salts: SaltCache) -> Result<Self> {
         let key = config.key()?;
         let udp = match config.method {
             Method::Blake3Aes128Gcm | Method::Blake3Aes256Gcm => {
@@ -366,7 +394,7 @@ impl Server {
             method: config.method,
             key,
             allow_private: config.allow_private_destinations,
-            salts: Mutex::default(),
+            salts,
             udp,
         })
     }

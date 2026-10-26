@@ -2,7 +2,9 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.19.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.20.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+
+0.20.0 修复 0.19.0 源码审查发现的四项 P1、两项 P2：广告地址监听仍执行用户跨节点限速；配置激活失败保留仍在运行修订的限速份额；Shadowsocks 规则重命名或限速调整保留 TCP 重放状态；应用 schema 升至 v5、控制器/Agent 状态兼容代号升至 2，旧程序拒绝打开启用两步验证后的状态；规则编辑保存保留维护排空字段；macOS 验证路径恢复可移植并保留 Linux 专属用例。审查中的缺陷复现已改写为回归测试。
 
 0.19.0 新增管理账号两步验证（TOTP 与一次性恢复码）和带权限范围、有效期的 API 令牌，在“账户安全”页面管理，接口见 [API.md](docs/API.md)。本版首次在 Debian 12 x86_64 上完成源码构建与全部自动化测试，并修复节点注册令牌对话框为空等界面缺陷。
 
@@ -52,6 +54,8 @@
 cargo build --locked --release
 rustup component add rustfmt clippy
 sh scripts/verify.sh
+# 可选：用 0.18.0/0.19.0 二进制核对 schema v5 降级围栏（使用本机临时状态）
+python3 scripts/check_state_fence.py --new target/release/relay --old /path/to/0.19.0/relay --legacy /path/to/0.18.0/relay
 ```
 
 可执行程序为 `target/release/relay`，管理界面直接编入二进制。`Cargo.lock` 固定依赖版本，第三方清单位于 [THIRD_PARTY.md](docs/THIRD_PARTY.md)。自有代码的对外发布许可尚未指定。

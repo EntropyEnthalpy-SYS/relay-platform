@@ -1,6 +1,6 @@
 # 本地验证记录
 
-0.18.0 开发版通过 **262 项自动化测试（234 项 Rust、28 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查与 Release 构建。完整用例见 [validation-evidence.json](validation-evidence.json)，日志见 [verification-0.18.0.txt](verification-0.18.0.txt)。本轮接入签名离线部署、程序代次切换、中断恢复、卸载及保留状态重装；完整 22 模块、Linux 实机与浏览器验收仍在推进。
+0.18.0 开发版通过 **262 项自动化测试（234 项 Rust、28 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查与 Release 构建。完整用例见 [validation-evidence-0.18.0.json](validation-evidence-0.18.0.json)，日志见 [verification-0.18.0.txt](verification-0.18.0.txt)。本轮接入签名离线部署、程序代次切换、中断恢复、卸载及保留状态重装；完整 22 模块、Linux 实机与浏览器验收仍在推进。
 
 ## 签名离线部署与保留状态重装
 

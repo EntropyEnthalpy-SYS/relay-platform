@@ -18,7 +18,12 @@ use std::{
 use uuid::Uuid;
 
 const MAGIC: &[u8; 8] = b"RLYJNL01";
-const SCHEMA: u32 = 4;
+/// On-disk recovery-log format. It is independent of the SQLite application
+/// schema: 0.20.0 raises `user_version` to 5 without changing any table, so
+/// existing logs keep their format and schema fingerprint.
+const FORMAT: u32 = 4;
+/// Oldest application schema this binary serves.
+const SCHEMA: u32 = 5;
 const HEADER_LEN: u64 = 92;
 const MAX_CHANGESET: u64 = 64 * 1024 * 1024;
 
@@ -155,12 +160,12 @@ fn schema_hash(conn: &Connection) -> Result<String> {
 fn initial_head(id: &str, schema_hash: &str) -> Result<(Vec<u8>, JournalHead)> {
     let id = Uuid::parse_str(id)?;
     let mut header = Vec::from(MAGIC.as_slice());
-    header.extend(SCHEMA.to_be_bytes());
+    header.extend(FORMAT.to_be_bytes());
     header.extend(id.as_bytes());
     header.extend(schema_hash.as_bytes());
     let head = JournalHead {
         journal_id: id.to_string(),
-        schema: SCHEMA,
+        schema: FORMAT,
         schema_sha256: schema_hash.into(),
         sequence: 0,
         sha256: hash(&header),
@@ -240,7 +245,7 @@ fn scan(
     file.rewind()?;
     let header = fixed::<92>(file)?.context("incomplete recovery log header")?;
     ensure!(
-        &header[..8] == MAGIC && u32::from_be_bytes(header[8..12].try_into()?) == SCHEMA,
+        &header[..8] == MAGIC && u32::from_be_bytes(header[8..12].try_into()?) == FORMAT,
         "unsupported recovery log format or schema"
     );
     let id = Uuid::from_slice(&header[12..28])?.to_string();
@@ -621,9 +626,10 @@ pub fn restore_controller(backup: &Path, log: &Path, output: &Path) -> Result<Re
         .context("stop the controller before restoring from its recovery log")?;
     let expected = read_head(&head_path(log))?;
     let source = Connection::open_with_flags(backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let source_schema: u32 = source.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
-        source.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))? == SCHEMA,
-        "backup schema does not match this recovery log version"
+        (4..=SCHEMA).contains(&source_schema),
+        "backup schema is not supported by this recovery log version"
     );
     let start = checkpoint(&source)?
         .context("backup predates recovery logging; no continuous history can be proven")?;
@@ -680,6 +686,10 @@ pub fn restore_controller(backup: &Path, log: &Path, output: &Path) -> Result<Re
             )?;
         }
         restored.execute("DELETE FROM metadata WHERE key IN('backup_created_at_ms','backup_original_budget_pause')",[])?;
+        // A 0.19.0 backup is schema 4 but has the same tables; finish the
+        // compatibility bump after replay so this binary serves it and older
+        // binaries reject the restored state.
+        restored.execute_batch("PRAGMA user_version=5")?;
         let mut replayed = 0;
         scan(&mut journal, Some(&start), |frame, head| {
             if frame.sequence > start.1 {

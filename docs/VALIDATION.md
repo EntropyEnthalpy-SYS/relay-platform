@@ -1,5 +1,35 @@
 # 本地验证记录
 
+0.20.0 开发版在 macOS 27.0.1 arm64 通过 **326 项自动化测试（297 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、规则编辑器序列化回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用，不作为跳过项。Linux 上还多一项条件单元测试，合计 327 项。日志见 [verification-0.20.0.txt](verification-0.20.0.txt)，逐项清单见 [validation-evidence-0.20.0.json](validation-evidence-0.20.0.json)。完整 22 模块、两节点原生服务和长期负载验收仍在推进。
+
+0.19.0 的历史计数需要更正：其开头的 318 项（289 + 29）来自 `--no-fail-fast` 的便携运行，没有计入 macOS 上失败的遥测与监听地址两项，也没有计入 1 项过滤；Linux 记录为 293 项 Rust（比 macOS 多一项条件测试）。0.20.0 已修复这两项 macOS 失败，并统一按完整套件计数。以下 0.19.0 记录保留原观测值。
+
+## 0.20.0 审查修复验证
+
+| 编号 | 修正 | 回归证据 |
+| --- | --- | --- |
+| R1 | 带 `advertise` 的规则参与用户跨节点份额，直接访问广告地址同样受限 | `review_regressions::advertised_listener_enforces_the_owners_limit_for_direct_clients`；1 MiB 双向在 16 KiB/s 限额下 1 秒未完成 |
+| R2 | 份额按节点“期望修订 ∪ 已应用修订”计算；激活失败时 Agent 续租旧份额 | `review_regressions::rejected_revision_renews_the_running_limit_instead_of_removing_it`；端口冲突修订被拒绝后旧监听仍受限 |
+| R3 | Shadowsocks TCP 盐缓存按（方式、密钥）跨兼容规则替换共享 | `review_regressions::shadowsocks_replay_state_survives_compatible_rule_revisions`；改名、限速、换钥三条路径 |
+| R4 | 应用 schema v5、状态兼容代号 2；旧二进制拒绝打开，安装器拒绝跨代号回滚 | `recovery::application_schema_five_fences_downgrades_without_rewriting_tables`；`scripts/check_state_fence.py` 使用 0.18.0/0.19.0/0.20.0 三个真实二进制验证 MFA、迁移与 v4 备份恢复 |
+| R5 | 规则编辑器保留 `target.draining`，并提供显式结束维护 | `scripts/test_web_editor.cjs` 执行随包 `targetEditor`，覆盖保留、显式关闭和普通目标 |
+| R6 | macOS 遥测只要求流量样本；监听迁移按平台门控；故障切换改用确定性的 TLS 握手停滞 | `agent_reports_become_telemetry_visible_only_to_the_owning_tenant`、`listen_address_moves_between_one_address_and_all_addresses_on_the_same_port`、`stalled_primary_falls_back_within_one_connect_and_is_tried_last_afterwards` |
+
+跨版本围栏脚本（本机，三个临时状态目录）：0.20.0 启用两步验证后密码登录 401；0.19.0 与 0.18.0 启动同一状态均以 `database schema newer than this binary` 退出；0.20.0 重新打开后密码登录仍 401、下一步时间片 TOTP 返回 200。0.19.0 创建的 schema v4 状态由 0.20.0 原地迁移，恢复日志序列 3→5→6 连续，旧二进制随后被拒绝。0.19.0 备份加日志由 0.20.0 `restore` 重放（备份序列 3、恢复序列 3），恢复后的控制器登录 200。
+
+完整检查命令：
+
+```sh
+sh scripts/verify.sh
+cargo build --locked --release
+python3 scripts/check_state_fence.py --new target/debug/relay \
+  --old /path/to/0.19.0/relay --legacy /path/to/0.18.0/relay
+```
+
+R1/R2 的毫秒数字只用于证明限额被明显突破或保持，不构成吞吐基准。跨版本脚本只操作本机临时状态，不调用服务管理器、真实安装器回滚或生产迁移。Linux 上仍应重跑完整套件、真实双机与 72 小时负载。
+
+## 0.19.0 历史记录
+
 0.19.0 开发版通过 **318 项自动化测试（289 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查与 Release 构建。日志见 [verification-0.19.0.txt](verification-0.19.0.txt)。本轮首次在 Linux 上构建并运行全部检查，新增管理账号两步验证与带权限范围的 API 令牌，并以真实浏览器验收相关页面。此前各版本的基准与演练记录保留在 [VALIDATION-0.18.0.md](VALIDATION-0.18.0.md) 等历史文件中；完整 22 模块、两节点原生服务和长期负载验收仍在推进。
 
 ## Linux 构建与测试

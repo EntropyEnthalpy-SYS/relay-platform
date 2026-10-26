@@ -131,8 +131,8 @@ async fn main() -> Result<()> {
                     "os": std::env::consts::OS,
                     "arch": std::env::consts::ARCH,
                     "deployment_format": 1,
-                    "state_contract": {"controller": 1, "agent": 1},
-                    "controller_schema": 4
+                    "state_contract": {"controller": 2, "agent": 2},
+                    "controller_schema": 5
                 })
             );
         }

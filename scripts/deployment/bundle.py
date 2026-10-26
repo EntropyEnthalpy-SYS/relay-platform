@@ -99,7 +99,7 @@ def validate_info(info):
     require(info['product'] == 'relay-platform' and info['deployment_format'] == 1, 'unsupported deployment format')
     require(re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', info['version']), 'invalid release version')
     require(info['os'] in ('linux', 'macos') and info['arch'] in ('x86_64', 'aarch64'), 'unsupported build target')
-    require(info['controller_schema'] == 4, 'unsupported controller schema')
+    require(info['controller_schema'] == 5, 'unsupported controller schema')
     require(isinstance(info['state_contract'], dict) and set(info['state_contract']) == {'controller', 'agent'}, 'invalid state contract')
     require(all(type(n) is int and 0 < n <= 65535 for n in info['state_contract'].values()), 'invalid compatibility epoch')
 

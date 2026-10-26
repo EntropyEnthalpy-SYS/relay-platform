@@ -100,7 +100,7 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 
 创建额度和恢复的完整约束见 [BUDGETS.md](BUDGETS.md)。当前未提供额度删除、周期清零或 HTTP 恢复解除接口；`allocation_paused:true` 时不发放新预留。0.4.0 的离线 `relay restore` 只有在完整恢复日志校验和重放成功后，才恢复原分配状态，见 [RECOVERY.md](RECOVERY.md)。接口的可用能力目录不表示完整灾难恢复已经完成。
 
-`/recovery` 的 `head` 包含 `journal_id`、`schema`、`schema_sha256`、`sequence`、`sha256` 和 `committed_bytes`。它不返回日志内容、磁盘路径或凭据。未认证的 `/healthz` 在恢复写入故障后返回 503 及 `status:recovery_log_unavailable`；正常为 200。该检查判断本机日志写入状态，不代表已完成异地备份或业务线路健康。
+`/recovery` 的 `head` 包含 `journal_id`、`schema`、`schema_sha256`、`sequence`、`sha256` 和 `committed_bytes`。这里的 `schema` 是恢复日志格式（0.20.0 仍为 4），不是 SQLite 应用 schema；后者由 `relay build-info` 的 `controller_schema` 报告，0.20.0 为 5。它不返回日志内容、磁盘路径或凭据。未认证的 `/healthz` 在恢复写入故障后返回 503 及 `status:recovery_log_unavailable`；正常为 200。该检查判断本机日志写入状态，不代表已完成异地备份或业务线路健康。
 
 401 表示凭据失效；403 表示权限或归属错误；不可见节点返回 404；400/422 表示输入不合法；409 表示版本/账本冲突；412 表示恢复分页期间配置变化。内部错误返回通用消息，细节进入本地服务日志。
 
@@ -206,7 +206,7 @@ GET /budgets/{id}/reservations?after=grant_id 使用用户会话，按预算所�
 
 API 令牌使用同一个 `Authorization: Bearer` 头，格式为 `rpat_` 加 64 位十六进制，服务端只保存 SHA-256 哈希。`scopes` 取值：`read`（所有 GET）、`nodes:write`（节点、配置、凭据操作与配置批次）、`budgets:write`、`users:write`（用户、租户、撤销会话）。范围不足返回 403；实际权限仍受账号角色和租户限制，只读用户的写入范围不产生写权限。`/account/*`、`/api-tokens*`、`/users/{id}/mfa/reset` 和 `/auth/logout` 只接受登录会话。有效期 1..365 天，每个用户最多 20 个未过期令牌；`/users/{id}/revoke-sessions` 同时撤销该用户的令牌。
 
-`/users` 每项新增 `mfa_enabled`。审计新增 `mfa.enable`、`mfa.disable`、`mfa.reset`、`mfa.recovery_code_used`、`api_token.create`、`api_token.revoke`。能力目录新增 `two-factor-login` 和 `scoped-api-tokens`。两类状态保存在 metadata 中并进入恢复日志，schema v4 不变；回退到 0.18.0 控制器会忽略两步验证，需要先停用。
+`/users` 每项新增 `mfa_enabled`。审计新增 `mfa.enable`、`mfa.disable`、`mfa.reset`、`mfa.recovery_code_used`、`api_token.create`、`api_token.revoke`。能力目录新增 `two-factor-login` 和 `scoped-api-tokens`。两类状态保存在 metadata 中并进入恢复日志；0.19.0 仍声明 schema v4，回退到 0.18.0 控制器会忽略两步验证。0.20.0 起应用 schema 升至 v5、状态兼容代号升至 2，旧二进制与安装器回滚均被拒绝，见下节。
 
 ## 0.19.0 遥测
 
@@ -284,3 +284,16 @@ API 令牌使用同一个 `Authorization: Bearer` 头，格式为 `rpat_` 加 64
 通道与设置保存在 metadata 中，进入备份和恢复日志，schema v4 不变；最多 20 个通道。API 只返回地址的协议和主机，不返回令牌和密钥。只有系统管理员可读写；写操作只接受登录会话，API 令牌即使带写入范围也返回 403。审计新增 `alerts.settings`、`alerts.channel.create`、`alerts.channel.update`、`alerts.channel.delete`。能力目录新增 `alert-notifications`。
 
 限制：告警状态和发送记录只在控制器内存中，重启后清空；重启后的第一次回报会重新检测不可用的目标，节点离线在启动 60 秒后才判定。通知地址由系统管理员填写，控制器会向其发起请求，包括内网地址，所以只应授予可信管理员。邮件通道、按租户分别配置告警、只读诊断角色和告警自动化动作尚未实现。
+
+## 0.20.0：状态兼容围栏与限速修复
+
+`relay build-info` 现在报告 `controller_schema: 5` 和 `state_contract: {controller: 2, agent: 2}`。控制器与 Agent 数据库的 `PRAGMA user_version` 从 4 升至 5，表结构和恢复日志格式 4 不变；0.18.0/0.19.0 在打开数据库时以 `database schema newer than this binary` 失败，签名安装器也以状态兼容代号不一致拒绝回滚。`relay restore` 接受 schema v4 备份和仍为格式 4 的连续恢复日志，重放完成后把输出数据库升级到 v5。升级顺序仍为先升级控制器并启动一次以完成 schema 围栏，再升级 Agent；已有 0.19.0 状态在升级前不要回退到 0.18.0。
+
+跨节点用户限速：
+
+- 带 `advertise` 的规则不再被排除在用户份额之外。广告地址可被直接访问，拓扑声明本身不能证明上游已经计量，因此直接客户端同样受限。
+- 控制器的分享列表按每节点“期望修订 ∪ 已应用修订”的规则计算；节点只有在报告新 `applied_revision` 后才退出旧规则的份额。
+- Agent 在 `engine.apply` 失败时保留并续租原份额，不再套用失败修订返回的列表；同步响应字段不变。
+- 同一用户流量经过多跳时，每一跳执行自己的份额，链路吞吐可能低于单节点份额；当前没有可信上游认证，不能只对入口计量。
+
+Shadowsocks：TCP 重放盐缓存按（方式、密钥）在进程内共享。规则重命名、限速调整等不改变密钥的替换继续拒绝已捕获的请求；修改密钥后使用新的加密身份。UDP 关联在规则修改时仍按既有行为结束，已结束关联的包号记录保留 60 秒。
