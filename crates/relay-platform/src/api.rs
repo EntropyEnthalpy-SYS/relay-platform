@@ -1439,6 +1439,69 @@ async fn prometheus_metrics(
             node.stats.prewarmed_connections
         ));
     }
+    body.push_str("# HELP relay_target_eligible Target health eligibility.\n# TYPE relay_target_eligible gauge\n");
+    for node in &nodes {
+        for target in &node.stats.target_health {
+            body.push_str(&format!(
+                "relay_target_eligible{{node=\"{}\",rule=\"{}\",target=\"{}\",status=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                metric_label(&target.rule_id),
+                metric_label(&target.target_address),
+                health_status(target.status),
+                u8::from(target.eligible)
+            ));
+        }
+    }
+    body.push_str("# HELP relay_target_latency_us Target probe latency.\n# TYPE relay_target_latency_us gauge\n");
+    for node in &nodes {
+        for target in &node.stats.target_health {
+            if let Some(latency) = target.latency_ewma_us {
+                body.push_str(&format!(
+                    "relay_target_latency_us{{node=\"{}\",rule=\"{}\",target=\"{}\"}} {}\n",
+                    metric_label(&node.id),
+                    metric_label(&target.rule_id),
+                    metric_label(&target.target_address),
+                    latency
+                ));
+            }
+        }
+    }
+    body.push_str("# HELP relay_target_window_failures Failed probes in the recent window.\n# TYPE relay_target_window_failures gauge\n");
+    for node in &nodes {
+        for target in &node.stats.target_health {
+            body.push_str(&format!(
+                "relay_target_window_failures{{node=\"{}\",rule=\"{}\",target=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                metric_label(&target.rule_id),
+                metric_label(&target.target_address),
+                target.window_failures
+            ));
+        }
+    }
+    body.push_str("# HELP relay_target_active_sessions Active sessions for a target.\n# TYPE relay_target_active_sessions gauge\n");
+    for node in &nodes {
+        for target in &node.stats.target_health {
+            body.push_str(&format!(
+                "relay_target_active_sessions{{node=\"{}\",rule=\"{}\",target=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                metric_label(&target.rule_id),
+                metric_label(&target.target_address),
+                target.active_sessions
+            ));
+        }
+    }
+    body.push_str("# HELP relay_target_completed_checks_total Completed target probes.\n# TYPE relay_target_completed_checks_total counter\n");
+    for node in &nodes {
+        for target in &node.stats.target_health {
+            body.push_str(&format!(
+                "relay_target_completed_checks_total{{node=\"{}\",rule=\"{}\",target=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                metric_label(&target.rule_id),
+                metric_label(&target.target_address),
+                target.completed_checks
+            ));
+        }
+    }
     body.push_str("# HELP relay_node_forwarded_bytes Forwarded application bytes.\n# TYPE relay_node_forwarded_bytes counter\n");
     for node in &nodes {
         body.push_str(&format!(
@@ -1468,6 +1531,16 @@ async fn prometheus_metrics(
         HeaderValue::from_static("text/plain; version=0.0.4"),
     );
     Ok((StatusCode::OK, headers, body))
+}
+
+fn health_status(status: crate::health::Status) -> &'static str {
+    match status {
+        crate::health::Status::Unknown => "unknown",
+        crate::health::Status::Healthy => "healthy",
+        crate::health::Status::Unhealthy => "unhealthy",
+        crate::health::Status::Recovering => "recovering",
+        crate::health::Status::Stale => "stale",
+    }
 }
 
 fn metric_label(value: &str) -> String {

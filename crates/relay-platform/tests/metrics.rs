@@ -2,7 +2,8 @@ mod common;
 use common::{PASSWORD, rule};
 use relay_platform::{
     api::{self, AppState},
-    model::Protocol,
+    health::{ProbeKind, Status, TargetHealthReport},
+    model::{EngineStats, Protocol},
     store::Store,
 };
 use serde_json::{Value, json};
@@ -56,6 +57,45 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
             relay_platform::store::Role::Viewer,
         )
         .unwrap();
+    let db_path = temp.path().join("controller.db");
+    let report = TargetHealthReport {
+        probe_kind: ProbeKind::TcpConnect,
+        rule_id: "rule-metrics".into(),
+        target_index: 0,
+        listen_port: 9000,
+        protocol: Protocol::Tcp,
+        target_address: "127.0.0.1:9".into(),
+        status: Status::Healthy,
+        eligible: true,
+        selection_reason: "fixture".into(),
+        sample_age_ms: Some(10),
+        max_age_ms: 30_000,
+        checked_at_ms: Some(1),
+        latency_ewma_us: Some(1500),
+        window_checks: 5,
+        window_failures: 1,
+        jitter_us: Some(100),
+        consecutive_successes: 4,
+        consecutive_failures: 0,
+        completed_checks: 5,
+        successful_checks: 4,
+        last_error: None,
+        probe_sent_bytes: 100,
+        probe_received_bytes: 200,
+        priority: 0,
+        active_sessions: 2,
+        max_sessions: None,
+    };
+    let stats = EngineStats {
+        target_health: vec![report],
+        ..Default::default()
+    };
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute(
+        "UPDATE nodes SET stats_json=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_string(&stats).unwrap(), node_id],
+    )
+    .unwrap();
     let (address, stop) = serve(store).await;
     let origin = format!("http://{address}");
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
