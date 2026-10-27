@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.78.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.78.0.txt](verification-0.78.0.txt)，逐项清单见 [validation-evidence-0.78.0.json](validation-evidence-0.78.0.json)。
+0.79.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.79.0.txt](verification-0.79.0.txt)，逐项清单见 [validation-evidence-0.79.0.json](validation-evidence-0.79.0.json)。
 
-## 0.78.0 计量/额度指标验证
+## 0.79.0 恢复日志指标验证
+
+| 检查 | 结果 |
+| --- | --- |
+| enabled | 1 |
+| healthy | 1 |
+| head | sequence/committed_bytes（存在 head 时） |
+| 限制 | 本机日志状态，不代表异地备份 |
+
+## 0.78.0 计量/额度指标验证（历史）
+
+0.78.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.78.0.txt](verification-0.78.0.txt)，逐项清单见 [validation-evidence-0.78.0.json](validation-evidence-0.78.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

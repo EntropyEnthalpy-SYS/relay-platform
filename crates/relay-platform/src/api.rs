@@ -1332,11 +1332,32 @@ async fn prometheus_metrics(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
 ) -> Result<(StatusCode, HeaderMap, String), ApiError> {
+    let store = state.store.clone();
     let nodes = database(state.store, move |db| db.nodes(&actor)).await?;
+    let journal = database(store, |db| db.recovery_log_status()).await?;
     let mut body = format!(
         "# HELP relay_build_info Build identity.\n# TYPE relay_build_info gauge\nrelay_build_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     );
+    body.push_str("# HELP relay_recovery_journal Controller recovery journal.\n# TYPE relay_recovery_journal gauge\n");
+    body.push_str(&format!(
+        "relay_recovery_journal{{kind=\"enabled\"}} {}\n",
+        u8::from(journal.enabled)
+    ));
+    body.push_str(&format!(
+        "relay_recovery_journal{{kind=\"healthy\"}} {}\n",
+        u8::from(journal.healthy)
+    ));
+    if let Some(head) = &journal.head {
+        body.push_str(&format!(
+            "relay_recovery_journal{{kind=\"sequence\"}} {}\n",
+            head.sequence
+        ));
+        body.push_str(&format!(
+            "relay_recovery_journal{{kind=\"committed_bytes\"}} {}\n",
+            head.committed_bytes
+        ));
+    }
     body.push_str(
         "# HELP relay_node_up Node presence in the controller.\n# TYPE relay_node_up gauge\n",
     );
