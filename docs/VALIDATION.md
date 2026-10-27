@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.65.0 开发版在 macOS 27.0.1 arm64 通过 **398 项自动化测试（369 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 399 项。日志见 [verification-0.65.0.txt](verification-0.65.0.txt)，逐项清单见 [validation-evidence-0.65.0.json](validation-evidence-0.65.0.json)。
+0.66.0 开发版在 macOS 27.0.1 arm64 通过 **399 项自动化测试（370 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 400 项。日志见 [verification-0.66.0.txt](verification-0.66.0.txt)，逐项清单见 [validation-evidence-0.66.0.json](validation-evidence-0.66.0.json)。
 
-## 0.65.0 映射状态文件验证
+## 0.66.0 指数退避重试验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 翻倍 | 50ms → 100ms |
+| 封顶 | 下一轮 150ms 不超过 max |
+| 边界 | 零初始/上限小于初始拒绝；成功后回到初始 |
+| 限制 | 仍无自动映射恢复/清理 |
+
+## 0.65.0 映射状态文件验证（历史）
+
+0.65.0 开发版在 macOS 27.0.1 arm64 通过 **398 项自动化测试（369 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 399 项。日志见 [verification-0.65.0.txt](verification-0.65.0.txt)，逐项清单见 [validation-evidence-0.65.0.json](validation-evidence-0.65.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

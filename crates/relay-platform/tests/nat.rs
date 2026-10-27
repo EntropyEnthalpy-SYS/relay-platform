@@ -142,7 +142,7 @@ async fn nat_pmp_retries_a_refused_request() {
         0,
         120,
         Duration::from_millis(500),
-        Some(Duration::from_millis(50)),
+        Some(nat::RetryPolicy::new(Duration::from_millis(50), Duration::from_millis(200)).unwrap()),
         cancel.clone(),
         move |mapping| tx.send(mapping.epoch).unwrap(),
     ));
@@ -158,4 +158,15 @@ async fn nat_pmp_retries_a_refused_request() {
         .unwrap()
         .unwrap();
     server.await.unwrap();
+}
+
+#[test]
+fn retry_policy_doubles_up_to_its_cap() {
+    let policy =
+        nat::RetryPolicy::new(Duration::from_millis(50), Duration::from_millis(150)).unwrap();
+    let first = policy.next(Duration::from_millis(50));
+    assert_eq!(first, Duration::from_millis(100));
+    assert_eq!(policy.next(first), Duration::from_millis(150));
+    assert!(nat::RetryPolicy::new(Duration::ZERO, Duration::from_secs(1)).is_err());
+    assert!(nat::RetryPolicy::new(Duration::from_secs(2), Duration::from_secs(1)).is_err());
 }

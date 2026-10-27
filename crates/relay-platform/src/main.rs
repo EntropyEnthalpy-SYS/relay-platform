@@ -49,6 +49,9 @@ enum Command {
         /// Retry a failed request after this many seconds (omit to fail fast).
         #[arg(long)]
         retry_secs: Option<u64>,
+        /// Maximum retry interval after exponential growth (defaults to retry-secs).
+        #[arg(long)]
+        retry_max_secs: Option<u64>,
         /// Write the last successful mapping as JSON (atomically).
         #[arg(long)]
         state_file: Option<PathBuf>,
@@ -126,6 +129,9 @@ enum Command {
         /// Retry a failed request after this many seconds (omit to fail fast).
         #[arg(long)]
         retry_secs: Option<u64>,
+        /// Maximum retry interval after exponential growth (defaults to retry-secs).
+        #[arg(long)]
+        retry_max_secs: Option<u64>,
         /// Write the last successful mapping as JSON (atomically).
         #[arg(long)]
         state_file: Option<PathBuf>,
@@ -152,6 +158,9 @@ enum Command {
         /// Retry a failed request after this many seconds (omit to fail fast).
         #[arg(long)]
         retry_secs: Option<u64>,
+        /// Maximum retry interval after exponential growth (defaults to retry-secs).
+        #[arg(long)]
+        retry_max_secs: Option<u64>,
         /// Write the last successful mapping as JSON (atomically).
         #[arg(long)]
         state_file: Option<PathBuf>,
@@ -234,6 +243,27 @@ enum Command {
     },
 }
 
+fn retry_policy(
+    initial: Option<u64>,
+    max: Option<u64>,
+) -> Result<Option<relay_platform::nat::RetryPolicy>> {
+    match initial {
+        Some(seconds) => {
+            let max = max.unwrap_or(seconds);
+            Ok(Some(relay_platform::nat::RetryPolicy::new(
+                Duration::from_secs(seconds),
+                Duration::from_secs(max),
+            )?))
+        }
+        None => {
+            if max.is_some() {
+                anyhow::bail!("retry-max-secs requires retry-secs");
+            }
+            Ok(None)
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -261,6 +291,7 @@ async fn main() -> Result<()> {
             renew,
             renew_after_secs,
             retry_secs,
+            retry_max_secs,
             state_file,
         } => {
             let runtime = tokio::runtime::Runtime::new()?;
@@ -277,7 +308,7 @@ async fn main() -> Result<()> {
                     external_port,
                     lifetime_secs,
                     after,
-                    retry_secs.map(Duration::from_secs),
+                    retry_policy(retry_secs, retry_max_secs)?,
                     stop,
                     move |mapping| {
                         println!("{}", serde_json::to_string(mapping).unwrap_or_default());
@@ -399,6 +430,7 @@ async fn main() -> Result<()> {
             renew,
             renew_after_secs,
             retry_secs,
+            retry_max_secs,
             state_file,
         } => {
             let gateway = relay_platform::pcp::gateway_from(&gateway)?;
@@ -416,7 +448,7 @@ async fn main() -> Result<()> {
                     external_port,
                     lifetime,
                     after,
-                    retry_secs.map(Duration::from_secs),
+                    retry_policy(retry_secs, retry_max_secs)?,
                     stop,
                     move |mapping| {
                         println!("{}", serde_json::to_string(mapping).unwrap_or_default());
@@ -457,6 +489,7 @@ async fn main() -> Result<()> {
             renew,
             renew_after_secs,
             retry_secs,
+            retry_max_secs,
             state_file,
         } => {
             let gateway = relay_platform::nat::gateway_from(&gateway)?;
@@ -476,7 +509,7 @@ async fn main() -> Result<()> {
                     external_port,
                     lifetime,
                     after,
-                    retry_secs.map(Duration::from_secs),
+                    retry_policy(retry_secs, retry_max_secs)?,
                     stop,
                     move |mapping| {
                         println!("{}", serde_json::to_string(mapping).unwrap_or_default());

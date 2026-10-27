@@ -147,7 +147,7 @@ pub async fn maintain<F>(
     external_port: u16,
     lifetime_secs: u32,
     renew_after: Duration,
-    retry_after: Option<Duration>,
+    retry: Option<crate::nat::RetryPolicy>,
     cancel: CancellationToken,
     mut on_mapping: F,
 ) -> Result<()>
@@ -156,27 +156,31 @@ where
 {
     ensure!(!renew_after.is_zero(), "renew interval is zero");
     ensure!(
-        retry_after.is_none_or(|delay| !delay.is_zero()),
+        retry.is_none_or(|policy| !policy.initial.is_zero() && !policy.max.is_zero()),
         "retry interval is zero"
     );
     ensure!(
         renew_after < Duration::from_secs(u64::from(lifetime_secs.max(1))),
         "renew interval must be shorter than the lease"
     );
+    let mut retry_delay = retry.map(|policy| policy.initial);
     loop {
         let mapping = match map(gateway, internal_port, external_port, lifetime_secs).await {
             Ok(mapping) => mapping,
-            Err(error) if retry_after.is_some() => {
+            Err(error) if retry.is_some() => {
+                let delay = retry_delay.unwrap_or_else(|| retry.unwrap().initial);
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => break,
-                    _ = sleep(retry_after.unwrap()) => {}
+                    _ = sleep(delay) => {}
                 }
+                retry_delay = Some(retry.unwrap().next(delay));
                 let _ = error;
                 continue;
             }
             Err(error) => return Err(error),
         };
+        retry_delay = retry.map(|policy| policy.initial);
         on_mapping(&mapping);
         tokio::select! {
             biased;
