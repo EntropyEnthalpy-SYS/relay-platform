@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.62.0 开发版在 macOS 27.0.1 arm64 通过 **394 项自动化测试（365 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 395 项。日志见 [verification-0.62.0.txt](verification-0.62.0.txt)，逐项清单见 [validation-evidence-0.62.0.json](validation-evidence-0.62.0.json)。
+0.63.0 开发版在 macOS 27.0.1 arm64 通过 **395 项自动化测试（366 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 396 项。日志见 [verification-0.63.0.txt](verification-0.63.0.txt)，逐项清单见 [validation-evidence-0.63.0.json](validation-evidence-0.63.0.json)。
 
-## 0.62.0 NAT 重试验证
+## 0.63.0 UPnP 事件回调验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 回调 | 本地 HTTP 接收 NOTIFY，提取 SID/SEQ 与原始正文 |
+| 生命周期 | 订阅、半超时续订、取消后退订 |
+| 边界 | 仅明文 IPv4/localhost；不解析属性 |
+| 限制 | 无事件动作分发、TLS 回调、完整 IGD 筛选或状态持久化 |
+
+## 0.62.0 NAT 重试验证（历史）
+
+0.62.0 开发版在 macOS 27.0.1 arm64 通过 **394 项自动化测试（365 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 395 项。日志见 [verification-0.62.0.txt](verification-0.62.0.txt)，逐项清单见 [validation-evidence-0.62.0.json](validation-evidence-0.62.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

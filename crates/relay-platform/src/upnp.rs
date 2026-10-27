@@ -2,12 +2,14 @@
 //! IPv4 SSDP discovery. The caller can use a discovered LOCATION as the
 //! description URL. This is a mapping management tool, not a NAT server.
 use anyhow::{Context, Result, bail, ensure};
+use axum::{Router, extract::State, http::HeaderMap, routing::post};
 use reqwest::Url;
 use serde::Serialize;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
-use tokio::net::UdpSocket;
-use tokio::time::{Instant, sleep, timeout_at};
+use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+use tokio::time::{Instant, interval, sleep, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Serialize)]
@@ -40,6 +42,12 @@ pub struct Subscription {
     pub event_url: String,
     pub sid: String,
     pub timeout_secs: u32,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct Event {
+    pub sid: String,
+    pub sequence: Option<String>,
+    pub body: String,
 }
 /// Extract the first WANIPConnection/WANPPPConnection service and its
 /// control URL from an IGD description document. This deliberately avoids a
@@ -435,4 +443,101 @@ where
         }
     }
     Ok(())
+}
+
+/// Run a callback HTTP server, subscribe the IGD to it, print events through
+/// `on_event`, and renew the subscription at half its timeout until cancelled.
+/// The callback URL must include a concrete loopback or local IP and port.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_events<F>(
+    description_url: &str,
+    callback: &str,
+    timeout_secs: u32,
+    cancel: CancellationToken,
+    mut on_event: F,
+) -> Result<Subscription>
+where
+    F: FnMut(&Event),
+{
+    ensure!(
+        (1..=86_400).contains(&timeout_secs),
+        "UPnP event timeout must be 1..86400 seconds"
+    );
+    let callback_url = Url::parse(callback).context("invalid UPnP callback URL")?;
+    ensure!(
+        callback_url.scheme() == "http",
+        "event callback must be plain HTTP"
+    );
+    let host = callback_url.host_str().context("callback has no host")?;
+    let ip: Ipv4Addr = host
+        .parse()
+        .or(match host {
+            "localhost" => Ok(Ipv4Addr::LOCALHOST),
+            _ => Err(()),
+        })
+        .map_err(|_| anyhow::anyhow!("event callback host must be an IPv4 literal or localhost"))?;
+    let port = callback_url.port().context("event callback has no port")?;
+    let path = if callback_url.path().is_empty() {
+        "/".to_owned()
+    } else {
+        callback_url.path().to_owned()
+    };
+    let listener = TcpListener::bind(SocketAddr::from((ip, port))).await?;
+    let (tx, mut rx) = unbounded_channel::<Event>();
+    async fn receive(
+        State(tx): State<UnboundedSender<Event>>,
+        headers: HeaderMap,
+        body: String,
+    ) -> axum::http::StatusCode {
+        let sid = headers
+            .get("SID")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let sequence = headers
+            .get("SEQ")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let _ = tx.send(Event {
+            sid,
+            sequence,
+            body,
+        });
+        axum::http::StatusCode::OK
+    }
+    let app = Router::new().route(&path, post(receive)).with_state(tx);
+    let server_cancel = cancel.clone();
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(server_cancel.cancelled_owned())
+            .await;
+    });
+    let subscription = subscribe(description_url, callback, timeout_secs).await?;
+    let period = Duration::from_secs(u64::from((timeout_secs / 2).max(1)));
+    let mut ticker = interval(period);
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            Some(event) = rx.recv() => on_event(&event),
+            _ = ticker.tick() => {
+                match renew(&subscription.event_url, &subscription.sid, timeout_secs).await {
+                    Ok(timeout) => {
+                        // Keep the subscription alive; the effective timeout is
+                        // reported by the gateway but we renew on the requested
+                        // cadence to avoid a one-off extension changing behavior.
+                        let _ = timeout;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "UPnP event renewal failed");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    server.abort();
+    let _ = unsubscribe(&subscription.event_url, &subscription.sid).await;
+    Ok(subscription)
 }

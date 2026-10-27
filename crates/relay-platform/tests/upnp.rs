@@ -214,3 +214,91 @@ async fn upnp_event_subscription_renews_and_unsubscribes() {
     assert_eq!(seen[1].1.as_deref(), Some("uuid:test"));
     assert_eq!(seen[2].0, "UNSUBSCRIBE");
 }
+
+#[tokio::test]
+async fn upnp_event_callback_server_receives_notify_and_unsubscribes() {
+    type Seen = Arc<Mutex<Vec<String>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    async fn desc() -> Html<&'static str> {
+        Html(
+            r#"<root><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/control</controlURL><eventSubURL>/events</eventSubURL></service></root>"#,
+        )
+    }
+    async fn events(
+        State(seen): State<Seen>,
+        method: Method,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        let sid = headers
+            .get("SID")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        seen.lock()
+            .unwrap()
+            .push(format!("{} {sid}", method.as_str()));
+        (
+            [("SID", "uuid:callback-test"), ("TIMEOUT", "Second-30")],
+            "",
+        )
+    }
+    let app = Router::new()
+        .route("/desc.xml", get(desc))
+        .route("/events", any(events))
+        .with_state(seen.clone());
+    let igd = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let igd_addr = igd.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(igd, app).await.unwrap() });
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let callback_port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let callback = format!("http://127.0.0.1:{callback_port}/events");
+    let description = format!("http://{igd_addr}/desc.xml");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let stop = cancel.clone();
+    let description_task = description.clone();
+    let callback_task = callback.clone();
+    let task = tokio::spawn(async move {
+        upnp::run_events(&description_task, &callback_task, 30, stop, move |event| {
+            tx.send(event.clone()).unwrap()
+        })
+        .await
+    });
+    let mut ready = false;
+    for _ in 0..50 {
+        if reqwest::Client::new()
+            .post(&callback)
+            .header("SID", "uuid:callback-test")
+            .header("SEQ", "0")
+            .body("<e:propertyset/>")
+            .send()
+            .await
+            .is_ok()
+        {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(ready, "callback server did not start");
+    let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.sid, "uuid:callback-test");
+    assert_eq!(event.sequence.as_deref(), Some("0"));
+    cancel.cancel();
+    let subscription = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(subscription.sid, "uuid:callback-test");
+    let methods = seen.lock().unwrap().clone();
+    assert!(methods.iter().any(|method| method.starts_with("SUBSCRIBE")));
+    assert!(
+        methods
+            .iter()
+            .any(|method| method.starts_with("UNSUBSCRIBE"))
+    );
+}

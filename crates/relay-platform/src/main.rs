@@ -80,6 +80,15 @@ enum Command {
         #[arg(long, default_value_t = 1800)]
         timeout_secs: u32,
     },
+    /// Serve a local UPnP callback, subscribe, print events and renew.
+    UpnpEvents {
+        #[arg(long)]
+        description_url: String,
+        #[arg(long)]
+        callback: String,
+        #[arg(long, default_value_t = 1800)]
+        timeout_secs: u32,
+    },
     /// Unsubscribe an existing IGD event subscription.
     UpnpUnsubscribe {
         #[arg(long)]
@@ -322,6 +331,30 @@ async fn main() -> Result<()> {
                 &callback,
                 timeout_secs,
             ))?;
+            println!("{}", serde_json::to_string_pretty(&subscription)?);
+        }
+        Command::UpnpEvents {
+            description_url,
+            callback,
+            timeout_secs,
+        } => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let cancel = CancellationToken::new();
+            let stop = cancel.clone();
+            let task = relay_platform::upnp::run_events(
+                &description_url,
+                &callback,
+                timeout_secs,
+                stop,
+                |event| println!("{}", serde_json::to_string(event).unwrap_or_default()),
+            );
+            let signal_cancel = cancel.clone();
+            let signal = tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                signal_cancel.cancel();
+            });
+            let subscription = runtime.block_on(task)?;
+            signal.abort();
             println!("{}", serde_json::to_string_pretty(&subscription)?);
         }
         Command::UpnpUnsubscribe { event_url, sid } => {
