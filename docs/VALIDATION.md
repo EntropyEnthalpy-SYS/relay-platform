@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.68.0 开发版在 macOS 27.0.1 arm64 通过 **401 项自动化测试（372 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 402 项。日志见 [verification-0.68.0.txt](verification-0.68.0.txt)，逐项清单见 [validation-evidence-0.68.0.json](validation-evidence-0.68.0.json)。
+0.69.0 开发版在 macOS 27.0.1 arm64 通过 **402 项自动化测试（373 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 403 项。日志见 [verification-0.69.0.txt](verification-0.69.0.txt)，逐项清单见 [validation-evidence-0.69.0.json](validation-evidence-0.69.0.json)。
 
-## 0.68.0 应用回执门控验证
+## 0.69.0 DNS 分页验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 分页 | 两页结果按顺序合并为 2 条 |
+| 上限 | 每页 100、最多 50 页 |
+| 兼容 | 无 result_info 时单页 |
+| 限制 | 未做真实 Cloudflare/传播/端到端验收 |
+
+## 0.68.0 应用回执门控验证（历史）
+
+0.68.0 开发版在 macOS 27.0.1 arm64 通过 **401 项自动化测试（372 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 402 项。日志见 [verification-0.68.0.txt](verification-0.68.0.txt)，逐项清单见 [validation-evidence-0.68.0.json](validation-evidence-0.68.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

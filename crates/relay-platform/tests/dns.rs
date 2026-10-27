@@ -655,3 +655,44 @@ fn dns_inputs_are_bounded_and_endpoints_reject_plaintext_remote_hosts() {
     assert!(dns::validate_record(RecordType::Aaaa, "a.example.com", "2001:db8::1", 300).is_ok());
     assert!(dns::validate_comment(Some(&"x".repeat(101))).is_err());
 }
+
+#[tokio::test]
+async fn dns_list_follows_cloudflare_pagination() {
+    async fn page(
+        axum::extract::Query(params): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >,
+    ) -> axum::Json<Value> {
+        let page: u64 = params
+            .get("page")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
+        let result = if page == 1 {
+            json!([{"id":"one","name":"a.example.com","type":"A","content":"192.0.2.1","ttl":120}])
+        } else {
+            json!([{"id":"two","name":"b.example.com","type":"A","content":"192.0.2.2","ttl":120}])
+        };
+        axum::Json(json!({"success":true,"errors":[],"result":result,
+            "result_info":{"page":page,"per_page":100,"total_pages":2}}))
+    }
+    let app = axum::Router::new().route(
+        "/client/v4/zones/{zone}/dns_records",
+        axum::routing::get(page),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let provider = dns::Provider {
+        id: "provider".into(),
+        name: "fixture".into(),
+        kind: ProviderKind::Cloudflare,
+        endpoint: format!("http://{address}/client/v4"),
+        token: "test-token".into(),
+        created_at_ms: 0,
+    };
+    let client = dns::Cloudflare::new(reqwest::Client::new(), &provider).unwrap();
+    let records = client.list("example.com").await.unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].id, "one");
+    assert_eq!(records[1].id, "two");
+}

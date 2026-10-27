@@ -254,6 +254,13 @@ struct Envelope<T> {
     #[serde(default)]
     errors: Vec<ApiError>,
     result: T,
+    #[serde(default)]
+    result_info: Option<ResultInfo>,
+}
+#[derive(Clone, Debug, Deserialize)]
+struct ResultInfo {
+    #[serde(default)]
+    total_pages: u64,
 }
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct RemoteRecord {
@@ -292,10 +299,10 @@ impl Cloudflare {
         Url::parse(&format!("{}/zones/{}{suffix}", self.base, zone))
             .context("invalid DNS provider URL")
     }
-    async fn call<T: for<'de> Deserialize<'de>>(
+    async fn call_envelope<T: for<'de> Deserialize<'de>>(
         &self,
         request: reqwest::RequestBuilder,
-    ) -> Result<T> {
+    ) -> Result<Envelope<T>> {
         let response = request
             .bearer_auth(&self.token)
             .header(reqwest::header::ACCEPT, "application/json")
@@ -314,11 +321,32 @@ impl Cloudflare {
             );
             bail!("DNS provider rejected the request: {message}");
         }
-        Ok(body.result)
+        Ok(body)
     }
+    async fn call<T: for<'de> Deserialize<'de>>(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<T> {
+        Ok(self.call_envelope(request).await?.result)
+    }
+
     pub async fn list(&self, zone: &str) -> Result<Vec<RemoteRecord>> {
-        let url = self.url(zone, "/dns_records?per_page=100")?;
-        self.call(self.http.get(url)).await
+        let mut records = Vec::new();
+        for page in 1..=50u64 {
+            let url = self.url(zone, &format!("/dns_records?per_page=100&page={page}"))?;
+            let envelope: Envelope<Vec<RemoteRecord>> =
+                self.call_envelope(self.http.get(url)).await?;
+            let pages = envelope
+                .result_info
+                .as_ref()
+                .map(|info| info.total_pages.max(1))
+                .unwrap_or(1);
+            records.extend(envelope.result);
+            if page >= pages {
+                return Ok(records);
+            }
+        }
+        bail!("DNS provider returned more than 50 record pages")
     }
     pub async fn create(&self, zone: &str, record: &Record) -> Result<RemoteRecord> {
         let url = self.url(zone, "/dns_records")?;
