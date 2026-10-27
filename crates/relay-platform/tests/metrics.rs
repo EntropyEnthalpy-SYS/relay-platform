@@ -35,6 +35,19 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     let store = Store::open(&temp.path().join("controller.db")).unwrap();
     store.set_kind("controller").unwrap();
     let admin = store.bootstrap(PASSWORD).unwrap();
+    let budget = store
+        .create_budget(
+            &admin,
+            relay_platform::budget::NewBudget {
+                scope: relay_platform::budget::BudgetScope::Tenant,
+                scope_id: "default".into(),
+                name: "metrics-budget".into(),
+                limit_bytes: 10_000,
+                quantum_bytes: 1_000,
+            },
+        )
+        .unwrap();
+    let budget_id = budget.id.clone();
     let (node, _) = store
         .create_node(&admin, "default", "metrics-node")
         .unwrap();
@@ -160,6 +173,9 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     assert!(body.contains(&format!("relay_node_active_udp{{node=\"{node_id}\"}} 0")));
     assert!(body.contains(&format!(
         "relay_node_accepted_tcp_total{{node=\"{node_id}\"}} 0"
+    )));
+    assert!(body.contains(&format!(
+        "relay_budget{{budget=\"{budget_id}\",tenant=\"default\",scope=\"tenant\",scope_id=\"default\",kind=\"limit_bytes\"}} 10000"
     )));
     stop.cancel();
 }

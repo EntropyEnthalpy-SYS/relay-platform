@@ -1332,13 +1332,34 @@ async fn prometheus_metrics(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
 ) -> Result<(StatusCode, HeaderMap, String), ApiError> {
-    let store = state.store.clone();
-    let nodes = database(state.store, move |db| db.nodes(&actor)).await?;
-    let journal = database(store, |db| db.recovery_log_status()).await?;
+    let actor_for_nodes = actor.clone();
+    let nodes = database(state.store.clone(), move |db| db.nodes(&actor_for_nodes)).await?;
+    let budgets = database(state.store.clone(), move |db| db.budgets(&actor)).await?;
+    let journal = database(state.store, |db| db.recovery_log_status()).await?;
     let mut body = format!(
         "# HELP relay_build_info Build identity.\n# TYPE relay_build_info gauge\nrelay_build_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     );
+    body.push_str("# HELP relay_budget Budget limits and usage.\n# TYPE relay_budget gauge\n");
+    for budget in &budgets.budgets {
+        for (kind, value) in [
+            ("limit_bytes", budget.limit_bytes),
+            ("quantum_bytes", budget.quantum_bytes),
+            ("committed_bytes", budget.committed_bytes),
+            ("consumed_bytes", budget.consumed_bytes),
+            ("revision", budget.revision),
+        ] {
+            body.push_str(&format!(
+                "relay_budget{{budget=\"{}\",tenant=\"{}\",scope=\"{}\",scope_id=\"{}\",kind=\"{}\"}} {}\n",
+                metric_label(&budget.id),
+                metric_label(&budget.tenant_id),
+                budget.scope.as_str(),
+                metric_label(&budget.scope_id),
+                kind,
+                value
+            ));
+        }
+    }
     body.push_str("# HELP relay_recovery_journal Controller recovery journal.\n# TYPE relay_recovery_journal gauge\n");
     body.push_str(&format!(
         "relay_recovery_journal{{kind=\"enabled\"}} {}\n",

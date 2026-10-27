@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.80.0 开发版在 macOS 27.0.1 arm64 通过 **405 项自动化测试（376 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 406 项。日志见 [verification-0.80.0.txt](verification-0.80.0.txt)，逐项清单见 [validation-evidence-0.80.0.json](validation-evidence-0.80.0.json)。
+0.81.0 开发版在 macOS 27.0.1 arm64 通过 **405 项自动化测试（376 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 406 项。日志见 [verification-0.81.0.txt](verification-0.81.0.txt)，逐项清单见 [validation-evidence-0.81.0.json](validation-evidence-0.81.0.json)。
 
-## 0.80.0 目标健康门控验证
+## 0.81.0 预算指标验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 指标 | `relay_budget{...kind="limit_bytes"} 10000` |
+| 标签 | budget/tenant/scope/scope_id |
+| 限制 | 只读，不含预留/租约明细 |
+
+## 0.80.0 目标健康门控验证（历史）
+
+0.80.0 开发版在 macOS 27.0.1 arm64 通过 **405 项自动化测试（376 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 406 项。日志见 [verification-0.80.0.txt](verification-0.80.0.txt)，逐项清单见 [validation-evidence-0.80.0.json](validation-evidence-0.80.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |
