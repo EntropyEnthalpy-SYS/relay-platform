@@ -1503,6 +1503,7 @@ async fn rollout_template(
                 expected_revision: target.expected_revision,
                 name: target.name,
                 listen,
+                variables: target.variables,
             })
         })
         .collect::<std::result::Result<Vec<_>, ApiError>>()?;
@@ -1553,6 +1554,8 @@ struct ApplyTemplate {
     expected_revision: u64,
     name: String,
     listen: String,
+    #[serde(default)]
+    variables: std::collections::BTreeMap<String, String>,
 }
 async fn templates(
     State(state): State<AppState>,
@@ -1609,13 +1612,14 @@ async fn apply_template(
     })?;
     Ok(Json(
         database(state.store, move |db| {
-            db.apply_template(
+            db.apply_template_with_variables(
                 &actor,
                 &node,
                 &id,
                 input.expected_revision,
                 &input.name,
                 listen,
+                &input.variables,
             )
         })
         .await?,

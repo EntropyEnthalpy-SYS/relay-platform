@@ -17,6 +17,7 @@ fn input(tenant: Option<&str>, source: relay_platform::model::Rule) -> TemplateI
         name: "Web preset".into(),
         description: "HTTP ingress".into(),
         rule: source,
+        variables: Default::default(),
     }
 }
 
@@ -122,6 +123,7 @@ fn rollout_stops_after_a_failed_canary_batch() {
             expected_revision: expected,
             name: format!("rollout-{}", node.id),
             listen: format!("127.0.0.1:{port}").parse().unwrap(),
+            variables: Default::default(),
         }
     };
     let report = store
@@ -158,6 +160,46 @@ fn rollout_stops_after_a_failed_canary_batch() {
     assert_eq!(retry.applied, 2);
     assert!(store.config(&admin, &b.id, None).unwrap().rules.len() == 1);
     assert!(store.config(&admin, &c.id, None).unwrap().rules.len() == 1);
+}
+
+#[test]
+fn template_variables_render_and_can_be_overridden() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (node, _) = store.create_node(&admin, "default", "edge").unwrap();
+    let initial = store.set_config(&admin, &node.id, 0, vec![]).unwrap();
+    let mut source = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    source.targets[0].address = "{{host}}:9000".into();
+    let mut input = input(None, source);
+    input.variables.insert("host".into(), "127.0.0.1".into());
+    let template = store.create_template(&admin, input).unwrap();
+    let defaults = store
+        .apply_template(
+            &admin,
+            &node.id,
+            &template.id,
+            initial.revision,
+            "default",
+            "127.0.0.1:19001".parse().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(defaults.rules[0].targets[0].address, "127.0.0.1:9000");
+    let overrides =
+        std::collections::BTreeMap::from([("host".to_string(), "localhost".to_string())]);
+    let changed = store
+        .apply_template_with_variables(
+            &admin,
+            &node.id,
+            &template.id,
+            defaults.revision,
+            "override",
+            "127.0.0.1:19002".parse().unwrap(),
+            &overrides,
+        )
+        .unwrap();
+    assert_eq!(changed.rules[1].targets[0].address, "localhost:9000");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

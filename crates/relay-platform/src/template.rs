@@ -2,8 +2,9 @@
 //! it clones the body into a node configuration with a fresh identity, name,
 //! listen address and meter epoch.
 use crate::model::{Rule, now_ms};
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuleTemplate {
@@ -13,6 +14,8 @@ pub struct RuleTemplate {
     pub name: String,
     pub description: String,
     pub rule: Rule,
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
     pub created_by: String,
     pub created_at_ms: i64,
 }
@@ -31,6 +34,8 @@ pub struct RolloutTargetInput {
     pub expected_revision: u64,
     pub name: String,
     pub listen: String,
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutTarget {
@@ -38,6 +43,8 @@ pub struct RolloutTarget {
     pub expected_revision: u64,
     pub name: String,
     pub listen: std::net::SocketAddr,
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutResult {
@@ -78,6 +85,8 @@ pub struct TemplateInput {
     #[serde(default)]
     pub description: String,
     pub rule: Rule,
+    #[serde(default)]
+    pub variables: BTreeMap<String, String>,
 }
 pub fn validate(input: &TemplateInput) -> Result<()> {
     ensure!(
@@ -90,8 +99,78 @@ pub fn validate(input: &TemplateInput) -> Result<()> {
         input.description.len() <= 2_000 && !input.description.contains('\0'),
         "template description must be at most 2000 bytes"
     );
-    input.rule.validate()?;
+    validate_variables(&input.variables)?;
+    render_rule(&input.rule, &input.variables)?.validate()?;
     Ok(())
+}
+
+pub fn validate_variables(variables: &BTreeMap<String, String>) -> Result<()> {
+    ensure!(
+        variables.len() <= 64,
+        "template variables must be at most 64"
+    );
+    for (name, value) in variables {
+        ensure!(
+            !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+            "template variable names must be 1..64 ASCII alphanumeric/underscore"
+        );
+        ensure!(
+            value.len() <= 1024 && !value.chars().any(char::is_control),
+            "template variable values must be at most 1024 bytes without control characters"
+        );
+    }
+    Ok(())
+}
+
+/// Substitute `{{name}}` in every string field of the rule. Missing values are
+/// errors, so a typo cannot silently become a literal target.
+pub fn render_rule(rule: &Rule, variables: &BTreeMap<String, String>) -> Result<Rule> {
+    validate_variables(variables)?;
+    let mut value = serde_json::to_value(rule)?;
+    render_value(&mut value, variables)?;
+    serde_json::from_value(value).context("rendered template rule is invalid")
+}
+
+fn render_value(value: &mut serde_json::Value, variables: &BTreeMap<String, String>) -> Result<()> {
+    match value {
+        serde_json::Value::String(text) => *text = render_string(text, variables)?,
+        serde_json::Value::Array(items) => {
+            for item in items {
+                render_value(item, variables)?;
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                render_value(item, variables)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn render_string(text: &str, variables: &BTreeMap<String, String>) -> Result<String> {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            bail!("unterminated template placeholder");
+        };
+        let name = after[..end].trim();
+        let value = variables
+            .get(name)
+            .with_context(|| format!("template variable {name} has no value"))?;
+        output.push_str(value);
+        rest = &after[end + 2..];
+    }
+    output.push_str(rest);
+    Ok(output)
 }
 pub fn now() -> i64 {
     now_ms()

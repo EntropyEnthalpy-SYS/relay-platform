@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.53.0 开发版在 macOS 27.0.1 arm64 通过 **387 项自动化测试（358 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 388 项。日志见 [verification-0.53.0.txt](verification-0.53.0.txt)，逐项清单见 [validation-evidence-0.53.0.json](validation-evidence-0.53.0.json)。
+0.54.0 开发版在 macOS 27.0.1 arm64 通过 **388 项自动化测试（359 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 389 项。日志见 [verification-0.54.0.txt](verification-0.54.0.txt)，逐项清单见 [validation-evidence-0.54.0.json](validation-evidence-0.54.0.json)。
 
-## 0.53.0 反向隧道验证
+## 0.54.0 模板变量验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 默认变量 | `{{host}}:9000` 渲染为 `127.0.0.1:9000` |
+| 覆盖 | apply-time `host=localhost` 渲染为 `localhost:9000` |
+| 校验 | 创建/更新时完整规则校验；缺失变量拒绝 |
+| 限制 | 仅字符串替换；无表达式、条件、密钥引用、版本化或百分比 canary |
+
+## 0.53.0 反向隧道验证（历史）
+
+0.53.0 开发版在 macOS 27.0.1 arm64 通过 **387 项自动化测试（358 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 388 项。日志见 [verification-0.53.0.txt](verification-0.53.0.txt)，逐项清单见 [validation-evidence-0.53.0.json](validation-evidence-0.53.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

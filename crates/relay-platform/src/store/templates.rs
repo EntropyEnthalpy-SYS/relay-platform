@@ -1,6 +1,6 @@
 //! Rule-template persistence in metadata and application into a node config.
 use super::*;
-use crate::template::{RuleTemplate, TemplateInput, validate};
+use crate::template::{RuleTemplate, TemplateInput, render_rule, validate, validate_variables};
 
 fn key(id: &str) -> String {
     format!("template:{id}")
@@ -96,6 +96,7 @@ impl Store {
             name: input.name,
             description: input.description,
             rule: input.rule,
+            variables: input.variables,
             created_by: actor.id.clone(),
             created_at_ms: now_ms(),
         };
@@ -137,6 +138,7 @@ impl Store {
         template.name = input.name;
         template.description = input.description;
         template.rule = input.rule;
+        template.variables = input.variables;
         write(&tx, &template)?;
         audit(&tx, &actor.id, "template.update", &template.id, "{}")?;
         tx.commit()?;
@@ -258,13 +260,14 @@ impl Store {
             batches = index + 1;
             let mut failed = false;
             for target in batch {
-                match self.apply_template(
+                match self.apply_template_with_variables(
                     actor,
                     &target.node_id,
                     template_id,
                     target.expected_revision,
                     &target.name,
                     target.listen,
+                    &target.variables,
                 ) {
                     Ok(config) => {
                         applied += 1;
@@ -419,6 +422,28 @@ impl Store {
         name: &str,
         listen: std::net::SocketAddr,
     ) -> Result<NodeConfig> {
+        self.apply_template_with_variables(
+            actor,
+            node,
+            template_id,
+            expected_revision,
+            name,
+            listen,
+            &std::collections::BTreeMap::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_template_with_variables(
+        &self,
+        actor: &Actor,
+        node: &str,
+        template_id: &str,
+        expected_revision: u64,
+        name: &str,
+        listen: std::net::SocketAddr,
+        overrides: &std::collections::BTreeMap<String, String>,
+    ) -> Result<NodeConfig> {
         require_writer(actor)?;
         let (mut config, tenant) = {
             let conn = self.0.lock().unwrap();
@@ -440,12 +465,14 @@ impl Store {
                 node_tenant(&conn, node)?,
             )
         };
-        let mut rule = {
+        let (raw_rule, mut variables) = {
             let conn = self.0.lock().unwrap();
-            read(&conn, template_id)?
-                .context("template not found")?
-                .rule
+            let template = read(&conn, template_id)?.context("template not found")?;
+            (template.rule, template.variables)
         };
+        validate_variables(overrides)?;
+        variables.extend(overrides.clone());
+        let mut rule = render_rule(&raw_rule, &variables)?;
         rule.id = Uuid::new_v4().to_string();
         rule.tenant_id = tenant;
         rule.owner_id = actor.id.clone();

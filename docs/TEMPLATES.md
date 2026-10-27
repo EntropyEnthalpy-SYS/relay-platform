@@ -37,6 +37,21 @@
 
 返回与“应用”相同的拟创建规则身份（新 ID、名称、监听、owner、tenant、meter）以及 `current_revision/valid/error`，但不写修订。监听冲突等校验错误会以 `valid=false` 和错误文本返回。预览不会改变节点配置或运行状态。
 
+## 变量替换
+
+模板规则中的字符串字段支持 `{{name}}` 占位符，变量在模板创建时保存：
+
+```json
+{"name":"Origin template","rule":{"targets":[{"address":"{{host}}:{{port}}",...}],...},
+ "variables":{"host":"origin.internal","port":"443"}}
+```
+
+- 变量名 1–64 字节 ASCII 字母/数字/下划线；值 ≤1024 字节且不能含控制字符；最多 64 个。
+- 创建/更新模板时会用变量渲染并做完整规则校验；未解析的占位符直接拒绝，不会静默变成字面量。
+- 应用模板可传 `variables` 覆盖默认值；同一模板可对不同节点使用不同 host/port 等。
+- 批量应用每个目标也可带 `variables`；重试沿用原目标变量。
+- 占位符可出现在任意字符串字段（包括目标、名称、TLS 名称等）；不处理数字/布尔字段。
+
 ## 批量应用（canary）
 
 `POST /templates/{id}/rollout`：
@@ -73,6 +88,7 @@
 | POST | `/nodes/{node}/templates/{id}` | 应用为新规则 |
 | POST | `/nodes/{node}/templates/{id}/preview` | 只校验并返回拟创建规则，不写修订 |
 | POST | `/templates/{id}/rollout` | 有序分批应用到多个节点，失败停止后续批次 |
+| POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?}` 应用模板；变量覆盖默认值 |
 | POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |
 
 `/templates*` 和节点模板应用仅接受登录会话，API 令牌访问 403。面板规则表格的“存为模板”和“规则模板”页提供保存、应用、删除。
