@@ -1,6 +1,7 @@
 use crate::{
     datagram,
     health::{self, HealthSet, Observation},
+    http_connect,
     metrics::{MeterStats, Timing},
     model::*,
     multipath,
@@ -861,6 +862,7 @@ struct RuleResources {
 struct RuntimeRule {
     shadowsocks: Option<shadowsocks::Server>,
     socks5: Option<socks5::Server>,
+    http_connect: Option<http_connect::Server>,
     multipath_server: Option<Arc<multipath::Server>>,
     multipath_client: Option<Arc<Semaphore>>,
     health: Option<Arc<HealthSet>>,
@@ -935,6 +937,10 @@ impl RuntimeRule {
                 .inbound_socks5
                 .as_ref()
                 .map(|config| socks5::Server::new(config).expect("validated configuration")),
+            http_connect: spec
+                .inbound_http_connect
+                .as_ref()
+                .map(|config| http_connect::Server::new(config).expect("validated configuration")),
             multipath_server: spec
                 .inbound_multipath
                 .clone()
@@ -1954,6 +1960,7 @@ fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
         || old.inbound_proxy != new.inbound_proxy
         || old.inbound_shadowsocks != new.inbound_shadowsocks
         || old.inbound_socks5 != new.inbound_socks5
+        || old.inbound_http_connect != new.inbound_http_connect
         || old.targets.iter().any(|previous| {
             new.targets.iter().any(|current| {
                 current.address == previous.address
@@ -2438,6 +2445,35 @@ async fn connect_destination(
     .context("destination connection timed out")?
 }
 
+async fn connect_http_connect_destination(
+    rule: &RuntimeRule,
+    server: &http_connect::Server,
+    destination: &shadowsocks::Destination,
+    inlet: ListenerKey,
+) -> Result<BoxStream> {
+    let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
+    timeout_at(deadline, async {
+        let mut last = None;
+        for address in rule.resolver.resolve(&destination.to_string()).await? {
+            if !server.permits(address.ip()) {
+                last = Some(anyhow::anyhow!("{destination} is not a public address"));
+                continue;
+            }
+            let route = rule.routes.reserve(inlet, address)?;
+            match network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true)?;
+                    return Ok(transport::hold(Box::new(stream), route));
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("{destination} has no addresses")))
+    })
+    .await
+    .context("HTTP CONNECT destination connection timed out")?
+}
+
 async fn connect_socks5_destination(
     rule: &RuntimeRule,
     server: &socks5::Server,
@@ -2646,7 +2682,28 @@ async fn tcp_session(
     } else {
         client
     };
-    let (client, target) = if let Some(server) = &rule.socks5 {
+    let (client, target) = if let Some(server) = &rule.http_connect {
+        let destination = match server.accept(&mut client, handshake_deadline).await {
+            Ok(destination) => destination,
+            Err(error) => {
+                stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(%error, rule = %rule.spec.id, "HTTP CONNECT request rejected");
+                return Ok(());
+            }
+        };
+        let target =
+            match connect_http_connect_destination(&rule, server, &destination, inlet).await {
+                Ok(target) => {
+                    http_connect::ok(&mut client).await?;
+                    target
+                }
+                Err(error) => {
+                    let _ = http_connect::reply(&mut client, 502, "Bad Gateway").await;
+                    return Err(error);
+                }
+            };
+        (client, target)
+    } else if let Some(server) = &rule.socks5 {
         let destination = match server.accept(&mut client, handshake_deadline).await {
             Ok(destination) => destination,
             Err(error) => {

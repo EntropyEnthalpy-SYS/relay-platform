@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.31.0 开发版在 macOS 27.0.1 arm64 通过 **355 项自动化测试（326 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 356 项。日志见 [verification-0.31.0.txt](verification-0.31.0.txt)，逐项清单见 [validation-evidence-0.31.0.json](validation-evidence-0.31.0.json)。
+0.32.0 开发版在 macOS 27.0.1 arm64 通过 **360 项自动化测试（331 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 361 项。日志见 [verification-0.32.0.txt](verification-0.32.0.txt)，逐项清单见 [validation-evidence-0.32.0.json](validation-evidence-0.32.0.json)。
 
-## 0.31.0 礼品码验证
+## 0.32.0 HTTP CONNECT 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 协议单元 | 域名 CONNECT、成功响应、Basic 认证、缺失认证 407、成功路径 |
+| Engine | 真实监听、CONNECT 到 TCP 回显目标、200 响应与双向字节转发 |
+| 规则校验 | TCP-only、无固定目标、认证成对、与 SOCKS5 互斥 |
+| 面板 | `node --check web/app.js` 与视图结构检查；HTTP CONNECT 编辑器/分享源码，未做浏览器点击验收 |
+
+## 0.31.0 礼品码验证（历史）
+
+0.31.0 开发版在 macOS 27.0.1 arm64 通过 **355 项自动化测试（326 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 356 项。日志见 [verification-0.31.0.txt](verification-0.31.0.txt)，逐项清单见 [validation-evidence-0.31.0.json](validation-evidence-0.31.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

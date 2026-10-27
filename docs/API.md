@@ -410,3 +410,13 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | PUT | `/tickets/{id}/status` | `open` / `pending` / `closed` |
 
 普通用户仅自己的工单，租户管理员本租户，系统管理员全部；关闭后拒绝消息。`/tickets/*` 仅登录会话。详见 [TICKETS.md](TICKETS.md)。
+
+## 0.32.0 HTTP CONNECT 入口
+
+规则可增加：
+
+```json
+{"inbound_http_connect":{"username":"user","password":"secret","allow_private_destinations":false}}
+```
+
+仅接受 `CONNECT host:port HTTP/1.x`；可选 Basic 认证，缺失/错误返回 407，其他方法 405；默认拒绝非公网目的地。规则必须 `protocol=tcp`、`targets=[]`，不能同时配置 `inbound_shadowsocks`/`inbound_socks5`。连接成功后返回 200，失败 502。详见 [HTTP_CONNECT.md](HTTP_CONNECT.md)。

@@ -156,3 +156,7 @@ SOCKS5 握手在入口传输（PROXY/TLS/WS）之后、目标连接之前执行�
 ## 0.31.0：礼品码
 
 礼品码与钱包流水共用事务：兑换时校验启用/窗口/次数，写入余额和唯一引用 `gift:<CODE>:<user>` 的 `credit` 流水，并递增兑换计数。唯一引用同时提供每用户一次和请求重试幂等；已兑换的码只能停用，避免抹掉审计记录。
+
+## 0.32.0：HTTP CONNECT
+
+HTTP CONNECT 在入口 TLS/WS/PROXY 之后解析 HTTP/1.x 请求行与 Basic 认证，目标连接成功后才写 200；失败写 502，方法和认证错误分别写 405/407。解析只接受 CONNECT authority，不实现普通 HTTP 正向代理的 absolute-form 请求，避免把代理入口误当成完整 HTTP 服务。

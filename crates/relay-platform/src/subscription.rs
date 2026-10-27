@@ -487,6 +487,7 @@ mod tests {
                 allow_private_destinations: false,
             }),
             inbound_socks5: None,
+            inbound_http_connect: None,
             advertise: Some("edge.example.com:9000".into()),
             targets: vec![],
             balance: crate::model::Balance::WeightedRoundRobin,

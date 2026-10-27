@@ -46,6 +46,7 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         inbound_websocket: None,
         inbound_shadowsocks: None,
         inbound_socks5: None,
+        inbound_http_connect: None,
         advertise: None,
         targets: vec![Target {
             priority: 0,

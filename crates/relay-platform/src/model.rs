@@ -339,6 +339,9 @@ pub struct Rule {
     /// A SOCKS5 CONNECT server with optional username/password authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_socks5: Option<crate::socks5::ServerConfig>,
+    /// An HTTP CONNECT proxy server with optional Basic authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_http_connect: Option<crate::http_connect::ServerConfig>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -402,12 +405,23 @@ impl Rule {
         if let Some(config) = &self.inbound_socks5 {
             crate::socks5::validate(config)?;
             ensure!(
-                self.inbound_shadowsocks.is_none(),
-                "a rule cannot be both a Shadowsocks and SOCKS5 inbound"
+                self.inbound_shadowsocks.is_none() && self.inbound_http_connect.is_none(),
+                "a rule cannot combine proxy inbounds"
             );
             ensure!(
                 self.protocol == Protocol::Tcp,
                 "the SOCKS5 inbound currently supports TCP CONNECT only"
+            );
+        }
+        if let Some(config) = &self.inbound_http_connect {
+            crate::http_connect::validate(config)?;
+            ensure!(
+                self.inbound_shadowsocks.is_none() && self.inbound_socks5.is_none(),
+                "a rule cannot combine proxy inbounds"
+            );
+            ensure!(
+                self.protocol == Protocol::Tcp,
+                "the HTTP CONNECT inbound supports TCP only"
             );
         }
         if let Some(health) = &self.health_check {
@@ -510,7 +524,10 @@ impl Rule {
                 "DNS cache limits exceeded"
             );
         }
-        if self.inbound_shadowsocks.is_some() || self.inbound_socks5.is_some() {
+        if self.inbound_shadowsocks.is_some()
+            || self.inbound_socks5.is_some()
+            || self.inbound_http_connect.is_some()
+        {
             ensure!(
                 self.targets.is_empty(),
                 "a proxy inbound connects where each client asks; it has no targets"
