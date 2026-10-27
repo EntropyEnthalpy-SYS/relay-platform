@@ -40,6 +40,12 @@ enum Command {
         lifetime_secs: u32,
         #[arg(long)]
         delete: bool,
+        /// Keep renewing the mapping until Ctrl-C.
+        #[arg(long)]
+        renew: bool,
+        /// Seconds between renewals (defaults to half the lifetime).
+        #[arg(long)]
+        renew_after_secs: Option<u64>,
     },
     /// Request or delete a PCP UDP port mapping.
     PcpMap {
@@ -54,6 +60,12 @@ enum Command {
         /// Delete the mapping instead of creating it.
         #[arg(long)]
         delete: bool,
+        /// Keep renewing the mapping until Ctrl-C.
+        #[arg(long)]
+        renew: bool,
+        /// Seconds between renewals (defaults to half the lifetime).
+        #[arg(long)]
+        renew_after_secs: Option<u64>,
     },
     /// Request or delete a NAT-PMP UDP port mapping.
     NatMap {
@@ -177,16 +189,43 @@ async fn main() -> Result<()> {
             external_port,
             lifetime_secs,
             delete,
+            renew,
+            renew_after_secs,
         } => {
-            let mapping = tokio::runtime::Runtime::new()?.block_on(relay_platform::upnp::map(
-                &description_url,
-                &internal_client,
-                internal_port,
-                external_port,
-                lifetime_secs,
-                delete,
-            ))?;
-            println!("{}", serde_json::to_string_pretty(&mapping)?);
+            let runtime = tokio::runtime::Runtime::new()?;
+            if renew && !delete {
+                let after = renew_after_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| Duration::from_secs(u64::from((lifetime_secs / 2).max(1))));
+                let cancel = CancellationToken::new();
+                let stop = cancel.clone();
+                let task = relay_platform::upnp::maintain(
+                    &description_url,
+                    &internal_client,
+                    internal_port,
+                    external_port,
+                    lifetime_secs,
+                    after,
+                    stop,
+                    |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
+                );
+                runtime.block_on(async {
+                    tokio::select! {
+                        result = task => result,
+                        _ = tokio::signal::ctrl_c() => { cancel.cancel(); Ok(()) }
+                    }
+                })?;
+            } else {
+                let mapping = runtime.block_on(relay_platform::upnp::map(
+                    &description_url,
+                    &internal_client,
+                    internal_port,
+                    external_port,
+                    lifetime_secs,
+                    delete,
+                ))?;
+                println!("{}", serde_json::to_string_pretty(&mapping)?);
+            }
         }
         Command::PcpMap {
             gateway,
@@ -194,16 +233,42 @@ async fn main() -> Result<()> {
             external_port,
             lifetime_secs,
             delete,
+            renew,
+            renew_after_secs,
         } => {
             let gateway = relay_platform::pcp::gateway_from(&gateway)?;
             let lifetime = if delete { 0 } else { lifetime_secs };
-            let mapping = tokio::runtime::Runtime::new()?.block_on(relay_platform::pcp::map(
-                gateway,
-                internal_port,
-                external_port,
-                lifetime,
-            ))?;
-            println!("{}", serde_json::to_string_pretty(&mapping)?);
+            let runtime = tokio::runtime::Runtime::new()?;
+            if renew && !delete {
+                let after = renew_after_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| Duration::from_secs(u64::from((lifetime_secs / 2).max(1))));
+                let cancel = CancellationToken::new();
+                let stop = cancel.clone();
+                let task = relay_platform::pcp::maintain(
+                    gateway,
+                    internal_port,
+                    external_port,
+                    lifetime,
+                    after,
+                    stop,
+                    |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
+                );
+                runtime.block_on(async {
+                    tokio::select! {
+                        result = task => result,
+                        _ = tokio::signal::ctrl_c() => { cancel.cancel(); Ok(()) }
+                    }
+                })?;
+            } else {
+                let mapping = runtime.block_on(relay_platform::pcp::map(
+                    gateway,
+                    internal_port,
+                    external_port,
+                    lifetime,
+                ))?;
+                println!("{}", serde_json::to_string_pretty(&mapping)?);
+            }
         }
         Command::NatMap {
             gateway,

@@ -87,3 +87,50 @@ fn pcp_rejects_bad_versions_and_refusals() {
     assert!(pcp::parse_response(&[2, 0x81], gateway, [0; 12]).is_err());
     assert!(pcp::gateway_from("not-an-address").is_err());
 }
+
+#[tokio::test]
+async fn pcp_renews_until_cancelled() {
+    let gateway = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = gateway.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut request = [0u8; 60];
+        for epoch in 1u32..=2 {
+            let (size, peer) = gateway.recv_from(&mut request).await.unwrap();
+            assert_eq!(size, 60);
+            gateway
+                .send_to(
+                    &response(&request, 120, epoch, 0, Ipv4Addr::new(192, 0, 2, 10)),
+                    peer,
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(pcp::maintain(
+        address,
+        9000,
+        0,
+        120,
+        Duration::from_millis(50),
+        cancel.clone(),
+        move |mapping| tx.send(mapping.epoch).unwrap(),
+    ));
+    let first = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((first, second), (1, 2));
+    cancel.cancel();
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+}

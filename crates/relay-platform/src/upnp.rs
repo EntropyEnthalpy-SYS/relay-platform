@@ -5,6 +5,8 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::Url;
 use serde::Serialize;
 use std::time::Duration;
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Mapping {
@@ -156,4 +158,45 @@ pub async fn map(
     };
     call(&client, &control_url, &mapping.service, &mapping, delete).await?;
     Ok(mapping)
+}
+
+/// Renew a UPnP IGD mapping until cancelled. The control URL is looked up on
+/// every renewal so a changed description/control endpoint is picked up.
+#[allow(clippy::too_many_arguments)]
+pub async fn maintain<F>(
+    description_url: &str,
+    internal_client: &str,
+    internal_port: u16,
+    external_port: u16,
+    lifetime_secs: u32,
+    renew_after: Duration,
+    cancel: CancellationToken,
+    mut on_mapping: F,
+) -> Result<()>
+where
+    F: FnMut(&Mapping),
+{
+    ensure!(!renew_after.is_zero(), "renew interval is zero");
+    ensure!(
+        renew_after < Duration::from_secs(u64::from(lifetime_secs.max(1))),
+        "renew interval must be shorter than the lease"
+    );
+    loop {
+        let mapping = map(
+            description_url,
+            internal_client,
+            internal_port,
+            external_port,
+            lifetime_secs,
+            false,
+        )
+        .await?;
+        on_mapping(&mapping);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => break,
+            _ = sleep(renew_after) => {}
+        }
+    }
+    Ok(())
 }

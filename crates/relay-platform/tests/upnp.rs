@@ -65,3 +65,64 @@ async fn upnp_add_and_delete_use_the_igd_control_url() {
     assert!(second.contains("DeletePortMapping"));
     assert!(second.contains("<NewExternalPort>40000</NewExternalPort>"));
 }
+
+#[tokio::test]
+async fn upnp_renews_until_cancelled() {
+    type Seen = Arc<Mutex<Vec<String>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    async fn desc() -> Html<&'static str> {
+        Html(
+            r#"<root><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/control</controlURL></service></root>"#,
+        )
+    }
+    async fn control(State(seen): State<Seen>, body: String) -> &'static str {
+        seen.lock().unwrap().push(body);
+        "<Envelope><Body><AddPortMappingResponse/></Body></Envelope>"
+    }
+    let app = Router::new()
+        .route("/desc.xml", get(desc))
+        .route("/control", post(control))
+        .with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let url = format!("http://{address}/desc.xml");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        upnp::maintain(
+            &url,
+            "127.0.0.1",
+            9000,
+            40000,
+            600,
+            std::time::Duration::from_millis(50),
+            task_cancel,
+            move |mapping| tx.send(mapping.external_port).unwrap(),
+        )
+        .await
+    });
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((first, second), (40000, 40000));
+    cancel.cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .take(2)
+            .all(|body| body.contains("AddPortMapping"))
+    );
+}
