@@ -20,6 +20,7 @@ pub mod multipath;
 pub mod nat;
 mod network;
 pub mod node;
+pub mod pcp;
 pub mod proxy;
 mod routing;
 pub mod shadowsocks;

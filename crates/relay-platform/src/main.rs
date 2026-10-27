@@ -26,6 +26,20 @@ enum Command {
     BuildInfo,
     /// Observe MPTCP kernel capability, interfaces, routes and endpoints.
     MptcpInfo,
+    /// Request or delete a PCP UDP port mapping.
+    PcpMap {
+        #[arg(long)]
+        gateway: String,
+        #[arg(long)]
+        internal_port: u16,
+        #[arg(long, default_value_t = 0)]
+        external_port: u16,
+        #[arg(long, default_value_t = 3600)]
+        lifetime_secs: u32,
+        /// Delete the mapping instead of creating it.
+        #[arg(long)]
+        delete: bool,
+    },
     /// Request or delete a NAT-PMP UDP port mapping.
     NatMap {
         #[arg(long)]
@@ -135,6 +149,23 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
     match cli.command {
+        Command::PcpMap {
+            gateway,
+            internal_port,
+            external_port,
+            lifetime_secs,
+            delete,
+        } => {
+            let gateway = relay_platform::pcp::gateway_from(&gateway)?;
+            let lifetime = if delete { 0 } else { lifetime_secs };
+            let mapping = tokio::runtime::Runtime::new()?.block_on(relay_platform::pcp::map(
+                gateway,
+                internal_port,
+                external_port,
+                lifetime,
+            ))?;
+            println!("{}", serde_json::to_string_pretty(&mapping)?);
+        }
         Command::NatMap {
             gateway,
             internal_port,

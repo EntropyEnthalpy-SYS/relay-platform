@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.42.0 开发版在 macOS 27.0.1 arm64 通过 **370 项自动化测试（341 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 371 项。日志见 [verification-0.42.0.txt](verification-0.42.0.txt)，逐项清单见 [validation-evidence-0.42.0.json](validation-evidence-0.42.0.json)。
+0.43.0 开发版在 macOS 27.0.1 arm64 通过 **372 项自动化测试（343 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 373 项。日志见 [verification-0.43.0.txt](verification-0.43.0.txt)，逐项清单见 [validation-evidence-0.43.0.json](validation-evidence-0.43.0.json)。
 
-## 0.42.0 NAT-PMP 验证
+## 0.43.0 PCP 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 集成 | 假网关验证 60 字节请求、nonce、成功映射、IPv4-mapped 外部地址、删除 |
+| 单元 | 版本/拒绝/短响应、非法 gateway 失败 |
+| 限制 | 无 UPnP、续租/重试、固定源端口、IPv6 完整矩阵、反向隧道、WireGuard |
+
+## 0.42.0 NAT-PMP 验证（历史）
+
+0.42.0 开发版在 macOS 27.0.1 arm64 通过 **370 项自动化测试（341 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 371 项。日志见 [verification-0.42.0.txt](verification-0.42.0.txt)，逐项清单见 [validation-evidence-0.42.0.json](validation-evidence-0.42.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

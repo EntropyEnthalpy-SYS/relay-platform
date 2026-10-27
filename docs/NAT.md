@@ -1,6 +1,6 @@
 # NAT 端口映射
 
-0.42.0 增加 NAT-PMP（RFC 6886）UDP 端口映射客户端，作为模块 16 的第一个可执行能力。它不是 NAT 穿透服务器、反向隧道或 WireGuard。
+0.42.0 增加 NAT-PMP（RFC 6886）UDP 端口映射客户端；0.43.0 增加 PCP（RFC 6887）MAP 客户端。它们是端口映射管理工具，不是 NAT 穿透服务器、反向隧道或 WireGuard。
 
 ## CLI
 
@@ -16,8 +16,21 @@ relay nat-map --gateway 192.168.1.1:5351 --internal-port 9000 --delete
 - `--external-port 0` 表示由网关分配；`--delete` 发送生命周期 0。
 - 生命周期上限 7 天；内部端口不能为 0。
 
+## PCP
+
+```text
+relay pcp-map --gateway 192.168.1.1 \
+  --internal-port 9000 --external-port 0 --lifetime-secs 3600
+relay pcp-map --gateway 192.168.1.1:5351 --internal-port 9000 --delete
+```
+
+- PCP 版本 2、MAP opcode 1、UDP 协议 17；60 字节请求/响应。
+- 客户端随机生成 12 字节 nonce，响应必须匹配；拒绝结果码、版本、长度错误明确失败。
+- 外部 IP 使用 16 字节字段，IPv4-mapped 地址会还原成 IPv4；生命周期上限 7 天。
+- 与 NAT-PMP 一样只管理一个映射，不改变 Relay 数据路径。
+
 ## 验证与限制
 
-- 集成测试用本机假 NAT-PMP 网关验证请求字段、成功映射、epoch/外部端口解析、删除请求和拒绝响应。
-- 未实现 PCP、UPnP IGD、NAT-PMP 续租/重试、IPv6、映射状态持久化、反向隧道、WireGuard、真实家用路由器验收；模块 16 仍为部分实现。
+- 集成测试用本机假 NAT-PMP 网关验证请求字段、成功映射、epoch/外部端口解析、删除请求和拒绝响应；假 PCP 网关验证 nonce、成功映射、IPv4-mapped 外部地址、删除和拒绝。
+- 未实现 UPnP IGD、NAT-PMP/PCP 续租/重试、PCP 固定源端口 5351、IPv6 完整矩阵、映射状态持久化、反向隧道、WireGuard、公网入口和真实家用路由器验收；模块 16 仍为部分实现。
 - 该命令只管理一个映射，不改变 Relay 规则或监听；需要网关实际支持 NAT-PMP。
