@@ -303,6 +303,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/tickets", get(tickets).post(create_ticket))
         .route("/api/v1/templates", get(templates).post(create_template))
         .route("/api/v1/templates/{id}/versions", get(template_versions))
+        .route("/api/v1/templates/{id}/diff", get(template_diff))
         .route(
             "/api/v1/templates/{id}/versions/{version}/rollback",
             post(rollback_template),
@@ -1610,6 +1611,24 @@ async fn template_versions(
 ) -> ApiResult<Vec<crate::template::RuleTemplate>> {
     Ok(Json(
         database(state.store, move |db| db.template_versions(&actor, &id)).await?,
+    ))
+}
+#[derive(Deserialize)]
+struct TemplateDiffQuery {
+    from: u64,
+    to: u64,
+}
+async fn template_diff(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Query(query): Query<TemplateDiffQuery>,
+) -> ApiResult<crate::template::TemplateDiff> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.template_diff(&actor, &id, query.from, query.to)
+        })
+        .await?,
     ))
 }
 async fn rollback_template(

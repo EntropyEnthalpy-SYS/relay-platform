@@ -37,6 +37,16 @@
 
 返回与“应用”相同的拟创建规则身份（新 ID、名称、监听、owner、tenant、meter）以及 `current_revision/valid/error`，但不写修订。监听冲突等校验错误会以 `valid=false` 和错误文本返回。预览不会改变节点配置或运行状态。
 
+## 版本差异
+
+`GET /templates/{id}/diff?from=1&to=2` 返回两个模板版本的结构化差异：
+
+- 比较名称、描述、规则和变量；
+- 路径使用 JSON Pointer 风格（`/rule/targets/0/address`），对象键转义 `~0`/`~1`；
+- 数组按索引比较，新增/删除一侧为 `null`；
+- 最多返回 512 个变化，避免超大输出；
+- 面板“差异”按钮可输入两个版本号查看结果。
+
 ## 版本历史与回滚
 
 - 创建为 v1；每次更新把当前模板快照写入 `template-version:{id}:{version}`，新内容版本号 +1。
@@ -98,6 +108,7 @@
 | POST | `/nodes/{node}/templates/{id}` | 应用为新规则 |
 | POST | `/nodes/{node}/templates/{id}/preview` | 只校验并返回拟创建规则，不写修订 |
 | GET | `/templates/{id}/versions` | 当前和历史模板版本 |
+| GET | `/templates/{id}/diff?from=&to=` | 两个模板版本的结构化差异 |
 | POST | `/templates/{id}/versions/{version}/rollback` | 旧内容作为新版本写回 |
 | POST | `/templates/{id}/rollout` | 有序分批应用到多个节点，失败停止后续批次 |
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?,template_version?}` 应用模板；可固定历史版本 |

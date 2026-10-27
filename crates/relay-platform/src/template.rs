@@ -80,6 +80,19 @@ pub struct RolloutReport {
     pub aborted: bool,
     pub results: Vec<RolloutResult>,
 }
+#[derive(Clone, Debug, Serialize)]
+pub struct TemplateDiff {
+    pub template_id: String,
+    pub from: u64,
+    pub to: u64,
+    pub changes: Vec<DiffChange>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct DiffChange {
+    pub path: String,
+    pub from: Option<serde_json::Value>,
+    pub to: Option<serde_json::Value>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutRecord {
     pub targets: Vec<RolloutTarget>,

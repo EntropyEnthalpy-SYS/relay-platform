@@ -786,7 +786,7 @@ async function renderTemplates() {
   const p = panel('规则模板', '模板保存一份已验证的规则内容；应用时生成新的规则 ID、名称、监听地址和计量周期，并走正常配置校验。', null);
   if (!templates.length) p.append(empty('还没有模板', '在“转发规则”表格中把一条规则存为模板。'));
   else p.append(table(['名称', '范围', '说明', '源监听', '操作'], templates.map(template => {
-    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); actions.append(button('批量应用', () => rolloutTemplate(template), 'table-action')); actions.append(button('版本', () => templateVersions(template), 'table-action')); }
+    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); actions.append(button('批量应用', () => rolloutTemplate(template), 'table-action')); actions.append(button('版本', () => templateVersions(template), 'table-action')); actions.append(button('差异', () => templateDiff(template), 'table-action')); }
     if (state.actor.role === 'system_admin' || template.tenant_id === state.actor.tenant_id) actions.append(button('删除', () => deleteTemplate(template), 'table-action danger'));
     return [namedCell(template.name, template.id), template.tenant_id || '全局', template.description || '—', template.rule.listen, actions];
   })));
@@ -803,6 +803,23 @@ async function deleteTemplate(template) {
   if (!confirm(`删除模板「${template.name}」？`)) return;
   await api(`/templates/${template.id}`, { method: 'DELETE' }); notify('模板已删除。'); await renderTemplates();
 }
+async function templateDiff(template) {
+  const from = prompt('旧版本号', '1');
+  if (!from) return;
+  const to = prompt('新版本号', String(template.version));
+  if (!to) return;
+  const diff = await api(`/templates/${template.id}/diff?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+  const content = el('div');
+  if (!diff.changes.length) content.append(el('p', '两个版本内容相同。', 'fine'));
+  const list = el('div', undefined, 'version-list');
+  for (const change of diff.changes) {
+    const row = el('div', undefined, 'version-row');
+    row.append(el('code', change.path), el('span', `${JSON.stringify(change.from)} → ${JSON.stringify(change.to)}`));
+    list.append(row);
+  }
+  content.append(list); modal(`差异 · ${template.name}`, content);
+}
+
 async function templateVersions(template) {
   const versions = await api(`/templates/${template.id}/versions`);
   const content = el('div'); content.append(el('p', `当前版本 ${template.version}；保留 ${versions.length} 个版本。`, 'fine'));

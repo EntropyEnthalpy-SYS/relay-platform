@@ -189,6 +189,53 @@ impl Store {
         Ok(versions)
     }
 
+    pub fn template_diff(
+        &self,
+        actor: &Actor,
+        id: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<crate::template::TemplateDiff> {
+        require_writer(actor)?;
+        let conn = self.0.lock().unwrap();
+        let current = read(&conn, id)?.context("template not found")?;
+        if !visible(actor, &current) {
+            return reject(403, "template belongs to another tenant");
+        }
+        let resolve = |version: u64| -> Result<RuleTemplate> {
+            if version == current.version {
+                return Ok(current.clone());
+            }
+            ensure!(
+                version > 0 && version < current.version,
+                "template version is not available"
+            );
+            read_version(&conn, id, version)?.context("template version not found")
+        };
+        let left = resolve(from)?;
+        let right = resolve(to)?;
+        let mut changes = Vec::new();
+        let left_value = serde_json::json!({
+            "name": left.name,
+            "description": left.description,
+            "rule": left.rule,
+            "variables": left.variables,
+        });
+        let right_value = serde_json::json!({
+            "name": right.name,
+            "description": right.description,
+            "rule": right.rule,
+            "variables": right.variables,
+        });
+        diff_values("", &left_value, &right_value, &mut changes)?;
+        Ok(crate::template::TemplateDiff {
+            template_id: id.into(),
+            from,
+            to,
+            changes,
+        })
+    }
+
     pub fn rollback_template(&self, actor: &Actor, id: &str, version: u64) -> Result<RuleTemplate> {
         require_writer(actor)?;
         let mut conn = self.0.lock().unwrap();
@@ -584,4 +631,69 @@ impl Store {
         config.rules.push(rule);
         self.set_config_with_rate(actor, node, expected_revision, config.rules, None)
     }
+}
+
+fn diff_values(
+    path: &str,
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+    changes: &mut Vec<crate::template::DiffChange>,
+) -> Result<()> {
+    if left == right {
+        return Ok(());
+    }
+    ensure!(changes.len() < 512, "template diff is too large");
+    match (left, right) {
+        (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
+            let mut keys: Vec<_> = left.keys().chain(right.keys()).cloned().collect();
+            keys.sort();
+            keys.dedup();
+            for key in keys {
+                let child = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                match (left.get(&key), right.get(&key)) {
+                    (Some(a), Some(b)) => diff_values(&child, a, b, changes)?,
+                    (Some(a), None) => changes.push(crate::template::DiffChange {
+                        path: child,
+                        from: Some(a.clone()),
+                        to: None,
+                    }),
+                    (None, Some(b)) => changes.push(crate::template::DiffChange {
+                        path: child,
+                        from: None,
+                        to: Some(b.clone()),
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        (serde_json::Value::Array(left), serde_json::Value::Array(right)) => {
+            for index in 0..left.len().max(right.len()) {
+                let child = format!("{path}/{index}");
+                match (left.get(index), right.get(index)) {
+                    (Some(a), Some(b)) => diff_values(&child, a, b, changes)?,
+                    (Some(a), None) => changes.push(crate::template::DiffChange {
+                        path: child,
+                        from: Some(a.clone()),
+                        to: None,
+                    }),
+                    (None, Some(b)) => changes.push(crate::template::DiffChange {
+                        path: child,
+                        from: None,
+                        to: Some(b.clone()),
+                    }),
+                    (None, None) => {}
+                }
+            }
+        }
+        _ => changes.push(crate::template::DiffChange {
+            path: if path.is_empty() {
+                "/".into()
+            } else {
+                path.into()
+            },
+            from: Some(left.clone()),
+            to: Some(right.clone()),
+        }),
+    }
+    Ok(())
 }
