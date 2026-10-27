@@ -1347,6 +1347,40 @@ async fn prometheus_metrics(
             metric_label(&node.tenant_id)
         ));
     }
+    body.push_str("# HELP relay_node_applied_revision Last applied configuration revision.\n# TYPE relay_node_applied_revision gauge\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_applied_revision{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.applied_revision
+        ));
+    }
+    body.push_str("# HELP relay_node_desired_revision Desired configuration revision.\n# TYPE relay_node_desired_revision gauge\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_desired_revision{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.desired_revision
+        ));
+    }
+    body.push_str("# HELP relay_node_config_in_sync Whether applied equals desired.\n# TYPE relay_node_config_in_sync gauge\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_config_in_sync{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            u8::from(node.applied_revision == node.desired_revision)
+        ));
+    }
+    body.push_str("# HELP relay_node_last_seen_timestamp_seconds Last sync as Unix seconds.\n# TYPE relay_node_last_seen_timestamp_seconds gauge\n");
+    for node in &nodes {
+        if let Some(seen) = node.last_seen_ms {
+            body.push_str(&format!(
+                "relay_node_last_seen_timestamp_seconds{{node=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                seen as f64 / 1000.0
+            ));
+        }
+    }
     body.push_str("# HELP relay_node_active_tcp Active TCP connections.\n# TYPE relay_node_active_tcp gauge\n");
     for node in &nodes {
         body.push_str(&format!(
