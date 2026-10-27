@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.66.0 开发版在 macOS 27.0.1 arm64 通过 **399 项自动化测试（370 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 400 项。日志见 [verification-0.66.0.txt](verification-0.66.0.txt)，逐项清单见 [validation-evidence-0.66.0.json](validation-evidence-0.66.0.json)。
+0.67.0 开发版在 macOS 27.0.1 arm64 通过 **400 项自动化测试（371 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 401 项。日志见 [verification-0.67.0.txt](verification-0.67.0.txt)，逐项清单见 [validation-evidence-0.67.0.json](validation-evidence-0.67.0.json)。
 
-## 0.66.0 指数退避重试验证
+## 0.67.0 批量健康预检验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 未同步 | 90 秒内无同步的节点被拒绝，未写配置 |
+| 应用错误 | 有 `apply_error` 的节点被拒绝 |
+| 关闭预检 | 同一节点可正常应用 |
+| 限制 | 预检不是应用后健康观察或自动放量 |
+
+## 0.66.0 指数退避重试验证（历史）
+
+0.66.0 开发版在 macOS 27.0.1 arm64 通过 **399 项自动化测试（370 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 400 项。日志见 [verification-0.66.0.txt](verification-0.66.0.txt)，逐项清单见 [validation-evidence-0.66.0.json](validation-evidence-0.66.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

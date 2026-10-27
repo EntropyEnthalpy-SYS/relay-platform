@@ -57,6 +57,15 @@
 - 模板版本与节点配置修订是两套独立计数。
 - 面板模板页“版本”按钮列出历史并提供回滚。
 
+## 健康预检
+
+`require_healthy: true` 时，每个目标在应用前必须：
+
+- 最近 90 秒内同步过；
+- 没有 `apply_error`。
+
+不满足的节点不会写入配置，报告对应错误并停止后续批次；这是**预检**，不是应用后的业务健康检查或自动放量。默认关闭。
+
 ## 百分比首批
 
 `POST /templates/{id}/rollout` 可传 `canary_percent`（1–100）：
@@ -119,7 +128,7 @@
 | GET | `/templates/{id}/versions` | 当前和历史模板版本 |
 | GET | `/templates/{id}/diff?from=&to=` | 两个模板版本的结构化差异 |
 | POST | `/templates/{id}/versions/{version}/rollback` | 旧内容作为新版本写回 |
-| POST | `/templates/{id}/rollout` | 有序分批应用；可选 `canary_percent` 首批比例、回滚 |
+| POST | `/templates/{id}/rollout` | 有序分批应用；可选 `canary_percent` 首批比例、健康预检、回滚 |
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?,template_version?}` 应用模板；可固定历史版本 |
 | POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |
 

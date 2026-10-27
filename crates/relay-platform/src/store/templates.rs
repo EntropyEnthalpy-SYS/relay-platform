@@ -362,6 +362,7 @@ impl Store {
     /// Apply a template to ordered node batches. A failure in a batch stops
     /// later batches; successful nodes in that batch remain applied and are
     /// reported individually. Each node's expected revision still guards it.
+    #[allow(clippy::too_many_arguments)]
     pub fn rollout_template(
         &self,
         actor: &Actor,
@@ -370,6 +371,7 @@ impl Store {
         batch_size: usize,
         rollback_on_failure: bool,
         canary_percent: Option<u8>,
+        require_healthy: bool,
     ) -> Result<crate::template::RolloutReport> {
         require_writer(actor)?;
         ensure!(!targets.is_empty(), "rollout requires at least one node");
@@ -386,6 +388,16 @@ impl Store {
                 "duplicate rollout node"
             );
         }
+        let health = if require_healthy {
+            Some(
+                self.nodes(actor)?
+                    .into_iter()
+                    .map(|node| (node.id.clone(), node))
+                    .collect::<std::collections::HashMap<_, _>>(),
+            )
+        } else {
+            None
+        };
         let mut results = Vec::new();
         let mut applied = 0usize;
         let mut rolled_back = 0usize;
@@ -411,6 +423,44 @@ impl Store {
             batches = index;
             let mut failed = false;
             for target in batch {
+                if let Some(nodes) = &health {
+                    let Some(node) = nodes.get(&target.node_id) else {
+                        failed = true;
+                        results.push(crate::template::RolloutResult {
+                            node_id: target.node_id.clone(),
+                            batch: index,
+                            applied: false,
+                            revision: None,
+                            rule_id: None,
+                            error: Some("node not found for health preflight".into()),
+                            rolled_back: false,
+                            rollback_error: None,
+                        });
+                        continue;
+                    };
+                    let healthy = node.apply_error.is_none()
+                        && node
+                            .last_seen_ms
+                            .is_some_and(|seen| now_ms() - seen <= 90_000);
+                    if !healthy {
+                        failed = true;
+                        results.push(crate::template::RolloutResult {
+                            node_id: target.node_id.clone(),
+                            batch: index,
+                            applied: false,
+                            revision: None,
+                            rule_id: None,
+                            error: Some(if node.apply_error.is_some() {
+                                "node has an apply error".into()
+                            } else {
+                                "node has not synced within 90s".into()
+                            }),
+                            rolled_back: false,
+                            rollback_error: None,
+                        });
+                        continue;
+                    }
+                }
                 match self.apply_template_with_variables(
                     actor,
                     &target.node_id,
@@ -501,6 +551,7 @@ impl Store {
             template_id: template_id.into(),
             batch_size,
             canary_percent,
+            require_healthy,
             batches,
             applied,
             rolled_back,
@@ -512,6 +563,7 @@ impl Store {
             targets: targets.to_vec(),
             rollback_on_failure,
             canary_percent,
+            require_healthy,
             report: report.clone(),
         };
         let mut conn = self.0.lock().unwrap();
@@ -562,6 +614,7 @@ impl Store {
             record.report.batch_size,
             record.rollback_on_failure,
             record.canary_percent,
+            record.require_healthy,
         )
     }
 
@@ -718,4 +771,11 @@ fn diff_values(
         }),
     }
     Ok(())
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default()
 }

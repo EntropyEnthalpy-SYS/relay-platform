@@ -75,6 +75,8 @@ pub struct RolloutReport {
     pub batch_size: usize,
     #[serde(default)]
     pub canary_percent: Option<u8>,
+    #[serde(default)]
+    pub require_healthy: bool,
     pub batches: usize,
     pub applied: usize,
     pub rolled_back: usize,
@@ -101,6 +103,8 @@ pub struct RolloutRecord {
     pub rollback_on_failure: bool,
     #[serde(default)]
     pub canary_percent: Option<u8>,
+    #[serde(default)]
+    pub require_healthy: bool,
     pub report: RolloutReport,
 }
 #[derive(Clone, Debug, Deserialize)]
