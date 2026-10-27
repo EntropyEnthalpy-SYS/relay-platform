@@ -49,6 +49,9 @@ enum Command {
         /// Retry a failed request after this many seconds (omit to fail fast).
         #[arg(long)]
         retry_secs: Option<u64>,
+        /// Write the last successful mapping as JSON (atomically).
+        #[arg(long)]
+        state_file: Option<PathBuf>,
     },
     /// Run the public side of a single-session reverse TCP tunnel.
     ReverseServer {
@@ -123,6 +126,9 @@ enum Command {
         /// Retry a failed request after this many seconds (omit to fail fast).
         #[arg(long)]
         retry_secs: Option<u64>,
+        /// Write the last successful mapping as JSON (atomically).
+        #[arg(long)]
+        state_file: Option<PathBuf>,
     },
     /// Request or delete a NAT-PMP UDP port mapping.
     NatMap {
@@ -146,6 +152,9 @@ enum Command {
         /// Retry a failed request after this many seconds (omit to fail fast).
         #[arg(long)]
         retry_secs: Option<u64>,
+        /// Write the last successful mapping as JSON (atomically).
+        #[arg(long)]
+        state_file: Option<PathBuf>,
     },
     /// Run the control API and embedded administration interface.
     Server {
@@ -252,6 +261,7 @@ async fn main() -> Result<()> {
             renew,
             renew_after_secs,
             retry_secs,
+            state_file,
         } => {
             let runtime = tokio::runtime::Runtime::new()?;
             if renew && !delete {
@@ -269,7 +279,12 @@ async fn main() -> Result<()> {
                     after,
                     retry_secs.map(Duration::from_secs),
                     stop,
-                    |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
+                    move |mapping| {
+                        println!("{}", serde_json::to_string(mapping).unwrap_or_default());
+                        if let Some(path) = &state_file {
+                            let _ = relay_platform::state::write_json_atomic(path, mapping);
+                        }
+                    },
                 );
                 runtime.block_on(async {
                     tokio::select! {
@@ -287,6 +302,13 @@ async fn main() -> Result<()> {
                     delete,
                 ))?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
+                if let Some(path) = &state_file {
+                    if delete {
+                        relay_platform::state::remove_if_present(path)?;
+                    } else {
+                        relay_platform::state::write_json_atomic(path, &mapping)?;
+                    }
+                }
             }
         }
         Command::ReverseServer {
@@ -377,6 +399,7 @@ async fn main() -> Result<()> {
             renew,
             renew_after_secs,
             retry_secs,
+            state_file,
         } => {
             let gateway = relay_platform::pcp::gateway_from(&gateway)?;
             let lifetime = if delete { 0 } else { lifetime_secs };
@@ -395,7 +418,12 @@ async fn main() -> Result<()> {
                     after,
                     retry_secs.map(Duration::from_secs),
                     stop,
-                    |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
+                    move |mapping| {
+                        println!("{}", serde_json::to_string(mapping).unwrap_or_default());
+                        if let Some(path) = &state_file {
+                            let _ = relay_platform::state::write_json_atomic(path, mapping);
+                        }
+                    },
                 );
                 runtime.block_on(async {
                     tokio::select! {
@@ -411,6 +439,13 @@ async fn main() -> Result<()> {
                     lifetime,
                 ))?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
+                if let Some(path) = &state_file {
+                    if delete {
+                        relay_platform::state::remove_if_present(path)?;
+                    } else {
+                        relay_platform::state::write_json_atomic(path, &mapping)?;
+                    }
+                }
             }
         }
         Command::NatMap {
@@ -422,6 +457,7 @@ async fn main() -> Result<()> {
             renew,
             renew_after_secs,
             retry_secs,
+            state_file,
         } => {
             let gateway = relay_platform::nat::gateway_from(&gateway)?;
             relay_platform::nat::validate_ports(internal_port, external_port)?;
@@ -442,7 +478,12 @@ async fn main() -> Result<()> {
                     after,
                     retry_secs.map(Duration::from_secs),
                     stop,
-                    |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
+                    move |mapping| {
+                        println!("{}", serde_json::to_string(mapping).unwrap_or_default());
+                        if let Some(path) = &state_file {
+                            let _ = relay_platform::state::write_json_atomic(path, mapping);
+                        }
+                    },
                 );
                 runtime.block_on(async {
                     tokio::select! {
@@ -461,6 +502,13 @@ async fn main() -> Result<()> {
                     lifetime,
                 ))?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
+                if let Some(path) = &state_file {
+                    if delete {
+                        relay_platform::state::remove_if_present(path)?;
+                    } else {
+                        relay_platform::state::write_json_atomic(path, &mapping)?;
+                    }
+                }
             }
         }
         Command::MptcpInfo => {

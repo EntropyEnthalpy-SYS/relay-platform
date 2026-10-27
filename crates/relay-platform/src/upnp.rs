@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail, ensure};
 use axum::{Router, extract::State, http::HeaderMap, routing::post};
 use reqwest::Url;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
@@ -20,7 +20,7 @@ pub struct Discovery {
     pub usn: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mapping {
     pub description_url: String,
     pub control_url: String,

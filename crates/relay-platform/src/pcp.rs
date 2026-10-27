@@ -1,7 +1,7 @@
 //! Minimal PCP (RFC 6887) MAP client for one UDP mapping. It is a management
 //! client, not a PCP server or a NAT traversal data path.
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, sleep, timeout};
@@ -13,7 +13,7 @@ const OPCODE_MAP: u8 = 1;
 const PROTOCOL_UDP: u8 = 17;
 const DEFAULT_PORT: u16 = 5351;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mapping {
     pub gateway: SocketAddr,
     pub internal_port: u16,

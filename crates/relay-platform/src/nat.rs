@@ -1,7 +1,7 @@
 //! Minimal NAT-PMP (RFC 6886) port-mapping client. This manages one UDP
 //! mapping; it is not a NAT traversal server or a WireGuard implementation.
 use anyhow::{Context, Result, bail, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 use tokio::time::{Duration, sleep, timeout};
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 const OPCODE_MAP_UDP: u8 = 1;
 const DEFAULT_PORT: u16 = 5351;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Mapping {
     pub gateway: SocketAddr,
     pub internal_port: u16,

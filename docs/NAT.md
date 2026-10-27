@@ -15,7 +15,7 @@ relay upnp-discover --timeout-secs 3
 relay upnp-subscribe --description-url http://192.168.1.1:5000/rootDesc.xml --callback http://192.0.2.10:9000/events --timeout-secs 1800
 relay upnp-unsubscribe --event-url http://192.168.1.1:5000/events --sid uuid:...
 relay upnp-events --description-url http://192.168.1.1:5000/rootDesc.xml --callback http://192.0.2.10:9000/events --timeout-secs 1800
-relay nat-map --gateway 192.168.1.1 --internal-port 9000 --renew --retry-secs 5
+relay nat-map --gateway 192.168.1.1 --internal-port 9000 --renew --retry-secs 5 --state-file /var/lib/relay/mapping.json
 relay upnp-map --description-url http://192.168.1.1:5000/rootDesc.xml --internal-port 9000 --external-port 40000 --lifetime-secs 600 --renew
 ```
 
@@ -42,6 +42,7 @@ relay pcp-map --gateway 192.168.1.1:5351 --internal-port 9000 --delete
 - 事件 JSON 同时包含原始正文和 `properties`：从叶级属性元素提取的键值（去命名空间前缀，最多 64 项、每值 4096 字节）；不执行 XML、不解析实体，也不做事件动作分发。
 - `upnp-discover` 向 `239.255.255.250:1900` 发送 SSDP M-SEARCH（IGD 设备类型），在超时内收集 `LOCATION`，按 LOCATION 去重并输出 JSON；测试使用显式单播目标，受控网络可用 `discover_at`。目前只做 IPv4，不解析设备 XML，也不自动选择网关。
 - 三种客户端的 `--renew` 都可配 `--retry-secs`：请求失败后按该间隔重试，直到成功或 Ctrl-C；省略时失败即退出。零间隔拒绝。
+- `--state-file` 在每次成功映射后原子写入最后一条映射 JSON；`--delete` 成功后删除该文件。它是最后状态记录，不会在启动时自动恢复映射或清理旧映射。
 - NAT-PMP、PCP、UPnP 的 `--renew` 持续续租直到 Ctrl-C；间隔默认生命周期的一半，也可用 `--renew-after-secs` 指定。续租间隔必须小于生命周期；每次成功映射输出一行 JSON，失败即退出并保留错误。`--delete` 优先，不会续租。PCP 每次重新获取 nonce；UPnP 每次重新解析 description/control URL，能感知控制地址变化。
 
 ## UPnP IGD
@@ -61,5 +62,5 @@ relay upnp-map --description-url ... --internal-port 9000 --external-port 40000 
 ## 验证与限制
 
 - 集成测试用本机假 NAT-PMP 网关验证请求字段、成功映射、epoch/外部端口解析、删除请求、拒绝响应和取消前多次续租；假 PCP 网关验证 nonce、成功映射、IPv4-mapped 外部地址、删除、拒绝和续租；假 UPnP HTTP 服务验证 description 解析、AddPortMapping/DeletePortMapping 的 control URL、SOAP 字段和续租；假 SSDP 服务验证 M-SEARCH 字段、LOCATION 解析和重复响应去重；假 HTTP 事件服务验证 SUBSCRIBE/续订/UNSUBSCRIBE 的 SID、CALLBACK 和超时；回调服务测试验证 NOTIFY 接收、SID/SEQ、属性提取和取消后退订。
-- SSDP 仅收集 IGD LOCATION；UPnP 事件不解析属性正文，回调仅支持明文 IPv4/localhost；未实现完整设备/服务描述筛选、PCP 固定源端口 5351、IPv6 完整矩阵、映射状态持久化、指数退避、WireGuard、公网入口和真实家用路由器验收；固定间隔重试已实现；模块 16 仍为部分实现。
+- SSDP 仅收集 IGD LOCATION；UPnP 事件不解析嵌套属性语义，回调仅支持明文 IPv4/localhost；未实现完整设备/服务描述筛选、PCP 固定源端口 5351、IPv6 完整矩阵、映射状态持久化、指数退避、WireGuard、公网入口和真实家用路由器验收；固定间隔重试已实现；模块 16 仍为部分实现。
 - 该命令只管理一个映射，不改变 Relay 规则或监听；需要网关实际支持 NAT-PMP。
