@@ -12,6 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 
 const MAX_LINE: usize = 512;
+const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const READY: &str = "READY";
 const OPEN: &str = "OPEN";
 const OK: &str = "OK";
@@ -24,11 +26,15 @@ pub async fn serve(control: TcpListener, public: TcpListener, token: String) -> 
     let public = std::sync::Arc::new(public);
     loop {
         let (mut control_stream, peer) = control.accept().await?;
-        let authorized = match read_line(&mut control_stream).await {
-            Ok(line) => line
+        let authorized = match tokio::time::timeout(AUTH_TIMEOUT, read_line(&mut control_stream))
+            .await
+            .ok()
+            .and_then(Result::ok)
+        {
+            Some(line) => line
                 .strip_prefix("REVERSE ")
                 .is_some_and(|provided| token_matches(&token, provided)),
-            Err(_) => false,
+            None => false,
         };
         if !authorized {
             let _ = control_stream.write_all(b"DENY\n").await;
@@ -134,12 +140,17 @@ async fn client_session(server: SocketAddr, target: &str, token: &str) -> Result
     if line != OPEN {
         bail!("unexpected reverse command: {line}");
     }
-    let mut local = match TcpStream::connect(target).await {
-        Ok(stream) => stream,
-        Err(error) => {
+    let mut local = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(target)).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
             let message = format!("FAIL {error}\n");
             let _ = control.write_all(message.as_bytes()).await;
             bail!("reverse target connect failed: {error}");
+        }
+        Err(_) => {
+            let message = "FAIL target connect timed out\n";
+            let _ = control.write_all(message.as_bytes()).await;
+            bail!("reverse target connect timed out");
         }
     };
     control.write_all(format!("{OK}\n").as_bytes()).await?;

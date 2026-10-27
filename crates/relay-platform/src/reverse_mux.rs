@@ -24,6 +24,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_LINE: usize = 512;
+const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_FRAME: usize = 64 * 1024;
 const READY: &str = "READY";
 const DENY: &str = "DENY";
@@ -74,11 +76,15 @@ pub async fn serve_mux_with_options(
     let public = Arc::new(public);
     loop {
         let (mut control_stream, peer) = control.accept().await?;
-        let authorized = match read_line(&mut control_stream).await {
-            Ok(line) => line
+        let authorized = match tokio::time::timeout(AUTH_TIMEOUT, read_line(&mut control_stream))
+            .await
+            .ok()
+            .and_then(Result::ok)
+        {
+            Some(line) => line
                 .strip_prefix("REVERSE-MUX ")
                 .is_some_and(|provided| token_matches(&token, provided)),
-            Err(_) => false,
+            None => false,
         };
         if !authorized {
             let _ = control_stream.write_all(b"DENY\n").await;
@@ -354,8 +360,9 @@ async fn bridge_local(
     sessions: Sessions,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let local = TcpStream::connect(&target)
+    let local = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target))
         .await
+        .with_context(|| format!("connect reverse mux target {target} timed out"))?
         .with_context(|| format!("connect reverse mux target {target}"))?;
     local.set_nodelay(true).ok();
     write_frame(&writer, OK, id, &[]).await?;
