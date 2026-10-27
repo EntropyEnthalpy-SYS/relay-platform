@@ -33,6 +33,13 @@ pub struct Mapping {
 pub struct Service {
     pub kind: String,
     pub control_url: String,
+    pub event_url: Option<String>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct Subscription {
+    pub event_url: String,
+    pub sid: String,
+    pub timeout_secs: u32,
 }
 /// Extract the first WANIPConnection/WANPPPConnection service and its
 /// control URL from an IGD description document. This deliberately avoids a
@@ -57,11 +64,145 @@ pub fn parse_description(xml: &str) -> Result<Service> {
         + start;
     let control_url = tail[start..end].trim().to_owned();
     ensure!(!control_url.is_empty(), "IGD controlURL is empty");
+    let event_url = tail
+        .find("<eventSubURL>")
+        .and_then(|start| {
+            let start = start + "<eventSubURL>".len();
+            tail[start..]
+                .find("</eventSubURL>")
+                .map(|end| tail[start..start + end].trim().to_owned())
+        })
+        .filter(|value| !value.is_empty());
     Ok(Service {
         kind: format!("urn:schemas-upnp-org:service:{kind}:1"),
         control_url,
+        event_url,
     })
 }
+fn event_method(name: &str) -> Result<reqwest::Method> {
+    reqwest::Method::from_bytes(name.as_bytes()).context("invalid UPnP event method")
+}
+
+/// Subscribe to the IGD event URL. The callback must be an absolute HTTP(S)
+/// URL reachable by the gateway; this function does not run an event server.
+pub async fn subscribe(
+    description_url: &str,
+    callback: &str,
+    timeout_secs: u32,
+) -> Result<Subscription> {
+    ensure!(
+        (1..=86_400).contains(&timeout_secs),
+        "UPnP subscription timeout must be 1..86400 seconds"
+    );
+    let callback = Url::parse(callback).context("invalid UPnP callback URL")?;
+    ensure!(
+        matches!(callback.scheme(), "http" | "https"),
+        "UPnP callback must be HTTP(S)"
+    );
+    let base = Url::parse(description_url).context("invalid IGD description URL")?;
+    let event_url = event_target(description_url)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("IGD service has no eventSubURL"))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let response = client
+        .request(event_method("SUBSCRIBE")?, event_url.clone())
+        .header("CALLBACK", format!("<{callback}>"))
+        .header("NT", "upnp:event")
+        .header("TIMEOUT", format!("Second-{timeout_secs}"))
+        .send()
+        .await
+        .context("UPnP SUBSCRIBE failed")?;
+    ensure!(
+        response.status().is_success(),
+        "UPnP SUBSCRIBE returned {}",
+        response.status()
+    );
+    let sid = response
+        .headers()
+        .get("SID")
+        .and_then(|value| value.to_str().ok())
+        .context("UPnP SUBSCRIBE has no SID")?
+        .to_owned();
+    let timeout_secs = response
+        .headers()
+        .get("TIMEOUT")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Second-"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(timeout_secs);
+    let _ = base;
+    Ok(Subscription {
+        event_url: event_url.to_string(),
+        sid,
+        timeout_secs,
+    })
+}
+
+pub async fn renew(event_url: &str, sid: &str, timeout_secs: u32) -> Result<u32> {
+    ensure!(
+        (1..=86_400).contains(&timeout_secs),
+        "UPnP renewal timeout must be 1..86400 seconds"
+    );
+    ensure!(
+        !sid.is_empty() && !sid.chars().any(char::is_control),
+        "invalid UPnP SID"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let response = client
+        .request(event_method("SUBSCRIBE")?, Url::parse(event_url)?)
+        .header("SID", sid)
+        .header("TIMEOUT", format!("Second-{timeout_secs}"))
+        .send()
+        .await
+        .context("UPnP subscription renewal failed")?;
+    ensure!(
+        response.status().is_success(),
+        "UPnP renewal returned {}",
+        response.status()
+    );
+    Ok(response
+        .headers()
+        .get("TIMEOUT")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Second-"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(timeout_secs))
+}
+
+pub async fn unsubscribe(event_url: &str, sid: &str) -> Result<()> {
+    ensure!(
+        !sid.is_empty() && !sid.chars().any(char::is_control),
+        "invalid UPnP SID"
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    let response = client
+        .request(event_method("UNSUBSCRIBE")?, Url::parse(event_url)?)
+        .header("SID", sid)
+        .send()
+        .await
+        .context("UPnP UNSUBSCRIBE failed")?;
+    ensure!(
+        response.status().is_success(),
+        "UPnP UNSUBSCRIBE returned {}",
+        response.status()
+    );
+    Ok(())
+}
+
+async fn event_target(description_url: &str) -> Result<Option<Url>> {
+    let base = Url::parse(description_url).context("invalid IGD description URL")?;
+    let xml = reqwest::get(description_url).await?;
+    let xml = xml.text().await?;
+    let service = parse_description(&xml)?;
+    Ok(service.event_url.map(|path| base.join(&path)).transpose()?)
+}
+
 fn soap(service: &str, delete: bool, mapping: &Mapping) -> String {
     let action = if delete {
         "DeletePortMapping"

@@ -68,6 +68,22 @@ enum Command {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=64))]
         sessions: u8,
     },
+    /// Subscribe to an IGD event URL; the callback server is external.
+    UpnpSubscribe {
+        #[arg(long)]
+        description_url: String,
+        #[arg(long)]
+        callback: String,
+        #[arg(long, default_value_t = 1800)]
+        timeout_secs: u32,
+    },
+    /// Unsubscribe an existing IGD event subscription.
+    UpnpUnsubscribe {
+        #[arg(long)]
+        event_url: String,
+        #[arg(long)]
+        sid: String,
+    },
     /// Discover UPnP IGDs with SSDP and print LOCATION candidates.
     UpnpDiscover {
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..=30))]
@@ -283,6 +299,24 @@ async fn main() -> Result<()> {
                 token,
                 usize::from(sessions),
             ))?;
+        }
+        Command::UpnpSubscribe {
+            description_url,
+            callback,
+            timeout_secs,
+        } => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let subscription = runtime.block_on(relay_platform::upnp::subscribe(
+                &description_url,
+                &callback,
+                timeout_secs,
+            ))?;
+            println!("{}", serde_json::to_string_pretty(&subscription)?);
+        }
+        Command::UpnpUnsubscribe { event_url, sid } => {
+            tokio::runtime::Runtime::new()?
+                .block_on(relay_platform::upnp::unsubscribe(&event_url, &sid))?;
+            println!("{}", serde_json::json!({"ok": true}));
         }
         Command::UpnpDiscover { timeout_secs } => {
             let found = tokio::runtime::Runtime::new()?.block_on(

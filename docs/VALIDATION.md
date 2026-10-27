@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.59.0 开发版在 macOS 27.0.1 arm64 通过 **391 项自动化测试（362 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 392 项。日志见 [verification-0.59.0.txt](verification-0.59.0.txt)，逐项清单见 [validation-evidence-0.59.0.json](validation-evidence-0.59.0.json)。
+0.60.0 开发版在 macOS 27.0.1 arm64 通过 **392 项自动化测试（363 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 393 项。日志见 [verification-0.60.0.txt](verification-0.60.0.txt)，逐项清单见 [validation-evidence-0.60.0.json](validation-evidence-0.60.0.json)。
 
-## 0.59.0 百分比首批验证
+## 0.60.0 UPnP 事件订阅验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 订阅 | SUBSCRIBE 携带 CALLBACK/NT/TIMEOUT，返回 SID/超时 |
+| 续订/退订 | 使用 SID 续订和 UNSUBSCRIBE |
+| 限制 | 不解析事件正文、不提供回调服务；无完整 IGD 筛选/状态持久化 |
+
+## 0.59.0 百分比首批验证（历史）
+
+0.59.0 开发版在 macOS 27.0.1 arm64 通过 **391 项自动化测试（362 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 392 项。日志见 [verification-0.59.0.txt](verification-0.59.0.txt)，逐项清单见 [validation-evidence-0.59.0.json](validation-evidence-0.59.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

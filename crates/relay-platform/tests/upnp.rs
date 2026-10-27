@@ -1,8 +1,9 @@
 use axum::{
     Router,
     extract::State,
-    response::Html,
-    routing::{get, post},
+    http::{HeaderMap, Method},
+    response::{Html, IntoResponse},
+    routing::{any, get, post},
 };
 use relay_platform::upnp;
 use std::sync::{Arc, Mutex};
@@ -155,4 +156,60 @@ async fn ssdp_discovery_parses_location_and_deduplicates() {
     assert_eq!(found[0].location, "http://127.0.0.1:5000/rootDesc.xml");
     assert_eq!(found[0].server.as_deref(), Some("Test/1.0 UPnP/1.1"));
     task.await.unwrap();
+}
+
+#[tokio::test]
+async fn upnp_event_subscription_renews_and_unsubscribes() {
+    type Seen = Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>>;
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    async fn desc() -> Html<&'static str> {
+        Html(
+            r#"<root><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/control</controlURL><eventSubURL>/events</eventSubURL></service></root>"#,
+        )
+    }
+    async fn events(
+        State(seen): State<Seen>,
+        method: Method,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        seen.lock().unwrap().push((
+            method.as_str().to_owned(),
+            headers
+                .get("SID")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+            headers
+                .get("CALLBACK")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+        ));
+        ([("SID", "uuid:test"), ("TIMEOUT", "Second-120")], "")
+    }
+    let app = Router::new()
+        .route("/desc.xml", get(desc))
+        .route("/events", any(events))
+        .with_state(seen.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let description = format!("http://{address}/desc.xml");
+    let subscription = upnp::subscribe(&description, "http://127.0.0.1:9/callback", 120)
+        .await
+        .unwrap();
+    assert_eq!(subscription.event_url, format!("http://{address}/events"));
+    assert_eq!(subscription.sid, "uuid:test");
+    assert_eq!(subscription.timeout_secs, 120);
+    let renewed = upnp::renew(&subscription.event_url, &subscription.sid, 60)
+        .await
+        .unwrap();
+    assert_eq!(renewed, 120);
+    upnp::unsubscribe(&subscription.event_url, &subscription.sid)
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].0, "SUBSCRIBE");
+    assert!(seen[0].2.as_deref().unwrap().contains("/callback"));
+    assert_eq!(seen[1].1.as_deref(), Some("uuid:test"));
+    assert_eq!(seen[2].0, "UNSUBSCRIBE");
 }
