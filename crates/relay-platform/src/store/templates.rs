@@ -191,6 +191,93 @@ impl Store {
             error,
         })
     }
+    /// Apply a template to ordered node batches. A failure in a batch stops
+    /// later batches; successful nodes in that batch remain applied and are
+    /// reported individually. Each node's expected revision still guards it.
+    pub fn rollout_template(
+        &self,
+        actor: &Actor,
+        template_id: &str,
+        targets: &[crate::template::RolloutTarget],
+        batch_size: usize,
+    ) -> Result<crate::template::RolloutReport> {
+        require_writer(actor)?;
+        ensure!(!targets.is_empty(), "rollout requires at least one node");
+        ensure!(targets.len() <= 100, "rollout supports at most 100 nodes");
+        ensure!((1..=50).contains(&batch_size), "batch size must be 1..=50");
+        let mut seen = std::collections::HashSet::new();
+        for target in targets {
+            ensure!(
+                seen.insert(target.node_id.as_str()),
+                "duplicate rollout node"
+            );
+        }
+        let mut results = Vec::new();
+        let mut applied = 0usize;
+        let mut aborted = false;
+        let mut batches = 0usize;
+        for (index, batch) in targets.chunks(batch_size).enumerate() {
+            batches = index + 1;
+            let mut failed = false;
+            for target in batch {
+                match self.apply_template(
+                    actor,
+                    &target.node_id,
+                    template_id,
+                    target.expected_revision,
+                    &target.name,
+                    target.listen,
+                ) {
+                    Ok(config) => {
+                        applied += 1;
+                        let rule = config.rules.last();
+                        results.push(crate::template::RolloutResult {
+                            node_id: target.node_id.clone(),
+                            batch: index + 1,
+                            applied: true,
+                            revision: Some(config.revision),
+                            rule_id: rule.map(|rule| rule.id.clone()),
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        failed = true;
+                        results.push(crate::template::RolloutResult {
+                            node_id: target.node_id.clone(),
+                            batch: index + 1,
+                            applied: false,
+                            revision: None,
+                            rule_id: None,
+                            error: Some(error.to_string()),
+                        });
+                    }
+                }
+            }
+            if failed {
+                aborted = true;
+                for target in targets.iter().skip((index + 1) * batch_size) {
+                    results.push(crate::template::RolloutResult {
+                        node_id: target.node_id.clone(),
+                        batch: index + 2,
+                        applied: false,
+                        revision: None,
+                        rule_id: None,
+                        error: Some("not attempted after canary failure".into()),
+                    });
+                }
+                break;
+            }
+        }
+        Ok(crate::template::RolloutReport {
+            template_id: template_id.into(),
+            batch_size,
+            batches,
+            applied,
+            aborted,
+            results,
+        })
+    }
+
     /// Clone the template into a node revision. The expected revision keeps
     /// concurrent edits safe; the normal config validator rechecks listeners
     /// and references.

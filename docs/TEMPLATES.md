@@ -37,6 +37,23 @@
 
 返回与“应用”相同的拟创建规则身份（新 ID、名称、监听、owner、tenant、meter）以及 `current_revision/valid/error`，但不写修订。监听冲突等校验错误会以 `valid=false` 和错误文本返回。预览不会改变节点配置或运行状态。
 
+## 批量应用（canary）
+
+`POST /templates/{id}/rollout`：
+
+```json
+{"batch_size": 2, "targets": [
+  {"node_id":"node-a","expected_revision":3,"name":"Web","listen":"127.0.0.1:19090"},
+  {"node_id":"node-b","expected_revision":3,"name":"Web","listen":"127.0.0.1:19090"}
+]}
+```
+
+- 目标按输入顺序分批，`batch_size` 1–50，最多 100 个节点；节点不能重复。
+- 每个节点仍按自己的 `expected_revision` 应用，生成新的规则 ID/名称/监听/计量周期。
+- 一批中任一节点失败即停止后续批次；同批已成功的节点保留，后续节点标记 `not attempted after canary failure`。
+- 返回 `batch/batches/applied/aborted/results`；每项包含 revision、rule_id 或错误。没有自动回滚；需要用户显式修复或重新发布。
+- 面板模板页“批量应用”接受目标 JSON 和批大小，显示逐节点结果。
+
 ## 界面与 API
 
 | 方法 | 路径 | 说明 |
@@ -45,11 +62,12 @@
 | PUT/DELETE | `/templates/{id}` | 编辑/删除，受租户范围 |
 | POST | `/nodes/{node}/templates/{id}` | 应用为新规则 |
 | POST | `/nodes/{node}/templates/{id}/preview` | 只校验并返回拟创建规则，不写修订 |
+| POST | `/templates/{id}/rollout` | 有序分批应用到多个节点，失败停止后续批次 |
 
 `/templates*` 和节点模板应用仅接受登录会话，API 令牌访问 403。面板规则表格的“存为模板”和“规则模板”页提供保存、应用、删除。
 
 ## 验证与限制
 
-- Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403；预览不改变修订，重复监听返回 `valid=false`。
+- Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`，以及 canary 批次失败后停止后续节点。
 - HTTP 测试覆盖创建、viewer 403、节点配置修订、应用后规则名称。
-- 未实现模板版本化、完整配置差异视图、变量参数化、跨节点灰度批次、模板引用依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。
+- 未实现模板版本化、完整配置差异视图、变量参数化、自动回滚、百分比/健康阈值灰度、模板引用依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。

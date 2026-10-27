@@ -102,6 +102,52 @@ fn templates_are_scoped_and_apply_a_fresh_rule_identity() {
     let _ = viewer;
 }
 
+#[test]
+fn rollout_stops_after_a_failed_canary_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (a, _) = store.create_node(&admin, "default", "a").unwrap();
+    let (b, _) = store.create_node(&admin, "default", "b").unwrap();
+    let (c, _) = store.create_node(&admin, "default", "c").unwrap();
+    let ra = store.set_config(&admin, &a.id, 0, vec![]).unwrap();
+    let rb = store.set_config(&admin, &b.id, 0, vec![]).unwrap();
+    let rc = store.set_config(&admin, &c.id, 0, vec![]).unwrap();
+    let source = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    let template = store.create_template(&admin, input(None, source)).unwrap();
+    let target = |node: &relay_platform::store::Node, expected: u64, port: u16| {
+        relay_platform::template::RolloutTarget {
+            node_id: node.id.clone(),
+            expected_revision: expected,
+            name: format!("rollout-{}", node.id),
+            listen: format!("127.0.0.1:{port}").parse().unwrap(),
+        }
+    };
+    let report = store
+        .rollout_template(
+            &admin,
+            &template.id,
+            &[
+                target(&a, ra.revision, 19001),
+                target(&b, rb.revision + 99, 19002),
+                target(&c, rc.revision, 19003),
+            ],
+            1,
+        )
+        .unwrap();
+    assert!(report.aborted);
+    assert_eq!(report.applied, 1);
+    assert_eq!(report.batches, 2);
+    assert_eq!(report.results.len(), 3);
+    assert!(report.results[0].applied);
+    assert!(!report.results[1].applied);
+    assert_eq!(
+        report.results[2].error.as_deref(),
+        Some("not attempted after canary failure")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn template_http_applies_and_rejects_viewers() {
     use relay_platform::api::{self, AppState};

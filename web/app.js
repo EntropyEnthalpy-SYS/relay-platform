@@ -786,7 +786,7 @@ async function renderTemplates() {
   const p = panel('规则模板', '模板保存一份已验证的规则内容；应用时生成新的规则 ID、名称、监听地址和计量周期，并走正常配置校验。', null);
   if (!templates.length) p.append(empty('还没有模板', '在“转发规则”表格中把一条规则存为模板。'));
   else p.append(table(['名称', '范围', '说明', '源监听', '操作'], templates.map(template => {
-    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); }
+    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); actions.append(button('批量应用', () => rolloutTemplate(template), 'table-action')); }
     if (state.actor.role === 'system_admin' || template.tenant_id === state.actor.tenant_id) actions.append(button('删除', () => deleteTemplate(template), 'table-action danger'));
     return [namedCell(template.name, template.id), template.tenant_id || '全局', template.description || '—', template.rule.listen, actions];
   })));
@@ -803,6 +803,21 @@ async function deleteTemplate(template) {
   if (!confirm(`删除模板「${template.name}」？`)) return;
   await api(`/templates/${template.id}`, { method: 'DELETE' }); notify('模板已删除。'); await renderTemplates();
 }
+async function rolloutTemplate(template) {
+  const nodes = state.nodes; const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'batch_size', '每批节点数（1–50）', '1', 'number');
+  const targets = textarea(grid, 'targets', '目标 JSON（node_id/expected_revision/name/listen 数组）',
+    JSON.stringify(nodes.slice(0, 1).map(n => ({ node_id: n.id, expected_revision: 0, name: template.name, listen: '127.0.0.1:9000' })), null, 2));
+  targets.rows = 10;
+  form.append(grid, el('p', '按顺序分批应用；某批失败后停止后续批次，成功节点仍保留，并返回每个节点的结果。', 'fine'));
+  submit(form, '开始批量应用', async data => {
+    const parsed = JSON.parse(String(data.get('targets')));
+    const report = await api(`/templates/${template.id}/rollout`, { method: 'POST', body: { batch_size: Number(data.get('batch_size')), targets: parsed } });
+    $('#dialog').close(); modal(`批量结果 · ${template.name}`, el('pre', JSON.stringify(report, null, 2), 'json-preview'));
+  });
+  modal(`批量应用 · ${template.name}`, form);
+}
+
 async function previewTemplate(template) {
   const nodes = state.nodes; const form = el('form'), grid = el('div', undefined, 'form-grid');
   const node = select(grid, 'node', '节点', nodes.map(n => [n.id, n.name || n.id]), nodes[0]?.id);

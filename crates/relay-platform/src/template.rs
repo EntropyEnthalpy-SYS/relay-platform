@@ -26,6 +26,38 @@ pub struct TemplatePreview {
     pub error: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize)]
+pub struct RolloutTargetInput {
+    pub node_id: String,
+    pub expected_revision: u64,
+    pub name: String,
+    pub listen: String,
+}
+#[derive(Clone, Debug)]
+pub struct RolloutTarget {
+    pub node_id: String,
+    pub expected_revision: u64,
+    pub name: String,
+    pub listen: std::net::SocketAddr,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct RolloutResult {
+    pub node_id: String,
+    pub batch: usize,
+    pub applied: bool,
+    pub revision: Option<u64>,
+    pub rule_id: Option<String>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct RolloutReport {
+    pub template_id: String,
+    pub batch_size: usize,
+    pub batches: usize,
+    pub applied: usize,
+    pub aborted: bool,
+    pub results: Vec<RolloutResult>,
+}
+#[derive(Clone, Debug, Deserialize)]
 pub struct TemplateInput {
     #[serde(default)]
     pub tenant_id: Option<String>,

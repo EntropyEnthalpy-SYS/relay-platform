@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.46.0 稳定化版在 macOS 27.0.1 arm64 通过 **380 项自动化测试（351 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 381 项。日志见 [verification-0.46.0.txt](verification-0.46.0.txt)，逐项清单见 [validation-evidence-0.46.0.json](validation-evidence-0.46.0.json)。
+0.47.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.47.0.txt](verification-0.47.0.txt)，逐项清单见 [validation-evidence-0.47.0.json](validation-evidence-0.47.0.json)。
 
-## 0.46.0 审查 R1–R5 验证
+## 0.47.0 模板 canary 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 3 节点、batch=1；首批成功、第二批失败后停止，第三节点标记未尝试 |
+| 身份 | 每节点独立 expected_revision、新规则 ID/监听/owner/tenant/meter |
+| 面板 | `node --check`、编辑器/视图结构；批量 JSON 源码流程 |
+| 限制 | 无自动回滚、变量、百分比/健康阈值、依赖图或浏览器点击验收 |
+
+## 0.46.0 审查 R1–R5 验证（历史）
+
+0.46.0 稳定化版在 macOS 27.0.1 arm64 通过 **380 项自动化测试（351 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 381 项。日志见 [verification-0.46.0.txt](verification-0.46.0.txt)，逐项清单见 [validation-evidence-0.46.0.json](validation-evidence-0.46.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

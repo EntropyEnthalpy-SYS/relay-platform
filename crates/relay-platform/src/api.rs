@@ -311,6 +311,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/nodes/{node}/templates/{id}/preview",
             post(preview_template),
         )
+        .route("/api/v1/templates/{id}/rollout", post(rollout_template))
         .route("/api/v1/tickets/{id}", get(ticket))
         .route("/api/v1/tickets/{id}/messages", post(reply_ticket))
         .route(
@@ -1453,6 +1454,46 @@ async fn mptcp_diagnostics(
         ));
     }
     Ok(Json(crate::mptcp::detect()))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RolloutInput {
+    batch_size: usize,
+    targets: Vec<crate::template::RolloutTargetInput>,
+}
+async fn rollout_template(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<RolloutInput>,
+) -> ApiResult<crate::template::RolloutReport> {
+    let targets = input
+        .targets
+        .into_iter()
+        .map(|target| {
+            let listen = target.listen.parse().map_err(|_| {
+                ApiError(
+                    Rejection {
+                        status: 400,
+                        message: format!("invalid rollout listen for {}", target.node_id),
+                    }
+                    .into(),
+                )
+            })?;
+            Ok(crate::template::RolloutTarget {
+                node_id: target.node_id,
+                expected_revision: target.expected_revision,
+                name: target.name,
+                listen,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, ApiError>>()?;
+    Ok(Json(
+        database(state.store, move |db| {
+            db.rollout_template(&actor, &id, &targets, input.batch_size)
+        })
+        .await?,
+    ))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
