@@ -88,6 +88,12 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     };
     let stats = EngineStats {
         target_health: vec![report],
+        multipath: Some(relay_platform::multipath::Stats {
+            active_sessions: 1,
+            active_paths: 2,
+            delivered_payload_bytes: 4096,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let conn = rusqlite::Connection::open(&db_path).unwrap();

@@ -1439,6 +1439,56 @@ async fn prometheus_metrics(
             node.stats.prewarmed_connections
         ));
     }
+    body.push_str("# HELP relay_multipath_active_sessions Active aggregation sessions.\n# TYPE relay_multipath_active_sessions gauge\n");
+    for node in &nodes {
+        if let Some(stats) = &node.stats.multipath {
+            body.push_str(&format!(
+                "relay_multipath_active_sessions{{node=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                stats.active_sessions
+            ));
+        }
+    }
+    body.push_str("# HELP relay_multipath_active_paths Active aggregation paths.\n# TYPE relay_multipath_active_paths gauge\n");
+    for node in &nodes {
+        if let Some(stats) = &node.stats.multipath {
+            body.push_str(&format!(
+                "relay_multipath_active_paths{{node=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                stats.active_paths
+            ));
+        }
+    }
+    body.push_str("# HELP relay_multipath_payload_bytes Aggregation payload counters.\n# TYPE relay_multipath_payload_bytes counter\n");
+    for node in &nodes {
+        if let Some(stats) = &node.stats.multipath {
+            for (kind, value) in [
+                ("sent", stats.sent_payload_bytes),
+                ("replicated", stats.replicated_payload_bytes),
+                ("retransmitted", stats.retransmitted_payload_bytes),
+                ("received", stats.received_payload_bytes),
+                ("duplicate", stats.duplicate_payload_bytes),
+                ("delivered", stats.delivered_payload_bytes),
+            ] {
+                body.push_str(&format!(
+                    "relay_multipath_payload_bytes{{node=\"{}\",kind=\"{}\"}} {}\n",
+                    metric_label(&node.id),
+                    kind,
+                    value
+                ));
+            }
+        }
+    }
+    body.push_str("# HELP relay_multipath_failed_paths_total Failed aggregation paths.\n# TYPE relay_multipath_failed_paths_total counter\n");
+    for node in &nodes {
+        if let Some(stats) = &node.stats.multipath {
+            body.push_str(&format!(
+                "relay_multipath_failed_paths_total{{node=\"{}\"}} {}\n",
+                metric_label(&node.id),
+                stats.failed_paths
+            ));
+        }
+    }
     body.push_str("# HELP relay_target_eligible Target health eligibility.\n# TYPE relay_target_eligible gauge\n");
     for node in &nodes {
         for target in &node.stats.target_health {
