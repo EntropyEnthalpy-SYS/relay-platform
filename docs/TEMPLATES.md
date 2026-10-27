@@ -57,6 +57,10 @@
 - 模板版本与节点配置修订是两套独立计数。
 - 面板模板页“版本”按钮列出历史并提供回滚。
 
+## 应用回执门控
+
+`wait_for_apply_ms` 可选：每批配置写入后等待目标节点回报 `applied_revision` 达到该批修订，且无 `apply_error`，超过时限则 `aborted` 并记录 `gate_error`。它只验证**配置应用回执**，不检查流量、错误率或延迟。
+
 ## 健康预检
 
 `require_healthy: true` 时，每个目标在应用前必须：
@@ -128,7 +132,7 @@
 | GET | `/templates/{id}/versions` | 当前和历史模板版本 |
 | GET | `/templates/{id}/diff?from=&to=` | 两个模板版本的结构化差异 |
 | POST | `/templates/{id}/versions/{version}/rollback` | 旧内容作为新版本写回 |
-| POST | `/templates/{id}/rollout` | 有序分批应用；可选 `canary_percent` 首批比例、健康预检、回滚 |
+| POST | `/templates/{id}/rollout` | 有序分批应用；可选首批比例、健康预检、应用回执等待、回滚 |
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?,template_version?}` 应用模板；可固定历史版本 |
 | POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |
 

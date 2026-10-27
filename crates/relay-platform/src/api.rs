@@ -1475,6 +1475,8 @@ struct RolloutInput {
     canary_percent: Option<u8>,
     #[serde(default)]
     require_healthy: bool,
+    #[serde(default)]
+    wait_for_apply_ms: Option<u64>,
     targets: Vec<crate::template::RolloutTargetInput>,
 }
 async fn retry_rollout(
@@ -1528,6 +1530,7 @@ async fn rollout_template(
                 input.rollback_on_failure,
                 input.canary_percent,
                 input.require_healthy,
+                input.wait_for_apply_ms,
             )
         })
         .await?,

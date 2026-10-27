@@ -77,6 +77,10 @@ pub struct RolloutReport {
     pub canary_percent: Option<u8>,
     #[serde(default)]
     pub require_healthy: bool,
+    #[serde(default)]
+    pub wait_for_apply_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_error: Option<String>,
     pub batches: usize,
     pub applied: usize,
     pub rolled_back: usize,
@@ -105,6 +109,8 @@ pub struct RolloutRecord {
     pub canary_percent: Option<u8>,
     #[serde(default)]
     pub require_healthy: bool,
+    #[serde(default)]
+    pub wait_for_apply_ms: Option<u64>,
     pub report: RolloutReport,
 }
 #[derive(Clone, Debug, Deserialize)]

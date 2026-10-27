@@ -1,6 +1,7 @@
 //! Rule-template persistence in metadata and application into a node config.
 use super::*;
 use crate::template::{RuleTemplate, TemplateInput, render_rule, validate, validate_variables};
+use anyhow::bail;
 
 fn key(id: &str) -> String {
     format!("template:{id}")
@@ -372,6 +373,7 @@ impl Store {
         rollback_on_failure: bool,
         canary_percent: Option<u8>,
         require_healthy: bool,
+        wait_for_apply_ms: Option<u64>,
     ) -> Result<crate::template::RolloutReport> {
         require_writer(actor)?;
         ensure!(!targets.is_empty(), "rollout requires at least one node");
@@ -404,6 +406,7 @@ impl Store {
         let mut rollback_failed = 0usize;
         let mut successes = Vec::<usize>::new();
         let mut aborted = false;
+        let mut gate_error = None;
         let mut batches = 0usize;
         let first_batch = canary_percent
             .map(|percent| {
@@ -501,6 +504,23 @@ impl Store {
                     }
                 }
             }
+            if !failed && let Some(timeout_ms) = wait_for_apply_ms {
+                let expected: Vec<_> = results
+                    .iter()
+                    .filter(|result| result.batch == index && result.applied)
+                    .filter_map(|result| {
+                        result
+                            .revision
+                            .map(|revision| (result.node_id.clone(), revision))
+                    })
+                    .collect();
+                if !expected.is_empty()
+                    && let Err(error) = self.wait_for_applied(actor, &expected, timeout_ms)
+                {
+                    failed = true;
+                    gate_error = Some(error.to_string());
+                }
+            }
             if failed {
                 aborted = true;
                 if rollback_on_failure {
@@ -552,6 +572,8 @@ impl Store {
             batch_size,
             canary_percent,
             require_healthy,
+            wait_for_apply_ms,
+            gate_error,
             batches,
             applied,
             rolled_back,
@@ -564,6 +586,7 @@ impl Store {
             rollback_on_failure,
             canary_percent,
             require_healthy,
+            wait_for_apply_ms,
             report: report.clone(),
         };
         let mut conn = self.0.lock().unwrap();
@@ -615,6 +638,7 @@ impl Store {
             record.rollback_on_failure,
             record.canary_percent,
             record.require_healthy,
+            record.wait_for_apply_ms,
         )
     }
 
@@ -705,6 +729,35 @@ impl Store {
         rule.enabled = true;
         config.rules.push(rule);
         self.set_config_with_rate(actor, node, expected_revision, config.rules, None)
+    }
+
+    fn wait_for_applied(
+        &self,
+        actor: &Actor,
+        expected: &[(String, u64)],
+        timeout_ms: u64,
+    ) -> Result<()> {
+        ensure!(timeout_ms > 0, "wait_for_apply_ms must be positive");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let nodes = self.nodes(actor)?;
+            let mut pending = 0usize;
+            for (node_id, revision) in expected {
+                let node = nodes.iter().find(|node| &node.id == node_id);
+                if node.is_none_or(|node| {
+                    node.applied_revision < *revision || node.apply_error.is_some()
+                }) {
+                    pending += 1;
+                }
+            }
+            if pending == 0 {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("{pending} node(s) did not apply revision within {timeout_ms} ms");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }
 

@@ -840,6 +840,7 @@ async function rolloutTemplate(template) {
   const nodes = state.nodes; const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'batch_size', '每批节点数（1–50）', '1', 'number');
   field(grid, 'canary_percent', '首批百分比（留空使用批大小）', '', 'number', false);
+  field(grid, 'wait_for_apply_ms', '应用回执等待 / ms（留空不等待）', '', 'number', false);
   const rollback = el('label'); rollback.append(el('span', '失败时回滚已应用节点'), Object.assign(el('input'), { type: 'checkbox', name: 'rollback_on_failure' })); grid.append(rollback);
   const healthy = el('label'); healthy.append(el('span', '仅健康节点（90 秒内有同步且无应用错误）'), Object.assign(el('input'), { type: 'checkbox', name: 'require_healthy' })); grid.append(healthy);
   const targets = textarea(grid, 'targets', '目标 JSON（node_id/expected_revision/name/listen 数组）',
@@ -848,7 +849,7 @@ async function rolloutTemplate(template) {
   form.append(grid, el('p', '按顺序分批应用；某批失败后停止后续批次，成功节点仍保留，并返回每个节点的结果。', 'fine'));
   submit(form, '开始批量应用', async data => {
     const parsed = JSON.parse(String(data.get('targets')));
-    const report = await api(`/templates/${template.id}/rollout`, { method: 'POST', body: { batch_size: Number(data.get('batch_size')), canary_percent: data.get('canary_percent') ? Number(data.get('canary_percent')) : null, require_healthy: data.get('require_healthy') === 'on', rollback_on_failure: data.get('rollback_on_failure') === 'on', targets: parsed } });
+    const report = await api(`/templates/${template.id}/rollout`, { method: 'POST', body: { batch_size: Number(data.get('batch_size')), canary_percent: data.get('canary_percent') ? Number(data.get('canary_percent')) : null, require_healthy: data.get('require_healthy') === 'on', wait_for_apply_ms: data.get('wait_for_apply_ms') ? Number(data.get('wait_for_apply_ms')) : null, rollback_on_failure: data.get('rollback_on_failure') === 'on', targets: parsed } });
     $('#dialog').close();
     const content = el('div'); content.append(el('pre', JSON.stringify(report, null, 2), 'json-preview'));
     if (report.aborted) content.append(button('重试失败节点', async () => {

@@ -140,6 +140,7 @@ fn rollout_stops_after_a_failed_canary_batch() {
             true,
             None,
             false,
+            None,
         )
         .unwrap();
     assert!(report.aborted);
@@ -207,6 +208,51 @@ fn template_variables_render_and_can_be_overridden() {
 }
 
 #[test]
+fn rollout_reports_a_missing_post_apply_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (node, _) = store.create_node(&admin, "default", "apply-gate").unwrap();
+    let revision = store.set_config(&admin, &node.id, 0, vec![]).unwrap();
+    let template = store
+        .create_template(
+            &admin,
+            input(None, rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp)),
+        )
+        .unwrap();
+    let target = relay_platform::template::RolloutTarget {
+        node_id: node.id,
+        expected_revision: revision.revision,
+        name: "apply-gate".into(),
+        listen: "127.0.0.1:19105".parse().unwrap(),
+        variables: Default::default(),
+        template_version: None,
+    };
+    let report = store
+        .rollout_template(
+            &admin,
+            &template.id,
+            &[target],
+            1,
+            false,
+            None,
+            false,
+            Some(100),
+        )
+        .unwrap();
+    assert_eq!(report.applied, 1);
+    assert!(report.aborted);
+    assert!(
+        report
+            .gate_error
+            .as_deref()
+            .unwrap()
+            .contains("did not apply")
+    );
+}
+
+#[test]
 fn rollout_can_require_a_recent_healthy_node() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("controller.db")).unwrap();
@@ -237,6 +283,7 @@ fn rollout_can_require_a_recent_healthy_node() {
             false,
             None,
             true,
+            None,
         )
         .unwrap();
     assert_eq!(rejected.applied, 0);
@@ -248,7 +295,7 @@ fn rollout_can_require_a_recent_healthy_node() {
             .contains("synced")
     );
     let applied = store
-        .rollout_template(&admin, &template.id, &[target], 1, false, None, false)
+        .rollout_template(&admin, &template.id, &[target], 1, false, None, false, None)
         .unwrap();
     assert_eq!(applied.applied, 1);
 }
@@ -277,7 +324,16 @@ fn canary_percent_sizes_the_first_batch() {
         });
     }
     let report = store
-        .rollout_template(&admin, &template.id, &targets, 2, false, Some(34), false)
+        .rollout_template(
+            &admin,
+            &template.id,
+            &targets,
+            2,
+            false,
+            Some(34),
+            false,
+            None,
+        )
         .unwrap();
     assert_eq!(report.canary_percent, Some(34));
     assert_eq!(report.batches, 2);
