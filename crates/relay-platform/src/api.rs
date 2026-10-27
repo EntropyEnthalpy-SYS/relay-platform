@@ -307,6 +307,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(update_template).delete(delete_template),
         )
         .route("/api/v1/nodes/{node}/templates/{id}", post(apply_template))
+        .route(
+            "/api/v1/nodes/{node}/templates/{id}/preview",
+            post(preview_template),
+        )
         .route("/api/v1/tickets/{id}", get(ticket))
         .route("/api/v1/tickets/{id}/messages", post(reply_ticket))
         .route(
@@ -1449,6 +1453,34 @@ async fn mptcp_diagnostics(
         ));
     }
     Ok(Json(crate::mptcp::detect()))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewTemplate {
+    name: String,
+    listen: String,
+}
+async fn preview_template(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((node, id)): Path<(String, String)>,
+    Json(input): Json<PreviewTemplate>,
+) -> ApiResult<crate::template::TemplatePreview> {
+    let listen: std::net::SocketAddr = input.listen.parse().map_err(|_| {
+        ApiError(
+            Rejection {
+                status: 400,
+                message: "invalid listen address".into(),
+            }
+            .into(),
+        )
+    })?;
+    Ok(Json(
+        database(state.store, move |db| {
+            db.preview_template(&actor, &node, &id, &input.name, listen)
+        })
+        .await?,
+    ))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

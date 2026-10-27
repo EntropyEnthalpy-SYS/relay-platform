@@ -34,6 +34,22 @@ fn templates_are_scoped_and_apply_a_fresh_rule_identity() {
         .unwrap();
     assert_eq!(template.name, "Web preset");
     assert_eq!(store.templates(&admin).unwrap().len(), 1);
+    let preview = store
+        .preview_template(
+            &admin,
+            &node.id,
+            &template.id,
+            "Previewed",
+            "127.0.0.1:19090".parse().unwrap(),
+        )
+        .unwrap();
+    assert!(preview.valid, "{:?}", preview.error);
+    assert_eq!(preview.current_revision, initial.revision);
+    assert_ne!(preview.rule.id, template.rule.id);
+    assert_eq!(
+        store.config(&admin, &node.id, None).unwrap().revision,
+        initial.revision
+    );
     let applied = store
         .apply_template(
             &admin,

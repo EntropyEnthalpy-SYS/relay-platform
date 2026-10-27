@@ -16,6 +16,15 @@ pub struct RuleTemplate {
     pub created_by: String,
     pub created_at_ms: i64,
 }
+#[derive(Clone, Debug, Serialize)]
+pub struct TemplatePreview {
+    pub node_id: String,
+    pub current_revision: u64,
+    pub template_id: String,
+    pub rule: Rule,
+    pub valid: bool,
+    pub error: Option<String>,
+}
 #[derive(Clone, Debug, Deserialize)]
 pub struct TemplateInput {
     #[serde(default)]

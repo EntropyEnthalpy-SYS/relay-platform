@@ -1,0 +1,37 @@
+{
+  "binary": "relay",
+  "formats": {
+    "clash": {
+      "bytes": 290,
+      "content_type": "text/yaml; charset=utf-8",
+      "status": 200
+    },
+    "shadowrocket": {
+      "bytes": 127,
+      "content_type": "text/plain; charset=utf-8",
+      "status": 200
+    },
+    "surge": {
+      "bytes": 258,
+      "content_type": "text/plain; charset=utf-8",
+      "status": 200
+    },
+    "v2ray": {
+      "bytes": 172,
+      "content_type": "text/plain; charset=utf-8",
+      "status": 200
+    }
+  },
+  "preview_skipped": [
+    {
+      "reason": "not a Shadowsocks inbound; a subscription client needs a proxy protocol",
+      "rule_id": "plain",
+      "rule_name": "Plain forwarding"
+    }
+  ],
+  "rotation": {
+    "after_delete": 401,
+    "new_status_before_delete": 200,
+    "old_status": 401
+  }
+}

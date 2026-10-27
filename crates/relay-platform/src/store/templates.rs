@@ -138,6 +138,59 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Validate a proposed application without writing a revision. The
+    /// returned rule has the same fresh identity fields as `apply_template`.
+    pub fn preview_template(
+        &self,
+        actor: &Actor,
+        node: &str,
+        template_id: &str,
+        name: &str,
+        listen: std::net::SocketAddr,
+    ) -> Result<crate::template::TemplatePreview> {
+        require_writer(actor)?;
+        let (mut config, tenant, template) = {
+            let conn = self.0.lock().unwrap();
+            let template = read(&conn, template_id)?.context("template not found")?;
+            if !visible(actor, &template) {
+                return reject(403, "template belongs to another tenant");
+            }
+            require_node(&conn, actor, node, false)?;
+            let json = conn
+                .query_row(
+                    "SELECT c.config_json FROM config_history c JOIN nodes n ON n.id=c.node_id AND n.desired_revision=c.revision WHERE n.id=?1",
+                    [node],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+                .context("configuration revision not found")?;
+            (
+                serde_json::from_str::<NodeConfig>(&json)?,
+                node_tenant(&conn, node)?,
+                template,
+            )
+        };
+        let current_revision = config.revision;
+        let mut rule = template.rule;
+        rule.id = Uuid::new_v4().to_string();
+        rule.tenant_id = tenant;
+        rule.owner_id = actor.id.clone();
+        rule.name = name.into();
+        rule.listen = listen;
+        rule.listen_end_port = None;
+        rule.meter_epoch = Uuid::new_v4().to_string();
+        rule.enabled = true;
+        config.rules.push(rule.clone());
+        let error = config.validate().err().map(|error| error.to_string());
+        Ok(crate::template::TemplatePreview {
+            node_id: node.into(),
+            current_revision,
+            template_id: template_id.into(),
+            rule,
+            valid: error.is_none(),
+            error,
+        })
+    }
     /// Clone the template into a node revision. The expected revision keeps
     /// concurrent edits safe; the normal config validator rechecks listeners
     /// and references.

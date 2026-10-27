@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.40.0 开发版在 macOS 27.0.1 arm64 通过 **368 项自动化测试（339 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 369 项。日志见 [verification-0.40.0.txt](verification-0.40.0.txt)，逐项清单见 [validation-evidence-0.40.0.json](validation-evidence-0.40.0.json)。
+0.41.0 开发版在 macOS 27.0.1 arm64 通过 **368 项自动化测试（339 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 369 项。日志见 [verification-0.41.0.txt](verification-0.41.0.txt)，逐项清单见 [validation-evidence-0.41.0.json](validation-evidence-0.41.0.json)。
 
-## 0.40.0 MPTCP 能力观测验证
+## 0.41.0 模板预览验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 预览不改变修订、拟创建身份正确、重复监听 `valid=false` |
+| HTTP | 预览返回 `valid/current_revision`，viewer 写权限仍拒绝 |
+| 限制 | 无模板版本化/完整差异/变量/灰度/依赖图/浏览器点击验收 |
+
+## 0.40.0 MPTCP 能力观测验证（历史）
+
+0.40.0 开发版在 macOS 27.0.1 arm64 通过 **368 项自动化测试（339 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 369 项。日志见 [verification-0.40.0.txt](verification-0.40.0.txt)，逐项清单见 [validation-evidence-0.40.0.json](validation-evidence-0.40.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

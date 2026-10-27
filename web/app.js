@@ -786,7 +786,7 @@ async function renderTemplates() {
   const p = panel('规则模板', '模板保存一份已验证的规则内容；应用时生成新的规则 ID、名称、监听地址和计量周期，并走正常配置校验。', null);
   if (!templates.length) p.append(empty('还没有模板', '在“转发规则”表格中把一条规则存为模板。'));
   else p.append(table(['名称', '范围', '说明', '源监听', '操作'], templates.map(template => {
-    const actions = el('div'); if (state.actor.role !== 'viewer') actions.append(button('应用', () => applyTemplate(template), 'table-action'));
+    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); }
     if (state.actor.role === 'system_admin' || template.tenant_id === state.actor.tenant_id) actions.append(button('删除', () => deleteTemplate(template), 'table-action danger'));
     return [namedCell(template.name, template.id), template.tenant_id || '全局', template.description || '—', template.rule.listen, actions];
   })));
@@ -802,6 +802,18 @@ async function saveTemplate(source) {
 async function deleteTemplate(template) {
   if (!confirm(`删除模板「${template.name}」？`)) return;
   await api(`/templates/${template.id}`, { method: 'DELETE' }); notify('模板已删除。'); await renderTemplates();
+}
+async function previewTemplate(template) {
+  const nodes = state.nodes; const form = el('form'), grid = el('div', undefined, 'form-grid');
+  const node = select(grid, 'node', '节点', nodes.map(n => [n.id, n.name || n.id]), nodes[0]?.id);
+  field(grid, 'name', '新规则名称', template.name).maxLength = 120;
+  field(grid, 'listen', '监听地址', '127.0.0.1:9000');
+  form.append(grid, el('p', '预览只校验并返回拟创建的规则，不写修订。', 'fine'));
+  submit(form, '预览', async data => {
+    const preview = await api(`/nodes/${node.value}/templates/${template.id}/preview`, { method: 'POST', body: { name: String(data.get('name')).trim(), listen: String(data.get('listen')).trim() } });
+    $('#dialog').close(); modal(`模板预览 · ${template.name}`, el('pre', JSON.stringify(preview, null, 2), 'json-preview'));
+  });
+  modal(`预览模板 · ${template.name}`, form);
 }
 async function applyTemplate(template) {
   const nodes = state.nodes; const form = el('form'), grid = el('div', undefined, 'form-grid');

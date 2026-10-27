@@ -27,6 +27,16 @@
 - 通过既有 `set_config` 修订检查、监听冲突/引用校验和节点权限执行；并发编辑的旧修订返回 409，不会覆盖。
 - 配置发布后仍需节点回执确认实际应用；模板应用不直接修改运行中的节点。
 
+## 预览
+
+`POST /nodes/{node}/templates/{id}/preview`：
+
+```json
+{"name": "Clone", "listen": "127.0.0.1:19090"}
+```
+
+返回与“应用”相同的拟创建规则身份（新 ID、名称、监听、owner、tenant、meter）以及 `current_revision/valid/error`，但不写修订。监听冲突等校验错误会以 `valid=false` 和错误文本返回。预览不会改变节点配置或运行状态。
+
 ## 界面与 API
 
 | 方法 | 路径 | 说明 |
@@ -34,11 +44,12 @@
 | GET/POST | `/templates` | 可见模板/创建 |
 | PUT/DELETE | `/templates/{id}` | 编辑/删除，受租户范围 |
 | POST | `/nodes/{node}/templates/{id}` | 应用为新规则 |
+| POST | `/nodes/{node}/templates/{id}/preview` | 只校验并返回拟创建规则，不写修订 |
 
 `/templates*` 和节点模板应用仅接受登录会话，API 令牌访问 403。面板规则表格的“存为模板”和“规则模板”页提供保存、应用、删除。
 
 ## 验证与限制
 
-- Store 测试覆盖创建、列表、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403。
+- Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403；预览不改变修订，重复监听返回 `valid=false`。
 - HTTP 测试覆盖创建、viewer 403、节点配置修订、应用后规则名称。
-- 未实现模板版本化/差异预览、变量参数化、跨节点灰度批次、模板引用依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。
+- 未实现模板版本化、完整配置差异视图、变量参数化、跨节点灰度批次、模板引用依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。
