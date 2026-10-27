@@ -1440,6 +1440,50 @@ async fn prometheus_metrics(
         ));
     }
     body.push_str(
+        "# HELP relay_meter Budget and admission counters.\n# TYPE relay_meter counter\n",
+    );
+    for node in &nodes {
+        if let Some(meter) = &node.stats.meter {
+            for (kind, value) in [
+                ("admission_batches", meter.admission_batches.samples),
+                ("admission_requests", meter.admission_requests),
+                ("failed_batches", meter.failed_batches),
+                ("budget_waiting", meter.budget_waiting),
+                ("budget_timeouts", meter.budget_timeouts),
+                ("budget_wait_us_total", meter.budget_wait.total_us),
+                ("budget_wait_us_max", meter.budget_wait.max_us),
+            ] {
+                body.push_str(&format!(
+                    "relay_meter{{node=\"{}\",kind=\"{}\"}} {}\n",
+                    metric_label(&node.id),
+                    kind,
+                    value
+                ));
+            }
+        }
+    }
+    body.push_str("# HELP relay_budget_recovery Budget recovery counters.\n# TYPE relay_budget_recovery counter\n");
+    for node in &nodes {
+        if let Some(recovery) = &node.stats.budget_recovery {
+            for (kind, value) in [
+                ("validated_grants", recovery.validated_grants),
+                (
+                    "recovered_pending_grants",
+                    recovery.recovered_pending_grants,
+                ),
+                ("cancelled_requests", recovery.cancelled_requests),
+                ("open_grants", recovery.open_grants),
+            ] {
+                body.push_str(&format!(
+                    "relay_budget_recovery{{node=\"{}\",kind=\"{}\"}} {}\n",
+                    metric_label(&node.id),
+                    kind,
+                    value
+                ));
+            }
+        }
+    }
+    body.push_str(
         "# HELP relay_node_system Resource statistics.\n# TYPE relay_node_system gauge\n",
     );
     for node in &nodes {

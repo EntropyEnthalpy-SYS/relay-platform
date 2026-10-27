@@ -88,6 +88,26 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     };
     let stats = EngineStats {
         target_health: vec![report],
+        meter: Some(relay_platform::metrics::MeterStats {
+            admission_batches: relay_platform::metrics::TimingStats {
+                samples: 1,
+                total_us: 20,
+                max_us: 20,
+            },
+            admission_requests: 3,
+            failed_batches: 0,
+            budget_wait: relay_platform::metrics::TimingStats::default(),
+            budget_waiting: 0,
+            budget_timeouts: 0,
+        }),
+        budget_recovery: Some(relay_platform::budget::BudgetRecoveryStats {
+            run_id: "fixture".into(),
+            at_ms: 1,
+            validated_grants: 2,
+            recovered_pending_grants: 1,
+            cancelled_requests: 0,
+            open_grants: 1,
+        }),
         system: Some(relay_platform::system::SystemStats {
             cpu_percent: Some(12.5),
             rss_bytes: Some(4096),
