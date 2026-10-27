@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.58.0 开发版在 macOS 27.0.1 arm64 通过 **390 项自动化测试（361 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 391 项。日志见 [verification-0.58.0.txt](verification-0.58.0.txt)，逐项清单见 [validation-evidence-0.58.0.json](validation-evidence-0.58.0.json)。
+0.59.0 开发版在 macOS 27.0.1 arm64 通过 **391 项自动化测试（362 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 392 项。日志见 [verification-0.59.0.txt](verification-0.59.0.txt)，逐项清单见 [validation-evidence-0.59.0.json](validation-evidence-0.59.0.json)。
 
-## 0.58.0 模板 diff 验证
+## 0.59.0 百分比首批验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 首批 | 3 节点、batch=2、34% → 首批 2，第二批 1 |
+| 上限 | 首批比例计算不超过 batch_size，至少 1 |
+| 失败 | 原有停止/回滚/重试语义不变 |
+| 限制 | 仅批次大小；无观察窗口/错误率/延迟健康阈值 |
+
+## 0.58.0 模板 diff 验证（历史）
+
+0.58.0 开发版在 macOS 27.0.1 arm64 通过 **390 项自动化测试（361 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 391 项。日志见 [verification-0.58.0.txt](verification-0.58.0.txt)，逐项清单见 [validation-evidence-0.58.0.json](validation-evidence-0.58.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

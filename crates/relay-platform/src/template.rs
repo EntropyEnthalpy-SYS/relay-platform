@@ -73,6 +73,8 @@ pub struct RolloutReport {
     pub id: String,
     pub template_id: String,
     pub batch_size: usize,
+    #[serde(default)]
+    pub canary_percent: Option<u8>,
     pub batches: usize,
     pub applied: usize,
     pub rolled_back: usize,
@@ -97,6 +99,8 @@ pub struct DiffChange {
 pub struct RolloutRecord {
     pub targets: Vec<RolloutTarget>,
     pub rollback_on_failure: bool,
+    #[serde(default)]
+    pub canary_percent: Option<u8>,
     pub report: RolloutReport,
 }
 #[derive(Clone, Debug, Deserialize)]

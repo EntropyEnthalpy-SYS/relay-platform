@@ -138,6 +138,7 @@ fn rollout_stops_after_a_failed_canary_batch() {
             ],
             1,
             true,
+            None,
         )
         .unwrap();
     assert!(report.aborted);
@@ -202,6 +203,40 @@ fn template_variables_render_and_can_be_overridden() {
         )
         .unwrap();
     assert_eq!(changed.rules[1].targets[0].address, "localhost:9000");
+}
+
+#[test]
+fn canary_percent_sizes_the_first_batch() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let source = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    let template = store.create_template(&admin, input(None, source)).unwrap();
+    let mut targets = Vec::new();
+    for (index, port) in [19101u16, 19102, 19103].into_iter().enumerate() {
+        let (node, _) = store
+            .create_node(&admin, "default", &format!("canary-{index}"))
+            .unwrap();
+        let revision = store.set_config(&admin, &node.id, 0, vec![]).unwrap();
+        targets.push(relay_platform::template::RolloutTarget {
+            node_id: node.id,
+            expected_revision: revision.revision,
+            name: format!("canary-{index}"),
+            listen: format!("127.0.0.1:{port}").parse().unwrap(),
+            variables: Default::default(),
+            template_version: None,
+        });
+    }
+    let report = store
+        .rollout_template(&admin, &template.id, &targets, 2, false, Some(34))
+        .unwrap();
+    assert_eq!(report.canary_percent, Some(34));
+    assert_eq!(report.batches, 2);
+    assert_eq!(report.applied, 3);
+    assert_eq!(report.results[0].batch, 1);
+    assert_eq!(report.results[1].batch, 1);
+    assert_eq!(report.results[2].batch, 2);
 }
 
 #[test]

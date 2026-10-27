@@ -369,11 +369,16 @@ impl Store {
         targets: &[crate::template::RolloutTarget],
         batch_size: usize,
         rollback_on_failure: bool,
+        canary_percent: Option<u8>,
     ) -> Result<crate::template::RolloutReport> {
         require_writer(actor)?;
         ensure!(!targets.is_empty(), "rollout requires at least one node");
         ensure!(targets.len() <= 100, "rollout supports at most 100 nodes");
         ensure!((1..=50).contains(&batch_size), "batch size must be 1..=50");
+        ensure!(
+            canary_percent.is_none_or(|percent| (1..=100).contains(&percent)),
+            "canary percent must be 1..=100"
+        );
         let mut seen = std::collections::HashSet::new();
         for target in targets {
             ensure!(
@@ -388,8 +393,22 @@ impl Store {
         let mut successes = Vec::<usize>::new();
         let mut aborted = false;
         let mut batches = 0usize;
-        for (index, batch) in targets.chunks(batch_size).enumerate() {
-            batches = index + 1;
+        let first_batch = canary_percent
+            .map(|percent| {
+                (targets.len() * usize::from(percent))
+                    .div_ceil(100)
+                    .max(1)
+                    .min(batch_size)
+            })
+            .unwrap_or(batch_size);
+        let mut offset = 0usize;
+        let mut index = 0usize;
+        while offset < targets.len() {
+            let size = if index == 0 { first_batch } else { batch_size };
+            let batch = &targets[offset..targets.len().min(offset + size)];
+            offset += batch.len();
+            index += 1;
+            batches = index;
             let mut failed = false;
             for target in batch {
                 match self.apply_template_with_variables(
@@ -407,7 +426,7 @@ impl Store {
                         let rule = config.rules.last();
                         results.push(crate::template::RolloutResult {
                             node_id: target.node_id.clone(),
-                            batch: index + 1,
+                            batch: index,
                             applied: true,
                             revision: Some(config.revision),
                             rule_id: rule.map(|rule| rule.id.clone()),
@@ -421,7 +440,7 @@ impl Store {
                         failed = true;
                         results.push(crate::template::RolloutResult {
                             node_id: target.node_id.clone(),
-                            batch: index + 1,
+                            batch: index,
                             applied: false,
                             revision: None,
                             rule_id: None,
@@ -462,10 +481,10 @@ impl Store {
                         }
                     }
                 }
-                for target in targets.iter().skip((index + 1) * batch_size) {
+                for target in targets.iter().skip(offset) {
                     results.push(crate::template::RolloutResult {
                         node_id: target.node_id.clone(),
-                        batch: index + 2,
+                        batch: index + 1,
                         applied: false,
                         revision: None,
                         rule_id: None,
@@ -481,6 +500,7 @@ impl Store {
             id: Uuid::new_v4().to_string(),
             template_id: template_id.into(),
             batch_size,
+            canary_percent,
             batches,
             applied,
             rolled_back,
@@ -491,6 +511,7 @@ impl Store {
         let record = crate::template::RolloutRecord {
             targets: targets.to_vec(),
             rollback_on_failure,
+            canary_percent,
             report: report.clone(),
         };
         let mut conn = self.0.lock().unwrap();
@@ -540,6 +561,7 @@ impl Store {
             &retry,
             record.report.batch_size,
             record.rollback_on_failure,
+            record.canary_percent,
         )
     }
 

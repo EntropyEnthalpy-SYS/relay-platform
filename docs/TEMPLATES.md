@@ -57,6 +57,15 @@
 - 模板版本与节点配置修订是两套独立计数。
 - 面板模板页“版本”按钮列出历史并提供回滚。
 
+## 百分比首批
+
+`POST /templates/{id}/rollout` 可传 `canary_percent`（1–100）：
+
+- 首批大小按 `ceil(目标数 × 百分比 / 100)` 计算，至少 1，且不超过 `batch_size`；
+- 首批成功后，其余按 `batch_size` 分批；
+- 首批失败仍按既有策略停止/可选回滚；
+- 这是**批次大小**控制，不是健康检查或自动放量；没有观察窗口、错误率或延迟阈值。
+
 ## 变量替换
 
 模板规则中的字符串字段支持 `{{name}}` 占位符，变量在模板创建时保存：
@@ -110,7 +119,7 @@
 | GET | `/templates/{id}/versions` | 当前和历史模板版本 |
 | GET | `/templates/{id}/diff?from=&to=` | 两个模板版本的结构化差异 |
 | POST | `/templates/{id}/versions/{version}/rollback` | 旧内容作为新版本写回 |
-| POST | `/templates/{id}/rollout` | 有序分批应用到多个节点，失败停止后续批次 |
+| POST | `/templates/{id}/rollout` | 有序分批应用；可选 `canary_percent` 首批比例、回滚 |
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?,template_version?}` 应用模板；可固定历史版本 |
 | POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |
 
