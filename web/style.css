@@ -509,3 +509,5 @@ td .clip { display: block; max-width: 340px; overflow: hidden; text-overflow: el
   font-size: 13px;
   overflow-wrap: anywhere;
 }
+.version-list { display: grid; gap: 8px; }
+.version-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; }

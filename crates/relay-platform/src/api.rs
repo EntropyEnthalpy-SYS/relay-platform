@@ -302,6 +302,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/diagnostics/mptcp", get(mptcp_diagnostics))
         .route("/api/v1/tickets", get(tickets).post(create_ticket))
         .route("/api/v1/templates", get(templates).post(create_template))
+        .route("/api/v1/templates/{id}/versions", get(template_versions))
+        .route(
+            "/api/v1/templates/{id}/versions/{version}/rollback",
+            post(rollback_template),
+        )
         .route(
             "/api/v1/templates/{id}",
             axum::routing::put(update_template).delete(delete_template),
@@ -1594,6 +1599,27 @@ async fn delete_template(
 ) -> ApiResult<serde_json::Value> {
     database(state.store, move |db| db.delete_template(&actor, &id)).await?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn template_versions(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Vec<crate::template::RuleTemplate>> {
+    Ok(Json(
+        database(state.store, move |db| db.template_versions(&actor, &id)).await?,
+    ))
+}
+async fn rollback_template(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((id, version)): Path<(String, u64)>,
+) -> ApiResult<crate::template::RuleTemplate> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.rollback_template(&actor, &id, version)
+        })
+        .await?,
+    ))
 }
 async fn apply_template(
     State(state): State<AppState>,

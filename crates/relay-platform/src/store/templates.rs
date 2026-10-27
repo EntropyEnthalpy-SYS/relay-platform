@@ -5,6 +5,16 @@ use crate::template::{RuleTemplate, TemplateInput, render_rule, validate, valida
 fn key(id: &str) -> String {
     format!("template:{id}")
 }
+fn version_key(id: &str, version: u64) -> String {
+    format!("template-version:{id}:{version}")
+}
+fn write_version(tx: &Transaction<'_>, value: &RuleTemplate) -> Result<()> {
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![version_key(&value.id, value.version), serde_json::to_string(value)?],
+    )?;
+    Ok(())
+}
 fn read(conn: &Connection, id: &str) -> Result<Option<RuleTemplate>> {
     let raw: Option<String> = conn
         .query_row("SELECT value FROM metadata WHERE key=?1", [key(id)], |r| {
@@ -92,6 +102,7 @@ impl Store {
         }
         let template = RuleTemplate {
             id: Uuid::new_v4().to_string(),
+            version: 1,
             tenant_id: input.tenant_id,
             name: input.name,
             description: input.description,
@@ -134,6 +145,8 @@ impl Store {
                 "only a system administrator can create a global template",
             );
         }
+        write_version(&tx, &template)?;
+        template.version = template.version.saturating_add(1);
         template.tenant_id = input.tenant_id;
         template.name = input.name;
         template.description = input.description;
@@ -144,6 +157,68 @@ impl Store {
         tx.commit()?;
         Ok(template)
     }
+    pub fn template_versions(&self, actor: &Actor, id: &str) -> Result<Vec<RuleTemplate>> {
+        require_writer(actor)?;
+        let conn = self.0.lock().unwrap();
+        let current = read(&conn, id)?.context("template not found")?;
+        if !visible(actor, &current) {
+            return reject(403, "template belongs to another tenant");
+        }
+        let mut versions = vec![current];
+        let mut statement =
+            conn.prepare("SELECT value FROM metadata WHERE key GLOB ?1 ORDER BY key")?;
+        let pattern = format!("template-version:{id}:*");
+        let rows: Vec<String> = statement
+            .query_map([pattern], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for row in rows {
+            versions.push(serde_json::from_str(&row).context("invalid stored template version")?);
+        }
+        versions.sort_by_key(|a| std::cmp::Reverse(a.version));
+        versions.dedup_by_key(|template| template.version);
+        Ok(versions)
+    }
+
+    pub fn rollback_template(&self, actor: &Actor, id: &str, version: u64) -> Result<RuleTemplate> {
+        require_writer(actor)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut current = read(&tx, id)?.context("template not found")?;
+        if !visible(actor, &current) {
+            return reject(403, "template belongs to another tenant");
+        }
+        if version >= current.version {
+            return reject(409, "template version is not older than current");
+        }
+        let raw: String = tx
+            .query_row(
+                "SELECT value FROM metadata WHERE key=?1",
+                [version_key(id, version)],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("template version not found")?;
+        let snapshot: RuleTemplate =
+            serde_json::from_str(&raw).context("invalid stored template version")?;
+        write_version(&tx, &current)?;
+        current.version = current.version.saturating_add(1);
+        current.tenant_id = snapshot.tenant_id;
+        current.name = snapshot.name;
+        current.description = snapshot.description;
+        current.rule = snapshot.rule;
+        current.variables = snapshot.variables;
+        write(&tx, &current)?;
+        audit(
+            &tx,
+            &actor.id,
+            "template.rollback",
+            id,
+            &serde_json::json!({"from": current.version - 1, "to": version}).to_string(),
+        )?;
+        tx.commit()?;
+        Ok(current)
+    }
+
     pub fn delete_template(&self, actor: &Actor, id: &str) -> Result<()> {
         require_writer(actor)?;
         let mut conn = self.0.lock().unwrap();

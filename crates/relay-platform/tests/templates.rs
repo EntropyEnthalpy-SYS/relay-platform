@@ -202,6 +202,35 @@ fn template_variables_render_and_can_be_overridden() {
     assert_eq!(changed.rules[1].targets[0].address, "localhost:9000");
 }
 
+#[test]
+fn template_versions_can_be_listed_and_rolled_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let source = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    let template = store.create_template(&admin, input(None, source)).unwrap();
+    assert_eq!(template.version, 1);
+    let mut changed = input(None, rule("127.0.0.1:9001".parse().unwrap(), Protocol::Tcp));
+    changed.name = "Second version".into();
+    let updated = store
+        .update_template(&admin, &template.id, changed)
+        .unwrap();
+    assert_eq!(updated.version, 2);
+    assert_eq!(
+        store.template_versions(&admin, &template.id).unwrap().len(),
+        2
+    );
+    let rolled = store.rollback_template(&admin, &template.id, 1).unwrap();
+    assert_eq!(rolled.version, 3);
+    assert_eq!(rolled.name, "Web preset");
+    assert_eq!(rolled.rule.targets[0].address, "127.0.0.1:9000");
+    assert_eq!(
+        store.template_versions(&admin, &template.id).unwrap().len(),
+        3
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn template_http_applies_and_rejects_viewers() {
     use relay_platform::api::{self, AppState};

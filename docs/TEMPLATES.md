@@ -37,6 +37,15 @@
 
 返回与“应用”相同的拟创建规则身份（新 ID、名称、监听、owner、tenant、meter）以及 `current_revision/valid/error`，但不写修订。监听冲突等校验错误会以 `valid=false` 和错误文本返回。预览不会改变节点配置或运行状态。
 
+## 版本历史与回滚
+
+- 创建为 v1；每次更新把当前模板快照写入 `template-version:{id}:{version}`，新内容版本号 +1。
+- `GET /templates/{id}/versions` 返回当前及历史版本（新到旧）；历史快照不可变。
+- `POST /templates/{id}/versions/{version}/rollback` 把旧内容作为**新版本**写回（版本号继续增加），不是删除历史或降级版本号。
+- 只能回滚到严格更旧的版本；回滚需要管理员权限并写审计。
+- 当前应用/批量/重试仍使用最新版本；模板版本与节点配置修订是两套独立计数。
+- 面板模板页“版本”按钮列出历史并提供回滚。
+
 ## 变量替换
 
 模板规则中的字符串字段支持 `{{name}}` 占位符，变量在模板创建时保存：
@@ -87,6 +96,8 @@
 | PUT/DELETE | `/templates/{id}` | 编辑/删除，受租户范围 |
 | POST | `/nodes/{node}/templates/{id}` | 应用为新规则 |
 | POST | `/nodes/{node}/templates/{id}/preview` | 只校验并返回拟创建规则，不写修订 |
+| GET | `/templates/{id}/versions` | 当前和历史模板版本 |
+| POST | `/templates/{id}/versions/{version}/rollback` | 旧内容作为新版本写回 |
 | POST | `/templates/{id}/rollout` | 有序分批应用到多个节点，失败停止后续批次 |
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?}` 应用模板；变量覆盖默认值 |
 | POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |

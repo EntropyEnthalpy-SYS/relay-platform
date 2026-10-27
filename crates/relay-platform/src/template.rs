@@ -6,9 +6,14 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn default_version() -> u64 {
+    1
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RuleTemplate {
     pub id: String,
+    #[serde(default = "default_version")]
+    pub version: u64,
     /// `None` is global; `Some` is visible only inside that tenant.
     pub tenant_id: Option<String>,
     pub name: String,

@@ -786,7 +786,7 @@ async function renderTemplates() {
   const p = panel('规则模板', '模板保存一份已验证的规则内容；应用时生成新的规则 ID、名称、监听地址和计量周期，并走正常配置校验。', null);
   if (!templates.length) p.append(empty('还没有模板', '在“转发规则”表格中把一条规则存为模板。'));
   else p.append(table(['名称', '范围', '说明', '源监听', '操作'], templates.map(template => {
-    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); actions.append(button('批量应用', () => rolloutTemplate(template), 'table-action')); }
+    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); actions.append(button('批量应用', () => rolloutTemplate(template), 'table-action')); actions.append(button('版本', () => templateVersions(template), 'table-action')); }
     if (state.actor.role === 'system_admin' || template.tenant_id === state.actor.tenant_id) actions.append(button('删除', () => deleteTemplate(template), 'table-action danger'));
     return [namedCell(template.name, template.id), template.tenant_id || '全局', template.description || '—', template.rule.listen, actions];
   })));
@@ -803,6 +803,22 @@ async function deleteTemplate(template) {
   if (!confirm(`删除模板「${template.name}」？`)) return;
   await api(`/templates/${template.id}`, { method: 'DELETE' }); notify('模板已删除。'); await renderTemplates();
 }
+async function templateVersions(template) {
+  const versions = await api(`/templates/${template.id}/versions`);
+  const content = el('div'); content.append(el('p', `当前版本 ${template.version}；保留 ${versions.length} 个版本。`, 'fine'));
+  const list = el('div', undefined, 'version-list');
+  for (const version of versions) {
+    const row = el('div', undefined, 'version-row');
+    row.append(el('span', `v${version.version} · ${version.name}`));
+    if (version.version < template.version) row.append(button('回滚', async () => {
+      const rolled = await api(`/templates/${template.id}/versions/${version.version}/rollback`, { method: 'POST' });
+      $('#dialog').close(); renderTemplates(); modal('已回滚', el('pre', JSON.stringify(rolled, null, 2), 'json-preview'));
+    }, 'table-action'));
+    list.append(row);
+  }
+  content.append(list); modal(`版本 · ${template.name}`, content);
+}
+
 async function rolloutTemplate(template) {
   const nodes = state.nodes; const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'batch_size', '每批节点数（1–50）', '1', 'number');
