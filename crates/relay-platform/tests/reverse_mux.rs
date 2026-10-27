@@ -165,3 +165,66 @@ async fn tls_control_connection_still_multiplexes_public_streams() {
     server.abort();
     client.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn mtls_control_requires_a_client_identity() {
+    let certs = tls::Certificates::new();
+    let acceptor = reverse_mux::tls_acceptor_with_client_ca(
+        &certs.root.join("server/cert.pem"),
+        &certs.root.join("server/key.pem"),
+        &certs.root.join("root/ca.pem"),
+    )
+    .unwrap();
+    let (connector, name) = reverse_mux::tls_connector_with_identity(
+        &certs.root.join("root/ca.pem"),
+        "relay.test",
+        &certs.root.join("client/cert.pem"),
+        &certs.root.join("client/key.pem"),
+    )
+    .unwrap();
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public.local_addr().unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = target.accept().await.unwrap();
+        let mut buffer = [0u8; 64];
+        let size = stream.read(&mut buffer).await.unwrap();
+        stream.write_all(&buffer[..size]).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let server = tokio::spawn(reverse_mux::serve_mux_tls(
+        control,
+        public,
+        "mux-mtls-token".into(),
+        acceptor,
+        8,
+        300,
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux_tls(
+        control_addr,
+        target_addr.to_string(),
+        "mux-mtls-token".into(),
+        connector,
+        name,
+    ));
+    let mut exposed = timeout(Duration::from_secs(3), TcpStream::connect(public_addr))
+        .await
+        .unwrap()
+        .unwrap();
+    exposed.write_all(b"mutual").await.unwrap();
+    let mut reply = [0u8; 6];
+    timeout(Duration::from_secs(3), exposed.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"mutual");
+    timeout(Duration::from_secs(3), echo)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    client.abort();
+}

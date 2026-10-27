@@ -100,6 +100,9 @@ enum Command {
         /// TLS private key for the control listener (requires --tls-cert).
         #[arg(long)]
         tls_key: Option<PathBuf>,
+        /// CA bundle used to require a client certificate (requires TLS).
+        #[arg(long)]
+        tls_client_ca: Option<PathBuf>,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -115,6 +118,12 @@ enum Command {
         /// TLS server name (required with --tls-ca).
         #[arg(long)]
         tls_server_name: Option<String>,
+        /// Client certificate for mTLS (requires --tls-client-key).
+        #[arg(long)]
+        tls_client_cert: Option<PathBuf>,
+        /// Client private key for mTLS (requires --tls-client-cert).
+        #[arg(long)]
+        tls_client_key: Option<PathBuf>,
     },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
@@ -439,15 +448,21 @@ async fn main() -> Result<()> {
             idle_timeout_secs,
             tls_cert,
             tls_key,
+            tls_client_ca,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
-            match (tls_cert, tls_key) {
-                (Some(cert), Some(key)) => {
-                    let acceptor = relay_platform::reverse_mux::tls_acceptor(&cert, &key)?;
+            match (tls_cert, tls_key, tls_client_ca) {
+                (Some(cert), Some(key), client_ca) => {
+                    let acceptor = match client_ca {
+                        Some(ca) => relay_platform::reverse_mux::tls_acceptor_with_client_ca(
+                            &cert, &key, &ca,
+                        )?,
+                        None => relay_platform::reverse_mux::tls_acceptor(&cert, &key)?,
+                    };
                     relay_platform::reverse_mux::serve_mux_tls(
                         control,
                         public,
@@ -458,7 +473,7 @@ async fn main() -> Result<()> {
                     )
                     .await?;
                 }
-                (None, None) => {
+                (None, None, None) => {
                     relay_platform::reverse_mux::serve_mux_with_options(
                         control,
                         public,
@@ -468,7 +483,9 @@ async fn main() -> Result<()> {
                     )
                     .await?;
                 }
-                _ => anyhow::bail!("--tls-cert and --tls-key must be supplied together"),
+                _ => anyhow::bail!(
+                    "--tls-cert, --tls-key and --tls-client-ca require both certificate and key"
+                ),
             }
         }
         Command::ReverseMuxClient {
@@ -477,16 +494,25 @@ async fn main() -> Result<()> {
             token_file,
             tls_ca,
             tls_server_name,
+            tls_client_cert,
+            tls_client_key,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
-            let tls = match (tls_ca, tls_server_name) {
-                (Some(ca), Some(name)) => {
+            let tls = match (tls_ca, tls_server_name, tls_client_cert, tls_client_key) {
+                (Some(ca), Some(name), Some(cert), Some(key)) => {
+                    Some(relay_platform::reverse_mux::tls_connector_with_identity(
+                        &ca, &name, &cert, &key,
+                    )?)
+                }
+                (Some(ca), Some(name), None, None) => {
                     Some(relay_platform::reverse_mux::tls_connector(&ca, &name)?)
                 }
-                (None, None) => None,
-                _ => anyhow::bail!("--tls-ca and --tls-server-name must be supplied together"),
+                (None, None, None, None) => None,
+                _ => anyhow::bail!(
+                    "--tls-ca/--tls-server-name and --tls-client-cert/--tls-client-key must be paired"
+                ),
             };
             loop {
                 let result = match &tls {

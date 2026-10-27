@@ -296,16 +296,46 @@ async fn read_frames(
 }
 
 pub fn tls_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor> {
+    tls_acceptor_inner(cert_path, key_path, None)
+}
+
+pub fn tls_acceptor_with_client_ca(
+    cert_path: &Path,
+    key_path: &Path,
+    client_ca_path: &Path,
+) -> Result<TlsAcceptor> {
+    tls_acceptor_inner(cert_path, key_path, Some(client_ca_path))
+}
+
+fn tls_acceptor_inner(
+    cert_path: &Path,
+    key_path: &Path,
+    client_ca_path: Option<&Path>,
+) -> Result<TlsAcceptor> {
     let certs = CertificateDer::pem_slice_iter(&std::fs::read(cert_path)?)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     ensure!(!certs.is_empty(), "TLS certificate file is empty");
     let key = PrivateKeyDer::from_pem_slice(&std::fs::read(key_path)?)
         .context("cannot parse TLS private key")?;
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    let config = ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+    let builder = ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()?;
+    let builder = if let Some(ca_path) = client_ca_path {
+        let mut roots = RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca_path)?) {
+            roots.add(cert?)?;
+        }
+        ensure!(!roots.is_empty(), "TLS client CA file has no certificates");
+        let verifier = tokio_rustls::rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            provider,
+        )
+        .build()?;
+        builder.with_client_cert_verifier(verifier)
+    } else {
+        builder.with_no_client_auth()
+    };
+    let config = builder.with_single_cert(certs, key)?;
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
@@ -313,16 +343,46 @@ pub fn tls_connector(
     ca_path: &Path,
     server_name: &str,
 ) -> Result<(TlsConnector, ServerName<'static>)> {
+    tls_connector_inner(ca_path, server_name, None)
+}
+
+pub fn tls_connector_with_identity(
+    ca_path: &Path,
+    server_name: &str,
+    client_cert_path: &Path,
+    client_key_path: &Path,
+) -> Result<(TlsConnector, ServerName<'static>)> {
+    tls_connector_inner(
+        ca_path,
+        server_name,
+        Some((client_cert_path, client_key_path)),
+    )
+}
+
+fn tls_connector_inner(
+    ca_path: &Path,
+    server_name: &str,
+    identity: Option<(&Path, &Path)>,
+) -> Result<(TlsConnector, ServerName<'static>)> {
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca_path)?) {
         roots.add(cert?)?;
     }
     ensure!(!roots.is_empty(), "TLS CA file has no certificates");
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    let config = ClientConfig::builder_with_provider(provider)
+    let builder = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        .with_root_certificates(roots);
+    let config = if let Some((cert_path, key_path)) = identity {
+        let certs = CertificateDer::pem_slice_iter(&std::fs::read(cert_path)?)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ensure!(!certs.is_empty(), "TLS client certificate file is empty");
+        let key = PrivateKeyDer::from_pem_slice(&std::fs::read(key_path)?)
+            .context("cannot parse TLS client private key")?;
+        builder.with_client_auth_cert(certs, key)?
+    } else {
+        builder.with_no_client_auth()
+    };
     Ok((
         TlsConnector::from(Arc::new(config)),
         ServerName::try_from(server_name.to_owned())?,
