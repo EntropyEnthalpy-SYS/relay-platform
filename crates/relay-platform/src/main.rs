@@ -94,6 +94,12 @@ enum Command {
         /// Close an idle public stream after this many seconds (1-86400).
         #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(1..=86400))]
         idle_timeout_secs: u32,
+        /// TLS certificate chain for the control listener (requires --tls-key).
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+        /// TLS private key for the control listener (requires --tls-cert).
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -103,6 +109,12 @@ enum Command {
         target: String,
         #[arg(long)]
         token_file: PathBuf,
+        /// CA bundle for verifying the control server (enables TLS).
+        #[arg(long)]
+        tls_ca: Option<PathBuf>,
+        /// TLS server name (required with --tls-ca).
+        #[arg(long)]
+        tls_server_name: Option<String>,
     },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
@@ -425,34 +437,79 @@ async fn main() -> Result<()> {
             token_file,
             max_streams,
             idle_timeout_secs,
+            tls_cert,
+            tls_key,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
-            relay_platform::reverse_mux::serve_mux_with_options(
-                control,
-                public,
-                token,
-                usize::from(max_streams),
-                u64::from(idle_timeout_secs),
-            )
-            .await?;
+            match (tls_cert, tls_key) {
+                (Some(cert), Some(key)) => {
+                    let acceptor = relay_platform::reverse_mux::tls_acceptor(&cert, &key)?;
+                    relay_platform::reverse_mux::serve_mux_tls(
+                        control,
+                        public,
+                        token,
+                        acceptor,
+                        usize::from(max_streams),
+                        u64::from(idle_timeout_secs),
+                    )
+                    .await?;
+                }
+                (None, None) => {
+                    relay_platform::reverse_mux::serve_mux_with_options(
+                        control,
+                        public,
+                        token,
+                        usize::from(max_streams),
+                        u64::from(idle_timeout_secs),
+                    )
+                    .await?;
+                }
+                _ => anyhow::bail!("--tls-cert and --tls-key must be supplied together"),
+            }
         }
         Command::ReverseMuxClient {
             server,
             target,
             token_file,
+            tls_ca,
+            tls_server_name,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
+            let tls = match (tls_ca, tls_server_name) {
+                (Some(ca), Some(name)) => {
+                    Some(relay_platform::reverse_mux::tls_connector(&ca, &name)?)
+                }
+                (None, None) => None,
+                _ => anyhow::bail!("--tls-ca and --tls-server-name must be supplied together"),
+            };
             loop {
-                if let Err(error) =
-                    relay_platform::reverse_mux::client_mux(server, target.clone(), token.clone())
+                let result = match &tls {
+                    Some((connector, name)) => {
+                        relay_platform::reverse_mux::client_mux_tls(
+                            server,
+                            target.clone(),
+                            token.clone(),
+                            connector.clone(),
+                            name.clone(),
+                        )
                         .await
-                {
+                    }
+                    None => {
+                        relay_platform::reverse_mux::client_mux(
+                            server,
+                            target.clone(),
+                            token.clone(),
+                        )
+                        .await
+                    }
+                };
+                if let Err(error) = result {
                     tracing::warn!(%error, "reverse mux client ended; reconnecting");
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }

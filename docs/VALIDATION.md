@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.88.0 开发版在 macOS 27.0.1 arm64 通过 **409 项自动化测试（380 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 410 项。日志见 [verification-0.88.0.txt](verification-0.88.0.txt)，逐项清单见 [validation-evidence-0.88.0.json](validation-evidence-0.88.0.json)。
+0.89.0 开发版在 macOS 27.0.1 arm64 通过 **410 项自动化测试（381 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 411 项。日志见 [verification-0.89.0.txt](verification-0.89.0.txt)，逐项清单见 [validation-evidence-0.89.0.json](validation-evidence-0.89.0.json)。
 
-## 0.88.0 反向连接超时
+## 0.89.0 反向 mux 控制 TLS
+
+| 检查 | 结果 |
+| --- | --- |
+| 服务端 | cert/key 同时提供才启用 |
+| 客户端 | CA + server name 校验 |
+| 测试 | TLS 控制连接回显一个公网流 |
+| 限制 | 公网监听仍明文；无 mTLS/重放保护 |
+
+## 0.88.0 反向连接超时（历史）
+
+0.88.0 开发版在 macOS 27.0.1 arm64 通过 **409 项自动化测试（380 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 410 项。日志见 [verification-0.88.0.txt](verification-0.88.0.txt)，逐项清单见 [validation-evidence-0.88.0.json](validation-evidence-0.88.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

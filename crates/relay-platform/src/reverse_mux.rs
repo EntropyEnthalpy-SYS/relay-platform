@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -14,12 +15,16 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{
-        TcpListener, TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::{Mutex, mpsc, oneshot},
+};
+use tokio_rustls::{
+    TlsAcceptor, TlsConnector,
+    rustls::{
+        ClientConfig, RootCertStore, ServerConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
@@ -37,7 +42,9 @@ const FIN: u8 = 5;
 const RESET: u8 = 6;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
-type Writer = Arc<Mutex<OwnedWriteHalf>>;
+type ControlRead = Box<dyn AsyncRead + Send + Unpin>;
+type ControlWrite = Box<dyn AsyncWrite + Send + Unpin>;
+type Writer = Arc<Mutex<ControlWrite>>;
 type Sessions = Arc<Mutex<HashMap<u32, mpsc::Sender<(u8, Vec<u8>)>>>>;
 type Frame = (u8, u32, Vec<u8>);
 
@@ -76,6 +83,7 @@ pub async fn serve_mux_with_options(
     let public = Arc::new(public);
     loop {
         let (mut control_stream, peer) = control.accept().await?;
+        control_stream.set_nodelay(true).ok();
         let authorized = match tokio::time::timeout(AUTH_TIMEOUT, read_line(&mut control_stream))
             .await
             .ok()
@@ -96,9 +104,16 @@ pub async fn serve_mux_with_options(
         }
         tracing::info!(%peer, "reverse mux client connected");
         let public = public.clone();
+        let token = token.clone();
         tokio::spawn(async move {
-            if let Err(error) =
-                serve_control(control_stream, public, max_streams, idle_timeout_secs).await
+            if let Err(error) = serve_authorized_control(
+                control_stream,
+                public,
+                token,
+                max_streams,
+                idle_timeout_secs,
+            )
+            .await
             {
                 tracing::warn!(%error, "reverse mux control ended");
             }
@@ -106,14 +121,35 @@ pub async fn serve_mux_with_options(
     }
 }
 
+async fn serve_authorized_control<S>(
+    control: S,
+    public: Arc<TcpListener>,
+    token: String,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let _ = token;
+    let (reader, writer) = tokio::io::split(control);
+    serve_control(
+        Box::new(reader),
+        Box::new(writer),
+        public,
+        max_streams,
+        idle_timeout_secs,
+    )
+    .await
+}
+
 async fn serve_control(
-    control: TcpStream,
+    reader: ControlRead,
+    writer: ControlWrite,
     public: Arc<TcpListener>,
     max_streams: usize,
     idle_timeout_secs: u64,
 ) -> Result<()> {
-    control.set_nodelay(true).ok();
-    let (reader, writer) = control.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer));
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>> =
@@ -230,7 +266,7 @@ async fn bridge_public(
 }
 
 async fn read_frames(
-    mut reader: OwnedReadHalf,
+    mut reader: ControlRead,
     sessions: Sessions,
     responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>,
     cancel: CancellationToken,
@@ -259,6 +295,151 @@ async fn read_frames(
     }
 }
 
+pub fn tls_acceptor(cert_path: &Path, key_path: &Path) -> Result<TlsAcceptor> {
+    let certs = CertificateDer::pem_slice_iter(&std::fs::read(cert_path)?)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(!certs.is_empty(), "TLS certificate file is empty");
+    let key = PrivateKeyDer::from_pem_slice(&std::fs::read(key_path)?)
+        .context("cannot parse TLS private key")?;
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+pub fn tls_connector(
+    ca_path: &Path,
+    server_name: &str,
+) -> Result<(TlsConnector, ServerName<'static>)> {
+    let mut roots = RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca_path)?) {
+        roots.add(cert?)?;
+    }
+    ensure!(!roots.is_empty(), "TLS CA file has no certificates");
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok((
+        TlsConnector::from(Arc::new(config)),
+        ServerName::try_from(server_name.to_owned())?,
+    ))
+}
+
+pub async fn serve_mux_tls(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    acceptor: TlsAcceptor,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+) -> Result<()> {
+    ensure!(
+        !token.is_empty() && token.len() <= 256,
+        "reverse token must be 1..256 bytes"
+    );
+    ensure!(
+        (1..=1024).contains(&max_streams),
+        "reverse mux max streams must be 1..=1024"
+    );
+    ensure!(
+        (1..=86_400).contains(&idle_timeout_secs),
+        "reverse mux idle timeout must be 1..=86400 seconds"
+    );
+    let public = Arc::new(public);
+    loop {
+        let (stream, peer) = control.accept().await?;
+        let mut control_stream = match acceptor.accept(stream).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::warn!(%peer, %error, "reverse mux TLS handshake failed");
+                continue;
+            }
+        };
+        let authorized = match tokio::time::timeout(AUTH_TIMEOUT, read_line(&mut control_stream))
+            .await
+            .ok()
+            .and_then(Result::ok)
+        {
+            Some(line) => line
+                .strip_prefix("REVERSE-MUX ")
+                .is_some_and(|provided| token_matches(&token, provided)),
+            None => false,
+        };
+        if !authorized {
+            let _ = control_stream.write_all(b"DENY\n").await;
+            tracing::warn!(%peer, "reverse mux TLS authentication failed");
+            continue;
+        }
+        if control_stream.write_all(b"READY\n").await.is_err() {
+            continue;
+        }
+        tracing::info!(%peer, "reverse mux TLS client connected");
+        let public = public.clone();
+        let token = token.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_authorized_control(
+                control_stream,
+                public,
+                token,
+                max_streams,
+                idle_timeout_secs,
+            )
+            .await
+            {
+                tracing::warn!(%error, "reverse mux TLS control ended");
+            }
+        });
+    }
+}
+
+pub async fn client_mux_tls(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    connector: TlsConnector,
+    server_name: ServerName<'static>,
+) -> Result<()> {
+    ensure!(
+        !token.is_empty() && token.len() <= 256,
+        "reverse token must be 1..256 bytes"
+    );
+    let tcp = TcpStream::connect(server)
+        .await
+        .with_context(|| format!("connect reverse mux TLS server {server}"))?;
+    tcp.set_nodelay(true).ok();
+    let mut control = connector
+        .connect(server_name, tcp)
+        .await
+        .context("reverse mux TLS handshake failed")?;
+    control
+        .write_all(format!("REVERSE-MUX {token}\n").as_bytes())
+        .await?;
+    let reply = read_line(&mut control).await?;
+    match reply.as_str() {
+        READY => {}
+        DENY => bail!("reverse mux server rejected the token"),
+        other => bail!("unexpected reverse mux handshake: {other}"),
+    }
+    let (reader, writer) = tokio::io::split(control);
+    let writer: Writer = Arc::new(Mutex::new(Box::new(writer)));
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    let cancel = CancellationToken::new();
+    let read_task = tokio::spawn(client_read_loop(
+        Box::new(reader),
+        target,
+        writer,
+        sessions,
+        cancel.clone(),
+    ));
+    let _ = read_task.await;
+    cancel.cancel();
+    Ok(())
+}
+
 pub async fn client_mux(server: SocketAddr, target: String, token: String) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
@@ -278,11 +459,11 @@ pub async fn client_mux(server: SocketAddr, target: String, token: String) -> Re
         other => bail!("unexpected reverse mux handshake: {other}"),
     }
     let (reader, writer) = control.into_split();
-    let writer: Writer = Arc::new(Mutex::new(writer));
+    let writer: Writer = Arc::new(Mutex::new(Box::new(writer)));
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let cancel = CancellationToken::new();
     let read_task = tokio::spawn(client_read_loop(
-        reader,
+        Box::new(reader),
         target,
         writer.clone(),
         sessions.clone(),
@@ -294,7 +475,7 @@ pub async fn client_mux(server: SocketAddr, target: String, token: String) -> Re
 }
 
 async fn client_read_loop(
-    mut reader: OwnedReadHalf,
+    mut reader: ControlRead,
     target: String,
     writer: Writer,
     sessions: Sessions,
@@ -410,7 +591,7 @@ fn ensure_frame(length: usize) -> std::io::Result<()> {
     Ok(())
 }
 
-async fn read_frame(reader: &mut OwnedReadHalf) -> Result<Option<Frame>> {
+async fn read_frame(reader: &mut ControlRead) -> Result<Option<Frame>> {
     let mut header = [0u8; 9];
     let first = reader.read(&mut header[..1]).await?;
     if first == 0 {
@@ -438,7 +619,7 @@ fn token_matches(expected: &str, provided: &str) -> bool {
     difference == 0
 }
 
-async fn read_line(stream: &mut TcpStream) -> Result<String> {
+async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
     let mut line = Vec::with_capacity(32);
     loop {
         let mut byte = [0u8; 1];
