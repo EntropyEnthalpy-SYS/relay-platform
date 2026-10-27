@@ -75,7 +75,9 @@ pub async fn serve_mux_with_options(
     loop {
         let (mut control_stream, peer) = control.accept().await?;
         let authorized = match read_line(&mut control_stream).await {
-            Ok(line) => line == format!("REVERSE-MUX {token}"),
+            Ok(line) => line
+                .strip_prefix("REVERSE-MUX ")
+                .is_some_and(|provided| token_matches(&token, provided)),
             Err(_) => false,
         };
         if !authorized {
@@ -416,6 +418,17 @@ async fn read_frame(reader: &mut OwnedReadHalf) -> Result<Option<Frame>> {
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload).await?;
     Ok(Some((header[0], id, payload)))
+}
+
+fn token_matches(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (left, right) in expected.bytes().zip(provided.bytes()) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 async fn read_line(stream: &mut TcpStream) -> Result<String> {

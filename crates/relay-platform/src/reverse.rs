@@ -25,7 +25,9 @@ pub async fn serve(control: TcpListener, public: TcpListener, token: String) -> 
     loop {
         let (mut control_stream, peer) = control.accept().await?;
         let authorized = match read_line(&mut control_stream).await {
-            Ok(line) => line == format!("REVERSE {token}"),
+            Ok(line) => line
+                .strip_prefix("REVERSE ")
+                .is_some_and(|provided| token_matches(&token, provided)),
             Err(_) => false,
         };
         if !authorized {
@@ -143,6 +145,17 @@ async fn client_session(server: SocketAddr, target: &str, token: &str) -> Result
     control.write_all(format!("{OK}\n").as_bytes()).await?;
     copy_bidirectional(&mut local, &mut control).await?;
     Ok(())
+}
+
+fn token_matches(expected: &str, provided: &str) -> bool {
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (left, right) in expected.bytes().zip(provided.bytes()) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 async fn read_line(stream: &mut TcpStream) -> Result<String> {

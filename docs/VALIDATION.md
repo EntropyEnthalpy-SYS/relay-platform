@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.85.0 开发版在 macOS 27.0.1 arm64 通过 **409 项自动化测试（380 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 410 项。日志见 [verification-0.85.0.txt](verification-0.85.0.txt)，逐项清单见 [validation-evidence-0.85.0.json](validation-evidence-0.85.0.json)。
+0.86.0 开发版在 macOS 27.0.1 arm64 通过 **409 项自动化测试（380 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 410 项。日志见 [verification-0.86.0.txt](verification-0.86.0.txt)，逐项清单见 [validation-evidence-0.86.0.json](validation-evidence-0.86.0.json)。
 
-## 0.85.0 反向 mux 空闲超时
+## 0.86.0 反向 token 常量时间比较
+
+| 检查 | 结果 |
+| --- | --- |
+| 旧协议 | `REVERSE ` token 常量时间比较 |
+| mux | `REVERSE-MUX ` token 常量时间比较 |
+| 错误 token | 仍返回 `DENY` |
+| 限制 | 静态共享密钥，不等于 TLS/重放保护 |
+
+## 0.85.0 反向 mux 空闲超时（历史）
+
+0.85.0 开发版在 macOS 27.0.1 arm64 通过 **409 项自动化测试（380 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 410 项。日志见 [verification-0.85.0.txt](verification-0.85.0.txt)，逐项清单见 [validation-evidence-0.85.0.json](validation-evidence-0.85.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |
