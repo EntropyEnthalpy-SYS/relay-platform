@@ -88,6 +88,9 @@ enum Command {
         public_listen: SocketAddr,
         #[arg(long)]
         token_file: PathBuf,
+        /// Concurrent public streams per control connection (1-1024).
+        #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u16).range(1..=1024))]
+        max_streams: u16,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -417,13 +420,20 @@ async fn main() -> Result<()> {
             control_listen,
             public_listen,
             token_file,
+            max_streams,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
-            relay_platform::reverse_mux::serve_mux(control, public, token).await?;
+            relay_platform::reverse_mux::serve_mux_with_limit(
+                control,
+                public,
+                token,
+                usize::from(max_streams),
+            )
+            .await?;
         }
         Command::ReverseMuxClient {
             server,

@@ -40,9 +40,22 @@ type Sessions = Arc<Mutex<HashMap<u32, mpsc::Sender<(u8, Vec<u8>)>>>>;
 type Frame = (u8, u32, Vec<u8>);
 
 pub async fn serve_mux(control: TcpListener, public: TcpListener, token: String) -> Result<()> {
+    serve_mux_with_limit(control, public, token, 256).await
+}
+
+pub async fn serve_mux_with_limit(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    max_streams: usize,
+) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
+    );
+    ensure!(
+        (1..=1024).contains(&max_streams),
+        "reverse mux max streams must be 1..=1024"
     );
     let public = Arc::new(public);
     loop {
@@ -62,14 +75,18 @@ pub async fn serve_mux(control: TcpListener, public: TcpListener, token: String)
         tracing::info!(%peer, "reverse mux client connected");
         let public = public.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_control(control_stream, public).await {
+            if let Err(error) = serve_control(control_stream, public, max_streams).await {
                 tracing::warn!(%error, "reverse mux control ended");
             }
         });
     }
 }
 
-async fn serve_control(control: TcpStream, public: Arc<TcpListener>) -> Result<()> {
+async fn serve_control(
+    control: TcpStream,
+    public: Arc<TcpListener>,
+    max_streams: usize,
+) -> Result<()> {
     control.set_nodelay(true).ok();
     let (reader, writer) = control.into_split();
     let writer: Writer = Arc::new(Mutex::new(writer));
@@ -84,12 +101,18 @@ async fn serve_control(control: TcpStream, public: Arc<TcpListener>) -> Result<(
         cancel.clone(),
     ));
     let next_id = AtomicU32::new(1);
+    let active_streams = Arc::new(AtomicU32::new(0));
     let result: Result<()> = loop {
         let (mut exposed, peer) = tokio::select! {
             accepted = public.accept() => match accepted { Ok(pair) => pair, Err(error) => break Err(error.into()) },
             _ = cancel.cancelled() => break Ok(()),
         };
+        if active_streams.load(Ordering::Relaxed) >= max_streams as u32 {
+            let _ = exposed.shutdown().await;
+            continue;
+        }
         let id = next_id.fetch_add(1, Ordering::Relaxed);
+        active_streams.fetch_add(1, Ordering::Relaxed);
         let (data_tx, data_rx) = mpsc::channel(32);
         let (response_tx, response_rx) = oneshot::channel();
         sessions.lock().await.insert(id, data_tx);
@@ -97,6 +120,7 @@ async fn serve_control(control: TcpStream, public: Arc<TcpListener>) -> Result<(
         if let Err(error) = write_frame(&writer, OPEN, id, &[]).await {
             sessions.lock().await.remove(&id);
             responses.lock().await.remove(&id);
+            active_streams.fetch_sub(1, Ordering::Relaxed);
             let _ = exposed.shutdown().await;
             break Err(error.into());
         }
@@ -108,15 +132,26 @@ async fn serve_control(control: TcpStream, public: Arc<TcpListener>) -> Result<(
         if !opened {
             sessions.lock().await.remove(&id);
             responses.lock().await.remove(&id);
+            active_streams.fetch_sub(1, Ordering::Relaxed);
             let _ = exposed.shutdown().await;
             tracing::warn!(%peer, "reverse mux client did not open the target");
             continue;
         }
         let writer = writer.clone();
         let sessions = sessions.clone();
+        let active_streams = active_streams.clone();
         let cancel = cancel.clone();
         tokio::spawn(async move {
-            if let Err(error) = bridge_public(id, exposed, data_rx, writer, sessions, cancel).await
+            if let Err(error) = bridge_public(
+                id,
+                exposed,
+                data_rx,
+                writer,
+                sessions,
+                active_streams,
+                cancel,
+            )
+            .await
             {
                 tracing::debug!(%error, "reverse mux public bridge ended");
             }
@@ -133,6 +168,7 @@ async fn bridge_public(
     mut frames: mpsc::Receiver<(u8, Vec<u8>)>,
     writer: Writer,
     sessions: Sessions,
+    active_streams: Arc<AtomicU32>,
     cancel: CancellationToken,
 ) -> Result<()> {
     exposed.set_nodelay(true).ok();
@@ -155,6 +191,7 @@ async fn bridge_public(
         }
     }
     sessions.lock().await.remove(&id);
+    active_streams.fetch_sub(1, Ordering::Relaxed);
     Ok(())
 }
 

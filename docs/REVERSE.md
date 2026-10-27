@@ -32,7 +32,8 @@ relay reverse-client \
 relay reverse-mux-server \
   --control-listen 0.0.0.0:19010 \
   --public-listen 0.0.0.0:19011 \
-  --token-file /etc/relay/reverse.token
+  --token-file /etc/relay/reverse.token \
+  --max-streams 256
 
 relay reverse-mux-client \
   --server PUBLIC:19010 \
@@ -50,5 +51,6 @@ relay reverse-mux-client \
 - 没有单连接 mux、流量计量、ACL、TLS、重放保护或流量填充；控制/公网端口应置于受信网络或外部 TLS 隧道后。
 - 多路复用握手：`REVERSE-MUX <token>`；随后 9 字节帧头（kind、u32 id、u32 长度）+ 负载，kind 为 `OPEN/OK/FAIL/DATA/FIN/RESET`；帧负载上限 64 KiB。
 - 服务端为每个公网连接分配 id 并发 `OPEN`，客户端拨号目标后回 `OK`，再按 id 双向转发；一条控制连接可并发承载多个公网连接。
+- 服务端每条控制连接默认最多 256 个并发公网流，`--max-streams 1..1024` 可调；超过上限的新公网连接立即关闭，不分配 id。
 - 客户端 `reverse-mux-client` 在控制连接断开后 250ms 重连；不提供按连接计量、ACL、TLS、重放保护或流量填充。
-- 测试覆盖错误 token、单控制连接上两个并发公网连接、双目标回显；旧测试覆盖顺序连接和 session pool。未做真实公网、NAT、长时或高并发验收。
+- 测试覆盖错误 token、单控制连接上两个并发公网连接、双目标回显和流上限校验；旧测试覆盖顺序连接和 session pool。未做真实公网、NAT、长时或高并发验收。
