@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.48.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.48.0.txt](verification-0.48.0.txt)，逐项清单见 [validation-evidence-0.48.0.json](validation-evidence-0.48.0.json)。
+0.49.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.49.0.txt](verification-0.49.0.txt)，逐项清单见 [validation-evidence-0.49.0.json](validation-evidence-0.49.0.json)。
 
-## 0.48.0 模板 canary 回滚验证
+## 0.49.0 rollout 重试验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 持久化 | rollout 结果写入 metadata，保留目标/批次/回滚/结果 |
+| 重试 | 只选失败/未尝试节点；按当前修订重新应用；成功节点不重复 |
+| 测试 | 首批 a 成功、b 失败、c 未尝试；重试 b/c 均成功 |
+| 限制 | 不重放旧快照；无变量/百分比健康阈值/依赖图/浏览器点击 |
+
+## 0.48.0 模板 canary 回滚验证（历史）
+
+0.48.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.48.0.txt](verification-0.48.0.txt)，逐项清单见 [validation-evidence-0.48.0.json](validation-evidence-0.48.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

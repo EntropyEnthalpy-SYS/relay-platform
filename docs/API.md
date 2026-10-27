@@ -440,6 +440,7 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen}` 应用为新规则 |
 | POST | `/nodes/{node}/templates/{id}/preview` | `{name,listen}` 只校验并返回拟创建规则 |
 | POST | `/templates/{id}/rollout` | `{batch_size,rollback_on_failure?,targets:[{node_id,expected_revision,name,listen}]}` 分批应用；可选失败回滚 |
+| POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，按当前修订重新应用 |
 
 模板创建/更新校验规则主体；应用生成新 ID、名称、监听和计量周期，走正常配置修订校验。`/templates*` 与节点模板应用仅登录会话。详见 [TEMPLATES.md](TEMPLATES.md)。
 

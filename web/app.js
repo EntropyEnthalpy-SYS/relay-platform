@@ -814,7 +814,13 @@ async function rolloutTemplate(template) {
   submit(form, '开始批量应用', async data => {
     const parsed = JSON.parse(String(data.get('targets')));
     const report = await api(`/templates/${template.id}/rollout`, { method: 'POST', body: { batch_size: Number(data.get('batch_size')), rollback_on_failure: data.get('rollback_on_failure') === 'on', targets: parsed } });
-    $('#dialog').close(); modal(`批量结果 · ${template.name}`, el('pre', JSON.stringify(report, null, 2), 'json-preview'));
+    $('#dialog').close();
+    const content = el('div'); content.append(el('pre', JSON.stringify(report, null, 2), 'json-preview'));
+    if (report.aborted) content.append(button('重试失败节点', async () => {
+      const retry = await api(`/templates/${template.id}/rollouts/${report.id}/retry`, { method: 'POST' });
+      content.replaceChildren(el('pre', JSON.stringify(retry, null, 2), 'json-preview'));
+    }));
+    modal(`批量结果 · ${template.name}`, content);
   });
   modal(`批量应用 · ${template.name}`, form);
 }

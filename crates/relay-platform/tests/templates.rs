@@ -151,6 +151,13 @@ fn rollout_stops_after_a_failed_canary_batch() {
         report.results[2].error.as_deref(),
         Some("not attempted after canary failure")
     );
+    let retry = store
+        .retry_rollout(&admin, &template.id, &report.id)
+        .unwrap();
+    assert!(!retry.aborted);
+    assert_eq!(retry.applied, 2);
+    assert!(store.config(&admin, &b.id, None).unwrap().rules.len() == 1);
+    assert!(store.config(&admin, &c.id, None).unwrap().rules.len() == 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

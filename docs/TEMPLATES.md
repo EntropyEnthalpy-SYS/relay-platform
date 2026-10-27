@@ -54,6 +54,16 @@
 - 返回 `batch/batches/applied/rolled_back/rollback_failed/aborted/results`；每项包含 revision、rule_id、`rolled_back` 或错误。回滚使用应用后的修订作为 expected revision，后续并发配置变更会使该项回滚失败。
 - 面板模板页“批量应用”接受目标 JSON 和批大小，显示逐节点结果。
 
+## 重试失败节点
+
+`POST /templates/{id}/rollouts/{rollout_id}/retry`：
+
+- 每次 rollout 以 UUID 持久化目标、批大小、回滚选项和逐节点结果到 metadata。
+- 重试只选择原报告中 `applied=false` 的节点，按这些节点当前配置修订重新计算 `expected_revision`，再走正常分批应用。
+- 原成功节点不重复应用；回滚失败的节点仍按失败记录参与重试。
+- 新 rollout 生成新 ID；原记录保留。没有失败节点时返回 409。
+- 面板批量结果在 `aborted` 时显示“重试失败节点”。
+
 ## 界面与 API
 
 | 方法 | 路径 | 说明 |
@@ -63,11 +73,12 @@
 | POST | `/nodes/{node}/templates/{id}` | 应用为新规则 |
 | POST | `/nodes/{node}/templates/{id}/preview` | 只校验并返回拟创建规则，不写修订 |
 | POST | `/templates/{id}/rollout` | 有序分批应用到多个节点，失败停止后续批次 |
+| POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |
 
 `/templates*` 和节点模板应用仅接受登录会话，API 令牌访问 403。面板规则表格的“存为模板”和“规则模板”页提供保存、应用、删除。
 
 ## 验证与限制
 
-- Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`，以及 canary 批次失败后停止后续节点。
+- Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`、canary 批次失败后停止后续节点，以及失败后只重试失败节点。
 - HTTP 测试覆盖创建、viewer 403、节点配置修订、应用后规则名称。
 - 自动回滚只覆盖本次 rollout 新建规则的移除，不做旧配置的全量快照恢复；未实现模板版本化、完整差异视图、变量参数化、百分比/健康阈值灰度、依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。

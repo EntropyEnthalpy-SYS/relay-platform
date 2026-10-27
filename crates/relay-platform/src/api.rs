@@ -312,6 +312,10 @@ pub fn router(state: AppState) -> Router {
             post(preview_template),
         )
         .route("/api/v1/templates/{id}/rollout", post(rollout_template))
+        .route(
+            "/api/v1/templates/{id}/rollouts/{rollout_id}/retry",
+            post(retry_rollout),
+        )
         .route("/api/v1/tickets/{id}", get(ticket))
         .route("/api/v1/tickets/{id}/messages", post(reply_ticket))
         .route(
@@ -1462,6 +1466,18 @@ struct RolloutInput {
     #[serde(default)]
     rollback_on_failure: bool,
     targets: Vec<crate::template::RolloutTargetInput>,
+}
+async fn retry_rollout(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((template_id, rollout_id)): Path<(String, String)>,
+) -> ApiResult<crate::template::RolloutReport> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.retry_rollout(&actor, &template_id, &rollout_id)
+        })
+        .await?,
+    ))
 }
 async fn rollout_template(
     State(state): State<AppState>,

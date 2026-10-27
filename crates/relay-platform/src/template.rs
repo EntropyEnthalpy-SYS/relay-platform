@@ -32,14 +32,14 @@ pub struct RolloutTargetInput {
     pub name: String,
     pub listen: String,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutTarget {
     pub node_id: String,
     pub expected_revision: u64,
     pub name: String,
     pub listen: std::net::SocketAddr,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutResult {
     pub node_id: String,
     pub batch: usize,
@@ -52,8 +52,9 @@ pub struct RolloutResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback_error: Option<String>,
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutReport {
+    pub id: String,
     pub template_id: String,
     pub batch_size: usize,
     pub batches: usize,
@@ -62,6 +63,12 @@ pub struct RolloutReport {
     pub rollback_failed: usize,
     pub aborted: bool,
     pub results: Vec<RolloutResult>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RolloutRecord {
+    pub targets: Vec<RolloutTarget>,
+    pub rollback_on_failure: bool,
+    pub report: RolloutReport,
 }
 #[derive(Clone, Debug, Deserialize)]
 pub struct TemplateInput {

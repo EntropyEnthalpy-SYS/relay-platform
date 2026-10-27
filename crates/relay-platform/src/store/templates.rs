@@ -41,6 +41,26 @@ fn write(tx: &Transaction<'_>, value: &RuleTemplate) -> Result<()> {
     )?;
     Ok(())
 }
+fn rollout_key(id: &str) -> String {
+    format!("rollout:{id}")
+}
+fn read_rollout(conn: &Connection, id: &str) -> Result<Option<crate::template::RolloutRecord>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [rollout_key(id)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(raw.map(|value| serde_json::from_str(&value)).transpose()?)
+}
+fn write_rollout(tx: &Transaction<'_>, record: &crate::template::RolloutRecord) -> Result<()> {
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![rollout_key(&record.report.id), serde_json::to_string(record)?],
+    )?;
+    Ok(())
+}
 fn node_tenant(conn: &Connection, node: &str) -> Result<String> {
     conn.query_row("SELECT tenant_id FROM nodes WHERE id=?1", [node], |r| {
         r.get(0)
@@ -321,7 +341,8 @@ impl Store {
                 break;
             }
         }
-        Ok(crate::template::RolloutReport {
+        let report = crate::template::RolloutReport {
+            id: Uuid::new_v4().to_string(),
             template_id: template_id.into(),
             batch_size,
             batches,
@@ -330,7 +351,60 @@ impl Store {
             rollback_failed,
             aborted,
             results,
-        })
+        };
+        let record = crate::template::RolloutRecord {
+            targets: targets.to_vec(),
+            rollback_on_failure,
+            report: report.clone(),
+        };
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        write_rollout(&tx, &record)?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    pub fn retry_rollout(
+        &self,
+        actor: &Actor,
+        template_id: &str,
+        rollout_id: &str,
+    ) -> Result<crate::template::RolloutReport> {
+        require_writer(actor)?;
+        let record = {
+            let conn = self.0.lock().unwrap();
+            read_rollout(&conn, rollout_id)?.context("rollout not found")?
+        };
+        ensure!(
+            record.report.template_id == template_id,
+            "rollout template mismatch"
+        );
+        let mut retry = Vec::new();
+        for result in record
+            .report
+            .results
+            .iter()
+            .filter(|result| !result.applied)
+        {
+            let target = record
+                .targets
+                .iter()
+                .find(|target| target.node_id == result.node_id)
+                .context("rollout target missing")?;
+            let revision = self.config(actor, &target.node_id, None)?.revision;
+            retry.push(crate::template::RolloutTarget {
+                expected_revision: revision,
+                ..target.clone()
+            });
+        }
+        ensure!(!retry.is_empty(), "rollout has no failed targets to retry");
+        self.rollout_template(
+            actor,
+            template_id,
+            &retry,
+            record.report.batch_size,
+            record.rollback_on_failure,
+        )
     }
 
     /// Clone the template into a node revision. The expected revision keeps
