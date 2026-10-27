@@ -1355,6 +1355,56 @@ async fn prometheus_metrics(
             node.stats.active_tcp
         ));
     }
+    body.push_str(
+        "# HELP relay_node_active_udp Active UDP sessions.\n# TYPE relay_node_active_udp gauge\n",
+    );
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_active_udp{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.active_udp
+        ));
+    }
+    body.push_str("# HELP relay_node_accepted_tcp_total Accepted TCP connections.\n# TYPE relay_node_accepted_tcp_total counter\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_accepted_tcp_total{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.accepted_tcp
+        ));
+    }
+    body.push_str("# HELP relay_node_rejected_connections_total Rejected connections.\n# TYPE relay_node_rejected_connections_total counter\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_rejected_connections_total{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.rejected_connections
+        ));
+    }
+    body.push_str("# HELP relay_node_failed_connections_total Failed connections.\n# TYPE relay_node_failed_connections_total counter\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_failed_connections_total{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.failed_connections
+        ));
+    }
+    body.push_str("# HELP relay_node_dropped_datagrams_total Dropped datagrams.\n# TYPE relay_node_dropped_datagrams_total counter\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_dropped_datagrams_total{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.dropped_datagrams
+        ));
+    }
+    body.push_str("# HELP relay_node_prewarmed_connections_total Pre-warmed TCP connections.\n# TYPE relay_node_prewarmed_connections_total counter\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_prewarmed_connections_total{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.prewarmed_connections
+        ));
+    }
     body.push_str("# HELP relay_node_forwarded_bytes Forwarded application bytes.\n# TYPE relay_node_forwarded_bytes counter\n");
     for node in &nodes {
         body.push_str(&format!(

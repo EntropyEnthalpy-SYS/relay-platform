@@ -86,5 +86,9 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     assert!(body.contains("relay_build_info{version=\""));
     assert!(body.contains(&format!("relay_node_up{{node=\"{node_id}\"")));
     assert!(body.contains(&format!("relay_node_active_tcp{{node=\"{node_id}\"}} 0")));
+    assert!(body.contains(&format!("relay_node_active_udp{{node=\"{node_id}\"}} 0")));
+    assert!(body.contains(&format!(
+        "relay_node_accepted_tcp_total{{node=\"{node_id}\"}} 0"
+    )));
     stop.cancel();
 }
