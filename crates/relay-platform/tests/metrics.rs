@@ -186,6 +186,9 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     assert!(body.contains(&format!(
         "relay_node_accepted_tcp_total{{node=\"{node_id}\"}} 0"
     )));
+    assert!(body.contains("relay_reverse_mux_controls 0"));
+    assert!(body.contains("relay_reverse_mux_streams 0"));
+    assert!(body.contains("relay_reverse_mux_bytes{direction=\"public_to_target\"} 0"));
     assert!(body.contains(&format!(
         "relay_rule_usage{{node=\"{node_id}\",rule=\"rule-one\",tenant=\"default\",direction=\"upload_bytes\"}} 123"
     )));

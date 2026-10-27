@@ -12,6 +12,7 @@ use std::{
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
     time::Duration,
 };
@@ -51,6 +52,34 @@ type ControlWrite = Box<dyn AsyncWrite + Send + Unpin>;
 type Writer = Arc<Mutex<ControlWrite>>;
 type Sessions = Arc<Mutex<HashMap<u32, mpsc::Sender<(u8, Vec<u8>)>>>>;
 type Frame = (u8, u32, Vec<u8>);
+
+static ACTIVE_CONTROLS: AtomicU32 = AtomicU32::new(0);
+static TOTAL_CONTROLS: AtomicU64 = AtomicU64::new(0);
+static ACTIVE_STREAMS: AtomicU32 = AtomicU32::new(0);
+static TOTAL_STREAMS: AtomicU64 = AtomicU64::new(0);
+static PUBLIC_TO_TARGET_BYTES: AtomicU64 = AtomicU64::new(0);
+static TARGET_TO_PUBLIC_BYTES: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug)]
+pub struct Stats {
+    pub active_controls: u32,
+    pub total_controls: u64,
+    pub active_streams: u32,
+    pub total_streams: u64,
+    pub public_to_target_bytes: u64,
+    pub target_to_public_bytes: u64,
+}
+
+pub fn stats() -> Stats {
+    Stats {
+        active_controls: ACTIVE_CONTROLS.load(Ordering::Relaxed),
+        total_controls: TOTAL_CONTROLS.load(Ordering::Relaxed),
+        active_streams: ACTIVE_STREAMS.load(Ordering::Relaxed),
+        total_streams: TOTAL_STREAMS.load(Ordering::Relaxed),
+        public_to_target_bytes: PUBLIC_TO_TARGET_BYTES.load(Ordering::Relaxed),
+        target_to_public_bytes: TARGET_TO_PUBLIC_BYTES.load(Ordering::Relaxed),
+    }
+}
 
 pub async fn serve_mux(control: TcpListener, public: TcpListener, token: String) -> Result<()> {
     serve_mux_with_options(control, public, token, 256, 300, Vec::new()).await
@@ -186,7 +215,9 @@ where
 {
     let _ = token;
     let (reader, writer) = tokio::io::split(control);
-    serve_control(
+    ACTIVE_CONTROLS.fetch_add(1, AtomicOrdering::Relaxed);
+    TOTAL_CONTROLS.fetch_add(1, AtomicOrdering::Relaxed);
+    let result = serve_control(
         Box::new(reader),
         Box::new(writer),
         public,
@@ -195,7 +226,9 @@ where
         idle_timeout_secs,
         allow_public,
     )
-    .await
+    .await;
+    ACTIVE_CONTROLS.fetch_sub(1, AtomicOrdering::Relaxed);
+    result
 }
 
 async fn serve_control(
@@ -251,6 +284,8 @@ async fn serve_control(
         };
         let id = next_id.fetch_add(1, Ordering::Relaxed);
         active_streams.fetch_add(1, Ordering::Relaxed);
+        ACTIVE_STREAMS.fetch_add(1, AtomicOrdering::Relaxed);
+        TOTAL_STREAMS.fetch_add(1, AtomicOrdering::Relaxed);
         let (data_tx, data_rx) = mpsc::channel(32);
         let (response_tx, response_rx) = oneshot::channel();
         sessions.lock().await.insert(id, data_tx);
@@ -259,6 +294,7 @@ async fn serve_control(
             sessions.lock().await.remove(&id);
             responses.lock().await.remove(&id);
             active_streams.fetch_sub(1, Ordering::Relaxed);
+            ACTIVE_STREAMS.fetch_sub(1, AtomicOrdering::Relaxed);
             let _ = exposed.shutdown().await;
             break Err(error.into());
         }
@@ -271,6 +307,7 @@ async fn serve_control(
             sessions.lock().await.remove(&id);
             responses.lock().await.remove(&id);
             active_streams.fetch_sub(1, Ordering::Relaxed);
+            ACTIVE_STREAMS.fetch_sub(1, AtomicOrdering::Relaxed);
             let _ = exposed.shutdown().await;
             tracing::warn!(%peer, "reverse mux client did not open the target");
             continue;
@@ -324,11 +361,17 @@ async fn bridge_public(
             }
             read = reader.read(&mut buffer) => match read {
                 Ok(0) => { let _ = write_frame(&writer, FIN, id, &[]).await; break; }
-                Ok(size) => if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
+                Ok(size) => {
+                    PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, AtomicOrdering::Relaxed);
+                    if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
+                }
                 Err(_) => { let _ = write_frame(&writer, RESET, id, &[]).await; break; }
             },
             frame = frames.recv() => match frame {
-                Some((DATA, payload)) => if writer_stream.write_all(&payload).await.is_err() { break; },
+                Some((DATA, payload)) => {
+                    TARGET_TO_PUBLIC_BYTES.fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
+                    if writer_stream.write_all(&payload).await.is_err() { break; }
+                },
                 Some((FIN, _)) => { let _ = writer_stream.shutdown().await; break; }
                 Some((RESET, _)) | None => break,
                 _ => {}
@@ -338,6 +381,7 @@ async fn bridge_public(
     }
     sessions.lock().await.remove(&id);
     active_streams.fetch_sub(1, Ordering::Relaxed);
+    ACTIVE_STREAMS.fetch_sub(1, AtomicOrdering::Relaxed);
     Ok(())
 }
 
@@ -718,11 +762,17 @@ async fn bridge_local(
         tokio::select! {
             read = reader.read(&mut buffer) => match read {
                 Ok(0) => { let _ = write_frame(&writer, FIN, id, &[]).await; break; }
-                Ok(size) => if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
+                Ok(size) => {
+                    PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, AtomicOrdering::Relaxed);
+                    if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
+                }
                 Err(_) => { let _ = write_frame(&writer, RESET, id, &[]).await; break; }
             },
             frame = frames.recv() => match frame {
-                Some((DATA, payload)) => if writer_stream.write_all(&payload).await.is_err() { break; },
+                Some((DATA, payload)) => {
+                    TARGET_TO_PUBLIC_BYTES.fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
+                    if writer_stream.write_all(&payload).await.is_err() { break; }
+                },
                 Some((FIN, _)) => { let _ = writer_stream.shutdown().await; break; }
                 Some((RESET, _)) | None => break,
                 _ => {}

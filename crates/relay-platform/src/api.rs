@@ -1345,6 +1345,34 @@ async fn prometheus_metrics(
         "# HELP relay_build_info Build identity.\n# TYPE relay_build_info gauge\nrelay_build_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     );
+    let mux = crate::reverse_mux::stats();
+    body.push_str("# HELP relay_reverse_mux_controls Authorized reverse mux control connections.\n# TYPE relay_reverse_mux_controls gauge\n");
+    body.push_str(&format!(
+        "relay_reverse_mux_controls {}\n",
+        mux.active_controls
+    ));
+    body.push_str(&format!(
+        "relay_reverse_mux_controls_total {}\n",
+        mux.total_controls
+    ));
+    body.push_str("# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\n");
+    body.push_str(&format!(
+        "relay_reverse_mux_streams {}\n",
+        mux.active_streams
+    ));
+    body.push_str(&format!(
+        "relay_reverse_mux_streams_total {}\n",
+        mux.total_streams
+    ));
+    body.push_str("# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\n");
+    body.push_str(&format!(
+        "relay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\n",
+        mux.public_to_target_bytes
+    ));
+    body.push_str(&format!(
+        "relay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n",
+        mux.target_to_public_bytes
+    ));
     body.push_str("# HELP relay_rule_usage Cumulative rule usage from the ledger.\n# TYPE relay_rule_usage counter\n");
     for item in &usage {
         for (kind, value) in [
