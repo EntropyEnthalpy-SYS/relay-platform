@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.30.0 开发版在 macOS 27.0.1 arm64 通过 **353 项自动化测试（324 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 354 项。日志见 [verification-0.30.0.txt](verification-0.30.0.txt)，逐项清单见 [validation-evidence-0.30.0.json](validation-evidence-0.30.0.json)。
+0.31.0 开发版在 macOS 27.0.1 arm64 通过 **355 项自动化测试（326 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 356 项。日志见 [verification-0.31.0.txt](verification-0.31.0.txt)，逐项清单见 [validation-evidence-0.31.0.json](validation-evidence-0.31.0.json)。
 
-## 0.30.0 优惠码验证
+## 0.31.0 礼品码验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 管理员创建、非管理员 403、兑换入账、每用户一次、次数上限、停用/过期、删除已兑换 409 |
+| HTTP | 管理员创建、买家 403、兑换入钱包、重复兑换 409、删除已兑换 409 |
+| 面板 | `node --check web/app.js` 与视图结构检查；礼品码/兑换源码，未做浏览器点击验收 |
+
+## 0.30.0 优惠码验证（历史）
+
+0.30.0 开发版在 macOS 27.0.1 arm64 通过 **353 项自动化测试（324 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 354 项。日志见 [verification-0.30.0.txt](verification-0.30.0.txt)，逐项清单见 [validation-evidence-0.30.0.json](validation-evidence-0.30.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

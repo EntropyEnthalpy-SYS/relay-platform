@@ -375,6 +375,9 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| GET/POST | `/commerce/gift-codes` | 管理员礼品码列表/创建；普通用户 403 |
+| PUT/DELETE | `/commerce/gift-codes/{id}` | 管理员编辑/删除；已兑换删除 409 |
+| POST | `/commerce/gift-codes/redeem` | 用户兑换 `{code}`，直接入钱包；每用户每码一次 |
 | GET/POST | `/commerce/coupons` | 管理员优惠码列表/创建；普通用户 403 |
 | PUT/DELETE | `/commerce/coupons/{id}` | 管理员编辑/删除；已有使用 409 |
 | GET/POST | `/commerce/plans` | 启用套餐列表（管理员含停用）/创建；写仅系统管理员 |

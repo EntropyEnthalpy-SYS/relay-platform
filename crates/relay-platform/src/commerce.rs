@@ -56,6 +56,29 @@ pub struct CouponInput {
     pub enabled: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GiftCode {
+    pub id: String,
+    pub code: String,
+    pub amount_cents: i64,
+    pub starts_at_ms: i64,
+    pub ends_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_redemptions: Option<u32>,
+    #[serde(default)]
+    pub redeemed: u32,
+    pub enabled: bool,
+    pub created_at_ms: i64,
+}
+#[derive(Clone, Debug)]
+pub struct GiftCodeInput {
+    pub code: String,
+    pub amount_cents: i64,
+    pub starts_at_ms: i64,
+    pub ends_at_ms: Option<i64>,
+    pub max_redemptions: Option<u32>,
+    pub enabled: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Wallet {
     pub user_id: String,
     pub balance_cents: i64,
@@ -195,6 +218,31 @@ pub fn validate_coupon(input: &CouponInput) -> Result<()> {
     ensure!(
         input.max_redemptions.is_none_or(|max| max > 0),
         "coupon max redemptions must be positive when set"
+    );
+    Ok(())
+}
+pub fn validate_gift_code(input: &GiftCodeInput) -> Result<()> {
+    let code = input.code.trim().to_ascii_uppercase();
+    ensure!(
+        code.len() >= 6
+            && code.len() <= 32
+            && code
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "gift code must contain 6..32 ASCII letters, digits, '-' or '_'"
+    );
+    ensure!(
+        input.amount_cents > 0 && input.amount_cents <= MAX_AMOUNT_CENTS,
+        "gift amount must be positive and within range"
+    );
+    ensure!(input.starts_at_ms >= 0, "gift start must be nonnegative");
+    ensure!(
+        input.ends_at_ms.is_none_or(|end| end > input.starts_at_ms),
+        "gift end must be after its start"
+    );
+    ensure!(
+        input.max_redemptions.is_none_or(|max| max > 0),
+        "gift max redemptions must be positive when set"
     );
     Ok(())
 }

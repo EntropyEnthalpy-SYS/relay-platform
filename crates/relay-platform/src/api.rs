@@ -303,6 +303,15 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(set_ticket_status),
         )
         .route(
+            "/api/v1/commerce/gift-codes",
+            get(commerce_gift_codes).post(create_gift_code),
+        )
+        .route(
+            "/api/v1/commerce/gift-codes/{id}",
+            axum::routing::put(update_gift_code).delete(delete_gift_code),
+        )
+        .route("/api/v1/commerce/gift-codes/redeem", post(redeem_gift_code))
+        .route(
             "/api/v1/commerce/coupons",
             get(commerce_coupons).post(create_coupon),
         )
@@ -1503,6 +1512,90 @@ async fn set_ticket_status(
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CommerceGiftCodeInput {
+    code: String,
+    amount_cents: i64,
+    #[serde(default = "announcement_start")]
+    starts_at_ms: i64,
+    #[serde(default)]
+    ends_at_ms: Option<i64>,
+    #[serde(default)]
+    max_redemptions: Option<u32>,
+    #[serde(default = "commerce_enabled")]
+    enabled: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RedeemGiftCode {
+    code: String,
+}
+impl From<CommerceGiftCodeInput> for crate::commerce::GiftCodeInput {
+    fn from(value: CommerceGiftCodeInput) -> Self {
+        Self {
+            code: value.code,
+            amount_cents: value.amount_cents,
+            starts_at_ms: value.starts_at_ms,
+            ends_at_ms: value.ends_at_ms,
+            max_redemptions: value.max_redemptions,
+            enabled: value.enabled,
+        }
+    }
+}
+async fn commerce_gift_codes(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::commerce::GiftCode>> {
+    Ok(Json(
+        database(state.store, move |db| db.commerce_gift_codes(&actor)).await?,
+    ))
+}
+async fn create_gift_code(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<CommerceGiftCodeInput>,
+) -> ApiResult<crate::commerce::GiftCode> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_gift_code(&actor, input.into())
+        })
+        .await?,
+    ))
+}
+async fn update_gift_code(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<CommerceGiftCodeInput>,
+) -> ApiResult<crate::commerce::GiftCode> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_gift_code(&actor, &id, input.into())
+        })
+        .await?,
+    ))
+}
+async fn delete_gift_code(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_gift_code(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn redeem_gift_code(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<RedeemGiftCode>,
+) -> ApiResult<crate::commerce::Wallet> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.redeem_gift_code(&actor, &input.code)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommerceCouponInput {
     code: String,
     kind: crate::commerce::CouponKind,
@@ -2304,7 +2397,7 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }

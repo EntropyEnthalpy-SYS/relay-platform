@@ -2,7 +2,9 @@ mod common;
 use common::*;
 use relay_platform::{
     api::{self, AppState},
-    commerce::{CouponInput, CouponKind, LedgerKind, OrderStatus, PaymentStatus, PlanInput},
+    commerce::{
+        CouponInput, CouponKind, GiftCodeInput, LedgerKind, OrderStatus, PaymentStatus, PlanInput,
+    },
     model::now_ms,
     store::{Rejection, Store},
 };
@@ -332,6 +334,198 @@ fn coupons_discount_orders_and_enforce_limits() {
         store.wallet(&buyer, &user.id).unwrap().wallet.balance_cents,
         4_500
     );
+}
+
+#[test]
+fn gift_codes_credit_once_per_user_and_honor_limits() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let a = store
+        .create_user(
+            &admin,
+            "default",
+            "gift-a",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let b = store
+        .create_user(
+            &admin,
+            "default",
+            "gift-b",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (_, actor_a) = store.login("gift-a", PASSWORD).unwrap();
+    let (_, actor_b) = store.login("gift-b", PASSWORD).unwrap();
+    let gift = store
+        .create_gift_code(
+            &admin,
+            GiftCodeInput {
+                code: "WELCOME50".into(),
+                amount_cents: 5_000,
+                starts_at_ms: now_ms() - 1_000,
+                ends_at_ms: None,
+                max_redemptions: Some(2),
+                enabled: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(gift.code, "WELCOME50");
+    assert_eq!(
+        rejection(
+            store
+                .create_gift_code(
+                    &actor_a,
+                    GiftCodeInput {
+                        code: "NOPE00".into(),
+                        amount_cents: 1,
+                        starts_at_ms: now_ms(),
+                        ends_at_ms: None,
+                        max_redemptions: None,
+                        enabled: true,
+                    }
+                )
+                .unwrap_err()
+        ),
+        403
+    );
+    let wallet = store.redeem_gift_code(&actor_a, "welcome50").unwrap();
+    assert_eq!(wallet.balance_cents, 5_000);
+    let view = store.wallet(&actor_a, &a.id).unwrap();
+    assert!(
+        view.entries
+            .iter()
+            .any(|entry| entry.kind == LedgerKind::Credit && entry.delta_cents == 5_000)
+    );
+    assert_eq!(
+        rejection(store.redeem_gift_code(&actor_a, "WELCOME50").unwrap_err()),
+        409
+    );
+    let wallet = store.redeem_gift_code(&actor_b, "WELCOME50").unwrap();
+    assert_eq!(wallet.balance_cents, 5_000);
+    assert_eq!(
+        rejection(
+            store
+                .redeem_gift_code(&store.login("admin", PASSWORD).unwrap().1, "WELCOME50")
+                .unwrap_err()
+        ),
+        409
+    );
+    store
+        .update_gift_code(
+            &admin,
+            &gift.id,
+            GiftCodeInput {
+                code: "WELCOME50".into(),
+                amount_cents: 5_000,
+                starts_at_ms: now_ms() - 1_000,
+                ends_at_ms: Some(now_ms() - 1),
+                max_redemptions: Some(10),
+                enabled: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        rejection(store.redeem_gift_code(&actor_b, "WELCOME50").unwrap_err()),
+        409
+    );
+    assert_eq!(
+        rejection(store.delete_gift_code(&admin, &gift.id).unwrap_err()),
+        409
+    );
+    let _ = b;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn gift_code_http_redeems_once_and_blocks_non_admins() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    store
+        .create_user(
+            &admin,
+            "default",
+            "buyer",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (address, stop) = serve(store).await;
+    let origin = format!("http://{address}");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let admin_session = login(&client, &origin, "admin").await;
+    let buyer_session = login(&client, &origin, "buyer").await;
+    let gift: Value = client
+        .post(format!("{origin}/api/v1/commerce/gift-codes"))
+        .bearer_auth(&admin_session)
+        .json(&json!({"code":"HTTP50","amount_cents":3000,"max_redemptions":1}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/v1/commerce/gift-codes"))
+            .bearer_auth(&buyer_session)
+            .json(&json!({"code":"NOPE00","amount_cents":1}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/v1/commerce/gift-codes/redeem"))
+            .bearer_auth(&buyer_session)
+            .json(&json!({"code":"http50"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    let wallet: Value = client
+        .get(format!("{origin}/api/v1/commerce/wallet"))
+        .bearer_auth(&buyer_session)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(wallet["wallet"]["balance_cents"], 3000);
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/v1/commerce/gift-codes/redeem"))
+            .bearer_auth(&buyer_session)
+            .json(&json!({"code":"HTTP50"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let id = gift["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .delete(format!("{origin}/api/v1/commerce/gift-codes/{id}"))
+            .bearer_auth(&admin_session)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    stop.cancel();
 }
 
 async fn serve(store: Store) -> (SocketAddr, CancellationToken) {

@@ -2,9 +2,10 @@
 //! transaction together with its ledger entry and order/wallet state.
 use super::*;
 use crate::commerce::{
-    CURRENCY, Coupon, CouponInput, LedgerEntry, LedgerKind, Order, OrderStatus, Payment,
-    PaymentChannel, PaymentStatus, Plan, PlanInput, Wallet, WalletView, WebhookView, discount_for,
-    validate_adjustment, validate_coupon, validate_plan,
+    CURRENCY, Coupon, CouponInput, GiftCode, GiftCodeInput, LedgerEntry, LedgerKind, Order,
+    OrderStatus, Payment, PaymentChannel, PaymentStatus, Plan, PlanInput, Wallet, WalletView,
+    WebhookView, discount_for, validate_adjustment, validate_coupon, validate_gift_code,
+    validate_plan,
 };
 
 fn plan_key(id: &str) -> String {
@@ -27,6 +28,12 @@ fn coupon_key(id: &str) -> String {
 }
 fn coupon_code_key(code: &str) -> String {
     format!("commerce_coupon_code:{code}")
+}
+fn gift_key(id: &str) -> String {
+    format!("commerce_gift:{id}")
+}
+fn gift_code_key(code: &str) -> String {
+    format!("commerce_gift_code:{code}")
 }
 fn payment_key(id: &str) -> String {
     format!("commerce_payment:{id}")
@@ -77,6 +84,29 @@ fn read_coupon_code(conn: &Connection, code: &str) -> Result<Option<Coupon>> {
     id.map(|id| read_coupon(conn, &id))
         .transpose()
         .map(Option::flatten)
+}
+fn read_gift(conn: &Connection, id: &str) -> Result<Option<GiftCode>> {
+    read_json(conn, &gift_key(id))
+}
+fn read_gift_code(conn: &Connection, code: &str) -> Result<Option<GiftCode>> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [gift_code_key(code)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|id| read_gift(conn, &id))
+        .transpose()
+        .map(Option::flatten)
+}
+fn write_gift(tx: &Transaction<'_>, gift: &GiftCode) -> Result<()> {
+    write_json(tx, &gift_key(&gift.id), gift)?;
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![gift_code_key(&gift.code), gift.id],
+    )?;
+    Ok(())
 }
 fn write_coupon(tx: &Transaction<'_>, coupon: &Coupon) -> Result<()> {
     write_json(tx, &coupon_key(&coupon.id), coupon)?;
@@ -518,6 +548,131 @@ impl Store {
         audit(&tx, &actor.id, "commerce.coupon.delete", id, "{}")?;
         tx.commit()?;
         Ok(())
+    }
+    pub fn commerce_gift_codes(&self, actor: &Actor) -> Result<Vec<GiftCode>> {
+        require_admin(actor)?;
+        let conn = self.0.lock().unwrap();
+        let mut gifts = all::<GiftCode>(&conn, "commerce_gift:")?;
+        gifts.sort_by_key(|gift| std::cmp::Reverse(gift.created_at_ms));
+        Ok(gifts)
+    }
+    pub fn create_gift_code(&self, actor: &Actor, input: GiftCodeInput) -> Result<GiftCode> {
+        require_admin(actor)?;
+        validate_gift_code(&input)?;
+        let code = input.code.trim().to_ascii_uppercase();
+        let gift = GiftCode {
+            id: Uuid::new_v4().to_string(),
+            code,
+            amount_cents: input.amount_cents,
+            starts_at_ms: input.starts_at_ms,
+            ends_at_ms: input.ends_at_ms,
+            max_redemptions: input.max_redemptions,
+            redeemed: 0,
+            enabled: input.enabled,
+            created_at_ms: now_ms(),
+        };
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        if read_gift_code(&tx, &gift.code)?.is_some() {
+            return reject(409, "gift code already exists");
+        }
+        write_gift(&tx, &gift)?;
+        audit(&tx, &actor.id, "commerce.gift.create", &gift.id, "{}")?;
+        tx.commit()?;
+        Ok(gift)
+    }
+    pub fn update_gift_code(
+        &self,
+        actor: &Actor,
+        id: &str,
+        input: GiftCodeInput,
+    ) -> Result<GiftCode> {
+        require_admin(actor)?;
+        validate_gift_code(&input)?;
+        let code = input.code.trim().to_ascii_uppercase();
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut gift = read_gift(&tx, id)?.context("gift code not found")?;
+        if let Some(existing) = read_gift_code(&tx, &code)?
+            && existing.id != gift.id
+        {
+            return reject(409, "gift code already exists");
+        }
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [gift_code_key(&gift.code)],
+        )?;
+        gift.code = code;
+        gift.amount_cents = input.amount_cents;
+        gift.starts_at_ms = input.starts_at_ms;
+        gift.ends_at_ms = input.ends_at_ms;
+        gift.max_redemptions = input.max_redemptions;
+        gift.enabled = input.enabled;
+        write_gift(&tx, &gift)?;
+        audit(&tx, &actor.id, "commerce.gift.update", &gift.id, "{}")?;
+        tx.commit()?;
+        Ok(gift)
+    }
+    pub fn delete_gift_code(&self, actor: &Actor, id: &str) -> Result<()> {
+        require_admin(actor)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let gift = read_gift(&tx, id)?.context("gift code not found")?;
+        if gift.redeemed > 0 {
+            return reject(409, "disable the gift code; it already has redemptions");
+        }
+        tx.execute("DELETE FROM metadata WHERE key=?1", [gift_key(id)])?;
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [gift_code_key(&gift.code)],
+        )?;
+        audit(&tx, &actor.id, "commerce.gift.delete", id, "{}")?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn redeem_gift_code(&self, actor: &Actor, code: &str) -> Result<Wallet> {
+        let code = code.trim().to_ascii_uppercase();
+        let now = now_ms();
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut gift = match read_gift_code(&tx, &code)? {
+            Some(gift) => gift,
+            None => return reject(404, "gift code not found"),
+        };
+        if !gift.enabled || gift.starts_at_ms > now || gift.ends_at_ms.is_some_and(|end| end <= now)
+        {
+            return reject(409, "gift code is not active");
+        }
+        if gift.max_redemptions.is_some_and(|max| gift.redeemed >= max) {
+            return reject(409, "gift code redemption limit reached");
+        }
+        let reference = format!("gift:{}:{}", gift.code, actor.id);
+        if read_ledger_ref(&tx, &reference)?.is_some() {
+            return reject(409, "gift code already redeemed by this user");
+        }
+        let mut wallet = read_wallet(&tx, &actor.id)?;
+        wallet.balance_cents = wallet
+            .balance_cents
+            .checked_add(gift.amount_cents)
+            .context("wallet balance overflow")?;
+        wallet.updated_at_ms = now;
+        write_wallet(&tx, &wallet)?;
+        gift.redeemed = gift
+            .redeemed
+            .checked_add(1)
+            .context("gift redemption overflow")?;
+        write_gift(&tx, &gift)?;
+        post_ledger(
+            &tx,
+            &actor.id,
+            gift.amount_cents,
+            LedgerKind::Credit,
+            &reference,
+            &format!("gift {}", gift.code),
+        )?;
+        audit(&tx, &actor.id, "commerce.gift.redeem", &gift.id, "{}")?;
+        tx.commit()?;
+        Ok(wallet)
     }
     pub fn commerce_webhook(&self, actor: &Actor) -> Result<WebhookView> {
         require_admin(actor)?;
