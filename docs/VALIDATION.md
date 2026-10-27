@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.84.0 开发版在 macOS 27.0.1 arm64 通过 **408 项自动化测试（379 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 409 项。日志见 [verification-0.84.0.txt](verification-0.84.0.txt)，逐项清单见 [validation-evidence-0.84.0.json](validation-evidence-0.84.0.json)。
+0.85.0 开发版在 macOS 27.0.1 arm64 通过 **409 项自动化测试（380 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 410 项。日志见 [verification-0.85.0.txt](verification-0.85.0.txt)，逐项清单见 [validation-evidence-0.85.0.json](validation-evidence-0.85.0.json)。
 
-## 0.84.0 测试稳定性
+## 0.85.0 反向 mux 空闲超时
+
+| 检查 | 结果 |
+| --- | --- |
+| 默认 | 300 秒无数据关闭 |
+| 范围 | 1..=86400；0 拒绝 |
+| 行为 | 发送 `RESET` 并释放流 |
+| 限制 | 仅空闲回收，不改变数据路径 |
+
+## 0.84.0 测试稳定性（历史）
+
+0.84.0 开发版在 macOS 27.0.1 arm64 通过 **408 项自动化测试（379 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 409 项。日志见 [verification-0.84.0.txt](verification-0.84.0.txt)，逐项清单见 [validation-evidence-0.84.0.json](validation-evidence-0.84.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

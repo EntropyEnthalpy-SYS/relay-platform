@@ -75,6 +75,16 @@ async fn mux_stream_limit_is_validated() {
 }
 
 #[tokio::test]
+async fn mux_idle_timeout_is_validated() {
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let error = reverse_mux::serve_mux_with_options(control, public, "mux-token".into(), 1, 0)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("idle timeout"));
+}
+
+#[tokio::test]
 async fn mux_server_rejects_a_bad_token() {
     let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let control_addr = control.local_addr().unwrap();

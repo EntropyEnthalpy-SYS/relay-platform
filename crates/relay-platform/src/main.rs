@@ -91,6 +91,9 @@ enum Command {
         /// Concurrent public streams per control connection (1-1024).
         #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u16).range(1..=1024))]
         max_streams: u16,
+        /// Close an idle public stream after this many seconds (1-86400).
+        #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(1..=86400))]
+        idle_timeout_secs: u32,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -421,17 +424,19 @@ async fn main() -> Result<()> {
             public_listen,
             token_file,
             max_streams,
+            idle_timeout_secs,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
-            relay_platform::reverse_mux::serve_mux_with_limit(
+            relay_platform::reverse_mux::serve_mux_with_options(
                 control,
                 public,
                 token,
                 usize::from(max_streams),
+                u64::from(idle_timeout_secs),
             )
             .await?;
         }

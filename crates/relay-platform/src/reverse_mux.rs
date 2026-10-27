@@ -40,7 +40,7 @@ type Sessions = Arc<Mutex<HashMap<u32, mpsc::Sender<(u8, Vec<u8>)>>>>;
 type Frame = (u8, u32, Vec<u8>);
 
 pub async fn serve_mux(control: TcpListener, public: TcpListener, token: String) -> Result<()> {
-    serve_mux_with_limit(control, public, token, 256).await
+    serve_mux_with_options(control, public, token, 256, 300).await
 }
 
 pub async fn serve_mux_with_limit(
@@ -49,6 +49,16 @@ pub async fn serve_mux_with_limit(
     token: String,
     max_streams: usize,
 ) -> Result<()> {
+    serve_mux_with_options(control, public, token, max_streams, 300).await
+}
+
+pub async fn serve_mux_with_options(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
@@ -56,6 +66,10 @@ pub async fn serve_mux_with_limit(
     ensure!(
         (1..=1024).contains(&max_streams),
         "reverse mux max streams must be 1..=1024"
+    );
+    ensure!(
+        (1..=86_400).contains(&idle_timeout_secs),
+        "reverse mux idle timeout must be 1..=86400 seconds"
     );
     let public = Arc::new(public);
     loop {
@@ -75,7 +89,9 @@ pub async fn serve_mux_with_limit(
         tracing::info!(%peer, "reverse mux client connected");
         let public = public.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_control(control_stream, public, max_streams).await {
+            if let Err(error) =
+                serve_control(control_stream, public, max_streams, idle_timeout_secs).await
+            {
                 tracing::warn!(%error, "reverse mux control ended");
             }
         });
@@ -86,6 +102,7 @@ async fn serve_control(
     control: TcpStream,
     public: Arc<TcpListener>,
     max_streams: usize,
+    idle_timeout_secs: u64,
 ) -> Result<()> {
     control.set_nodelay(true).ok();
     let (reader, writer) = control.into_split();
@@ -150,6 +167,7 @@ async fn serve_control(
                 sessions,
                 active_streams,
                 cancel,
+                Duration::from_secs(idle_timeout_secs),
             )
             .await
             {
@@ -162,6 +180,7 @@ async fn serve_control(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_public(
     id: u32,
     exposed: TcpStream,
@@ -170,12 +189,19 @@ async fn bridge_public(
     sessions: Sessions,
     active_streams: Arc<AtomicU32>,
     cancel: CancellationToken,
+    idle_timeout: Duration,
 ) -> Result<()> {
     exposed.set_nodelay(true).ok();
     let (mut reader, mut writer_stream) = exposed.into_split();
     let mut buffer = vec![0u8; 16 * 1024];
     loop {
+        let idle = tokio::time::sleep(idle_timeout);
+        tokio::pin!(idle);
         tokio::select! {
+            _ = &mut idle => {
+                let _ = write_frame(&writer, RESET, id, &[]).await;
+                break;
+            }
             read = reader.read(&mut buffer) => match read {
                 Ok(0) => { let _ = write_frame(&writer, FIN, id, &[]).await; break; }
                 Ok(size) => if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
