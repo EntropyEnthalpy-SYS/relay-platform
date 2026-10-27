@@ -80,12 +80,26 @@ async def transfer(port, amount):
         await writer.wait_closed()
 
 
+async def timed_transfer(port, amount):
+    start = time.perf_counter()
+    await transfer(port, amount)
+    return time.perf_counter() - start
+
+
 async def tcp_measure(port, connections, amount):
     start = time.perf_counter()
-    await asyncio.gather(*(transfer(port, amount) for _ in range(connections)))
+    durations = await asyncio.gather(
+        *(timed_transfer(port, amount) for _ in range(connections)))
     elapsed = time.perf_counter() - start
-    return {'seconds': elapsed, 'one_way_payload_bytes': amount * connections,
-            'goodput_mbps': amount * connections * 8 / elapsed / 1_000_000}
+    ordered = sorted(durations)
+    return {
+        'seconds': elapsed,
+        'one_way_payload_bytes': amount * connections,
+        'goodput_mbps': amount * connections * 8 / elapsed / 1_000_000,
+        'connection_seconds': durations,
+        'latency_p50_ms': statistics.median(durations) * 1000,
+        'latency_p95_ms': ordered[max(0, int(connections * .95) - 1)] * 1000,
+    }
 
 
 async def udp_measure(port, samples):
@@ -208,7 +222,7 @@ def main():
     parser.add_argument('--binary', type=Path, default=Path('target/release/relay'))
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--mib', type=int, default=8)
-    parser.add_argument('--connections', type=int, nargs='+', default=[1, 4])
+    parser.add_argument('--connections', type=int, nargs='+', default=[1, 8, 32])
     parser.add_argument('--rounds', type=int, default=3)
     parser.add_argument('--udp-samples', type=int, default=100)
     args = parser.parse_args()

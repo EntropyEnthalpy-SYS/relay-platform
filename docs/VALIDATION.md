@@ -1,8 +1,20 @@
 # 本地验证记录
 
-0.32.0 开发版在 macOS 27.0.1 arm64 通过 **360 项自动化测试（331 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 361 项。日志见 [verification-0.32.0.txt](verification-0.32.0.txt)，逐项清单见 [validation-evidence-0.32.0.json](validation-evidence-0.32.0.json)。
+0.33.0 开发版在 macOS 27.0.1 arm64 通过 **360 项自动化测试（331 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 361 项。日志见 [verification-0.33.0.txt](verification-0.33.0.txt)，逐项清单见 [validation-evidence-0.33.0.json](validation-evidence-0.33.0.json)。
 
-## 0.32.0 HTTP CONNECT 验证
+## 0.33.0 性能验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 并发矩阵 | 1/8/32 连接、每连接 8 MiB、3 轮；直连与 Relay 交替 |
+| 吞吐 | Relay/直连约 0.504（1）、0.909（8）、0.945（32） |
+| 延迟 | Relay p95 连接耗时 12.9/52.1/235.0 ms；UDP p95 RTT 165.4 µs |
+| 正确性 | 双向逐字节校验通过；账本 2,066,174,720 字节精确匹配 |
+| 限制 | 本机 loopback、无 TLS/WAN/真实客户端、无 CPU/RSS/72 小时/竞品对照 |
+
+## 0.32.0 HTTP CONNECT 验证（历史）
+
+0.32.0 开发版在 macOS 27.0.1 arm64 通过 **360 项自动化测试（331 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 361 项。日志见 [verification-0.32.0.txt](verification-0.32.0.txt)，逐项清单见 [validation-evidence-0.32.0.json](validation-evidence-0.32.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

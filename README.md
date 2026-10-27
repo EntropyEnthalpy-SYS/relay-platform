@@ -2,7 +2,9 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.32.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.33.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+
+0.33.0 增加并发吞吐/延迟性能报告：1/8/32 连接、UDP RTT、双向逐字节校验与账本精确对账；单连接 Relay/直连约 0.50，8/32 连接约 0.91/0.95，结果仅限本机 loopback。见 [PERFORMANCE.md](docs/PERFORMANCE.md)。
 
 0.32.0 增加 HTTP/1.x CONNECT 入口：可选 Basic 认证、IPv4/IPv6/域名权威、默认拒绝内网、与 TLS/WS/PROXY 组合，真实 Engine 字节转发已验证；HTTP/2 CONNECT、Digest/NTLM 和真实客户端矩阵未完成。见 [HTTP_CONNECT.md](docs/HTTP_CONNECT.md)。
 
