@@ -51,7 +51,7 @@
 
 - 创建为 v1；每次更新把当前模板快照写入 `template-version:{id}:{version}`，新内容版本号 +1。
 - `GET /templates/{id}/versions` 返回当前及历史版本（新到旧）；历史快照不可变。
-- `POST /templates/{id}/versions/{version}/rollback` 把旧内容作为**新版本**写回（版本号继续增加），不是删除历史或降级版本号。
+- `POST /templates/{id}/versions/{version}/rollback` 把旧内容作为**新版本**写回（版本号继续增加），不是删除历史或降级版本号。全局模板只能由系统管理员回滚；租户管理员回滚自己的模板时，当前对象和恢复快照都必须属于该租户。
 - 只能回滚到严格更旧的版本；回滚需要管理员权限并写审计。
 - 应用/批量可传 `template_version` 固定使用某个历史版本；省略时使用最新版本。固定版本按快照渲染，版本不存在或未来版本会拒绝。
 - 模板版本与节点配置修订是两套独立计数。
@@ -61,7 +61,7 @@
 
 `wait_for_apply_ms` 可选：每批配置写入后等待目标节点回报 `applied_revision` 达到该批修订，且无 `apply_error`，超过时限则 `aborted` 并记录 `gate_error`。它只验证**配置应用回执**，不检查流量、错误率或延迟。
 
-`require_target_health: true` 可选：每批应用后，轮询该批节点的 `target_health`，直到每个节点至少有一个报告且所有报告 `eligible=true`；超时（默认 5 秒，或 `wait_for_apply_ms`）则 `aborted` 并记录 `gate_error`。它复用 Agent 的探测结果，不等同于完整流量健康或自动放量。
+`require_target_health: true` 可选：每批应用后，轮询该批节点的 `target_health`，要求节点已应用本次修订、存在**本次新规则 ID** 的报告、报告时间在 `max_age_ms` 内且所有该规则报告 `eligible=true`；超时（默认 5 秒，或 `wait_for_apply_ms`）则 `aborted` 并记录 `gate_error`。旧规则或过期遥测不能通过门控。它复用 Agent 的探测结果，不等同于完整流量健康或自动放量。
 
 ## 健康预检
 
@@ -118,7 +118,7 @@
 `POST /templates/{id}/rollouts/{rollout_id}/retry`：
 
 - 每次 rollout 以 UUID 持久化目标、批大小、回滚选项和逐节点结果到 metadata。
-- 重试只选择原报告中 `applied=false` 的节点，按这些节点当前配置修订重新计算 `expected_revision`，再走正常分批应用。
+- 重试选择原报告中 `applied=false` **或 `rolled_back=true`** 的节点，按这些节点当前配置修订重新计算 `expected_revision`，再走正常分批应用；被自动回滚移除规则的节点会重新纳入。
 - 原成功节点不重复应用；回滚失败的节点仍按失败记录参与重试。
 - 新 rollout 生成新 ID；原记录保留。没有失败节点时返回 409。
 - 面板批量结果在 `aborted` 时显示“重试失败节点”。
@@ -144,4 +144,4 @@
 
 - Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`、canary 批次失败后停止后续节点，以及失败后只重试失败节点。
 - HTTP 测试覆盖创建、viewer 403、节点配置修订、应用后规则名称。
-- 自动回滚只覆盖本次 rollout 新建规则的移除，不做旧配置的全量快照恢复；未实现依赖图、批量撤销和浏览器点击验收；目标健康门控只检查 Agent 最近探测的 eligible，不检查真实业务流量；模块 06 仍为部分实现。
+- 自动回滚只覆盖本次 rollout 新建规则的移除，不做旧配置的全量快照恢复；未实现依赖图、批量撤销和浏览器点击验收；目标健康门控检查新规则、修订与报告时效，但仍是 Agent 探测结果，不检查真实业务流量；模块 06 仍为部分实现。

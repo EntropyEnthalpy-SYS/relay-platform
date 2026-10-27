@@ -112,6 +112,9 @@ enum Command {
         /// CIDR allowed to connect to the public listener (repeatable; empty allows all).
         #[arg(long = "allow-public-cidr", value_name = "CIDR")]
         allow_public_cidr: Vec<String>,
+        /// Optional loopback HTTP listener that serves reverse mux Prometheus metrics.
+        #[arg(long)]
+        metrics_listen: Option<SocketAddr>,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -461,12 +464,17 @@ async fn main() -> Result<()> {
             public_tls_cert,
             public_tls_key,
             allow_public_cidr,
+            metrics_listen,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
+            if let Some(address) = metrics_listen {
+                let listener = tokio::net::TcpListener::bind(address).await?;
+                tokio::spawn(serve_mux_metrics(listener));
+            }
             let allow_public = allow_public_cidr
                 .iter()
                 .map(|value| {
@@ -957,5 +965,26 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn serve_mux_metrics(listener: tokio::net::TcpListener) {
+    loop {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            continue;
+        };
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await;
+            let body = relay_platform::reverse_mux::metrics_text();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
     }
 }

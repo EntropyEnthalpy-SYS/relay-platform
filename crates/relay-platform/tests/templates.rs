@@ -3,7 +3,7 @@ use common::*;
 use relay_platform::{
     health::{ProbeKind, Status, TargetHealthReport},
     model::{EngineStats, Protocol},
-    store::{Rejection, Store},
+    store::{Rejection, Role, Store},
     template::TemplateInput,
 };
 use serde_json::{Value, json};
@@ -163,7 +163,8 @@ fn rollout_stops_after_a_failed_canary_batch() {
         .retry_rollout(&admin, &template.id, &report.id)
         .unwrap();
     assert!(!retry.aborted);
-    assert_eq!(retry.applied, 2);
+    assert_eq!(retry.applied, 3);
+    assert!(store.config(&admin, &a.id, None).unwrap().rules.len() == 1);
     assert!(store.config(&admin, &b.id, None).unwrap().rules.len() == 1);
     assert!(store.config(&admin, &c.id, None).unwrap().rules.len() == 1);
 }
@@ -315,7 +316,7 @@ fn rollout_can_require_a_recent_healthy_node() {
 }
 
 #[test]
-fn rollout_can_require_all_targets_to_be_eligible() {
+fn stale_unrelated_target_health_blocks_rollout() {
     let temp = tempfile::tempdir().unwrap();
     let db = temp.path().join("controller.db");
     let store = Store::open(&db).unwrap();
@@ -385,11 +386,94 @@ fn rollout_can_require_all_targets_to_be_eligible() {
             None,
             false,
             true,
-            None,
+            Some(200),
         )
         .unwrap();
-    assert_eq!(report.applied, 1);
+    assert!(report.aborted);
     assert!(report.require_target_health);
+    assert_eq!(report.applied, 1);
+    assert_eq!(report.rolled_back, 0);
+    assert!(
+        report
+            .gate_error
+            .as_deref()
+            .unwrap()
+            .contains("intended rules")
+    );
+    let current = store.config(&admin, &node.id, None).unwrap();
+    assert_eq!(current.revision, revision.revision + 1);
+    assert!(
+        store.nodes(&admin).unwrap()[0].applied_revision < current.revision,
+        "the published revision must not be reported as applied"
+    );
+}
+
+#[test]
+fn fresh_health_for_the_intended_rule_is_accepted() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("controller.db");
+    let store = Store::open(&db).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (node, _) = store.create_node(&admin, "default", "target-gate").unwrap();
+    let mut intended = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    intended.id = "intended-rule".into();
+    let published = store
+        .set_config(&admin, &node.id, 0, vec![intended])
+        .unwrap();
+    let checked = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let stats = EngineStats {
+        target_health: vec![TargetHealthReport {
+            probe_kind: ProbeKind::TcpConnect,
+            rule_id: "intended-rule".into(),
+            target_index: 0,
+            listen_port: 9000,
+            protocol: Protocol::Tcp,
+            target_address: "127.0.0.1:9".into(),
+            status: Status::Healthy,
+            eligible: true,
+            selection_reason: "fixture".into(),
+            sample_age_ms: Some(10),
+            max_age_ms: 30_000,
+            checked_at_ms: Some(checked),
+            latency_ewma_us: Some(1000),
+            window_checks: 1,
+            window_failures: 0,
+            jitter_us: None,
+            consecutive_successes: 1,
+            consecutive_failures: 0,
+            completed_checks: 1,
+            successful_checks: 1,
+            last_error: None,
+            probe_sent_bytes: 1,
+            probe_received_bytes: 1,
+            priority: 0,
+            active_sessions: 0,
+            max_sessions: None,
+        }],
+        ..Default::default()
+    };
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE nodes SET applied_revision=?1, stats_json=?2 WHERE id=?3",
+            rusqlite::params![
+                published.revision,
+                serde_json::to_string(&stats).unwrap(),
+                node.id
+            ],
+        )
+        .unwrap();
+    store
+        .wait_for_target_health(
+            &admin,
+            &[(node.id.clone(), "intended-rule".into(), published.revision)],
+            200,
+        )
+        .unwrap();
 }
 
 #[test]
@@ -463,6 +547,36 @@ fn template_versions_can_be_listed_and_rolled_back() {
         store.template_versions(&admin, &template.id).unwrap().len(),
         3
     );
+}
+
+#[test]
+fn tenant_administrators_cannot_roll_back_global_templates() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let tenant = store.create_tenant(&admin, "acme").unwrap();
+    let tenant_admin = store
+        .create_user(&admin, &tenant, "tenant-admin", PASSWORD, Role::TenantAdmin)
+        .unwrap();
+    let source = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    let template = store.create_template(&admin, input(None, source)).unwrap();
+    let mut changed = input(None, rule("127.0.0.1:9001".parse().unwrap(), Protocol::Tcp));
+    changed.name = "Global v2".into();
+    store
+        .update_template(&admin, &template.id, changed)
+        .unwrap();
+    let error = store
+        .rollback_template(&tenant_admin, &template.id, 1)
+        .unwrap_err();
+    assert_eq!(rejection(error), 403);
+    let current = store
+        .template_versions(&admin, &template.id)
+        .unwrap()
+        .into_iter()
+        .find(|template| template.version == 2)
+        .unwrap();
+    assert_eq!(current.name, "Global v2");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

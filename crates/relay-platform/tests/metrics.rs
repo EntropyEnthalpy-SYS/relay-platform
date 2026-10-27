@@ -189,6 +189,7 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     assert!(body.contains("relay_api_requests{class=\"total\"} "));
     assert!(body.contains("relay_api_request_duration_seconds_bucket{le=\"0.005\"} "));
     assert!(body.contains("relay_api_request_duration_seconds_count "));
+    assert!(body.contains("relay_reverse_mux_process_available 0"));
     assert!(body.contains("relay_reverse_mux_controls 0"));
     assert!(body.contains("relay_reverse_mux_streams 0"));
     assert!(body.contains("relay_reverse_mux_bytes{direction=\"public_to_target\"} 0"));

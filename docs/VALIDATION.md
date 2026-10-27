@@ -1,8 +1,21 @@
 # 本地验证记录
 
-0.95.0 开发版在 macOS 27.0.1 arm64 通过 **413 项自动化测试（384 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 414 项。日志见 [verification-0.95.0.txt](verification-0.95.0.txt)，逐项清单见 [validation-evidence-0.95.0.json](validation-evidence-0.95.0.json)。
+0.96.0 开发版在 macOS 27.0.1 arm64 通过 **418 项自动化测试（389 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 419 项。日志见 [verification-0.96.0.txt](verification-0.96.0.txt)，逐项清单见 [validation-evidence-0.96.0.json](validation-evidence-0.96.0.json)。
 
-## 0.95.0 API 延迟直方图
+## 0.96.0 独立审查 R95 修复
+
+| 检查 | 结果 |
+| --- | --- |
+| R95-01 | 租户管理员回滚全局模板 403，内容/版本不变 |
+| R95-02 | 静默 TLS 连接不阻塞新控制连接 |
+| R95-03 | 半关闭后反向响应完整返回 |
+| R95-04 | 过期/错误规则健康不放行；新规则/新修订/新鲜健康通过 |
+| R95-05 | 回滚节点重新纳入重试 |
+| R95-06 | 隧道进程 `--metrics-listen`；控制器可用性为 0 |
+
+## 0.95.0 API 延迟直方图（历史）
+
+0.95.0 开发版在 macOS 27.0.1 arm64 通过 **413 项自动化测试（384 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 414 项。日志见 [verification-0.95.0.txt](verification-0.95.0.txt)，逐项清单见 [validation-evidence-0.95.0.json](validation-evidence-0.95.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

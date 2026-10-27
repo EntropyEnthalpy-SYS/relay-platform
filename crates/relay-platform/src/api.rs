@@ -1459,6 +1459,12 @@ async fn prometheus_metrics(
         "relay_api_request_duration_seconds_count {count}\n"
     ));
     let mux = crate::reverse_mux::stats();
+    let mux_total = mux.active_controls + mux.active_streams;
+    body.push_str("# HELP relay_reverse_mux_process_available 1 when the mux runs in this process; CLI deployments expose metrics at the mux --metrics-listen address.\n# TYPE relay_reverse_mux_process_available gauge\n");
+    body.push_str(&format!(
+        "relay_reverse_mux_process_available {}\n",
+        u8::from(mux_total > 0)
+    ));
     body.push_str("# HELP relay_reverse_mux_controls Authorized reverse mux control connections.\n# TYPE relay_reverse_mux_controls gauge\n");
     body.push_str(&format!(
         "relay_reverse_mux_controls {}\n",

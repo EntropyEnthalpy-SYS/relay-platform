@@ -245,6 +245,12 @@ impl Store {
         if !visible(actor, &current) {
             return reject(403, "template belongs to another tenant");
         }
+        if actor.role != Role::SystemAdmin
+            && (current.tenant_id.is_none()
+                || current.tenant_id.as_deref() != Some(&actor.tenant_id))
+        {
+            return reject(403, "cannot roll back this template");
+        }
         if version >= current.version {
             return reject(409, "template version is not older than current");
         }
@@ -258,6 +264,11 @@ impl Store {
             .context("template version not found")?;
         let snapshot: RuleTemplate =
             serde_json::from_str(&raw).context("invalid stored template version")?;
+        if actor.role != Role::SystemAdmin
+            && snapshot.tenant_id.as_deref() != Some(&actor.tenant_id)
+        {
+            return reject(403, "cannot restore this template version");
+        }
         write_version(&tx, &current)?;
         current.version = current.version.saturating_add(1);
         current.tenant_id = snapshot.tenant_id;
@@ -506,15 +517,21 @@ impl Store {
                 }
             }
             if !failed && require_target_health {
-                let nodes: Vec<_> = results
+                let expected: Vec<(String, String, u64)> = results
                     .iter()
                     .filter(|result| result.batch == index && result.applied)
-                    .map(|result| result.node_id.clone())
+                    .filter_map(|result| {
+                        Some((
+                            result.node_id.clone(),
+                            result.rule_id.clone()?,
+                            result.revision?,
+                        ))
+                    })
                     .collect();
-                if !nodes.is_empty()
+                if !expected.is_empty()
                     && let Err(error) = self.wait_for_target_health(
                         actor,
-                        &nodes,
+                        &expected,
                         wait_for_apply_ms.unwrap_or(5_000),
                     )
                 {
@@ -616,24 +633,38 @@ impl Store {
         Ok(report)
     }
 
-    fn wait_for_target_health(
+    /// Require fresh eligible reports for the exact rule and revision on each node.
+    pub fn wait_for_target_health(
         &self,
         actor: &Actor,
-        node_ids: &[String],
+        expected: &[(String, String, u64)],
         timeout_ms: u64,
     ) -> Result<()> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
         loop {
             let nodes = self.nodes(actor)?;
-            let ready = node_ids.iter().all(|id| {
+            let now = now_ms();
+            let ready = expected.iter().all(|(id, rule_id, revision)| {
                 nodes.iter().any(|node| {
-                    &node.id == id
-                        && !node.stats.target_health.is_empty()
-                        && node
-                            .stats
-                            .target_health
-                            .iter()
-                            .all(|target| target.eligible)
+                    if &node.id != id || node.applied_revision < *revision {
+                        return false;
+                    }
+                    let reports: Vec<_> = node
+                        .stats
+                        .target_health
+                        .iter()
+                        .filter(|target| &target.rule_id == rule_id)
+                        .collect();
+                    !reports.is_empty()
+                        && reports.iter().all(|target| {
+                            target.eligible
+                                && target.checked_at_ms.is_some_and(|checked| {
+                                    now.saturating_sub(checked) <= target.max_age_ms as i64
+                                })
+                                && target
+                                    .sample_age_ms
+                                    .is_some_and(|age| age <= target.max_age_ms)
+                        })
                 })
             });
             if ready {
@@ -641,7 +672,7 @@ impl Store {
             }
             if std::time::Instant::now() >= deadline {
                 anyhow::bail!(
-                    "target health did not become eligible for every node within {timeout_ms}ms"
+                    "target health did not become eligible for the intended rules within {timeout_ms}ms"
                 );
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -667,7 +698,7 @@ impl Store {
             .report
             .results
             .iter()
-            .filter(|result| !result.applied)
+            .filter(|result| !result.applied || result.rolled_back)
         {
             let target = record
                 .targets

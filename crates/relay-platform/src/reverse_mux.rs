@@ -19,7 +19,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, Semaphore, mpsc, oneshot},
 };
 use tokio_rustls::{
     TlsAcceptor, TlsConnector,
@@ -33,6 +33,8 @@ use tokio_util::sync::CancellationToken;
 const MAX_LINE: usize = 512;
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PENDING_HANDSHAKES: usize = 64;
 const MAX_FRAME: usize = 64 * 1024;
 const READY: &str = "READY";
 const DENY: &str = "DENY";
@@ -272,10 +274,14 @@ async fn serve_control(
             continue;
         }
         let mut exposed: PublicStream = if let Some(acceptor) = &public_acceptor {
-            match acceptor.accept(exposed).await {
-                Ok(stream) => Box::new(stream),
-                Err(error) => {
+            match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(exposed)).await {
+                Ok(Ok(stream)) => Box::new(stream),
+                Ok(Err(error)) => {
                     tracing::warn!(%peer, %error, "reverse mux public TLS handshake failed");
+                    continue;
+                }
+                Err(_) => {
+                    tracing::warn!(%peer, "reverse mux public TLS handshake timed out");
                     continue;
                 }
             }
@@ -351,7 +357,12 @@ async fn bridge_public(
 ) -> Result<()> {
     let (mut reader, mut writer_stream) = tokio::io::split(exposed);
     let mut buffer = vec![0u8; 16 * 1024];
+    let mut public_done = false;
+    let mut target_done = false;
     loop {
+        if public_done && target_done {
+            break;
+        }
         let idle = tokio::time::sleep(idle_timeout);
         tokio::pin!(idle);
         tokio::select! {
@@ -359,8 +370,11 @@ async fn bridge_public(
                 let _ = write_frame(&writer, RESET, id, &[]).await;
                 break;
             }
-            read = reader.read(&mut buffer) => match read {
-                Ok(0) => { let _ = write_frame(&writer, FIN, id, &[]).await; break; }
+            read = reader.read(&mut buffer), if !public_done => match read {
+                Ok(0) => {
+                    let _ = write_frame(&writer, FIN, id, &[]).await;
+                    public_done = true;
+                }
                 Ok(size) => {
                     PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, AtomicOrdering::Relaxed);
                     if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
@@ -372,7 +386,10 @@ async fn bridge_public(
                     TARGET_TO_PUBLIC_BYTES.fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
                     if writer_stream.write_all(&payload).await.is_err() { break; }
                 },
-                Some((FIN, _)) => { let _ = writer_stream.shutdown().await; break; }
+                Some((FIN, _)) => {
+                    let _ = writer_stream.shutdown().await;
+                    target_done = true;
+                }
                 Some((RESET, _)) | None => break,
                 _ => {}
             },
@@ -509,6 +526,53 @@ fn tls_connector_inner(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn authenticate_control_and_spawn<S>(
+    mut control_stream: S,
+    peer: SocketAddr,
+    token: String,
+    public: Arc<TcpListener>,
+    public_acceptor: Option<TlsAcceptor>,
+    allow_public: Vec<IpNet>,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+) where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
+    let authorized = match tokio::time::timeout(AUTH_TIMEOUT, read_line(&mut control_stream))
+        .await
+        .ok()
+        .and_then(Result::ok)
+    {
+        Some(line) => line
+            .strip_prefix("REVERSE-MUX ")
+            .is_some_and(|provided| token_matches(&token, provided)),
+        None => false,
+    };
+    if !authorized {
+        let _ = control_stream.write_all(b"DENY\n").await;
+        tracing::warn!(%peer, "reverse mux TLS authentication failed");
+        return;
+    }
+    if control_stream.write_all(b"READY\n").await.is_err() {
+        return;
+    }
+    tracing::info!(%peer, "reverse mux TLS client connected");
+    if let Err(error) = serve_authorized_control(
+        control_stream,
+        public,
+        public_acceptor,
+        token,
+        max_streams,
+        idle_timeout_secs,
+        allow_public,
+    )
+    .await
+    {
+        tracing::warn!(%error, "reverse mux TLS control ended");
+    }
+}
+
 pub async fn serve_mux_tls(
     control: TcpListener,
     public: TcpListener,
@@ -555,52 +619,46 @@ pub async fn serve_mux_tls_public(
         "reverse mux idle timeout must be 1..=86400 seconds"
     );
     let public = Arc::new(public);
+    let handshake_slots = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
     loop {
         let (stream, peer) = control.accept().await?;
-        let mut control_stream = match acceptor.accept(stream).await {
-            Ok(stream) => stream,
-            Err(error) => {
-                tracing::warn!(%peer, %error, "reverse mux TLS handshake failed");
+        let permit = match handshake_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!(%peer, "reverse mux TLS handshake capacity is full");
                 continue;
             }
         };
-        let authorized = match tokio::time::timeout(AUTH_TIMEOUT, read_line(&mut control_stream))
-            .await
-            .ok()
-            .and_then(Result::ok)
-        {
-            Some(line) => line
-                .strip_prefix("REVERSE-MUX ")
-                .is_some_and(|provided| token_matches(&token, provided)),
-            None => false,
-        };
-        if !authorized {
-            let _ = control_stream.write_all(b"DENY\n").await;
-            tracing::warn!(%peer, "reverse mux TLS authentication failed");
-            continue;
-        }
-        if control_stream.write_all(b"READY\n").await.is_err() {
-            continue;
-        }
-        tracing::info!(%peer, "reverse mux TLS client connected");
+        let acceptor = acceptor.clone();
+        let token = token.clone();
         let public = public.clone();
         let public_acceptor = public_acceptor.clone();
         let allow_public = allow_public.clone();
-        let token = token.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_authorized_control(
+            let _permit = permit;
+            let control_stream =
+                match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(error)) => {
+                        tracing::warn!(%peer, %error, "reverse mux TLS handshake failed");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!(%peer, "reverse mux TLS handshake timed out");
+                        return;
+                    }
+                };
+            authenticate_control_and_spawn(
                 control_stream,
+                peer,
+                token,
                 public,
                 public_acceptor,
-                token,
+                allow_public,
                 max_streams,
                 idle_timeout_secs,
-                allow_public,
             )
-            .await
-            {
-                tracing::warn!(%error, "reverse mux TLS control ended");
-            }
+            .await;
         });
     }
 }
@@ -758,10 +816,18 @@ async fn bridge_local(
     write_frame(&writer, OK, id, &[]).await?;
     let (mut reader, mut writer_stream) = local.into_split();
     let mut buffer = vec![0u8; 16 * 1024];
+    let mut local_done = false;
+    let mut server_done = false;
     loop {
+        if local_done && server_done {
+            break;
+        }
         tokio::select! {
-            read = reader.read(&mut buffer) => match read {
-                Ok(0) => { let _ = write_frame(&writer, FIN, id, &[]).await; break; }
+            read = reader.read(&mut buffer), if !local_done => match read {
+                Ok(0) => {
+                    let _ = write_frame(&writer, FIN, id, &[]).await;
+                    local_done = true;
+                }
                 Ok(size) => {
                     PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, AtomicOrdering::Relaxed);
                     if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
@@ -772,8 +838,11 @@ async fn bridge_local(
                 Some((DATA, payload)) => {
                     TARGET_TO_PUBLIC_BYTES.fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
                     if writer_stream.write_all(&payload).await.is_err() { break; }
-                },
-                Some((FIN, _)) => { let _ = writer_stream.shutdown().await; break; }
+                }
+                Some((FIN, _)) => {
+                    let _ = writer_stream.shutdown().await;
+                    server_done = true;
+                }
                 Some((RESET, _)) | None => break,
                 _ => {}
             },
@@ -821,6 +890,19 @@ async fn read_frame(reader: &mut ControlRead) -> Result<Option<Frame>> {
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload).await?;
     Ok(Some((header[0], id, payload)))
+}
+
+pub fn metrics_text() -> String {
+    let stats = stats();
+    format!(
+        "# HELP relay_reverse_mux_process_available 1 when metrics come from the tunnel process.\n# TYPE relay_reverse_mux_process_available gauge\nrelay_reverse_mux_process_available 1\n# HELP relay_reverse_mux_controls Authorized reverse mux controls.\n# TYPE relay_reverse_mux_controls gauge\nrelay_reverse_mux_controls {}\nrelay_reverse_mux_controls_total {}\n# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\nrelay_reverse_mux_streams {}\nrelay_reverse_mux_streams_total {}\n# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\nrelay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\nrelay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n",
+        stats.active_controls,
+        stats.total_controls,
+        stats.active_streams,
+        stats.total_streams,
+        stats.public_to_target_bytes,
+        stats.target_to_public_bytes,
+    )
 }
 
 fn token_matches(expected: &str, provided: &str) -> bool {
