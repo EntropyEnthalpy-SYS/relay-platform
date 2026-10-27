@@ -1334,12 +1334,40 @@ async fn prometheus_metrics(
 ) -> Result<(StatusCode, HeaderMap, String), ApiError> {
     let actor_for_nodes = actor.clone();
     let nodes = database(state.store.clone(), move |db| db.nodes(&actor_for_nodes)).await?;
+    let actor_for_usage = actor.clone();
+    let usage = database(state.store.clone(), move |db| {
+        db.rule_usage(&actor_for_usage)
+    })
+    .await?;
     let budgets = database(state.store.clone(), move |db| db.budgets(&actor)).await?;
     let journal = database(state.store, |db| db.recovery_log_status()).await?;
     let mut body = format!(
         "# HELP relay_build_info Build identity.\n# TYPE relay_build_info gauge\nrelay_build_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     );
+    body.push_str("# HELP relay_rule_usage Cumulative rule usage from the ledger.\n# TYPE relay_rule_usage counter\n");
+    for item in &usage {
+        for (kind, value) in [
+            ("upload_bytes", item.upload_bytes),
+            ("download_bytes", item.download_bytes),
+        ] {
+            body.push_str(&format!(
+                "relay_rule_usage{{node=\"{}\",rule=\"{}\",tenant=\"{}\",direction=\"{}\"}} {}\n",
+                metric_label(&item.node_id),
+                metric_label(&item.rule_id),
+                metric_label(&item.tenant_id),
+                kind,
+                value
+            ));
+        }
+        body.push_str(&format!(
+            "relay_rule_reported_timestamp_seconds{{node=\"{}\",rule=\"{}\",tenant=\"{}\"}} {}\n",
+            metric_label(&item.node_id),
+            metric_label(&item.rule_id),
+            metric_label(&item.tenant_id),
+            item.reported_at_ms as f64 / 1000.0
+        ));
+    }
     body.push_str("# HELP relay_budget Budget limits and usage.\n# TYPE relay_budget gauge\n");
     for budget in &budgets.budgets {
         for (kind, value) in [

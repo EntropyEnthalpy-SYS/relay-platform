@@ -220,6 +220,16 @@ pub fn write_secret(path: &Path, value: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+pub struct RuleUsage {
+    pub node_id: String,
+    pub rule_id: String,
+    pub tenant_id: String,
+    pub upload_bytes: u64,
+    pub download_bytes: u64,
+    pub reported_at_ms: i64,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -741,6 +751,30 @@ impl Store {
         require_node(&conn, actor, node, false)?;
         let mut q=conn.prepare("SELECT revision,actor_id,created_at_ms FROM config_history WHERE node_id=?1 ORDER BY revision DESC LIMIT 100")?;
         Ok(q.query_map([node],|r|Ok(serde_json::json!({"revision":r.get::<_,u64>(0)?,"actor_id":r.get::<_,String>(1)?,"created_at_ms":r.get::<_,i64>(2)?})))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn rule_usage(&self, actor: &Actor) -> Result<Vec<RuleUsage>> {
+        let conn = self.0.lock().unwrap();
+        let mut q = conn.prepare(
+            "SELECT u.node_id,u.rule_id,b.tenant_id,SUM(u.upload_bytes),SUM(u.download_bytes),MAX(u.reported_at_ms)
+             FROM usage u JOIN rule_bindings b ON b.rule_id=u.rule_id
+             WHERE (?1='system_admin' OR b.tenant_id=?2)
+             GROUP BY u.node_id,u.rule_id,b.tenant_id
+             ORDER BY u.node_id,u.rule_id LIMIT 5000",
+        )?;
+        Ok(
+            q.query_map(params![actor.role.as_str(), actor.tenant_id], |row| {
+                Ok(RuleUsage {
+                    node_id: row.get(0)?,
+                    rule_id: row.get(1)?,
+                    tenant_id: row.get(2)?,
+                    upload_bytes: row.get(3)?,
+                    download_bytes: row.get(4)?,
+                    reported_at_ms: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?,
+        )
     }
 
     pub fn reported_usage(&self, actor: &Actor) -> Result<Vec<serde_json::Value>> {

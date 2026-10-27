@@ -140,6 +140,18 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
         rusqlite::params![serde_json::to_string(&stats).unwrap(), node_id],
     )
     .unwrap();
+    let (rule_id, epoch): (String, String) = conn
+        .query_row(
+            "SELECT b.rule_id,e.meter_epoch FROM rule_bindings b JOIN rule_epochs e ON e.rule_id=b.rule_id LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    conn.execute(
+        "INSERT INTO usage(node_id,rule_id,meter_epoch,sequence,upload_bytes,download_bytes,reported_at_ms) VALUES(?1,?2,?3,1,123,456,1000)",
+        rusqlite::params![node_id, rule_id, epoch],
+    )
+    .unwrap();
     let (address, stop) = serve(store).await;
     let origin = format!("http://{address}");
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
@@ -173,6 +185,9 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     assert!(body.contains(&format!("relay_node_active_udp{{node=\"{node_id}\"}} 0")));
     assert!(body.contains(&format!(
         "relay_node_accepted_tcp_total{{node=\"{node_id}\"}} 0"
+    )));
+    assert!(body.contains(&format!(
+        "relay_rule_usage{{node=\"{node_id}\",rule=\"rule-one\",tenant=\"default\",direction=\"upload_bytes\"}} 123"
     )));
     assert!(body.contains(&format!(
         "relay_budget{{budget=\"{budget_id}\",tenant=\"default\",scope=\"tenant\",scope_id=\"default\",kind=\"limit_bytes\"}} 10000"
