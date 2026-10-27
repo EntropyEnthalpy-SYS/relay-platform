@@ -1,12 +1,22 @@
-//! Minimal UPnP IGD WANIPConnection/WANPPPConnection AddPortMapping client.
-//! Discovery is intentionally out of scope; the caller supplies the IGD
+//! Minimal UPnP IGD WANIPConnection/WANPPPConnection AddPortMapping client and
+//! IPv4 SSDP discovery. The caller can use a discovered LOCATION as the
 //! description URL. This is a mapping management tool, not a NAT server.
 use anyhow::{Context, Result, bail, ensure};
 use reqwest::Url;
 use serde::Serialize;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::net::UdpSocket;
+use tokio::time::{Instant, sleep, timeout_at};
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Discovery {
+    pub location: String,
+    pub server: Option<String>,
+    pub service_type: Option<String>,
+    pub usn: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Mapping {
@@ -158,6 +168,73 @@ pub async fn map(
     };
     call(&client, &control_url, &mapping.service, &mapping, delete).await?;
     Ok(mapping)
+}
+
+/// Send an SSDP M-SEARCH to the standard IPv4 multicast endpoint and collect
+/// IGD responses until `timeout`. Duplicate LOCATION values are returned once.
+pub async fn discover(timeout: Duration) -> Result<Vec<Discovery>> {
+    discover_at(SocketAddr::from(([239, 255, 255, 250], 1900)), timeout).await
+}
+
+/// Discovery variant with an explicit target, useful for a controlled network
+/// or tests. The target still speaks the normal SSDP request/response format.
+pub async fn discover_at(target: SocketAddr, timeout: Duration) -> Result<Vec<Discovery>> {
+    ensure!(!timeout.is_zero(), "discovery timeout is zero");
+    ensure!(target.is_ipv4(), "SSDP discovery currently supports IPv4");
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    let request = concat!(
+        "M-SEARCH * HTTP/1.1\r\n",
+        "HOST: 239.255.255.250:1900\r\n",
+        "MAN: \"ssdp:discover\"\r\n",
+        "MX: 2\r\n",
+        "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n",
+        "\r\n"
+    );
+    socket.send_to(request.as_bytes(), target).await?;
+    let deadline = Instant::now() + timeout;
+    let mut found = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut buffer = vec![0u8; 8192];
+    loop {
+        let received = match timeout_at(deadline, socket.recv_from(&mut buffer)).await {
+            Ok(received) => received,
+            Err(_) => break,
+        };
+        let (size, _) = received?;
+        let text = String::from_utf8_lossy(&buffer[..size]);
+        if let Some(item) = parse_discovery(&text)
+            && seen.insert(item.location.clone())
+        {
+            found.push(item);
+        }
+    }
+    Ok(found)
+}
+
+fn parse_discovery(response: &str) -> Option<Discovery> {
+    let mut location = None;
+    let mut server = None;
+    let mut service_type = None;
+    let mut usn = None;
+    for line in response.lines().skip(1) {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "location" if !value.is_empty() => location = Some(value.to_string()),
+            "server" => server = Some(value.to_string()),
+            "st" => service_type = Some(value.to_string()),
+            "usn" => usn = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    Some(Discovery {
+        location: location?,
+        server,
+        service_type,
+        usn,
+    })
 }
 
 /// Renew a UPnP IGD mapping until cancelled. The control URL is looked up on

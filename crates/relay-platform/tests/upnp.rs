@@ -126,3 +126,33 @@ async fn upnp_renews_until_cancelled() {
             .all(|body| body.contains("AddPortMapping"))
     );
 }
+
+#[tokio::test]
+async fn ssdp_discovery_parses_location_and_deduplicates() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let target = server.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        let mut buffer = [0u8; 1024];
+        let (size, peer) = server.recv_from(&mut buffer).await.unwrap();
+        let request = String::from_utf8_lossy(&buffer[..size]);
+        assert!(request.starts_with("M-SEARCH * HTTP/1.1"));
+        assert!(request.contains("ssdp:discover"));
+        let response = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "LOCATION: http://127.0.0.1:5000/rootDesc.xml\r\n",
+            "SERVER: Test/1.0 UPnP/1.1\r\n",
+            "ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n",
+            "USN: uuid:test::urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n",
+            "\r\n"
+        );
+        server.send_to(response.as_bytes(), peer).await.unwrap();
+        server.send_to(response.as_bytes(), peer).await.unwrap();
+    });
+    let found = upnp::discover_at(target, std::time::Duration::from_millis(400))
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].location, "http://127.0.0.1:5000/rootDesc.xml");
+    assert_eq!(found[0].server.as_deref(), Some("Test/1.0 UPnP/1.1"));
+    task.await.unwrap();
+}

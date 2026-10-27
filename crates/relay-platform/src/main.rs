@@ -47,6 +47,11 @@ enum Command {
         #[arg(long)]
         renew_after_secs: Option<u64>,
     },
+    /// Discover UPnP IGDs with SSDP and print LOCATION candidates.
+    UpnpDiscover {
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..=30))]
+        timeout_secs: u64,
+    },
     /// Request or delete a PCP UDP port mapping.
     PcpMap {
         #[arg(long)]
@@ -226,6 +231,12 @@ async fn main() -> Result<()> {
                 ))?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
             }
+        }
+        Command::UpnpDiscover { timeout_secs } => {
+            let found = tokio::runtime::Runtime::new()?.block_on(
+                relay_platform::upnp::discover(Duration::from_secs(timeout_secs)),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&found)?);
         }
         Command::PcpMap {
             gateway,
