@@ -375,6 +375,8 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
+| GET/POST | `/commerce/coupons` | 管理员优惠码列表/创建；普通用户 403 |
+| PUT/DELETE | `/commerce/coupons/{id}` | 管理员编辑/删除；已有使用 409 |
 | GET/POST | `/commerce/plans` | 启用套餐列表（管理员含停用）/创建；写仅系统管理员 |
 | PUT/DELETE | `/commerce/plans/{id}` | 编辑/删除；有订单时删除 409 |
 | GET | `/commerce/wallet` | 自己的余额与流水 |
@@ -383,7 +385,7 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | POST | `/commerce/orders/{id}/pay` | 钱包支付，重复支付 409 |
 | POST | `/commerce/orders/{id}/refund` | 管理员退款，重复退款 409 |
 
-套餐/订单保存价格快照。支付/退款不自动创建订阅、规则或流量权益。详见 [COMMERCE.md](COMMERCE.md)。
+套餐/订单保存价格快照；优惠码订单保存 `subtotal_cents`、`discount_cents`、`coupon_code` 和最终 `amount_cents`。支付/退款不自动创建订阅、规则或流量权益。详见 [COMMERCE.md](COMMERCE.md)。
 
 ## 0.28.0 外部支付回调
 

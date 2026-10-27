@@ -2,7 +2,8 @@ mod common;
 use common::*;
 use relay_platform::{
     api::{self, AppState},
-    commerce::{LedgerKind, OrderStatus, PaymentStatus, PlanInput},
+    commerce::{CouponInput, CouponKind, LedgerKind, OrderStatus, PaymentStatus, PlanInput},
+    model::now_ms,
     store::{Rejection, Store},
 };
 use serde_json::{Value, json};
@@ -241,6 +242,98 @@ async fn external_payment_webhook_is_signed_idempotent_and_not_wallet_refundable
     stop.cancel();
 }
 
+#[test]
+fn coupons_discount_orders_and_enforce_limits() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let user = store
+        .create_user(
+            &admin,
+            "default",
+            "buyer",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (_, buyer) = store.login("buyer", PASSWORD).unwrap();
+    let plan = store
+        .create_commerce_plan(&admin, plan_input(5_000))
+        .unwrap();
+    let coupon = store
+        .create_coupon(
+            &admin,
+            CouponInput {
+                code: "save10".into(),
+                kind: CouponKind::Percent,
+                value: 10,
+                min_amount_cents: 1_000,
+                starts_at_ms: now_ms() - 1_000,
+                ends_at_ms: None,
+                max_redemptions: Some(1),
+                enabled: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(coupon.code, "SAVE10");
+    assert_eq!(rejection(store.commerce_coupons(&buyer).unwrap_err()), 403);
+    let order = store
+        .create_order_with_coupon(&buyer, &plan.id, Some("save10"))
+        .unwrap();
+    assert_eq!(order.subtotal_cents, 5_000);
+    assert_eq!(order.discount_cents, 500);
+    assert_eq!(order.amount_cents, 4_500);
+    assert_eq!(order.coupon_code.as_deref(), Some("SAVE10"));
+    assert_eq!(store.commerce_coupons(&admin).unwrap()[0].redeemed, 1);
+    assert_eq!(
+        rejection(
+            store
+                .create_order_with_coupon(&buyer, &plan.id, Some("SAVE10"))
+                .unwrap_err()
+        ),
+        409
+    );
+    store
+        .update_coupon(
+            &admin,
+            &coupon.id,
+            CouponInput {
+                code: "SAVE10".into(),
+                kind: CouponKind::Fixed,
+                value: 1_000,
+                min_amount_cents: 1_000,
+                starts_at_ms: now_ms() - 1_000,
+                ends_at_ms: None,
+                max_redemptions: None,
+                enabled: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        rejection(
+            store
+                .create_order_with_coupon(&buyer, &plan.id, Some("SAVE10"))
+                .unwrap_err()
+        ),
+        409
+    );
+    let wallet = store
+        .adjust_wallet(&admin, &user.id, 4_500, "coupon-topup", "test")
+        .unwrap();
+    assert_eq!(wallet.balance_cents, 4_500);
+    store.pay_order(&buyer, &order.id).unwrap();
+    assert_eq!(
+        store.wallet(&buyer, &user.id).unwrap().wallet.balance_cents,
+        0
+    );
+    store.refund_order(&admin, &order.id).unwrap();
+    assert_eq!(
+        store.wallet(&buyer, &user.id).unwrap().wallet.balance_cents,
+        4_500
+    );
+}
+
 async fn serve(store: Store) -> (SocketAddr, CancellationToken) {
     let stop = CancellationToken::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -304,6 +397,28 @@ async fn commerce_http_routes_move_money_and_block_non_admins() {
     let plan_id = plan["id"].as_str().unwrap();
     assert_eq!(
         client
+            .post(format!("{origin}/api/v1/commerce/coupons"))
+            .bearer_auth(&admin_session)
+            .json(&json!({"code":"HTTP10","kind":"percent","value":10,"max_redemptions":5}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        client
+            .post(format!("{origin}/api/v1/commerce/coupons"))
+            .bearer_auth(&buyer_session)
+            .json(&json!({"code":"NO","kind":"fixed","value":1}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
             .post(format!("{origin}/api/v1/commerce/plans"))
             .bearer_auth(&buyer_session)
             .json(&json!({"name":"No","price_cents":1,"duration_days":1}))
@@ -346,13 +461,16 @@ async fn commerce_http_routes_move_money_and_block_non_admins() {
     let order: Value = client
         .post(format!("{origin}/api/v1/commerce/orders"))
         .bearer_auth(&buyer_session)
-        .json(&json!({"plan_id":plan_id}))
+        .json(&json!({"plan_id":plan_id,"coupon_code":"http10"}))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
+    assert_eq!(order["subtotal_cents"], 5000);
+    assert_eq!(order["discount_cents"], 500);
+    assert_eq!(order["amount_cents"], 4500);
     let order_id = order["id"].as_str().unwrap();
     assert_eq!(
         client
@@ -373,7 +491,7 @@ async fn commerce_http_routes_move_money_and_block_non_admins() {
         .json()
         .await
         .unwrap();
-    assert_eq!(wallet["wallet"]["balance_cents"], 5000);
+    assert_eq!(wallet["wallet"]["balance_cents"], 5500);
     assert_eq!(
         client
             .post(format!("{origin}/api/v1/commerce/orders/{order_id}/refund"))

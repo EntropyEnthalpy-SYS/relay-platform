@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.29.0 开发版在 macOS 27.0.1 arm64 通过 **352 项自动化测试（323 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 353 项。日志见 [verification-0.29.0.txt](verification-0.29.0.txt)，逐项清单见 [validation-evidence-0.29.0.json](validation-evidence-0.29.0.json)。
+0.30.0 开发版在 macOS 27.0.1 arm64 通过 **353 项自动化测试（324 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 354 项。日志见 [verification-0.30.0.txt](verification-0.30.0.txt)，逐项清单见 [validation-evidence-0.30.0.json](validation-evidence-0.30.0.json)。
 
-## 0.29.0 工单验证
+## 0.30.0 优惠码验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 10% 折扣、原价/折扣/最终金额、使用次数上限、停用拒绝、折后支付/退款 |
+| HTTP | 管理员创建优惠码、买家 403、订单折扣字段、折后钱包支付与退款 |
+| 面板 | `node --check web/app.js` 与视图结构检查；优惠码管理源码，未做浏览器点击验收 |
+
+## 0.29.0 工单验证（历史）
+
+0.29.0 开发版在 macOS 27.0.1 arm64 通过 **352 项自动化测试（323 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 353 项。日志见 [verification-0.29.0.txt](verification-0.29.0.txt)，逐项清单见 [validation-evidence-0.29.0.json](validation-evidence-0.29.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

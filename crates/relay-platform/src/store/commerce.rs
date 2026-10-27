@@ -2,8 +2,9 @@
 //! transaction together with its ledger entry and order/wallet state.
 use super::*;
 use crate::commerce::{
-    CURRENCY, LedgerEntry, LedgerKind, Order, OrderStatus, Payment, PaymentChannel, PaymentStatus,
-    Plan, PlanInput, Wallet, WalletView, WebhookView, validate_adjustment, validate_plan,
+    CURRENCY, Coupon, CouponInput, LedgerEntry, LedgerKind, Order, OrderStatus, Payment,
+    PaymentChannel, PaymentStatus, Plan, PlanInput, Wallet, WalletView, WebhookView, discount_for,
+    validate_adjustment, validate_coupon, validate_plan,
 };
 
 fn plan_key(id: &str) -> String {
@@ -20,6 +21,12 @@ fn ledger_ref_key(reference: &str) -> String {
 }
 fn order_key(id: &str) -> String {
     format!("commerce_order:{id}")
+}
+fn coupon_key(id: &str) -> String {
+    format!("commerce_coupon:{id}")
+}
+fn coupon_code_key(code: &str) -> String {
+    format!("commerce_coupon_code:{code}")
 }
 fn payment_key(id: &str) -> String {
     format!("commerce_payment:{id}")
@@ -47,7 +54,37 @@ fn write_wallet(tx: &Transaction<'_>, wallet: &Wallet) -> Result<()> {
     write_json(tx, &wallet_key(&wallet.user_id), wallet)
 }
 fn read_order(conn: &Connection, id: &str) -> Result<Option<Order>> {
-    read_json(conn, &order_key(id))
+    let mut order: Option<Order> = read_json(conn, &order_key(id))?;
+    if let Some(order) = &mut order
+        && order.subtotal_cents == 0
+        && order.discount_cents == 0
+    {
+        order.subtotal_cents = order.amount_cents;
+    }
+    Ok(order)
+}
+fn read_coupon(conn: &Connection, id: &str) -> Result<Option<Coupon>> {
+    read_json(conn, &coupon_key(id))
+}
+fn read_coupon_code(conn: &Connection, code: &str) -> Result<Option<Coupon>> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [coupon_code_key(code)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    id.map(|id| read_coupon(conn, &id))
+        .transpose()
+        .map(Option::flatten)
+}
+fn write_coupon(tx: &Transaction<'_>, coupon: &Coupon) -> Result<()> {
+    write_json(tx, &coupon_key(&coupon.id), coupon)?;
+    tx.execute(
+        "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![coupon_code_key(&coupon.code), coupon.id],
+    )?;
+    Ok(())
 }
 fn write_order(tx: &Transaction<'_>, order: &Order) -> Result<()> {
     write_json(tx, &order_key(&order.id), order)
@@ -261,18 +298,49 @@ impl Store {
         Ok(orders)
     }
     pub fn create_order(&self, actor: &Actor, plan_id: &str) -> Result<Order> {
+        self.create_order_with_coupon(actor, plan_id, None)
+    }
+    pub fn create_order_with_coupon(
+        &self,
+        actor: &Actor,
+        plan_id: &str,
+        coupon_code: Option<&str>,
+    ) -> Result<Order> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let plan = read_plan(&tx, plan_id)?.context("plan not found")?;
         if !plan.enabled {
             return reject(409, "plan is disabled");
         }
+        let subtotal_cents = plan.price_cents;
+        let mut discount_cents = 0;
+        let mut applied_coupon = None;
+        if let Some(code) = coupon_code.map(str::trim).filter(|code| !code.is_empty()) {
+            let code = code.to_ascii_uppercase();
+            let mut coupon = match read_coupon_code(&tx, &code)? {
+                Some(coupon) => coupon,
+                None => return reject(404, "coupon not found"),
+            };
+            discount_cents = match discount_for(&coupon, subtotal_cents, now_ms()) {
+                Ok(discount) => discount,
+                Err(error) => return reject(409, error.to_string()),
+            };
+            coupon.redeemed = coupon
+                .redeemed
+                .checked_add(1)
+                .context("coupon redemption overflow")?;
+            write_coupon(&tx, &coupon)?;
+            applied_coupon = Some(code);
+        }
         let order = Order {
             id: Uuid::new_v4().to_string(),
             user_id: actor.id.clone(),
             plan_id: plan.id.clone(),
             plan_name: plan.name.clone(),
-            amount_cents: plan.price_cents,
+            subtotal_cents,
+            discount_cents,
+            coupon_code: applied_coupon,
+            amount_cents: subtotal_cents - discount_cents,
             currency: CURRENCY.into(),
             duration_days: plan.duration_days,
             traffic_bytes: plan.traffic_bytes,
@@ -370,6 +438,86 @@ impl Store {
         audit(&tx, &actor.id, "commerce.order.refund", &order.id, "{}")?;
         tx.commit()?;
         Ok(order)
+    }
+    pub fn commerce_coupons(&self, actor: &Actor) -> Result<Vec<Coupon>> {
+        require_admin(actor)?;
+        let conn = self.0.lock().unwrap();
+        let mut coupons = all::<Coupon>(&conn, "commerce_coupon:")?;
+        coupons.sort_by_key(|coupon| std::cmp::Reverse(coupon.created_at_ms));
+        Ok(coupons)
+    }
+    pub fn create_coupon(&self, actor: &Actor, input: CouponInput) -> Result<Coupon> {
+        require_admin(actor)?;
+        validate_coupon(&input)?;
+        let code = input.code.trim().to_ascii_uppercase();
+        let coupon = Coupon {
+            id: Uuid::new_v4().to_string(),
+            code,
+            kind: input.kind,
+            value: input.value,
+            min_amount_cents: input.min_amount_cents,
+            starts_at_ms: input.starts_at_ms,
+            ends_at_ms: input.ends_at_ms,
+            max_redemptions: input.max_redemptions,
+            redeemed: 0,
+            enabled: input.enabled,
+            created_at_ms: now_ms(),
+        };
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        if read_coupon_code(&tx, &coupon.code)?.is_some() {
+            return reject(409, "coupon code already exists");
+        }
+        write_coupon(&tx, &coupon)?;
+        audit(&tx, &actor.id, "commerce.coupon.create", &coupon.id, "{}")?;
+        tx.commit()?;
+        Ok(coupon)
+    }
+    pub fn update_coupon(&self, actor: &Actor, id: &str, input: CouponInput) -> Result<Coupon> {
+        require_admin(actor)?;
+        validate_coupon(&input)?;
+        let code = input.code.trim().to_ascii_uppercase();
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut coupon = read_coupon(&tx, id)?.context("coupon not found")?;
+        if let Some(existing) = read_coupon_code(&tx, &code)?
+            && existing.id != coupon.id
+        {
+            return reject(409, "coupon code already exists");
+        }
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [coupon_code_key(&coupon.code)],
+        )?;
+        coupon.code = code;
+        coupon.kind = input.kind;
+        coupon.value = input.value;
+        coupon.min_amount_cents = input.min_amount_cents;
+        coupon.starts_at_ms = input.starts_at_ms;
+        coupon.ends_at_ms = input.ends_at_ms;
+        coupon.max_redemptions = input.max_redemptions;
+        coupon.enabled = input.enabled;
+        write_coupon(&tx, &coupon)?;
+        audit(&tx, &actor.id, "commerce.coupon.update", &coupon.id, "{}")?;
+        tx.commit()?;
+        Ok(coupon)
+    }
+    pub fn delete_coupon(&self, actor: &Actor, id: &str) -> Result<()> {
+        require_admin(actor)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let coupon = read_coupon(&tx, id)?.context("coupon not found")?;
+        if coupon.redeemed > 0 {
+            return reject(409, "disable the coupon; it already has redemptions");
+        }
+        tx.execute("DELETE FROM metadata WHERE key=?1", [coupon_key(id)])?;
+        tx.execute(
+            "DELETE FROM metadata WHERE key=?1",
+            [coupon_code_key(&coupon.code)],
+        )?;
+        audit(&tx, &actor.id, "commerce.coupon.delete", id, "{}")?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn commerce_webhook(&self, actor: &Actor) -> Result<WebhookView> {
         require_admin(actor)?;
