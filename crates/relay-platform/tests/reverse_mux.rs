@@ -82,9 +82,10 @@ async fn mux_stream_limit_is_validated() {
 async fn mux_idle_timeout_is_validated() {
     let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let error = reverse_mux::serve_mux_with_options(control, public, "mux-token".into(), 1, 0)
-        .await
-        .unwrap_err();
+    let error =
+        reverse_mux::serve_mux_with_options(control, public, "mux-token".into(), 1, 0, vec![])
+            .await
+            .unwrap_err();
     assert!(error.to_string().contains("idle timeout"));
 }
 
@@ -139,6 +140,7 @@ async fn tls_control_connection_still_multiplexes_public_streams() {
         acceptor,
         8,
         300,
+        vec![],
     ));
     let client = tokio::spawn(reverse_mux::client_mux_tls(
         control_addr,
@@ -202,6 +204,7 @@ async fn mtls_control_requires_a_client_identity() {
         acceptor,
         8,
         300,
+        vec![],
     ));
     let client = tokio::spawn(reverse_mux::client_mux_tls(
         control_addr,
@@ -259,6 +262,7 @@ async fn public_tls_terminates_before_the_public_stream() {
         acceptor,
         8,
         300,
+        vec![],
     ));
     let client = tokio::spawn(reverse_mux::client_mux(
         control_addr,
@@ -278,6 +282,41 @@ async fn public_tls_terminates_before_the_public_stream() {
         .await
         .unwrap()
         .unwrap();
+    server.abort();
+    client.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn public_cidr_allowlist_closes_denied_sources() {
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public.local_addr().unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let server = tokio::spawn(reverse_mux::serve_mux_with_options(
+        control,
+        public,
+        "cidr-token".into(),
+        8,
+        300,
+        vec!["10.0.0.0/8".parse().unwrap()],
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux(
+        control_addr,
+        target_addr.to_string(),
+        "cidr-token".into(),
+    ));
+    let mut exposed = timeout(Duration::from_secs(2), TcpStream::connect(public_addr))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut byte = [0u8; 1];
+    let read = timeout(Duration::from_secs(2), exposed.read(&mut byte))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read, 0);
     server.abort();
     client.abort();
 }

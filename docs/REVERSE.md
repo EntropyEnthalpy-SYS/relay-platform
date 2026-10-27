@@ -34,7 +34,8 @@ relay reverse-mux-server \
   --public-listen 0.0.0.0:19011 \
   --token-file /etc/relay/reverse.token \
   --max-streams 256 \
-  --idle-timeout-secs 300
+  --idle-timeout-secs 300 \
+  --allow-public-cidr 203.0.113.0/24
 
 relay reverse-mux-client \
   --server PUBLIC:19010 \

@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.91.0 开发版在 macOS 27.0.1 arm64 通过 **412 项自动化测试（383 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 413 项。日志见 [verification-0.91.0.txt](verification-0.91.0.txt)，逐项清单见 [validation-evidence-0.91.0.json](validation-evidence-0.91.0.json)。
+0.92.0 开发版在 macOS 27.0.1 arm64 通过 **413 项自动化测试（384 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 414 项。日志见 [verification-0.92.0.txt](verification-0.92.0.txt)，逐项清单见 [validation-evidence-0.92.0.json](validation-evidence-0.92.0.json)。
 
-## 0.91.0 反向 mux 公网 TLS
+## 0.92.0 反向 mux 公网 CIDR
+
+| 检查 | 结果 |
+| --- | --- |
+| 参数 | `--allow-public-cidr` 可重复 |
+| 空列表 | 允许所有来源 |
+| 不匹配 | 在 OPEN 前关闭 |
+| 限制 | 只过滤来源 IP |
+
+## 0.91.0 反向 mux 公网 TLS（历史）
+
+0.91.0 开发版在 macOS 27.0.1 arm64 通过 **412 项自动化测试（383 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 413 项。日志见 [verification-0.91.0.txt](verification-0.91.0.txt)，逐项清单见 [validation-evidence-0.91.0.json](validation-evidence-0.91.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

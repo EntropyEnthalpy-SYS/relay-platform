@@ -109,6 +109,9 @@ enum Command {
         /// TLS private key for the public listener (requires --public-tls-cert).
         #[arg(long)]
         public_tls_key: Option<PathBuf>,
+        /// CIDR allowed to connect to the public listener (repeatable; empty allows all).
+        #[arg(long = "allow-public-cidr", value_name = "CIDR")]
+        allow_public_cidr: Vec<String>,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -457,12 +460,21 @@ async fn main() -> Result<()> {
             tls_client_ca,
             public_tls_cert,
             public_tls_key,
+            allow_public_cidr,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
+            let allow_public = allow_public_cidr
+                .iter()
+                .map(|value| {
+                    value
+                        .parse::<ipnet::IpNet>()
+                        .with_context(|| format!("invalid public CIDR {value}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let public_tls = match (public_tls_cert, public_tls_key) {
                 (Some(cert), Some(key)) => {
                     Some(relay_platform::reverse_mux::tls_acceptor(&cert, &key)?)
@@ -490,6 +502,7 @@ async fn main() -> Result<()> {
                                 Some(public_acceptor),
                                 usize::from(max_streams),
                                 u64::from(idle_timeout_secs),
+                                allow_public.clone(),
                             )
                             .await?;
                         }
@@ -501,6 +514,7 @@ async fn main() -> Result<()> {
                                 acceptor,
                                 usize::from(max_streams),
                                 u64::from(idle_timeout_secs),
+                                allow_public.clone(),
                             )
                             .await?;
                         }
@@ -515,6 +529,7 @@ async fn main() -> Result<()> {
                             public_acceptor,
                             usize::from(max_streams),
                             u64::from(idle_timeout_secs),
+                            allow_public.clone(),
                         )
                         .await?;
                     }
@@ -525,6 +540,7 @@ async fn main() -> Result<()> {
                             token,
                             usize::from(max_streams),
                             u64::from(idle_timeout_secs),
+                            allow_public.clone(),
                         )
                         .await?;
                     }

@@ -4,6 +4,7 @@
 //! connections. This is separate from the legacy line protocol in `reverse`;
 //! the legacy commands keep their one-public-connection-per-control behavior.
 use anyhow::{Context, Result, bail, ensure};
+use ipnet::IpNet;
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -52,7 +53,7 @@ type Sessions = Arc<Mutex<HashMap<u32, mpsc::Sender<(u8, Vec<u8>)>>>>;
 type Frame = (u8, u32, Vec<u8>);
 
 pub async fn serve_mux(control: TcpListener, public: TcpListener, token: String) -> Result<()> {
-    serve_mux_with_options(control, public, token, 256, 300).await
+    serve_mux_with_options(control, public, token, 256, 300, Vec::new()).await
 }
 
 pub async fn serve_mux_with_limit(
@@ -61,7 +62,7 @@ pub async fn serve_mux_with_limit(
     token: String,
     max_streams: usize,
 ) -> Result<()> {
-    serve_mux_with_options(control, public, token, max_streams, 300).await
+    serve_mux_with_options(control, public, token, max_streams, 300, Vec::new()).await
 }
 
 pub async fn serve_mux_with_options(
@@ -70,8 +71,18 @@ pub async fn serve_mux_with_options(
     token: String,
     max_streams: usize,
     idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
 ) -> Result<()> {
-    serve_mux_plain_public(control, public, token, None, max_streams, idle_timeout_secs).await
+    serve_mux_plain_public(
+        control,
+        public,
+        token,
+        None,
+        max_streams,
+        idle_timeout_secs,
+        allow_public,
+    )
+    .await
 }
 
 pub async fn serve_mux_public_tls(
@@ -81,6 +92,7 @@ pub async fn serve_mux_public_tls(
     public_acceptor: TlsAcceptor,
     max_streams: usize,
     idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
 ) -> Result<()> {
     serve_mux_plain_public(
         control,
@@ -89,6 +101,7 @@ pub async fn serve_mux_public_tls(
         Some(public_acceptor),
         max_streams,
         idle_timeout_secs,
+        allow_public,
     )
     .await
 }
@@ -100,6 +113,7 @@ async fn serve_mux_plain_public(
     public_acceptor: Option<TlsAcceptor>,
     max_streams: usize,
     idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
 ) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
@@ -138,6 +152,7 @@ async fn serve_mux_plain_public(
         tracing::info!(%peer, "reverse mux client connected");
         let public = public.clone();
         let public_acceptor = public_acceptor.clone();
+        let allow_public = allow_public.clone();
         let token = token.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_authorized_control(
@@ -147,6 +162,7 @@ async fn serve_mux_plain_public(
                 token,
                 max_streams,
                 idle_timeout_secs,
+                allow_public,
             )
             .await
             {
@@ -163,6 +179,7 @@ async fn serve_authorized_control<S>(
     token: String,
     max_streams: usize,
     idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -176,6 +193,7 @@ where
         public_acceptor,
         max_streams,
         idle_timeout_secs,
+        allow_public,
     )
     .await
 }
@@ -187,6 +205,7 @@ async fn serve_control(
     public_acceptor: Option<TlsAcceptor>,
     max_streams: usize,
     idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
 ) -> Result<()> {
     let writer: Writer = Arc::new(Mutex::new(writer));
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -206,6 +225,15 @@ async fn serve_control(
             accepted = public.accept() => match accepted { Ok(pair) => pair, Err(error) => break Err(error.into()) },
             _ = cancel.cancelled() => break Ok(()),
         };
+        if !allow_public.is_empty()
+            && !allow_public
+                .iter()
+                .any(|network| network.contains(&peer.ip()))
+        {
+            tracing::warn!(%peer, "reverse mux public connection denied by CIDR allowlist");
+            let _ = exposed.shutdown().await;
+            continue;
+        }
         if active_streams.load(Ordering::Relaxed) >= max_streams as u32 {
             let _ = exposed.shutdown().await;
             continue;
@@ -444,6 +472,7 @@ pub async fn serve_mux_tls(
     acceptor: TlsAcceptor,
     max_streams: usize,
     idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
 ) -> Result<()> {
     serve_mux_tls_public(
         control,
@@ -453,10 +482,12 @@ pub async fn serve_mux_tls(
         None,
         max_streams,
         idle_timeout_secs,
+        allow_public,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_mux_tls_public(
     control: TcpListener,
     public: TcpListener,
@@ -465,6 +496,7 @@ pub async fn serve_mux_tls_public(
     public_acceptor: Option<TlsAcceptor>,
     max_streams: usize,
     idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
 ) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
@@ -509,6 +541,7 @@ pub async fn serve_mux_tls_public(
         tracing::info!(%peer, "reverse mux TLS client connected");
         let public = public.clone();
         let public_acceptor = public_acceptor.clone();
+        let allow_public = allow_public.clone();
         let token = token.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_authorized_control(
@@ -518,6 +551,7 @@ pub async fn serve_mux_tls_public(
                 token,
                 max_streams,
                 idle_timeout_secs,
+                allow_public,
             )
             .await
             {
