@@ -64,3 +64,51 @@ fn nat_pmp_rejects_bad_gateways_and_refusals() {
     assert!(nat::parse_response(&refused, gateway).is_err());
     assert!(nat::parse_response(&[0, 129], gateway).is_err());
 }
+
+#[tokio::test]
+async fn nat_pmp_renews_until_cancelled() {
+    let gateway = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = gateway.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut buffer = [0u8; 32];
+        for epoch in 1u32..=2 {
+            let (size, peer) = gateway.recv_from(&mut buffer).await.unwrap();
+            assert_eq!(size, 12);
+            let mut reply = vec![0, 129, 0, 0];
+            reply.extend_from_slice(&epoch.to_be_bytes());
+            reply.extend_from_slice(&9000u16.to_be_bytes());
+            reply.extend_from_slice(&40000u16.to_be_bytes());
+            reply.extend_from_slice(&120u32.to_be_bytes());
+            gateway.send_to(&reply, peer).await.unwrap();
+        }
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(nat::maintain(
+        address,
+        9000,
+        0,
+        120,
+        Duration::from_millis(50),
+        cancel.clone(),
+        move |mapping| {
+            tx.send(mapping.epoch).unwrap();
+        },
+    ));
+    let first = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((first, second), (1, 2));
+    cancel.cancel();
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+}

@@ -68,6 +68,12 @@ enum Command {
         /// Delete the mapping instead of creating it.
         #[arg(long)]
         delete: bool,
+        /// Keep renewing the mapping until Ctrl-C.
+        #[arg(long)]
+        renew: bool,
+        /// Seconds between renewals (defaults to half the lifetime).
+        #[arg(long)]
+        renew_after_secs: Option<u64>,
     },
     /// Run the control API and embedded administration interface.
     Server {
@@ -205,18 +211,47 @@ async fn main() -> Result<()> {
             external_port,
             lifetime_secs,
             delete,
+            renew,
+            renew_after_secs,
         } => {
             let gateway = relay_platform::nat::gateway_from(&gateway)?;
             relay_platform::nat::validate_ports(internal_port, external_port)?;
             relay_platform::nat::validate_lifetime(lifetime_secs)?;
             let lifetime = if delete { 0 } else { lifetime_secs };
-            let mapping = tokio::runtime::Runtime::new()?.block_on(relay_platform::nat::map(
-                gateway,
-                internal_port,
-                external_port,
-                lifetime,
-            ))?;
-            println!("{}", serde_json::to_string_pretty(&mapping)?);
+            let runtime = tokio::runtime::Runtime::new()?;
+            if renew && !delete {
+                let after = renew_after_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| Duration::from_secs(u64::from((lifetime_secs / 2).max(1))));
+                let cancel = CancellationToken::new();
+                let stop = cancel.clone();
+                let task = relay_platform::nat::maintain(
+                    gateway,
+                    internal_port,
+                    external_port,
+                    lifetime,
+                    after,
+                    stop,
+                    |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
+                );
+                runtime.block_on(async {
+                    tokio::select! {
+                        result = task => result,
+                        _ = tokio::signal::ctrl_c() => {
+                            cancel.cancel();
+                            Ok(())
+                        }
+                    }
+                })?;
+            } else {
+                let mapping = runtime.block_on(relay_platform::nat::map(
+                    gateway,
+                    internal_port,
+                    external_port,
+                    lifetime,
+                ))?;
+                println!("{}", serde_json::to_string_pretty(&mapping)?);
+            }
         }
         Command::MptcpInfo => {
             println!(

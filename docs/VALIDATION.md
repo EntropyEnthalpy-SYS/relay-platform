@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.49.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.49.0.txt](verification-0.49.0.txt)，逐项清单见 [validation-evidence-0.49.0.json](validation-evidence-0.49.0.json)。
+0.50.0 开发版在 macOS 27.0.1 arm64 通过 **382 项自动化测试（353 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 383 项。日志见 [verification-0.50.0.txt](verification-0.50.0.txt)，逐项清单见 [validation-evidence-0.50.0.json](validation-evidence-0.50.0.json)。
 
-## 0.49.0 rollout 重试验证
+## 0.50.0 NAT-PMP 续租验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 续租 | 假网关连续两次请求，epoch 1/2，外部端口保持 |
+| 取消 | 两次回调后取消，任务及时退出 |
+| 边界 | 续租间隔必须小于生命周期；`--delete` 不续租 |
+| 限制 | 仅 NAT-PMP；PCP/UPnP 续租、状态持久化、真实路由器未验收 |
+
+## 0.49.0 rollout 重试验证（历史）
+
+0.49.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.49.0.txt](verification-0.49.0.txt)，逐项清单见 [validation-evidence-0.49.0.json](validation-evidence-0.49.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |
