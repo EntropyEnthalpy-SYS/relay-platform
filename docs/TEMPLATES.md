@@ -43,7 +43,8 @@
 - `GET /templates/{id}/versions` 返回当前及历史版本（新到旧）；历史快照不可变。
 - `POST /templates/{id}/versions/{version}/rollback` 把旧内容作为**新版本**写回（版本号继续增加），不是删除历史或降级版本号。
 - 只能回滚到严格更旧的版本；回滚需要管理员权限并写审计。
-- 当前应用/批量/重试仍使用最新版本；模板版本与节点配置修订是两套独立计数。
+- 应用/批量可传 `template_version` 固定使用某个历史版本；省略时使用最新版本。固定版本按快照渲染，版本不存在或未来版本会拒绝。
+- 模板版本与节点配置修订是两套独立计数。
 - 面板模板页“版本”按钮列出历史并提供回滚。
 
 ## 变量替换
@@ -99,7 +100,7 @@
 | GET | `/templates/{id}/versions` | 当前和历史模板版本 |
 | POST | `/templates/{id}/versions/{version}/rollback` | 旧内容作为新版本写回 |
 | POST | `/templates/{id}/rollout` | 有序分批应用到多个节点，失败停止后续批次 |
-| POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?}` 应用模板；变量覆盖默认值 |
+| POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?,template_version?}` 应用模板；可固定历史版本 |
 | POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |
 
 `/templates*` 和节点模板应用仅接受登录会话，API 令牌访问 403。面板规则表格的“存为模板”和“规则模板”页提供保存、应用、删除。

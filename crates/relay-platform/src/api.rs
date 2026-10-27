@@ -1509,6 +1509,7 @@ async fn rollout_template(
                 name: target.name,
                 listen,
                 variables: target.variables,
+                template_version: target.template_version,
             })
         })
         .collect::<std::result::Result<Vec<_>, ApiError>>()?;
@@ -1561,6 +1562,8 @@ struct ApplyTemplate {
     listen: String,
     #[serde(default)]
     variables: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    template_version: Option<u64>,
 }
 async fn templates(
     State(state): State<AppState>,
@@ -1646,6 +1649,7 @@ async fn apply_template(
                 &input.name,
                 listen,
                 &input.variables,
+                input.template_version,
             )
         })
         .await?,

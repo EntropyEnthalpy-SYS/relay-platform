@@ -41,6 +41,8 @@ pub struct RolloutTargetInput {
     pub listen: String,
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
+    #[serde(default)]
+    pub template_version: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutTarget {
@@ -50,6 +52,8 @@ pub struct RolloutTarget {
     pub listen: std::net::SocketAddr,
     #[serde(default)]
     pub variables: BTreeMap<String, String>,
+    #[serde(default)]
+    pub template_version: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutResult {

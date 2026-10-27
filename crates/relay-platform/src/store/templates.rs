@@ -8,6 +8,16 @@ fn key(id: &str) -> String {
 fn version_key(id: &str, version: u64) -> String {
     format!("template-version:{id}:{version}")
 }
+fn read_version(conn: &Connection, id: &str, version: u64) -> Result<Option<RuleTemplate>> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM metadata WHERE key=?1",
+            [version_key(id, version)],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(raw.map(|value| serde_json::from_str(&value)).transpose()?)
+}
 fn write_version(tx: &Transaction<'_>, value: &RuleTemplate) -> Result<()> {
     tx.execute(
         "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -343,6 +353,7 @@ impl Store {
                     &target.name,
                     target.listen,
                     &target.variables,
+                    target.template_version,
                 ) {
                     Ok(config) => {
                         applied += 1;
@@ -505,6 +516,7 @@ impl Store {
             name,
             listen,
             &std::collections::BTreeMap::new(),
+            None,
         )
     }
 
@@ -518,6 +530,7 @@ impl Store {
         name: &str,
         listen: std::net::SocketAddr,
         overrides: &std::collections::BTreeMap<String, String>,
+        template_version: Option<u64>,
     ) -> Result<NodeConfig> {
         require_writer(actor)?;
         let (mut config, tenant) = {
@@ -542,7 +555,19 @@ impl Store {
         };
         let (raw_rule, mut variables) = {
             let conn = self.0.lock().unwrap();
-            let template = read(&conn, template_id)?.context("template not found")?;
+            let current = read(&conn, template_id)?.context("template not found")?;
+            let template = match template_version {
+                None => current,
+                Some(version) if version == current.version => current,
+                Some(version) => {
+                    ensure!(
+                        version > 0 && version < current.version,
+                        "template version is not available"
+                    );
+                    read_version(&conn, template_id, version)?
+                        .context("template version not found")?
+                }
+            };
             (template.rule, template.variables)
         };
         validate_variables(overrides)?;

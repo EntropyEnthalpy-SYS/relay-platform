@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.55.0 开发版在 macOS 27.0.1 arm64 通过 **389 项自动化测试（360 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 390 项。日志见 [verification-0.55.0.txt](verification-0.55.0.txt)，逐项清单见 [validation-evidence-0.55.0.json](validation-evidence-0.55.0.json)。
+0.56.0 开发版在 macOS 27.0.1 arm64 通过 **389 项自动化测试（360 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 390 项。日志见 [verification-0.56.0.txt](verification-0.56.0.txt)，逐项清单见 [validation-evidence-0.56.0.json](validation-evidence-0.56.0.json)。
 
-## 0.55.0 模板版本验证
+## 0.56.0 固定版本应用验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 固定版本 | v2 后应用 `template_version=1`，使用 v1 的目标 |
+| 默认 | 省略版本使用当前最新内容 |
+| 复用 | 批量目标可携带版本；重试保留 |
+| 限制 | 只固定模板内容，不恢复节点配置；无 diff/百分比 canary |
+
+## 0.55.0 模板版本验证（历史）
+
+0.55.0 开发版在 macOS 27.0.1 arm64 通过 **389 项自动化测试（360 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 390 项。日志见 [verification-0.55.0.txt](verification-0.55.0.txt)，逐项清单见 [validation-evidence-0.55.0.json](validation-evidence-0.55.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

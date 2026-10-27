@@ -124,6 +124,7 @@ fn rollout_stops_after_a_failed_canary_batch() {
             name: format!("rollout-{}", node.id),
             listen: format!("127.0.0.1:{port}").parse().unwrap(),
             variables: Default::default(),
+            template_version: None,
         }
     };
     let report = store
@@ -197,6 +198,7 @@ fn template_variables_render_and_can_be_overridden() {
             "override",
             "127.0.0.1:19002".parse().unwrap(),
             &overrides,
+            None,
         )
         .unwrap();
     assert_eq!(changed.rules[1].targets[0].address, "localhost:9000");
