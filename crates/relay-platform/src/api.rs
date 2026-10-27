@@ -430,6 +430,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/recovery", get(recovery_status))
         .route("/api/v1/control/metrics", get(control_metrics))
+        .route("/api/v1/metrics", get(prometheus_metrics))
         .route("/api/v1/capabilities", get(capabilities))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -1327,6 +1328,71 @@ async fn control_metrics(
     }
     Ok(Json(state.sync_queue.stats()))
 }
+async fn prometheus_metrics(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> Result<(StatusCode, HeaderMap, String), ApiError> {
+    let nodes = database(state.store, move |db| db.nodes(&actor)).await?;
+    let mut body = format!(
+        "# HELP relay_build_info Build identity.\n# TYPE relay_build_info gauge\nrelay_build_info{{version=\"{}\"}} 1\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    body.push_str(
+        "# HELP relay_node_up Node presence in the controller.\n# TYPE relay_node_up gauge\n",
+    );
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_up{{node=\"{}\",tenant=\"{}\"}} 1\n",
+            metric_label(&node.id),
+            metric_label(&node.tenant_id)
+        ));
+    }
+    body.push_str("# HELP relay_node_active_tcp Active TCP connections.\n# TYPE relay_node_active_tcp gauge\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_active_tcp{{node=\"{}\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.active_tcp
+        ));
+    }
+    body.push_str("# HELP relay_node_forwarded_bytes Forwarded application bytes.\n# TYPE relay_node_forwarded_bytes counter\n");
+    for node in &nodes {
+        body.push_str(&format!(
+            "relay_node_forwarded_bytes{{node=\"{}\",direction=\"upload\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.forwarded_upload_bytes
+        ));
+        body.push_str(&format!(
+            "relay_node_forwarded_bytes{{node=\"{}\",direction=\"download\"}} {}\n",
+            metric_label(&node.id),
+            node.stats.forwarded_download_bytes
+        ));
+    }
+    body.push_str("# HELP relay_node_apply_error Nodes with a configuration apply error.\n# TYPE relay_node_apply_error gauge\n");
+    for node in &nodes {
+        if let Some(error) = &node.apply_error {
+            body.push_str(&format!(
+                "relay_node_apply_error{{node=\"{}\",error=\"{}\"}} 1\n",
+                metric_label(&node.id),
+                metric_label(error)
+            ));
+        }
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    Ok((StatusCode::OK, headers, body))
+}
+
+fn metric_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
 async fn health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
     let healthy = database(state.store, |db| db.recovery_log_status())
         .await

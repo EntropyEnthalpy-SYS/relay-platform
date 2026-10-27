@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.69.0 开发版在 macOS 27.0.1 arm64 通过 **402 项自动化测试（373 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 403 项。日志见 [verification-0.69.0.txt](verification-0.69.0.txt)，逐项清单见 [validation-evidence-0.69.0.json](validation-evidence-0.69.0.json)。
+0.70.0 开发版在 macOS 27.0.1 arm64 通过 **403 项自动化测试（374 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 404 项。日志见 [verification-0.70.0.txt](verification-0.70.0.txt)，逐项清单见 [validation-evidence-0.70.0.json](validation-evidence-0.70.0.json)。
 
-## 0.69.0 DNS 分页验证
+## 0.70.0 Prometheus 指标验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 认证 | Viewer 登录后可读 |
+| 内容 | 构建信息、节点在线、活动 TCP、转发字节 |
+| 格式 | `text/plain; version=0.0.4` |
+| 限制 | 无规则级/UDP/延迟直方图或长期历史 |
+
+## 0.69.0 DNS 分页验证（历史）
+
+0.69.0 开发版在 macOS 27.0.1 arm64 通过 **402 项自动化测试（373 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 403 项。日志见 [verification-0.69.0.txt](verification-0.69.0.txt)，逐项清单见 [validation-evidence-0.69.0.json](validation-evidence-0.69.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

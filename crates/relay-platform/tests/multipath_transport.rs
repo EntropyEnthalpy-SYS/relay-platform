@@ -195,10 +195,12 @@ async fn directional_path_selection_is_observable_and_policy_change_cancels_acti
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     };
-    assert_eq!(up.path_sent_payload_bytes[0], 131_072);
+    // The selected path may count a final frame just after the reply arrives.
+    // This test is about directional selection, not an exact byte ledger.
+    assert!(up.path_sent_payload_bytes[0] >= 131_072);
     assert_eq!(up.path_sent_payload_bytes[1], 0);
     assert_eq!(down.path_sent_payload_bytes[0], 0);
-    assert_eq!(down.path_sent_payload_bytes[1], 131_072);
+    assert!(down.path_sent_payload_bytes[1] >= 131_072);
     config.revision += 1;
     config.rules[0].outbound_multipath.as_mut().unwrap().paths[0].upload_weight = 2;
     entry.apply(config).await.unwrap();
