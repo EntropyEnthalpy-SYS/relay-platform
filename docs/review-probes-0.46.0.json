@@ -1,0 +1,27 @@
+{
+  "binary": "/Users/zzb/CodeX/2026-10-24/new-chat/outputs/relay-platform/target/release/relay",
+  "sha256": "9c2c3a1ea8dba469cc6fbb32cbcb0627af53b5569d2ee13115f797484a5cf985",
+  "scope": "localhost only, authenticated SOCKS5, original unmodified source build",
+  "checks": {
+    "bind_policy": {
+      "defect_reproduced": false,
+      "error": "TimeoutError('timed out')"
+    },
+    "shared_ip_cross_delivery": {
+      "defect_reproduced": false,
+      "error": "TimeoutError('timed out')"
+    },
+    "udp_survives_control_close": {
+      "defect_reproduced": false,
+      "error": "TimeoutError('timed out')"
+    },
+    "udp_unexpected_reply_source": {
+      "defect_reproduced": false,
+      "error": "TimeoutError('timed out')"
+    },
+    "mixed_dns_ip_allowlist": {
+      "defect_reproduced": false,
+      "error": "AssertionError()"
+    }
+  }
+}

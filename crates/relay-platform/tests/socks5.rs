@@ -266,3 +266,192 @@ async fn socks5_bind_accepts_an_inbound_connection_and_relays_bytes() {
     drop(control);
     engine.shutdown().await.unwrap();
 }
+
+async fn socks5_control(listen: SocketAddr) -> TcpStream {
+    let mut control = TcpStream::connect(listen).await.unwrap();
+    control.write_all(&[5, 1, 0]).await.unwrap();
+    let mut selected = [0u8; 2];
+    control.read_exact(&mut selected).await.unwrap();
+    assert_eq!(selected, [5, 0]);
+    control
+}
+
+async fn socks5_udp_associate(listen: SocketAddr) -> (TcpStream, SocketAddr) {
+    let mut control = socks5_control(listen).await;
+    control
+        .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    let mut reply = [0u8; 10];
+    control.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply[..4], &[5, 0, 0, 1]);
+    (
+        control,
+        SocketAddr::from((
+            [reply[4], reply[5], reply[6], reply[7]],
+            u16::from_be_bytes([reply[8], reply[9]]),
+        )),
+    )
+}
+
+fn udp_packet(target: SocketAddr, payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0, 0, 0, 1];
+    packet.extend_from_slice(
+        &target
+            .ip()
+            .to_string()
+            .parse::<std::net::Ipv4Addr>()
+            .unwrap()
+            .octets(),
+    );
+    packet.extend_from_slice(&target.port().to_be_bytes());
+    packet.extend_from_slice(payload);
+    packet
+}
+
+#[tokio::test]
+async fn socks5_udp_associations_are_isolated_behind_one_ip() {
+    let mut rule = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Both);
+    rule.targets.clear();
+    rule.inbound_socks5 = Some(socks5::ServerConfig {
+        username: None,
+        password: None,
+        allow_private_destinations: true,
+    });
+    let listen = rule.listen;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    engine.apply(config(rule)).await.unwrap();
+    let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (a_control, a_relay) = socks5_udp_associate(listen).await;
+    let (b_control, b_relay) = socks5_udp_associate(listen).await;
+    assert_ne!(a_relay, b_relay);
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    a.send_to(
+        &udp_packet(target.local_addr().unwrap(), b"A-only"),
+        a_relay,
+    )
+    .await
+    .unwrap();
+    let mut target_buffer = [0u8; 64];
+    let (body_size, outbound) = target.recv_from(&mut target_buffer).await.unwrap();
+    assert_eq!(&target_buffer[..body_size], b"A-only");
+    target
+        .send_to(&target_buffer[..body_size], outbound)
+        .await
+        .unwrap();
+    let mut reply = [0u8; 64];
+    let (size, _) = timeout(Duration::from_secs(2), a.recv_from(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply[10..size], b"A-only");
+    b.send_to(
+        &udp_packet(target.local_addr().unwrap(), b"B-only"),
+        b_relay,
+    )
+    .await
+    .unwrap();
+    let (body_size, outbound) = target.recv_from(&mut target_buffer).await.unwrap();
+    assert_eq!(&target_buffer[..body_size], b"B-only");
+    target
+        .send_to(&target_buffer[..body_size], outbound)
+        .await
+        .unwrap();
+    let (size, _) = timeout(Duration::from_secs(2), b.recv_from(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply[10..size], b"B-only");
+    assert!(
+        timeout(Duration::from_millis(150), a.recv_from(&mut reply))
+            .await
+            .is_err()
+    );
+    drop(a_control);
+    drop(b_control);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn socks5_udp_replies_stop_with_the_control_connection() {
+    let mut rule = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Both);
+    rule.targets.clear();
+    rule.idle_timeout_secs = 1;
+    rule.inbound_socks5 = Some(socks5::ServerConfig {
+        username: None,
+        password: None,
+        allow_private_destinations: true,
+    });
+    let listen = rule.listen;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    engine.apply(config(rule)).await.unwrap();
+    let target = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (control, relay) = socks5_udp_associate(listen).await;
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    client
+        .send_to(&udp_packet(target.local_addr().unwrap(), b"before"), relay)
+        .await
+        .unwrap();
+    let mut target_buffer = [0u8; 64];
+    let (body_size, outbound) = target.recv_from(&mut target_buffer).await.unwrap();
+    target
+        .send_to(&target_buffer[..body_size], outbound)
+        .await
+        .unwrap();
+    let mut reply = [0u8; 64];
+    timeout(Duration::from_secs(2), client.recv_from(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(control);
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    target.send_to(b"after-close", outbound).await.unwrap();
+    assert!(
+        timeout(Duration::from_millis(300), client.recv_from(&mut reply))
+            .await
+            .is_err()
+    );
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn socks5_bind_rejects_a_peer_outside_the_requested_policy() {
+    let mut rule = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    rule.targets.clear();
+    rule.connect_timeout_ms = 100;
+    rule.deny_destinations = vec!["127.0.0.0/8".into()];
+    rule.inbound_socks5 = Some(socks5::ServerConfig {
+        username: None,
+        password: None,
+        allow_private_destinations: false,
+    });
+    let listen = rule.listen;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    engine.apply(config(rule)).await.unwrap();
+    let mut control = socks5_control(listen).await;
+    control
+        .write_all(&[5, 2, 0, 1, 203, 0, 113, 55, 0xa4, 0x10])
+        .await
+        .unwrap();
+    let mut bind_reply = [0u8; 10];
+    control.read_exact(&mut bind_reply).await.unwrap();
+    assert_eq!(&bind_reply[..4], &[5, 0, 0, 1]);
+    let bind = SocketAddr::from((
+        [bind_reply[4], bind_reply[5], bind_reply[6], bind_reply[7]],
+        u16::from_be_bytes([bind_reply[8], bind_reply[9]]),
+    ));
+    let inbound = TcpStream::connect(bind).await.unwrap();
+    let mut failure = [0u8; 10];
+    timeout(Duration::from_secs(2), control.read_exact(&mut failure))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failure[1], 5);
+    drop(inbound);
+    drop(control);
+    engine.shutdown().await.unwrap();
+}

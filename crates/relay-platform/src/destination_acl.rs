@@ -25,18 +25,45 @@ impl DestinationPolicy {
             deny: parse_list(deny)?,
         })
     }
-    pub fn permits(&self, host: &str, ips: impl IntoIterator<Item = IpAddr>) -> bool {
+    /// Returns only the resolved addresses that the policy authorizes.
+    /// A domain/allow entry authorizes the hostname (and therefore its
+    /// undeined addresses), while an IP/CIDR allow entry authorizes only
+    /// matching addresses. Deny entries remove matching addresses; a denied
+    /// hostname removes every address.
+    pub fn filter(&self, host: &str, ips: impl IntoIterator<Item = IpAddr>) -> Vec<IpAddr> {
         let host = normalize_host(host);
-        let ips: Vec<IpAddr> = ips.into_iter().collect();
-        if self.deny.iter().any(|pattern| {
-            pattern.matches_host(&host) || ips.iter().any(|ip| pattern.matches_ip(*ip))
-        }) {
+        if self.deny.iter().any(|pattern| pattern.matches_host(&host)) {
+            return Vec::new();
+        }
+        let host_allowed =
+            self.allow.is_empty() || self.allow.iter().any(|pattern| pattern.matches_host(&host));
+        ips.into_iter()
+            .filter(|ip| {
+                !self.deny.iter().any(|pattern| pattern.matches_ip(*ip))
+                    && (host_allowed || self.allow.iter().any(|pattern| pattern.matches_ip(*ip)))
+            })
+            .collect()
+    }
+    /// Compatibility predicate used by fixed-IP checks. It is true when the
+    /// host is authorized or at least one supplied address survives filtering.
+    pub fn permits(&self, host: &str, ips: impl IntoIterator<Item = IpAddr>) -> bool {
+        let host_value = normalize_host(host);
+        if self
+            .deny
+            .iter()
+            .any(|pattern| pattern.matches_host(&host_value))
+        {
             return false;
         }
-        self.allow.is_empty()
-            || self.allow.iter().any(|pattern| {
-                pattern.matches_host(&host) || ips.iter().any(|ip| pattern.matches_ip(*ip))
-            })
+        if self.allow.is_empty()
+            || self
+                .allow
+                .iter()
+                .any(|pattern| pattern.matches_host(&host_value))
+        {
+            return true;
+        }
+        self.filter(&host_value, ips).into_iter().next().is_some()
     }
     pub fn permits_address(&self, address: std::net::SocketAddr) -> bool {
         self.permits(&address.ip().to_string(), [address.ip()])
@@ -141,6 +168,42 @@ mod tests {
         assert!(!policy.permits("other.test", ["10.9.1.1".parse().unwrap()]));
         assert!(!policy.permits("other.test", ["203.0.113.8".parse().unwrap()]));
         assert!(policy.permits("other.test", ["203.0.113.7".parse().unwrap()]));
+    }
+
+    #[test]
+    fn ip_allowlist_filters_mixed_answers() {
+        let policy = DestinationPolicy::parse(&["127.0.0.1/32".into()], &[]).unwrap();
+        let filtered = policy.filter(
+            "localhost",
+            ["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()],
+        );
+        assert_eq!(filtered, vec!["127.0.0.1".parse::<IpAddr>().unwrap()]);
+        assert!(
+            DestinationPolicy::parse(&["*.example.com".into()], &[])
+                .unwrap()
+                .filter(
+                    "api.example.com",
+                    [
+                        "203.0.113.8".parse().unwrap(),
+                        "203.0.113.9".parse().unwrap()
+                    ]
+                )
+                .len()
+                == 2
+        );
+        assert!(
+            DestinationPolicy::parse(&[], &["203.0.113.9".into()])
+                .unwrap()
+                .filter(
+                    "api.example.com",
+                    [
+                        "203.0.113.8".parse().unwrap(),
+                        "203.0.113.9".parse().unwrap()
+                    ]
+                )
+                .len()
+                == 1
+        );
     }
 
     #[test]

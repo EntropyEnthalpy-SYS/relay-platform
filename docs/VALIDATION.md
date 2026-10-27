@@ -1,8 +1,21 @@
 # 本地验证记录
 
-0.45.0 开发版在 macOS 27.0.1 arm64 通过 **375 项自动化测试（346 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 376 项。日志见 [verification-0.45.0.txt](verification-0.45.0.txt)，逐项清单见 [validation-evidence-0.45.0.json](validation-evidence-0.45.0.json)。
+0.46.0 稳定化版在 macOS 27.0.1 arm64 通过 **380 项自动化测试（351 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 381 项。日志见 [verification-0.46.0.txt](verification-0.46.0.txt)，逐项清单见 [validation-evidence-0.46.0.json](validation-evidence-0.46.0.json)。
 
-## 0.45.0 SOCKS5 BIND 验证
+## 0.46.0 审查 R1–R5 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| R1 | 同 IP 两个 UDP 关联获得不同中继端点；A/B 各自回显，互不串流 |
+| R2 | 混合 A/AAAA 只保留允许地址；审查 DNS 探针不再复现 |
+| R3 | 错误/被拒绝 BIND 对端被丢弃并返回失败 |
+| R4 | 控制关闭 1.3 秒后不再收到回复；关联任务取消 |
+| R5 | 失败修订下新 1 KiB/s 限额在 16 秒内生效，128 KiB 回显被限速 |
+| 审查探针 | 修复后 5 项均 `defect_reproduced=false` |
+
+## 0.45.0 SOCKS5 BIND 验证（历史）
+
+0.45.0 开发版在 macOS 27.0.1 arm64 通过 **375 项自动化测试（346 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 376 项。日志见 [verification-0.45.0.txt](verification-0.45.0.txt)，逐项清单见 [validation-evidence-0.45.0.json](validation-evidence-0.45.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

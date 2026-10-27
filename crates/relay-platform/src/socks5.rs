@@ -3,12 +3,8 @@
 use crate::shadowsocks::Destination;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
-type UdpReply = UnboundedSender<(SocketAddr, Vec<u8>)>;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
 
@@ -42,56 +38,13 @@ pub struct Server {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Connect(Destination),
-    Bind,
+    Bind(Destination),
     UdpAssociate,
 }
 #[derive(Clone, Debug)]
 pub struct UdpDatagram {
-    pub client: SocketAddr,
     pub destination: Destination,
     pub payload: Vec<u8>,
-}
-struct UdpAssociation {
-    id: u64,
-    tx: UnboundedSender<UdpDatagram>,
-}
-#[derive(Default)]
-pub struct UdpRegistry {
-    inner: StdMutex<HashMap<IpAddr, UdpAssociation>>,
-    reply: StdMutex<Option<UdpReply>>,
-    next: std::sync::atomic::AtomicU64,
-}
-impl UdpRegistry {
-    /// Registers one control association for a client IP. A newer control
-    /// connection replaces the older binding; the old task exits when its
-    /// control socket closes.
-    pub fn register(&self, ip: IpAddr) -> (u64, tokio::sync::mpsc::UnboundedReceiver<UdpDatagram>) {
-        let (tx, rx) = unbounded_channel();
-        let id = self
-            .next
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            .wrapping_add(1);
-        self.inner
-            .lock()
-            .unwrap()
-            .insert(ip, UdpAssociation { id, tx });
-        (id, rx)
-    }
-    pub fn unregister(&self, ip: IpAddr, id: u64) {
-        let mut map = self.inner.lock().unwrap();
-        if map.get(&ip).is_some_and(|association| association.id == id) {
-            map.remove(&ip);
-        }
-    }
-    pub fn sender(&self, ip: IpAddr) -> Option<UnboundedSender<UdpDatagram>> {
-        self.inner.lock().unwrap().get(&ip).map(|a| a.tx.clone())
-    }
-    pub fn set_reply(&self, tx: UdpReply) {
-        *self.reply.lock().unwrap() = Some(tx);
-    }
-    pub fn reply_sender(&self) -> Option<UdpReply> {
-        self.reply.lock().unwrap().clone()
-    }
 }
 impl Server {
     pub fn new(config: &ServerConfig) -> Result<Self> {
@@ -103,10 +56,9 @@ impl Server {
     pub fn permits(&self, ip: IpAddr) -> bool {
         self.config.allow_private_destinations || crate::shadowsocks::public(ip)
     }
-    /// Performs the greeting, optional authentication and CONNECT request.
-    /// On success the caller must connect to the returned destination and then
-    /// call [`reply`] with a status. On malformed/unsupported input this method
-    /// sends a failure reply where the protocol still permits one.
+    /// Performs the greeting, optional authentication and CONNECT/BIND/
+    /// UDP ASSOCIATE request. On malformed/unsupported input this method sends
+    /// a failure reply where the protocol still permits one.
     pub async fn accept<S>(&self, stream: &mut S, deadline: Instant) -> Result<Request>
     where
         S: AsyncRead + AsyncWrite + Unpin,
@@ -172,7 +124,7 @@ impl Server {
                 );
                 Ok(Request::Connect(destination))
             }
-            2 => Ok(Request::Bind),
+            2 => Ok(Request::Bind(destination)),
             3 => Ok(Request::UdpAssociate),
             command => {
                 let _ = reply(stream, 7).await;
@@ -270,7 +222,6 @@ pub fn parse_udp_datagram(packet: &[u8]) -> Result<UdpDatagram> {
     ensure!(packet[2] == 0, "SOCKS5 UDP fragmentation is not supported");
     let (destination, payload_start) = parse_udp_address(&packet[3..])?;
     Ok(UdpDatagram {
-        client: SocketAddr::from(([0, 0, 0, 0], 0)),
         destination,
         payload: packet[3 + payload_start..].to_vec(),
     })
@@ -392,7 +343,7 @@ mod tests {
         let request = task.await.unwrap().unwrap();
         match request {
             Request::Connect(destination) => assert_eq!(destination.to_string(), "example.com:443"),
-            Request::Bind | Request::UdpAssociate => panic!("expected CONNECT"),
+            Request::Bind(_) | Request::UdpAssociate => panic!("expected CONNECT"),
         }
     }
 

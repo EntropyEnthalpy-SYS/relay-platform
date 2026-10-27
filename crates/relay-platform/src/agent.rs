@@ -421,7 +421,10 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                 // old listener running, so keep its limits: renew
                                 // the shares already in force instead of applying a
                                 // list that no longer names the old owner.
-                                engine.renew_user_shares(sent);
+                                engine.reconcile_user_shares(
+                                    &synced.user_rates.unwrap_or_default(),
+                                    sent,
+                                );
                                 tracing::info!(
                                     "share update deferred: configuration activation is pending"
                                 );
