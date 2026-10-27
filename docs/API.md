@@ -438,10 +438,15 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | --- | --- | --- |
 | GET/POST | `/templates` | 可见模板/创建 `{tenant_id,name,description,rule}` |
 | PUT/DELETE | `/templates/{id}` | 编辑/删除，受租户范围 |
-| POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen}` 应用为新规则 |
+| POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?,template_version?}` 应用为新规则 |
 | POST | `/nodes/{node}/templates/{id}/preview` | `{name,listen}` 只校验并返回拟创建规则 |
-| POST | `/templates/{id}/rollout` | `{batch_size,canary_percent?,rollback_on_failure?,targets:[...]}` 分批应用；首批比例可选 |
-| POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，按当前修订重新应用 |
+| POST | `/templates/{id}/rollout` | `{batch_size,canary_percent?,rollback_on_failure?,require_healthy?,require_target_health?,wait_for_apply_ms?,targets:[...]}` 有序发布并通过所选门控 |
+| POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 从原首批重新检查并恢复；已发布规则复用身份，成功记录幂等返回，并发重试 409 |
+| GET | `/templates/{id}/versions` | 当前及历史模板版本 |
+| GET | `/templates/{id}/diff?from=1&to=2` | 两版本的结构化差异 |
+| POST | `/templates/{id}/versions/{version}/rollback` | 旧内容写为新版本，受当前及历史租户范围限制 |
+
+0.97.0 批量结果：`applied` 仅表示已发布；`acknowledged/healthy/completed/reused` 分别表示精确修订回执、规则健康、通过所选门控、复用旧发布。回执和健康门控均拒绝被后续修订取代的配置。重试完整规则及旧记录兼容边界见 [TEMPLATES.md](TEMPLATES.md)。
 
 模板创建/更新校验规则主体；应用生成新 ID、名称、监听和计量周期，走正常配置修订校验。`/templates*` 与节点模板应用仅登录会话。详见 [TEMPLATES.md](TEMPLATES.md)。
 

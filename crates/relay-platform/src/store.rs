@@ -85,6 +85,7 @@ pub struct Store(
     Arc<crate::telemetry::Telemetry>,
     Arc<crate::alerts::Alerts>,
     Arc<Mutex<user_rates::UserRates>>,
+    Arc<Mutex<std::collections::HashSet<String>>>,
 );
 #[derive(Default)]
 struct BudgetSignals {
@@ -304,6 +305,7 @@ impl Store {
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
             Arc::new(Mutex::new(leases::LeaseClocks::default())),
+            Arc::default(),
             Arc::default(),
             Arc::default(),
             Arc::default(),

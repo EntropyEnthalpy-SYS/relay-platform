@@ -679,3 +679,306 @@ async fn login(client: &reqwest::Client, origin: &str, username: &str) -> String
         .unwrap();
     body["token"].as_str().unwrap().to_string()
 }
+
+// R96-01/R96-02 regression fixtures deliberately acknowledge through the same
+// persisted fields as node sync, independently of the rollout implementation.
+fn acknowledge_rollout(
+    db: &std::path::Path,
+    node: &str,
+    config: &relay_platform::model::NodeConfig,
+) {
+    let checked = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let mut stats = serde_json::to_value(EngineStats::default()).unwrap();
+    stats["target_health"] = json!([{
+        "probe_kind":"tcp_connect", "rule_id":config.rules[0].id,
+        "target_index":0, "listen_port":config.rules[0].listen.port(),
+        "protocol":"tcp", "target_address":"127.0.0.1:9000",
+        "status":"healthy", "eligible":true, "selection_reason":"fixture",
+        "sample_age_ms":0, "max_age_ms":30000, "checked_at_ms":checked,
+        "latency_ewma_us":1000, "window_checks":1, "window_failures":0,
+        "jitter_us":null, "consecutive_successes":1, "consecutive_failures":0,
+        "completed_checks":1, "successful_checks":1, "last_error":null,
+        "probe_sent_bytes":1, "probe_received_bytes":1, "priority":0,
+        "active_sessions":0, "max_sessions":null
+    }]);
+    // Ensure the fixture itself matches the engine schema.
+    serde_json::from_value::<EngineStats>(stats.clone()).unwrap();
+    rusqlite::Connection::open(db).unwrap().execute(
+        "UPDATE nodes SET applied_revision=?1, stats_json=?2, last_seen_ms=?3, apply_error=NULL WHERE id=?4",
+        rusqlite::params![config.revision, stats.to_string(), checked, node],
+    ).unwrap();
+}
+
+fn rollout_targets(
+    store: &Store,
+    admin: &relay_platform::store::Actor,
+    count: usize,
+) -> Vec<relay_platform::template::RolloutTarget> {
+    (0..count)
+        .map(|index| {
+            let (node, _) = store
+                .create_node(admin, "default", &format!("retry-{index}"))
+                .unwrap();
+            let config = store.set_config(admin, &node.id, 0, vec![]).unwrap();
+            relay_platform::template::RolloutTarget {
+                node_id: node.id,
+                expected_revision: config.revision,
+                name: format!("retry-{index}"),
+                listen: format!("127.0.0.1:{}", 19800 + index).parse().unwrap(),
+                variables: Default::default(),
+                template_version: None,
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn retry_rechecks_original_canary_after_restart_and_replays_completed_attempt() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("controller.db");
+    let store = Store::open(&db).unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let targets = rollout_targets(&store, &admin, 2);
+    let template = store
+        .create_template(
+            &admin,
+            input(None, rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp)),
+        )
+        .unwrap();
+    let initial = store
+        .rollout_template(
+            &admin,
+            &template.id,
+            &targets,
+            1,
+            false,
+            Some(50),
+            false,
+            true,
+            Some(150),
+        )
+        .unwrap();
+    assert!(initial.aborted);
+    assert!(initial.results[0].applied);
+    assert!(!initial.results[0].acknowledged && !initial.results[0].completed);
+    let canary = store.config(&admin, &targets[0].node_id, None).unwrap();
+    drop(store);
+    let store = Store::open(&db).unwrap();
+    let blocked = store
+        .retry_rollout(&admin, &template.id, &initial.id)
+        .unwrap();
+    assert!(blocked.aborted && blocked.results[0].reused);
+    assert_eq!(blocked.results[0].rule_id, initial.results[0].rule_id);
+    assert_eq!(
+        store
+            .config(&admin, &targets[0].node_id, None)
+            .unwrap()
+            .revision,
+        canary.revision
+    );
+    assert_eq!(
+        store
+            .config(&admin, &targets[1].node_id, None)
+            .unwrap()
+            .revision,
+        1
+    );
+    // Editing the template after failure must not change later retry batches.
+    store
+        .update_template(
+            &admin,
+            &template.id,
+            input(None, rule("127.0.0.1:9001".parse().unwrap(), Protocol::Tcp)),
+        )
+        .unwrap();
+    acknowledge_rollout(&db, &targets[0].node_id, &canary);
+    let worker_store = store.clone();
+    let worker_admin = admin.clone();
+    let next = targets[1].node_id.clone();
+    let worker_db = db.clone();
+    let receipts = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let config = worker_store.config(&worker_admin, &next, None).unwrap();
+            if config.revision == 2 {
+                acknowledge_rollout(&worker_db, &next, &config);
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "second batch never published"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    // Retry the root ID again, not just the most recent failed attempt.
+    let completed = store
+        .retry_rollout(&admin, &template.id, &initial.id)
+        .unwrap();
+    receipts.join().unwrap();
+    assert!(!completed.aborted, "{completed:?}");
+    assert!(
+        completed
+            .results
+            .iter()
+            .all(|r| r.completed && r.acknowledged && r.healthy)
+    );
+    assert_eq!(completed.results[0].rule_id, initial.results[0].rule_id);
+    drop(store);
+    let store = Store::open(&db).unwrap();
+    let replay = store
+        .retry_rollout(&admin, &template.id, &blocked.id)
+        .unwrap();
+    assert_eq!(replay.id, completed.id);
+    for target in &targets {
+        let config = store.config(&admin, &target.node_id, None).unwrap();
+        assert_eq!(config.revision, 2);
+        assert_eq!(config.rules.len(), 1);
+        assert_eq!(config.rules[0].targets[0].address, "127.0.0.1:9000");
+    }
+}
+
+#[test]
+fn single_published_unacknowledged_target_can_be_retried_without_a_duplicate() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("controller.db");
+    let store = Store::open(&db).unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let targets = rollout_targets(&store, &admin, 1);
+    let template = store
+        .create_template(
+            &admin,
+            input(None, rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp)),
+        )
+        .unwrap();
+    let initial = store
+        .rollout_template(
+            &admin,
+            &template.id,
+            &targets,
+            1,
+            false,
+            None,
+            false,
+            false,
+            Some(100),
+        )
+        .unwrap();
+    assert!(initial.aborted && initial.results[0].applied);
+    let config = store.config(&admin, &targets[0].node_id, None).unwrap();
+    acknowledge_rollout(&db, &targets[0].node_id, &config);
+    let retry = store
+        .retry_rollout(&admin, &template.id, &initial.id)
+        .unwrap();
+    assert!(!retry.aborted && retry.results[0].completed && retry.results[0].reused);
+    assert_eq!(retry.results[0].rule_id, initial.results[0].rule_id);
+    assert_eq!(
+        store
+            .config(&admin, &targets[0].node_id, None)
+            .unwrap()
+            .rules
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn later_healthy_revision_cannot_qualify_canary_or_receipt_gate() {
+    for target_health in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("controller.db");
+        let store = Store::open(&db).unwrap();
+        let admin = store.bootstrap(PASSWORD).unwrap();
+        let targets = rollout_targets(&store, &admin, 2);
+        let template = store
+            .create_template(
+                &admin,
+                input(None, rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp)),
+            )
+            .unwrap();
+        let worker_store = store.clone();
+        let worker_admin = admin.clone();
+        let node = targets[0].node_id.clone();
+        let worker_db = db.clone();
+        let edit = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let mut config = worker_store.config(&worker_admin, &node, None).unwrap();
+                if config.revision == 2 {
+                    config.rules[0].name = "concurrent operator revision".into();
+                    let changed = worker_store
+                        .set_config(&worker_admin, &node, 2, config.rules)
+                        .unwrap();
+                    acknowledge_rollout(&worker_db, &node, &changed);
+                    return changed;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        let report = store
+            .rollout_template(
+                &admin,
+                &template.id,
+                &targets,
+                1,
+                false,
+                Some(50),
+                false,
+                target_health,
+                Some(1000),
+            )
+            .unwrap();
+        let changed = edit.join().unwrap();
+        assert!(report.aborted);
+        assert!(report.gate_error.as_deref().unwrap().contains("superseded"));
+        assert_eq!(
+            report.results[0].rule_id.as_ref().unwrap(),
+            &changed.rules[0].id
+        );
+        assert!(!report.results[0].completed);
+        assert_eq!(
+            store
+                .config(&admin, &targets[1].node_id, None)
+                .unwrap()
+                .revision,
+            1
+        );
+        let retry = store
+            .retry_rollout(&admin, &template.id, &report.id)
+            .unwrap();
+        assert!(retry.aborted);
+        assert!(
+            retry.results[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("superseded")
+        );
+        assert_eq!(
+            store
+                .config(&admin, &targets[0].node_id, None)
+                .unwrap()
+                .revision,
+            3
+        );
+        assert_eq!(
+            store
+                .config(&admin, &targets[0].node_id, None)
+                .unwrap()
+                .rules
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .config(&admin, &targets[1].node_id, None)
+                .unwrap()
+                .revision,
+            1
+        );
+    }
+}

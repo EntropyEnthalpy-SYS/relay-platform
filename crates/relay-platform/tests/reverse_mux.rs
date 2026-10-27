@@ -414,3 +414,174 @@ fn mux_metrics_identify_the_tunnel_process() {
     assert!(text.contains("relay_reverse_mux_process_available 1"));
     assert!(text.contains("relay_reverse_mux_bytes{direction=\"public_to_target\"} "));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn established_tls_controls_do_not_consume_pending_handshake_slots() {
+    let certs = tls::Certificates::new();
+    let acceptor = reverse_mux::tls_acceptor(
+        &certs.root.join("server/cert.pem"),
+        &certs.root.join("server/key.pem"),
+    )
+    .unwrap();
+    let (connector, name) =
+        reverse_mux::tls_connector(&certs.root.join("root/ca.pem"), "relay.test").unwrap();
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = tokio::spawn(reverse_mux::serve_mux_tls(
+        control,
+        public,
+        "slots".into(),
+        acceptor,
+        8,
+        30,
+        vec![],
+    ));
+    let mut established = Vec::new();
+    for index in 0..80 {
+        let mut stream = timeout(Duration::from_secs(2), async {
+            connector
+                .connect(name.clone(), TcpStream::connect(address).await.unwrap())
+                .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        stream.write_all(b"REVERSE-MUX slots\n").await.unwrap();
+        let mut ready = [0; 6];
+        timeout(Duration::from_secs(2), stream.read_exact(&mut ready))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&ready, b"READY\n", "control {index}");
+        established.push(stream);
+    }
+    // All 80 remain open concurrently; the 65th must not depend on closing one.
+    assert_eq!(established.len(), 80);
+    drop(established);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn pending_authentication_stays_bounded_and_releases_slots_on_failure() {
+    let certs = tls::Certificates::new();
+    let acceptor = reverse_mux::tls_acceptor(
+        &certs.root.join("server/cert.pem"),
+        &certs.root.join("server/key.pem"),
+    )
+    .unwrap();
+    let (connector, name) =
+        reverse_mux::tls_connector(&certs.root.join("root/ca.pem"), "relay.test").unwrap();
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = tokio::spawn(reverse_mux::serve_mux_tls(
+        control,
+        public,
+        "slots".into(),
+        acceptor,
+        8,
+        30,
+        vec![],
+    ));
+    let mut pending = Vec::new();
+    for _ in 0..64 {
+        let stream = timeout(Duration::from_secs(2), async {
+            connector
+                .connect(name.clone(), TcpStream::connect(address).await.unwrap())
+                .await
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        pending.push(stream); // TLS complete, token authentication still pending.
+    }
+    let rejected = timeout(Duration::from_secs(2), async {
+        connector
+            .connect(name.clone(), TcpStream::connect(address).await.unwrap())
+            .await
+    })
+    .await
+    .unwrap();
+    assert!(
+        rejected.is_err(),
+        "unauthenticated controls must retain the 64-slot bound"
+    );
+    let mut denied = pending.pop().unwrap();
+    denied.write_all(b"REVERSE-MUX wrong\n").await.unwrap();
+    let mut response = [0; 5];
+    timeout(Duration::from_secs(2), denied.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response, b"DENY\n");
+    drop(denied);
+    // A failed authentication returns its permit while all other 63 are pending.
+    let mut replacement = timeout(Duration::from_secs(2), async {
+        connector
+            .connect(name, TcpStream::connect(address).await.unwrap())
+            .await
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    replacement.write_all(b"REVERSE-MUX slots\n").await.unwrap();
+    let mut ready = [0; 6];
+    timeout(Duration::from_secs(2), replacement.read_exact(&mut ready))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&ready, b"READY\n");
+    drop(pending);
+    drop(replacement);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn healthy_bulk_transfer_and_half_close_keep_all_bytes() {
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public.local_addr().unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let data = vec![0x5a; 8 * 1024 * 1024];
+    let expected = data.clone();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = target.accept().await.unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).await.unwrap();
+        assert!(
+            request == expected,
+            "bulk request length: {} expected: {}",
+            request.len(),
+            expected.len()
+        );
+        stream.write_all(&request).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let server = tokio::spawn(reverse_mux::serve_mux(control, public, "bulk".into()));
+    let client = tokio::spawn(reverse_mux::client_mux(
+        control_addr,
+        target_addr.to_string(),
+        "bulk".into(),
+    ));
+    timeout(Duration::from_secs(10), async {
+        let mut stream = TcpStream::connect(public_addr).await.unwrap();
+        stream.write_all(&data).await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        assert!(
+            response == data,
+            "bulk response length: {} expected: {}",
+            response.len(),
+            data.len()
+        );
+        echo.await.unwrap();
+    })
+    .await
+    .unwrap();
+    client.abort();
+    server.abort();
+}

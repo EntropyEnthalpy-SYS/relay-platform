@@ -11,7 +11,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
     time::Duration,
@@ -19,7 +19,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{Mutex, Semaphore, mpsc, oneshot},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
 };
 use tokio_rustls::{
     TlsAcceptor, TlsConnector,
@@ -44,15 +44,65 @@ const FAIL: u8 = 3;
 const DATA: u8 = 4;
 const FIN: u8 = 5;
 const RESET: u8 = 6;
+const WINDOW: u8 = 7;
+// OPEN/OK opt-in preserves interoperability with the original six-frame peers.
+const FLOW_CONTROL_V1: &[u8] = b"flow-control-v1";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCAL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+const STREAM_QUEUE_CAPACITY: usize = 32;
 
 trait PublicIo: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> PublicIo for T {}
 type PublicStream = Box<dyn PublicIo>;
 type ControlRead = Box<dyn AsyncRead + Send + Unpin>;
 type ControlWrite = Box<dyn AsyncWrite + Send + Unpin>;
-type Writer = Arc<Mutex<ControlWrite>>;
-type Sessions = Arc<Mutex<HashMap<u32, mpsc::Sender<(u8, Vec<u8>)>>>>;
+struct ControlWriter {
+    stream: Mutex<ControlWrite>,
+    cancel: CancellationToken,
+}
+type Writer = Arc<ControlWriter>;
+#[derive(Clone)]
+struct StreamInbox {
+    sender: mpsc::Sender<(u8, Vec<u8>)>,
+    cancel: CancellationToken,
+    flow: Arc<StreamFlow>,
+}
+struct StreamFlow {
+    enabled: AtomicBool,
+    credits: Semaphore,
+}
+impl StreamFlow {
+    fn new(enabled: bool) -> Arc<Self> {
+        Arc::new(Self {
+            enabled: AtomicBool::new(enabled),
+            credits: Semaphore::new(STREAM_QUEUE_CAPACITY),
+        })
+    }
+}
+type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
+
+struct ActiveControl;
+impl Drop for ActiveControl {
+    fn drop(&mut self) {
+        ACTIVE_CONTROLS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+struct ActiveStream(Arc<AtomicU32>);
+impl ActiveStream {
+    fn new(local: Arc<AtomicU32>) -> Self {
+        local.fetch_add(1, Ordering::Relaxed);
+        ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+        TOTAL_STREAMS.fetch_add(1, Ordering::Relaxed);
+        Self(local)
+    }
+}
+impl Drop for ActiveStream {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+        ACTIVE_STREAMS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 type Frame = (u8, u32, Vec<u8>);
 
 static ACTIVE_CONTROLS: AtomicU32 = AtomicU32::new(0);
@@ -219,7 +269,8 @@ where
     let (reader, writer) = tokio::io::split(control);
     ACTIVE_CONTROLS.fetch_add(1, AtomicOrdering::Relaxed);
     TOTAL_CONTROLS.fetch_add(1, AtomicOrdering::Relaxed);
-    let result = serve_control(
+    let _active = ActiveControl;
+    serve_control(
         Box::new(reader),
         Box::new(writer),
         public,
@@ -228,9 +279,7 @@ where
         idle_timeout_secs,
         allow_public,
     )
-    .await;
-    ACTIVE_CONTROLS.fetch_sub(1, AtomicOrdering::Relaxed);
-    result
+    .await
 }
 
 async fn serve_control(
@@ -242,11 +291,15 @@ async fn serve_control(
     idle_timeout_secs: u64,
     allow_public: Vec<IpNet>,
 ) -> Result<()> {
-    let writer: Writer = Arc::new(Mutex::new(writer));
+    let cancel = CancellationToken::new();
+    let _cancel_on_exit = cancel.clone().drop_guard();
+    let writer = Arc::new(ControlWriter {
+        stream: Mutex::new(writer),
+        cancel: cancel.clone(),
+    });
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
-    let cancel = CancellationToken::new();
     let read_task = tokio::spawn(read_frames(
         reader,
         sessions.clone(),
@@ -273,7 +326,7 @@ async fn serve_control(
             let _ = exposed.shutdown().await;
             continue;
         }
-        let mut exposed: PublicStream = if let Some(acceptor) = &public_acceptor {
+        let exposed: PublicStream = if let Some(acceptor) = &public_acceptor {
             match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(exposed)).await {
                 Ok(Ok(stream)) => Box::new(stream),
                 Ok(Err(error)) => {
@@ -289,52 +342,57 @@ async fn serve_control(
             Box::new(exposed)
         };
         let id = next_id.fetch_add(1, Ordering::Relaxed);
-        active_streams.fetch_add(1, Ordering::Relaxed);
-        ACTIVE_STREAMS.fetch_add(1, AtomicOrdering::Relaxed);
-        TOTAL_STREAMS.fetch_add(1, AtomicOrdering::Relaxed);
-        let (data_tx, data_rx) = mpsc::channel(32);
+        let active = ActiveStream::new(active_streams.clone());
+        let stream_cancel = cancel.child_token();
+        let flow = StreamFlow::new(false);
+        let (data_tx, data_rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
         let (response_tx, response_rx) = oneshot::channel();
-        sessions.lock().await.insert(id, data_tx);
+        sessions.lock().await.insert(
+            id,
+            StreamInbox {
+                sender: data_tx,
+                cancel: stream_cancel.clone(),
+                flow: flow.clone(),
+            },
+        );
         responses.lock().await.insert(id, response_tx);
-        if let Err(error) = write_frame(&writer, OPEN, id, &[]).await {
+        if let Err(error) = write_frame(&writer, OPEN, id, FLOW_CONTROL_V1).await {
             sessions.lock().await.remove(&id);
             responses.lock().await.remove(&id);
-            active_streams.fetch_sub(1, Ordering::Relaxed);
-            ACTIVE_STREAMS.fetch_sub(1, AtomicOrdering::Relaxed);
-            let _ = exposed.shutdown().await;
             break Err(error.into());
         }
-        let opened = tokio::time::timeout(OPEN_TIMEOUT, response_rx)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or(false);
+        let opened = tokio::select! {
+            response = tokio::time::timeout(OPEN_TIMEOUT, response_rx) =>
+                response.ok().and_then(Result::ok).unwrap_or(false),
+            _ = stream_cancel.cancelled() => false,
+        };
         if !opened {
             sessions.lock().await.remove(&id);
             responses.lock().await.remove(&id);
-            active_streams.fetch_sub(1, Ordering::Relaxed);
-            ACTIVE_STREAMS.fetch_sub(1, AtomicOrdering::Relaxed);
-            let _ = exposed.shutdown().await;
+            stream_cancel.cancel();
+            let _ = write_frame(&writer, RESET, id, &[]).await;
             tracing::warn!(%peer, "reverse mux client did not open the target");
             continue;
         }
         let writer = writer.clone();
         let sessions = sessions.clone();
-        let active_streams = active_streams.clone();
-        let cancel = cancel.clone();
         tokio::spawn(async move {
-            if let Err(error) = bridge_public(
+            let _active = active;
+            let result = bridge_io(
                 id,
                 exposed,
                 data_rx,
-                writer,
-                sessions,
-                active_streams,
-                cancel,
-                Duration::from_secs(idle_timeout_secs),
+                &writer,
+                &stream_cancel,
+                &flow,
+                Some(Duration::from_secs(idle_timeout_secs)),
+                true,
             )
-            .await
-            {
+            .await;
+            sessions.lock().await.remove(&id);
+            stream_cancel.cancel();
+            if let Err(error) = result {
+                let _ = write_frame(&writer, RESET, id, &[]).await;
                 tracing::debug!(%error, "reverse mux public bridge ended");
             }
         });
@@ -344,62 +402,147 @@ async fn serve_control(
     result
 }
 
+// Each stream has independent reader/writer tasks within this future. A blocked
+// socket write cannot stop its opposite direction, its deadline, or cancellation.
 #[allow(clippy::too_many_arguments)]
-async fn bridge_public(
+async fn bridge_io<S>(
     id: u32,
-    exposed: PublicStream,
+    stream: S,
     mut frames: mpsc::Receiver<(u8, Vec<u8>)>,
-    writer: Writer,
-    sessions: Sessions,
-    active_streams: Arc<AtomicU32>,
-    cancel: CancellationToken,
-    idle_timeout: Duration,
-) -> Result<()> {
-    let (mut reader, mut writer_stream) = tokio::io::split(exposed);
-    let mut buffer = vec![0u8; 16 * 1024];
-    let mut public_done = false;
-    let mut target_done = false;
-    loop {
-        if public_done && target_done {
-            break;
-        }
-        let idle = tokio::time::sleep(idle_timeout);
-        tokio::pin!(idle);
-        tokio::select! {
-            _ = &mut idle => {
-                let _ = write_frame(&writer, RESET, id, &[]).await;
-                break;
+    writer: &Writer,
+    cancel: &CancellationToken,
+    flow: &StreamFlow,
+    idle_timeout: Option<Duration>,
+    server: bool,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut reader, mut output) = tokio::io::split(stream);
+    let last_activity = Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+    let reading = async {
+        let result = async {
+            let mut buffer = vec![0u8; 16 * 1024];
+            loop {
+                let credit = if flow.enabled.load(Ordering::Relaxed) {
+                    Some(tokio::select! {
+                        credit = flow.credits.acquire() => credit.context("reverse mux flow window closed")?,
+                        _ = cancel.cancelled() => bail!("reverse mux stream cancelled"),
+                        _ = wait_idle(&last_activity, idle_timeout) => bail!("reverse mux stream idle timeout"),
+                    })
+                } else { None };
+                let size = tokio::select! {
+                    read = reader.read(&mut buffer) => read?,
+                    _ = cancel.cancelled() => bail!("reverse mux stream cancelled"),
+                    _ = wait_idle(&last_activity, idle_timeout) => bail!("reverse mux stream idle timeout"),
+                };
+                if size == 0 {
+                    write_frame(writer, FIN, id, &[]).await?;
+                    return Ok::<_, anyhow::Error>(());
+                }
+                // Finish an in-progress control frame even when this stream is
+                // cancelled; abandoning it would corrupt neighboring streams.
+                write_frame(writer, DATA, id, &buffer[..size]).await?;
+                if let Some(credit) = credit { credit.forget(); }
+                if server { PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, Ordering::Relaxed); }
+                *last_activity.lock().unwrap() = tokio::time::Instant::now();
             }
-            read = reader.read(&mut buffer), if !public_done => match read {
-                Ok(0) => {
-                    let _ = write_frame(&writer, FIN, id, &[]).await;
-                    public_done = true;
+        }.await;
+        if result.is_err() {
+            cancel.cancel();
+        }
+        result
+    };
+    let writing = async {
+        let result = async {
+            loop {
+                let frame = tokio::select! {
+                    frame = frames.recv() => frame,
+                    _ = cancel.cancelled() => bail!("reverse mux stream cancelled"),
+                    _ = wait_idle(&last_activity, idle_timeout) => bail!("reverse mux stream idle timeout"),
+                };
+                let Some((kind, payload)) = frame else { bail!("reverse mux stream closed without FIN") };
+                let io = async {
+                    match kind {
+                        DATA => output.write_all(&payload).await,
+                        FIN => output.shutdown().await,
+                        _ => Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reverse mux stream reset")),
+                    }
+                };
+                tokio::select! {
+                    result = tokio::time::timeout(idle_timeout.unwrap_or(LOCAL_WRITE_TIMEOUT), io) => {
+                        result.context("reverse mux socket write timed out")??;
+                    }
+                    _ = cancel.cancelled() => bail!("reverse mux stream cancelled"),
                 }
-                Ok(size) => {
-                    PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, AtomicOrdering::Relaxed);
-                    if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
+                if kind == FIN { return Ok::<_, anyhow::Error>(()); }
+                if flow.enabled.load(Ordering::Relaxed) {
+                    write_frame(writer, WINDOW, id, &1u32.to_be_bytes()).await?;
                 }
-                Err(_) => { let _ = write_frame(&writer, RESET, id, &[]).await; break; }
-            },
-            frame = frames.recv() => match frame {
-                Some((DATA, payload)) => {
-                    TARGET_TO_PUBLIC_BYTES.fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
-                    if writer_stream.write_all(&payload).await.is_err() { break; }
-                },
-                Some((FIN, _)) => {
-                    let _ = writer_stream.shutdown().await;
-                    target_done = true;
-                }
-                Some((RESET, _)) | None => break,
-                _ => {}
-            },
-            _ = cancel.cancelled() => break,
+                if server { TARGET_TO_PUBLIC_BYTES.fetch_add(payload.len() as u64, Ordering::Relaxed); }
+                *last_activity.lock().unwrap() = tokio::time::Instant::now();
+            }
+        }.await;
+        if result.is_err() {
+            cancel.cancel();
+        }
+        result
+    };
+    // Do not drop a sibling future in the middle of a control-frame write.
+    let (read, write) = tokio::join!(reading, writing);
+    read?;
+    write
+}
+
+async fn wait_idle(last: &std::sync::Mutex<tokio::time::Instant>, idle: Option<Duration>) {
+    let Some(idle) = idle else {
+        return std::future::pending().await;
+    };
+    loop {
+        let deadline = *last.lock().unwrap() + idle;
+        tokio::time::sleep_until(deadline).await;
+        if last.lock().unwrap().elapsed() >= idle {
+            return;
         }
     }
-    sessions.lock().await.remove(&id);
-    active_streams.fetch_sub(1, Ordering::Relaxed);
-    ACTIVE_STREAMS.fetch_sub(1, AtomicOrdering::Relaxed);
-    Ok(())
+}
+
+// Never await space in an individual stream's queue in the control reader.
+// One cooperative yield allows a ready consumer to drain a burst. A stream
+// still overloaded after that is reset, leaving the shared reader available.
+async fn dispatch_frame(sessions: &Sessions, id: u32, kind: u8, payload: Vec<u8>) {
+    let inbox = sessions.lock().await.get(&id).cloned();
+    if let Some(inbox) = inbox {
+        if kind == WINDOW {
+            if inbox.flow.enabled.load(Ordering::Relaxed) && payload.len() == 4 {
+                let credits = u32::from_be_bytes(payload.as_slice().try_into().unwrap()) as usize;
+                if credits > 0
+                    && credits <= STREAM_QUEUE_CAPACITY
+                    && inbox.flow.credits.available_permits() + credits <= STREAM_QUEUE_CAPACITY
+                {
+                    inbox.flow.credits.add_permits(credits);
+                    return;
+                }
+            }
+            sessions.lock().await.remove(&id);
+            inbox.cancel.cancel();
+            return;
+        }
+        if kind != RESET {
+            let result = match inbox.sender.try_send((kind, payload)) {
+                Err(mpsc::error::TrySendError::Full(frame)) => {
+                    tokio::task::yield_now().await;
+                    inbox.sender.try_send(frame)
+                }
+                result => result,
+            };
+            if result.is_ok() {
+                return;
+            }
+        }
+        sessions.lock().await.remove(&id);
+        inbox.cancel.cancel();
+    }
 }
 
 async fn read_frames(
@@ -409,19 +552,24 @@ async fn read_frames(
     cancel: CancellationToken,
 ) {
     loop {
-        match read_frame(&mut reader).await {
+        let frame = tokio::select! {
+            frame = read_frame(&mut reader) => frame,
+            _ = cancel.cancelled() => return,
+        };
+        match frame {
             Ok(Some((kind, id, payload))) => match kind {
                 OK | FAIL => {
+                    if kind == OK
+                        && payload == FLOW_CONTROL_V1
+                        && let Some(inbox) = sessions.lock().await.get(&id)
+                    {
+                        inbox.flow.enabled.store(true, Ordering::Relaxed);
+                    }
                     if let Some(response) = responses.lock().await.remove(&id) {
                         let _ = response.send(kind == OK);
                     }
                 }
-                DATA | FIN | RESET => {
-                    let sender = sessions.lock().await.get(&id).cloned();
-                    if let Some(sender) = sender {
-                        let _ = sender.send((kind, payload)).await;
-                    }
-                }
+                DATA | FIN | RESET | WINDOW => dispatch_frame(&sessions, id, kind, payload).await,
                 _ => {}
             },
             _ => {
@@ -529,6 +677,7 @@ fn tls_connector_inner(
 #[allow(clippy::too_many_arguments)]
 async fn authenticate_control_and_spawn<S>(
     mut control_stream: S,
+    permit: OwnedSemaphorePermit,
     peer: SocketAddr,
     token: String,
     public: Arc<TcpListener>,
@@ -550,13 +699,17 @@ async fn authenticate_control_and_spawn<S>(
         None => false,
     };
     if !authorized {
-        let _ = control_stream.write_all(b"DENY\n").await;
+        let _ = tokio::time::timeout(AUTH_TIMEOUT, control_stream.write_all(b"DENY\n")).await;
         tracing::warn!(%peer, "reverse mux TLS authentication failed");
         return;
     }
-    if control_stream.write_all(b"READY\n").await.is_err() {
+    if !matches!(
+        tokio::time::timeout(AUTH_TIMEOUT, control_stream.write_all(b"READY\n")).await,
+        Ok(Ok(()))
+    ) {
         return;
     }
+    drop(permit);
     tracing::info!(%peer, "reverse mux TLS client connected");
     if let Err(error) = serve_authorized_control(
         control_stream,
@@ -635,7 +788,6 @@ pub async fn serve_mux_tls_public(
         let public_acceptor = public_acceptor.clone();
         let allow_public = allow_public.clone();
         tokio::spawn(async move {
-            let _permit = permit;
             let control_stream =
                 match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                     Ok(Ok(stream)) => stream,
@@ -650,6 +802,7 @@ pub async fn serve_mux_tls_public(
                 };
             authenticate_control_and_spawn(
                 control_stream,
+                permit,
                 peer,
                 token,
                 public,
@@ -692,9 +845,13 @@ pub async fn client_mux_tls(
         other => bail!("unexpected reverse mux handshake: {other}"),
     }
     let (reader, writer) = tokio::io::split(control);
-    let writer: Writer = Arc::new(Mutex::new(Box::new(writer)));
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let cancel = CancellationToken::new();
+    let _cancel_on_exit = cancel.clone().drop_guard();
+    let writer = Arc::new(ControlWriter {
+        stream: Mutex::new(Box::new(writer)),
+        cancel: cancel.clone(),
+    });
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let read_task = tokio::spawn(client_read_loop(
         Box::new(reader),
         target,
@@ -726,9 +883,13 @@ pub async fn client_mux(server: SocketAddr, target: String, token: String) -> Re
         other => bail!("unexpected reverse mux handshake: {other}"),
     }
     let (reader, writer) = control.into_split();
-    let writer: Writer = Arc::new(Mutex::new(Box::new(writer)));
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let cancel = CancellationToken::new();
+    let _cancel_on_exit = cancel.clone().drop_guard();
+    let writer = Arc::new(ControlWriter {
+        stream: Mutex::new(Box::new(writer)),
+        cancel: cancel.clone(),
+    });
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let read_task = tokio::spawn(client_read_loop(
         Box::new(reader),
         target,
@@ -749,48 +910,74 @@ async fn client_read_loop(
     cancel: CancellationToken,
 ) {
     loop {
-        match read_frame(&mut reader).await {
-            Ok(Some((OPEN, id, _))) => {
-                let (data_tx, data_rx) = mpsc::channel(32);
-                sessions.lock().await.insert(id, data_tx);
+        let frame = tokio::select! {
+            frame = read_frame(&mut reader) => frame,
+            _ = cancel.cancelled() => return,
+        };
+        match frame {
+            Ok(Some((OPEN, id, payload))) => {
+                let stream_cancel = cancel.child_token();
+                let flow = StreamFlow::new(payload == FLOW_CONTROL_V1);
+                let (data_tx, data_rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
+                let old = sessions.lock().await.insert(
+                    id,
+                    StreamInbox {
+                        sender: data_tx,
+                        cancel: stream_cancel.clone(),
+                        flow: flow.clone(),
+                    },
+                );
+                if old.is_some() {
+                    cancel.cancel();
+                    return;
+                }
                 let target = target.clone();
                 let writer = writer.clone();
                 let sessions = sessions.clone();
-                let cancel = cancel.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = bridge_local(
-                        id,
-                        target,
-                        data_rx,
-                        writer.clone(),
-                        sessions.clone(),
-                        cancel,
-                    )
-                    .await
-                    {
-                        let _ = write_frame(&writer, FAIL, id, &[]).await;
-                        sessions.lock().await.remove(&id);
-                        tracing::debug!(%error, "reverse mux local bridge ended");
+                    let local = tokio::select! {
+                        local = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)) => local,
+                        _ = stream_cancel.cancelled() => {
+                            sessions.lock().await.remove(&id);
+                            let _ = write_frame(&writer, RESET, id, &[]).await;
+                            return;
+                        }
+                    };
+                    match local {
+                        Ok(Ok(local)) => {
+                            local.set_nodelay(true).ok();
+                            let features = if flow.enabled.load(Ordering::Relaxed) {
+                                FLOW_CONTROL_V1
+                            } else {
+                                &[]
+                            };
+                            if write_frame(&writer, OK, id, features).await.is_ok()
+                                && let Err(error) = bridge_io(
+                                    id,
+                                    local,
+                                    data_rx,
+                                    &writer,
+                                    &stream_cancel,
+                                    &flow,
+                                    None,
+                                    false,
+                                )
+                                .await
+                            {
+                                let _ = write_frame(&writer, RESET, id, &[]).await;
+                                tracing::debug!(%error, "reverse mux local bridge ended");
+                            }
+                        }
+                        _ => {
+                            let _ = write_frame(&writer, FAIL, id, &[]).await;
+                        }
                     }
+                    sessions.lock().await.remove(&id);
+                    stream_cancel.cancel();
                 });
             }
-            Ok(Some((DATA, id, payload))) => {
-                let sender = sessions.lock().await.get(&id).cloned();
-                if let Some(sender) = sender {
-                    let _ = sender.send((DATA, payload)).await;
-                }
-            }
-            Ok(Some((FIN, id, _))) => {
-                let sender = sessions.lock().await.get(&id).cloned();
-                if let Some(sender) = sender {
-                    let _ = sender.send((FIN, Vec::new())).await;
-                }
-            }
-            Ok(Some((RESET, id, _))) => {
-                let sender = sessions.lock().await.get(&id).cloned();
-                if let Some(sender) = sender {
-                    let _ = sender.send((RESET, Vec::new())).await;
-                }
+            Ok(Some((kind @ (DATA | FIN | RESET | WINDOW), id, payload))) => {
+                dispatch_frame(&sessions, id, kind, payload).await
             }
             _ => {
                 cancel.cancel();
@@ -800,69 +987,34 @@ async fn client_read_loop(
     }
 }
 
-async fn bridge_local(
-    id: u32,
-    target: String,
-    mut frames: mpsc::Receiver<(u8, Vec<u8>)>,
-    writer: Writer,
-    sessions: Sessions,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let local = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target))
-        .await
-        .with_context(|| format!("connect reverse mux target {target} timed out"))?
-        .with_context(|| format!("connect reverse mux target {target}"))?;
-    local.set_nodelay(true).ok();
-    write_frame(&writer, OK, id, &[]).await?;
-    let (mut reader, mut writer_stream) = local.into_split();
-    let mut buffer = vec![0u8; 16 * 1024];
-    let mut local_done = false;
-    let mut server_done = false;
-    loop {
-        if local_done && server_done {
-            break;
-        }
-        tokio::select! {
-            read = reader.read(&mut buffer), if !local_done => match read {
-                Ok(0) => {
-                    let _ = write_frame(&writer, FIN, id, &[]).await;
-                    local_done = true;
-                }
-                Ok(size) => {
-                    PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, AtomicOrdering::Relaxed);
-                    if write_frame(&writer, DATA, id, &buffer[..size]).await.is_err() { break; }
-                }
-                Err(_) => { let _ = write_frame(&writer, RESET, id, &[]).await; break; }
-            },
-            frame = frames.recv() => match frame {
-                Some((DATA, payload)) => {
-                    TARGET_TO_PUBLIC_BYTES.fetch_add(payload.len() as u64, AtomicOrdering::Relaxed);
-                    if writer_stream.write_all(&payload).await.is_err() { break; }
-                }
-                Some((FIN, _)) => {
-                    let _ = writer_stream.shutdown().await;
-                    server_done = true;
-                }
-                Some((RESET, _)) | None => break,
-                _ => {}
-            },
-            _ = cancel.cancelled() => break,
-        }
-    }
-    sessions.lock().await.remove(&id);
-    Ok(())
-}
-
+// The frame is atomic with respect to other writers. Cancellation or a timeout
+// after a partial frame poisons the entire control; never reuse its byte stream.
 async fn write_frame(writer: &Writer, kind: u8, id: u32, payload: &[u8]) -> std::io::Result<()> {
     ensure_frame(payload.len())?;
-    let mut stream = writer.lock().await;
-    let mut header = [0u8; 9];
-    header[0] = kind;
-    header[1..5].copy_from_slice(&id.to_be_bytes());
-    header[5..9].copy_from_slice(&(payload.len() as u32).to_be_bytes());
-    stream.write_all(&header).await?;
-    stream.write_all(payload).await?;
-    stream.flush().await
+    let result = tokio::select! {
+        biased;
+        _ = writer.cancel.cancelled() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "reverse mux control cancelled")),
+        result = tokio::time::timeout(CONTROL_WRITE_TIMEOUT, async {
+            let mut stream = writer.stream.lock().await;
+            if writer.cancel.is_cancelled() {
+                return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "reverse mux control cancelled"));
+            }
+            let poison_on_drop = writer.cancel.clone().drop_guard();
+            let mut header = [0u8; 9];
+            header[0] = kind;
+            header[1..5].copy_from_slice(&id.to_be_bytes());
+            header[5..9].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+            stream.write_all(&header).await?;
+            stream.write_all(payload).await?;
+            stream.flush().await?;
+            poison_on_drop.disarm();
+            Ok(())
+        }) => result.unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "reverse mux control write timed out"))),
+    };
+    if result.is_err() {
+        writer.cancel.cancel();
+    }
+    result
 }
 
 fn ensure_frame(length: usize) -> std::io::Result<()> {
@@ -932,4 +1084,147 @@ async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
         line.push(byte[0]);
     }
     String::from_utf8(line).context("reverse control line is not UTF-8")
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn full_stream_queue_does_not_block_a_neighbor_or_reset() {
+        let sessions: Sessions = Arc::default();
+        let (full_tx, mut full_rx) = mpsc::channel(1);
+        let full_cancel = CancellationToken::new();
+        full_tx.send((DATA, vec![1])).await.unwrap();
+        sessions.lock().await.insert(
+            1,
+            StreamInbox {
+                sender: full_tx,
+                cancel: full_cancel.clone(),
+                flow: StreamFlow::new(false),
+            },
+        );
+        let (other_tx, mut other_rx) = mpsc::channel(1);
+        let other_cancel = CancellationToken::new();
+        sessions.lock().await.insert(
+            2,
+            StreamInbox {
+                sender: other_tx,
+                cancel: other_cancel.clone(),
+                flow: StreamFlow::new(false),
+            },
+        );
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            dispatch_frame(&sessions, 1, DATA, vec![2]),
+        )
+        .await
+        .unwrap();
+        assert!(full_cancel.is_cancelled());
+        assert!(!sessions.lock().await.contains_key(&1));
+        dispatch_frame(&sessions, 2, DATA, b"neighbor".to_vec()).await;
+        assert_eq!(other_rx.recv().await.unwrap().1, b"neighbor");
+        assert!(!other_cancel.is_cancelled());
+        // RESET must also bypass a queue with pending data.
+        dispatch_frame(&sessions, 2, DATA, vec![3]).await;
+        dispatch_frame(&sessions, 2, RESET, vec![]).await;
+        assert!(other_cancel.is_cancelled());
+        assert!(full_rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn blocked_socket_writes_observe_cancellation_in_both_roles() {
+        for server in [false, true] {
+            let (stream, _blocked_reader) = tokio::io::duplex(32);
+            let (control, _control_peer) = tokio::io::duplex(1024);
+            let writer = Arc::new(ControlWriter {
+                stream: Mutex::new(Box::new(control)),
+                cancel: CancellationToken::new(),
+            });
+            let cancel = CancellationToken::new();
+            let (tx, rx) = mpsc::channel(2);
+            tx.send((DATA, vec![1; 1024])).await.unwrap();
+            let task_cancel = cancel.clone();
+            let task_writer = writer.clone();
+            let task = tokio::spawn(async move {
+                bridge_io(
+                    1,
+                    stream,
+                    rx,
+                    &task_writer,
+                    &task_cancel,
+                    &StreamFlow::new(false),
+                    Some(Duration::from_secs(10)),
+                    server,
+                )
+                .await
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel.cancel();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(
+                !writer.cancel.is_cancelled(),
+                "a stalled local socket must not poison the control"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_deadline_closes_a_blocked_public_write() {
+        let (stream, _blocked_reader) = tokio::io::duplex(32);
+        let (control, _control_peer) = tokio::io::duplex(1024);
+        let writer = Arc::new(ControlWriter {
+            stream: Mutex::new(Box::new(control)),
+            cancel: CancellationToken::new(),
+        });
+        let cancel = CancellationToken::new();
+        let (tx, rx) = mpsc::channel(2);
+        tx.send((DATA, vec![1; 1024])).await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(300),
+            bridge_io(
+                1,
+                stream,
+                rx,
+                &writer,
+                &cancel,
+                &StreamFlow::new(false),
+                Some(Duration::from_millis(30)),
+                true,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        assert!(cancel.is_cancelled());
+        assert!(!writer.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn abandoned_partial_control_frame_poison_closes_connection() {
+        // The nine-byte header cannot fit, so cancellation happens after a
+        // partial frame. A subsequent frame must never reuse these bytes.
+        let (control, _peer) = tokio::io::duplex(8);
+        let cancel = CancellationToken::new();
+        let writer = Arc::new(ControlWriter {
+            stream: Mutex::new(Box::new(control)),
+            cancel: cancel.clone(),
+        });
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(30),
+                write_frame(&writer, DATA, 1, b"payload")
+            )
+            .await
+            .is_err()
+        );
+        assert!(cancel.is_cancelled());
+        assert!(write_frame(&writer, DATA, 2, b"neighbor").await.is_err());
+    }
 }

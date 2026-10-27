@@ -53,15 +53,15 @@
 - `GET /templates/{id}/versions` 返回当前及历史版本（新到旧）；历史快照不可变。
 - `POST /templates/{id}/versions/{version}/rollback` 把旧内容作为**新版本**写回（版本号继续增加），不是删除历史或降级版本号。全局模板只能由系统管理员回滚；租户管理员回滚自己的模板时，当前对象和恢复快照都必须属于该租户。
 - 只能回滚到严格更旧的版本；回滚需要管理员权限并写审计。
-- 应用/批量可传 `template_version` 固定使用某个历史版本；省略时使用最新版本。固定版本按快照渲染，版本不存在或未来版本会拒绝。
+- 应用/批量可传 `template_version` 固定使用某个历史版本；单次应用省略时使用最新版本；批量应用在开始时固定版本，后续批次及重试沿用。固定版本按快照渲染，版本不存在或未来版本会拒绝。
 - 模板版本与节点配置修订是两套独立计数。
 - 面板模板页“版本”按钮列出历史并提供回滚。
 
 ## 应用回执门控
 
-`wait_for_apply_ms` 可选：每批配置写入后等待目标节点回报 `applied_revision` 达到该批修订，且无 `apply_error`，超过时限则 `aborted` 并记录 `gate_error`。它只验证**配置应用回执**，不检查流量、错误率或延迟。
+`wait_for_apply_ms` 可选：每批配置写入后等待目标节点的 `desired_revision` 和 `applied_revision` 都等于本次发布修订，且无 `apply_error`，超过时限则 `aborted` 并记录 `gate_error`。范围为 1–60000 ms。期望修订被后续修改取代时立即失败；不会接受更大的修订号。它只验证**配置应用回执**，不检查流量、错误率或延迟。
 
-`require_target_health: true` 可选：每批应用后，轮询该批节点的 `target_health`，要求节点已应用本次修订、存在**本次新规则 ID** 的报告、报告时间在 `max_age_ms` 内且所有该规则报告 `eligible=true`；超时（默认 5 秒，或 `wait_for_apply_ms`）则 `aborted` 并记录 `gate_error`。旧规则或过期遥测不能通过门控。它复用 Agent 的探测结果，不等同于完整流量健康或自动放量。
+`require_target_health: true` 可选：每批应用后，轮询该批节点的 `target_health`，要求节点期望修订和已应用修订都精确等于本次修订、无应用错误、存在**本次规则 ID** 的报告、报告时间在 `max_age_ms` 内且所有该规则报告 `eligible=true`；超时（默认 5 秒，或 `wait_for_apply_ms`）则 `aborted` 并记录 `gate_error`。旧规则、过期或未来时间戳遥测不能通过门控；较新修订即使保留规则 ID 也不能代替本次修订。它复用 Agent 的探测结果，不等同于完整流量健康或自动放量。
 
 ## 健康预检
 
@@ -113,15 +113,17 @@
 - 返回 `batch/batches/applied/rolled_back/rollback_failed/aborted/results`；每项包含 revision、rule_id、`rolled_back` 或错误。回滚使用应用后的修订作为 expected revision，后续并发配置变更会使该项回滚失败。
 - 面板模板页“批量应用”接受目标 JSON 和批大小，显示逐节点结果。
 
-## 重试失败节点
+## 重试与恢复（0.97.0）
 
 `POST /templates/{id}/rollouts/{rollout_id}/retry`：
 
-- 每次 rollout 以 UUID 持久化目标、批大小、回滚选项和逐节点结果到 metadata。
-- 重试选择原报告中 `applied=false` **或 `rolled_back=true`** 的节点，按这些节点当前配置修订重新计算 `expected_revision`，再走正常分批应用；被自动回滚移除规则的节点会重新纳入。
-- 原成功节点不重复应用；回滚失败的节点仍按失败记录参与重试。
-- 新 rollout 生成新 ID；原记录保留。没有失败节点时返回 409。
-- 面板批量结果在 `aborted` 时显示“重试失败节点”。
+- 每次完成的尝试持久化全部有序目标、固定模板版本、选项、规则 ID、修订与结果；记录通过 `root_id/retry_id` 关联。
+- 从原始首批重新检查完整目标集。已有且未回滚的规则复用原 ID 和修订，重新检查所选回执/健康门控；不会因 `applied=true` 跳过失败 canary，也不会重复追加规则。
+- 未发布或已成功回滚的节点按当前配置修订发布同一模板版本。已发布规则的修订若被改动，停止并要求操作者对账，避免覆盖并发配置或再追加一份规则。回滚失败同样保留原规则身份。
+- 同一个根记录的并发重试返回 409；重试根记录或任意历史尝试时均沿链找到最新结果。最新尝试成功后，再重试返回同一报告，不再写配置。重启后可恢复**已经持久化的尝试记录**。
+- 新字段 `acknowledged/healthy/completed/reused` 区分精确修订回执、规则健康、通过本次所选门控和复用已有发布；`applied` 为兼容字段，仍只表示发布过配置，不代表节点已执行。未选择回执/健康门控时 `completed=true` 仅表示配置发布完成。
+- 0.96 记录缺失新字段可反序列化为默认值。旧记录未固定模板版本且模板已超过 v1 时返回 409，必须先对账再新建批量；不能猜测当时使用的模板内容。
+- UI 每次失败后都可再次重试。发布进行中的进程崩溃尚无逐节点操作日志；未完成报告的发布须人工核对，不能宣称崩溃中途的 exactly-once。
 
 ## 界面与 API
 
@@ -136,12 +138,12 @@
 | POST | `/templates/{id}/versions/{version}/rollback` | 旧内容作为新版本写回 |
 | POST | `/templates/{id}/rollout` | 有序分批应用；可选首批比例、健康预检、应用回执等待、回滚 |
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen,variables?,template_version?}` 应用模板；可固定历史版本 |
-| POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 只重试失败/未尝试节点，重新计算当前修订 |
+| POST | `/templates/{id}/rollouts/{rollout_id}/retry` | 从原首批重新检查；复用已发布规则，恢复剩余目标 |
 
 `/templates*` 和节点模板应用仅接受登录会话，API 令牌访问 403。面板规则表格的“存为模板”和“规则模板”页提供保存、应用、删除。
 
 ## 验证与限制
 
-- Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`、canary 批次失败后停止后续节点，以及失败后只重试失败节点。
+- Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`、canary 批次失败后停止后续节点，以及回执/健康失败重试、重启恢复、重复重试不复制规则和新修订不能替代原门控。
 - HTTP 测试覆盖创建、viewer 403、节点配置修订、应用后规则名称。
 - 自动回滚只覆盖本次 rollout 新建规则的移除，不做旧配置的全量快照恢复；未实现依赖图、批量撤销和浏览器点击验收；目标健康门控检查新规则、修订与报告时效，但仍是 Agent 探测结果，不检查真实业务流量；模块 06 仍为部分实现。

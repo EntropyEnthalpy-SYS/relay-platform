@@ -55,11 +55,22 @@ pub struct RolloutTarget {
     #[serde(default)]
     pub template_version: Option<u64>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RolloutResult {
     pub node_id: String,
     pub batch: usize,
     pub applied: bool,
+    /// `applied` is the legacy publication flag, not an agent receipt.
+    #[serde(default)]
+    pub acknowledged: bool,
+    #[serde(default)]
+    pub healthy: bool,
+    /// All gates requested for this attempt have passed.
+    #[serde(default)]
+    pub completed: bool,
+    /// Retry reused the original rule/revision instead of publishing a duplicate.
+    #[serde(default)]
+    pub reused: bool,
     pub revision: Option<u64>,
     pub rule_id: Option<String>,
     pub error: Option<String>,
@@ -105,6 +116,10 @@ pub struct DiffChange {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RolloutRecord {
+    #[serde(default)]
+    pub root_id: String,
+    #[serde(default)]
+    pub retry_id: Option<String>,
     pub targets: Vec<RolloutTarget>,
     pub rollback_on_failure: bool,
     #[serde(default)]

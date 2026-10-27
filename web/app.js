@@ -841,9 +841,9 @@ async function rolloutTemplate(template) {
   field(grid, 'batch_size', '每批节点数（1–50）', '1', 'number');
   field(grid, 'canary_percent', '首批百分比（留空使用批大小）', '', 'number', false);
   field(grid, 'wait_for_apply_ms', '应用回执等待 / ms（留空不等待）', '', 'number', false);
-  const rollback = el('label'); rollback.append(el('span', '失败时回滚已应用节点'), Object.assign(el('input'), { type: 'checkbox', name: 'rollback_on_failure' })); grid.append(rollback);
+  const rollback = el('label'); rollback.append(el('span', '失败时移除本次已发布规则'), Object.assign(el('input'), { type: 'checkbox', name: 'rollback_on_failure' })); grid.append(rollback);
   const healthy = el('label'); healthy.append(el('span', '仅健康节点（90 秒内有同步且无应用错误）'), Object.assign(el('input'), { type: 'checkbox', name: 'require_healthy' })); grid.append(healthy);
-  const targetHealth = el('label'); targetHealth.append(el('span', '目标健康门控（所有目标最近探测 eligible）'), Object.assign(el('input'), { type: 'checkbox', name: 'require_target_health' })); grid.append(targetHealth);
+  const targetHealth = el('label'); targetHealth.append(el('span', '目标健康门控（本次修订与规则的有效健康报告）'), Object.assign(el('input'), { type: 'checkbox', name: 'require_target_health' })); grid.append(targetHealth);
   const targets = textarea(grid, 'targets', '目标 JSON（node_id/expected_revision/name/listen 数组）',
     JSON.stringify(nodes.slice(0, 1).map(n => ({ node_id: n.id, expected_revision: 0, name: template.name, listen: '127.0.0.1:9000' })), null, 2));
   targets.rows = 10;
@@ -852,11 +852,15 @@ async function rolloutTemplate(template) {
     const parsed = JSON.parse(String(data.get('targets')));
     const report = await api(`/templates/${template.id}/rollout`, { method: 'POST', body: { batch_size: Number(data.get('batch_size')), canary_percent: data.get('canary_percent') ? Number(data.get('canary_percent')) : null, require_healthy: data.get('require_healthy') === 'on', require_target_health: data.get('require_target_health') === 'on', wait_for_apply_ms: data.get('wait_for_apply_ms') ? Number(data.get('wait_for_apply_ms')) : null, rollback_on_failure: data.get('rollback_on_failure') === 'on', targets: parsed } });
     $('#dialog').close();
-    const content = el('div'); content.append(el('pre', JSON.stringify(report, null, 2), 'json-preview'));
-    if (report.aborted) content.append(button('重试失败节点', async () => {
-      const retry = await api(`/templates/${template.id}/rollouts/${report.id}/retry`, { method: 'POST' });
-      content.replaceChildren(el('pre', JSON.stringify(retry, null, 2), 'json-preview'));
-    }));
+    const content = el('div');
+    const renderReport = current => {
+      content.replaceChildren(el('p', 'applied 表示已发布；acknowledged 表示已回执；healthy 表示健康合格；completed 表示通过所选门控。', 'fine'), el('pre', JSON.stringify(current, null, 2), 'json-preview'));
+      if (current.aborted) content.append(button('重新检查并继续批量', async () => {
+        const retry = await api(`/templates/${template.id}/rollouts/${current.id}/retry`, { method: 'POST' });
+        renderReport(retry);
+      }));
+    };
+    renderReport(report);
     modal(`批量结果 · ${template.name}`, content);
   });
   modal(`批量应用 · ${template.name}`, form);

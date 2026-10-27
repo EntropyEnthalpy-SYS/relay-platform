@@ -69,3 +69,11 @@ relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 - mux 公网/控制半关闭会保留另一方向直到双方完成；TLS 握手有 10 秒超时，控制握手在独立任务中执行，不阻塞 accept；公网握手同样有时限。
 - `reverse-mux-server --metrics-listen 127.0.0.1:9100` 提供本进程的 Prometheus 指标；控制器 `/metrics` 的 `relay_reverse_mux_process_available` 为 0 表示 mux 不在该进程，不能把零当作隧道空闲。
 - 测试覆盖错误 token、单控制连接上两个并发公网连接、双目标回显、流上限校验和 idle 超时校验；旧测试覆盖顺序连接和 session pool。未做真实公网、NAT、长时或高并发验收。
+
+## 0.97.0 stream isolation and flow control
+
+- New peers negotiate `flow-control-v1` in the OPEN and OK payloads. Both directions start with 32 DATA-frame credits. WINDOW (kind 7) carries a four-byte big-endian credit count; one credit is returned only after a complete DATA payload has been written to its destination socket. A sender waits for its own credits outside the shared control reader. FIN preserves the other direction until it also finishes.
+- Each inbound stream queue remains bounded at 32 frames (at most 2 MiB for maximum-size 64 KiB frames; normal DATA writes are 16 KiB). The control reader never waits for queue space. Saturated legacy or nonconforming streams are reset individually after one cooperative yield. Upgrade both ends for credit-based backpressure; older peers remain supported through the original six-frame exchange without the new flow-control guarantee.
+- Blocked public socket writes are cancellable and bounded by the configured idle timeout. Blocked client target writes have a 30-second stall deadline. Connection loss cancels all child streams; stream resets cancel only that stream. A control frame has a 5-second write/lock deadline; any abandoned partial frame closes the entire control connection to prevent framing corruption.
+- The TLS server permits at most 64 simultaneous pending TLS/token authentications. TLS and authentication each have a 10-second deadline. The permit is released after READY, before serving the authenticated control. This is not a 64-established-control limit. Active stream/control metrics use drop guards for cleanup.
+- Regression coverage includes an 8 MiB upload followed by an 8 MiB EOF-triggered reply, slow readers with an unrelated echo stream, cancellation in both roles, partial-frame abandonment, 80 simultaneously authenticated TLS controls, and the 64-pending-authentication bound. These are loopback correctness tests, not WAN throughput or endurance certification.
