@@ -430,3 +430,13 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 ```
 
 支持 IP/CIDR/精确域名/`*.domain` 后缀/`*`；拒绝优先，空 allow 为全通。同时检查原始域名与解析 IP，适用于固定 TCP/UDP、Shadowsocks、SOCKS5 TCP、HTTP CONNECT、多路径和预热连接。非法模式在配置校验时拒绝。详见 [DESTINATION_ACL.md](DESTINATION_ACL.md)。
+
+## 0.38.0 规则模板
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/templates` | 可见模板/创建 `{tenant_id,name,description,rule}` |
+| PUT/DELETE | `/templates/{id}` | 编辑/删除，受租户范围 |
+| POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen}` 应用为新规则 |
+
+模板创建/更新校验规则主体；应用生成新 ID、名称、监听和计量周期，走正常配置修订校验。`/templates*` 与节点模板应用仅登录会话。详见 [TEMPLATES.md](TEMPLATES.md)。

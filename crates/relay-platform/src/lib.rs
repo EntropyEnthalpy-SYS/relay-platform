@@ -27,6 +27,7 @@ pub mod subscription;
 mod sync_queue;
 pub mod system;
 pub mod telemetry;
+pub mod template;
 pub mod ticket;
 pub mod topology;
 pub mod totp;

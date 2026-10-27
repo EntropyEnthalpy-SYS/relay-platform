@@ -172,6 +172,9 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
         || path.starts_with("dns/")
         || path.starts_with("commerce/")
         || path.starts_with("tickets")
+        || path == "templates"
+        || path.starts_with("templates/")
+        || path.contains("/templates/")
         || path.starts_with("api-tokens")
         || path.ends_with("/mfa/reset")
         || path == "auth/logout"
@@ -296,6 +299,12 @@ pub fn router(state: AppState) -> Router {
             get(preview_subscription),
         )
         .route("/api/v1/tickets", get(tickets).post(create_ticket))
+        .route("/api/v1/templates", get(templates).post(create_template))
+        .route(
+            "/api/v1/templates/{id}",
+            axum::routing::put(update_template).delete(delete_template),
+        )
+        .route("/api/v1/nodes/{node}/templates/{id}", post(apply_template))
         .route("/api/v1/tickets/{id}", get(ticket))
         .route("/api/v1/tickets/{id}/messages", post(reply_ticket))
         .route(
@@ -1427,6 +1436,80 @@ async fn public_subscription(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ApplyTemplate {
+    expected_revision: u64,
+    name: String,
+    listen: String,
+}
+async fn templates(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::template::RuleTemplate>> {
+    Ok(Json(
+        database(state.store, move |db| db.templates(&actor)).await?,
+    ))
+}
+async fn create_template(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::template::TemplateInput>,
+) -> ApiResult<crate::template::RuleTemplate> {
+    Ok(Json(
+        database(state.store, move |db| db.create_template(&actor, input)).await?,
+    ))
+}
+async fn update_template(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::template::TemplateInput>,
+) -> ApiResult<crate::template::RuleTemplate> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_template(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_template(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_template(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn apply_template(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((node, id)): Path<(String, String)>,
+    Json(input): Json<ApplyTemplate>,
+) -> ApiResult<NodeConfig> {
+    let listen: std::net::SocketAddr = input.listen.parse().map_err(|_| {
+        ApiError(
+            Rejection {
+                status: 400,
+                message: "invalid listen address".into(),
+            }
+            .into(),
+        )
+    })?;
+    Ok(Json(
+        database(state.store, move |db| {
+            db.apply_template(
+                &actor,
+                &node,
+                &id,
+                input.expected_revision,
+                &input.name,
+                listen,
+            )
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct NewTicketInput {
     subject: String,
     body: String,
@@ -2397,7 +2480,7 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","destination-acl","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","destination-acl","config-templates","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
