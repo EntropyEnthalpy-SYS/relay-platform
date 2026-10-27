@@ -25,12 +25,32 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
-#[derive(Default)]
+const LATENCY_BUCKETS: [f64; 11] = [
+    0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+
 struct ApiMetrics {
     total: AtomicU64,
     success: AtomicU64,
     client_error: AtomicU64,
     server_error: AtomicU64,
+    latency_buckets: [AtomicU64; LATENCY_BUCKETS.len()],
+    latency_sum_micros: AtomicU64,
+    latency_count: AtomicU64,
+}
+
+impl Default for ApiMetrics {
+    fn default() -> Self {
+        Self {
+            total: AtomicU64::new(0),
+            success: AtomicU64::new(0),
+            client_error: AtomicU64::new(0),
+            server_error: AtomicU64::new(0),
+            latency_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            latency_sum_micros: AtomicU64::new(0),
+            latency_count: AtomicU64::new(0),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -246,8 +266,23 @@ async fn api_metrics_middleware(
     request: axum::extract::Request,
     next: middleware::Next,
 ) -> axum::response::Response {
+    let started = Instant::now();
     let response = next.run(request).await;
+    let micros = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     state.api_metrics.total.fetch_add(1, Ordering::Relaxed);
+    state
+        .api_metrics
+        .latency_sum_micros
+        .fetch_add(micros, Ordering::Relaxed);
+    state
+        .api_metrics
+        .latency_count
+        .fetch_add(1, Ordering::Relaxed);
+    for (index, bucket) in LATENCY_BUCKETS.iter().enumerate() {
+        if micros <= (*bucket * 1_000_000.0) as u64 {
+            state.api_metrics.latency_buckets[index].fetch_add(1, Ordering::Relaxed);
+        }
+    }
     if response.status().is_success() {
         state.api_metrics.success.fetch_add(1, Ordering::Relaxed);
     } else if response.status().is_server_error() {
@@ -1405,6 +1440,24 @@ async fn prometheus_metrics(
             "relay_api_requests{{class=\"{class}\"}} {value}\n"
         ));
     }
+    body.push_str("# HELP relay_api_request_duration_seconds API request duration.\n# TYPE relay_api_request_duration_seconds histogram\n");
+    for (index, bucket) in LATENCY_BUCKETS.iter().enumerate() {
+        body.push_str(&format!(
+            "relay_api_request_duration_seconds_bucket{{le=\"{bucket}\"}} {}\n",
+            state.api_metrics.latency_buckets[index].load(Ordering::Relaxed)
+        ));
+    }
+    let count = state.api_metrics.latency_count.load(Ordering::Relaxed);
+    body.push_str(&format!(
+        "relay_api_request_duration_seconds_bucket{{le=\"+Inf\"}} {count}\n"
+    ));
+    body.push_str(&format!(
+        "relay_api_request_duration_seconds_sum {}\n",
+        state.api_metrics.latency_sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0
+    ));
+    body.push_str(&format!(
+        "relay_api_request_duration_seconds_count {count}\n"
+    ));
     let mux = crate::reverse_mux::stats();
     body.push_str("# HELP relay_reverse_mux_controls Authorized reverse mux control connections.\n# TYPE relay_reverse_mux_controls gauge\n");
     body.push_str(&format!(
