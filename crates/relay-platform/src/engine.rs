@@ -942,9 +942,11 @@ impl RuntimeRule {
                 .inbound_http_connect
                 .as_ref()
                 .map(|config| http_connect::Server::new(config).expect("validated configuration")),
-            destination: destination_acl::DestinationPolicy::parse(
+            destination: destination_acl::DestinationPolicy::parse_with_ports(
                 &spec.allow_destinations,
                 &spec.deny_destinations,
+                &spec.allow_destination_ports,
+                &spec.deny_destination_ports,
             )
             .expect("validated configuration"),
             multipath_server: spec
@@ -2342,9 +2344,7 @@ fn bind_peer_allowed(
         return false;
     }
     rule.spec.permits(peer.ip())
-        && rule
-            .destination
-            .permits(&peer.ip().to_string(), [peer.ip()])
+        && rule.destination.permits_socket(peer)
         && server.permits(peer.ip())
 }
 
@@ -2374,10 +2374,7 @@ async fn try_target(
         .and_then(Prewarm::take)
     {
         // A pre-warmed connection that fails to activate falls back to a fresh dial.
-        if !rule
-            .destination
-            .permits(&dialed.address.ip().to_string(), [dialed.address.ip()])
-        {
+        if !rule.destination.permits_socket(dialed.address) {
             last = Some("pre-warmed destination denied by rule policy".into());
         } else {
             match timeout_at(deadline, activate_target(rule, index, dialed, Some(info))).await {
@@ -2481,14 +2478,9 @@ async fn connect_tcp(
 
 async fn resolve_destination(rule: &RuntimeRule, endpoint: &str) -> Result<Vec<SocketAddr>> {
     let addresses = rule.resolver.resolve(endpoint).await?;
-    let allowed = rule.destination.filter(
-        destination_acl::host_from_endpoint(endpoint),
-        addresses.iter().map(SocketAddr::ip),
-    );
-    let addresses: Vec<_> = addresses
-        .into_iter()
-        .filter(|address| allowed.contains(&address.ip()))
-        .collect();
+    let addresses: Vec<_> = rule
+        .destination
+        .filter_sockets(destination_acl::host_from_endpoint(endpoint), addresses);
     ensure!(
         !addresses.is_empty(),
         "destination denied by rule policy: {endpoint}"

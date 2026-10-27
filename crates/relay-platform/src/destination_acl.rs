@@ -1,7 +1,7 @@
 //! Destination allow/deny policy for fixed targets and proxy destinations.
 //! Deny wins; an empty allow list allows everything not denied. Patterns are
 //! IP, CIDR, exact domain, `*.example.com`/`.example.com` suffix, or `*`.
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use ipnet::IpNet;
 use std::net::IpAddr;
 
@@ -9,6 +9,65 @@ use std::net::IpAddr;
 pub struct DestinationPolicy {
     allow: Vec<Pattern>,
     deny: Vec<Pattern>,
+    ports: PortPolicy,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct PortPolicy {
+    allow: Vec<PortPattern>,
+    deny: Vec<PortPattern>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PortPattern {
+    Any,
+    Single(u16),
+    Range(u16, u16),
+}
+impl PortPolicy {
+    fn parse(allow: &[String], deny: &[String]) -> Result<Self> {
+        Ok(Self {
+            allow: allow
+                .iter()
+                .map(|value| parse_port(value))
+                .collect::<Result<_>>()?,
+            deny: deny
+                .iter()
+                .map(|value| parse_port(value))
+                .collect::<Result<_>>()?,
+        })
+    }
+    fn permits(&self, port: u16) -> bool {
+        !self.deny.iter().any(|pattern| pattern.matches(port))
+            && (self.allow.is_empty() || self.allow.iter().any(|pattern| pattern.matches(port)))
+    }
+}
+impl PortPattern {
+    fn matches(&self, port: u16) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Single(value) => *value == port,
+            Self::Range(start, end) => (*start..=*end).contains(&port),
+        }
+    }
+}
+fn parse_port(value: &str) -> Result<PortPattern> {
+    let value = value.trim();
+    if value.is_empty() {
+        bail!("destination port must not be empty");
+    }
+    if value == "*" {
+        return Ok(PortPattern::Any);
+    }
+    if let Some((start, end)) = value.split_once('-') {
+        let start: u16 = start
+            .parse()
+            .context("invalid destination port range start")?;
+        let end: u16 = end.parse().context("invalid destination port range end")?;
+        ensure!(start <= end, "destination port range is reversed");
+        return Ok(PortPattern::Range(start, end));
+    }
+    Ok(PortPattern::Single(
+        value.parse().context("invalid destination port")?,
+    ))
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Pattern {
@@ -20,9 +79,22 @@ enum Pattern {
 }
 impl DestinationPolicy {
     pub fn parse(allow: &[String], deny: &[String]) -> Result<Self> {
+        Self::parse_with_ports(allow, deny, &[], &[])
+    }
+    pub fn parse_with_ports(
+        allow: &[String],
+        deny: &[String],
+        allow_ports: &[String],
+        deny_ports: &[String],
+    ) -> Result<Self> {
+        ensure!(
+            allow_ports.len() <= 256 && deny_ports.len() <= 256,
+            "too many destination port patterns"
+        );
         Ok(Self {
             allow: parse_list(allow)?,
             deny: parse_list(deny)?,
+            ports: PortPolicy::parse(allow_ports, deny_ports)?,
         })
     }
     /// Returns only the resolved addresses that the policy authorizes.
@@ -66,7 +138,23 @@ impl DestinationPolicy {
         self.filter(&host_value, ips).into_iter().next().is_some()
     }
     pub fn permits_address(&self, address: std::net::SocketAddr) -> bool {
+        self.permits_socket(address)
+    }
+    pub fn filter_sockets(
+        &self,
+        host: &str,
+        addresses: impl IntoIterator<Item = std::net::SocketAddr>,
+    ) -> Vec<std::net::SocketAddr> {
+        let addresses: Vec<_> = addresses.into_iter().collect();
+        let allowed = self.filter(host, addresses.iter().map(|address| address.ip()));
+        addresses
+            .into_iter()
+            .filter(|address| allowed.contains(&address.ip()) && self.ports.permits(address.port()))
+            .collect()
+    }
+    pub fn permits_socket(&self, address: std::net::SocketAddr) -> bool {
         self.permits(&address.ip().to_string(), [address.ip()])
+            && self.ports.permits(address.port())
     }
 }
 impl Pattern {
@@ -204,6 +292,23 @@ mod tests {
                 .len()
                 == 1
         );
+    }
+
+    #[test]
+    fn destination_ports_are_filtered_with_ranges() {
+        let policy = DestinationPolicy::parse_with_ports(
+            &[],
+            &[],
+            &["443".into(), "8000-8080".into()],
+            &["8443".into(), "9000-9001".into()],
+        )
+        .unwrap();
+        assert!(policy.permits_socket("203.0.113.7:443".parse().unwrap()));
+        assert!(policy.permits_socket("203.0.113.7:8080".parse().unwrap()));
+        assert!(!policy.permits_socket("203.0.113.7:80".parse().unwrap()));
+        assert!(!policy.permits_socket("203.0.113.7:8443".parse().unwrap()));
+        assert!(!policy.permits_socket("203.0.113.7:9001".parse().unwrap()));
+        assert!(DestinationPolicy::parse_with_ports(&[], &[], &["8000-1".into()], &[]).is_err());
     }
 
     #[test]

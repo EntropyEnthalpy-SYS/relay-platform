@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.60.0 开发版在 macOS 27.0.1 arm64 通过 **392 项自动化测试（363 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 393 项。日志见 [verification-0.60.0.txt](verification-0.60.0.txt)，逐项清单见 [validation-evidence-0.60.0.json](validation-evidence-0.60.0.json)。
+0.61.0 开发版在 macOS 27.0.1 arm64 通过 **393 项自动化测试（364 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 394 项。日志见 [verification-0.61.0.txt](verification-0.61.0.txt)，逐项清单见 [validation-evidence-0.61.0.json](validation-evidence-0.61.0.json)。
 
-## 0.60.0 UPnP 事件订阅验证
+## 0.61.0 目的地端口 ACL 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 单端口/范围 | 443、8000-8080 放行；80 拒绝 |
+| 拒绝优先 | 8443、9000-9001 拒绝 |
+| 边界 | 反向范围拒绝；端口与主机/IP 同时满足 |
+| 限制 | 无 GeoIP/ASN、协议组合、多规则链或真实域名污染测试 |
+
+## 0.60.0 UPnP 事件订阅验证（历史）
+
+0.60.0 开发版在 macOS 27.0.1 arm64 通过 **392 项自动化测试（363 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 393 项。日志见 [verification-0.60.0.txt](verification-0.60.0.txt)，逐项清单见 [validation-evidence-0.60.0.json](validation-evidence-0.60.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

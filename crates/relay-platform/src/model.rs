@@ -373,6 +373,12 @@ pub struct Rule {
     /// Destination denylist; evaluated before the allowlist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_destinations: Vec<String>,
+    /// Destination port allowlist (`443`, `8000-8080`, `*`); empty means all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_destination_ports: Vec<String>,
+    /// Destination port denylist; evaluated before the allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_destination_ports: Vec<String>,
 }
 
 impl Rule {
@@ -407,9 +413,11 @@ impl Rule {
     }
     pub fn validate(&self) -> Result<()> {
         crate::multipath::validate_rule(self)?;
-        crate::destination_acl::DestinationPolicy::parse(
+        crate::destination_acl::DestinationPolicy::parse_with_ports(
             &self.allow_destinations,
             &self.deny_destinations,
+            &self.allow_destination_ports,
+            &self.deny_destination_ports,
         )?;
         crate::shadowsocks::validate_rule(self)?;
         if let Some(config) = &self.inbound_socks5 {
@@ -674,7 +682,10 @@ impl Rule {
             "too many source networks"
         );
         ensure!(
-            self.allow_destinations.len() <= 256 && self.deny_destinations.len() <= 256,
+            self.allow_destinations.len() <= 256
+                && self.deny_destinations.len() <= 256
+                && self.allow_destination_ports.len() <= 256
+                && self.deny_destination_ports.len() <= 256,
             "too many destination patterns"
         );
         Ok(())

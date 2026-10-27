@@ -503,6 +503,8 @@ mod tests {
             allow_sources: vec![],
             allow_destinations: vec![],
             deny_destinations: vec![],
+            allow_destination_ports: vec![],
+            deny_destination_ports: vec![],
             deny_sources: vec![],
         }
     }

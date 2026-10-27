@@ -7,7 +7,9 @@
 ```json
 {
   "allow_destinations": ["*.example.com", "10.0.0.0/8", "203.0.113.7"],
-  "deny_destinations": ["secret.example.com", "10.9.0.0/16"]
+  "deny_destinations": ["secret.example.com", "10.9.0.0/16"],
+  "allow_destination_ports": ["443", "8000-8080"],
+  "deny_destination_ports": ["8443"]
 }
 ```
 
@@ -15,7 +17,9 @@
 - 不接受端口、URL、协议前缀或路径；非法模式在配置校验阶段明确拒绝。域名大小写不敏感，末尾点被忽略。
 - 拒绝优先；允许列表为空表示“除拒绝外全部允许”，非空则是白名单。
 - 匹配同时检查原始域名（代理目的地/域名目标）和解析后的每个 IP。域名/后缀允许授权该主机未拒绝的解析地址；IP/CIDR 允许只授权匹配的地址。解析结果会在拨号前排掉不允许的地址，不会因“任一地址匹配”而放行其他地址。
+- 目的地端口策略：`allow_destination_ports` / `deny_destination_ports`，支持单端口 `443`、范围 `8000-8080`、`*`；拒绝优先，空允许为全通。端口与主机/IP 策略同时满足才放行；BIND 对端端口也受同一策略约束。
 - 适用于固定 TCP/UDP 目标、Shadowsocks、SOCKS5 TCP/BIND、HTTP CONNECT、多路径路径和 SOCKS5 UDP 目标；预热连接也不会绕过。BIND 的入站对端还会检查来源 ACL、目的地 ACL 和私网策略。
+- 端口策略在解析后逐地址执行；混合 A/AAAA 中端口不匹配的地址被过滤。
 - 记录仍在规则 JSON 中，schema v5 和恢复日志格式 4 不变。
 
 ## 界面与 API
