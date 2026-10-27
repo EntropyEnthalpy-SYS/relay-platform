@@ -22,6 +22,7 @@ mod network;
 pub mod node;
 pub mod pcp;
 pub mod proxy;
+pub mod reverse;
 mod routing;
 pub mod shadowsocks;
 pub mod socks5;

@@ -1,0 +1,77 @@
+{
+  "build": {
+    "legacy": {
+      "arch": "aarch64",
+      "controller_schema": 4,
+      "deployment_format": 1,
+      "os": "macos",
+      "product": "relay-platform",
+      "state_contract": {
+        "agent": 1,
+        "controller": 1
+      },
+      "version": "0.18.0"
+    },
+    "new": {
+      "arch": "aarch64",
+      "controller_schema": 5,
+      "deployment_format": 1,
+      "os": "macos",
+      "product": "relay-platform",
+      "state_contract": {
+        "agent": 2,
+        "controller": 2
+      },
+      "version": "0.53.0"
+    },
+    "old": {
+      "arch": "aarch64",
+      "controller_schema": 4,
+      "deployment_format": 1,
+      "os": "macos",
+      "product": "relay-platform",
+      "state_contract": {
+        "agent": 1,
+        "controller": 1
+      },
+      "version": "0.19.0"
+    }
+  },
+  "mfa_fence": {
+    "api_token_after_reopen": 401,
+    "api_token_after_revoke": 401,
+    "api_token_before_revoke": 200,
+    "mfa_password_only_020": 401,
+    "mfa_recovery_after_reopen": 200,
+    "password_only_after_reopen": 401,
+    "recovery_schema": 4,
+    "refusals": [
+      {
+        "reason": "Error: database schema newer than this binary",
+        "refused": true,
+        "version": "0.19.0"
+      },
+      {
+        "reason": "Error: database schema newer than this binary",
+        "refused": true,
+        "version": "0.18.0"
+      }
+    ]
+  },
+  "migration": {
+    "after_sequence": 5,
+    "before_sequence": 3,
+    "final_sequence": 6,
+    "log_schema": 4,
+    "old_binary": {
+      "reason": "Error: database schema newer than this binary",
+      "refused": true
+    }
+  },
+  "restore_schema_v4": {
+    "backup_sequence": 3,
+    "login": 200,
+    "restored_sequence": 3,
+    "served_schema": 4
+  }
+}

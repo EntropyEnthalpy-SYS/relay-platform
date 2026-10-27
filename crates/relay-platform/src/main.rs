@@ -47,6 +47,24 @@ enum Command {
         #[arg(long)]
         renew_after_secs: Option<u64>,
     },
+    /// Run the public side of a single-session reverse TCP tunnel.
+    ReverseServer {
+        #[arg(long)]
+        control_listen: SocketAddr,
+        #[arg(long)]
+        public_listen: SocketAddr,
+        #[arg(long)]
+        token_file: PathBuf,
+    },
+    /// Connect a private target to a reverse tunnel server.
+    ReverseClient {
+        #[arg(long)]
+        server: SocketAddr,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        token_file: PathBuf,
+    },
     /// Discover UPnP IGDs with SSDP and print LOCATION candidates.
     UpnpDiscover {
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..=30))]
@@ -231,6 +249,32 @@ async fn main() -> Result<()> {
                 ))?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
             }
+        }
+        Command::ReverseServer {
+            control_listen,
+            public_listen,
+            token_file,
+        } => {
+            let token = std::fs::read_to_string(&token_file)?
+                .trim_end_matches(['\r', '\n'])
+                .to_owned();
+            let runtime = tokio::runtime::Runtime::new()?;
+            runtime.block_on(async {
+                let control = tokio::net::TcpListener::bind(control_listen).await?;
+                let public = tokio::net::TcpListener::bind(public_listen).await?;
+                relay_platform::reverse::serve(control, public, token).await
+            })?;
+        }
+        Command::ReverseClient {
+            server,
+            target,
+            token_file,
+        } => {
+            let token = std::fs::read_to_string(&token_file)?
+                .trim_end_matches(['\r', '\n'])
+                .to_owned();
+            tokio::runtime::Runtime::new()?
+                .block_on(relay_platform::reverse::client(server, target, token))?;
         }
         Command::UpnpDiscover { timeout_secs } => {
             let found = tokio::runtime::Runtime::new()?.block_on(
