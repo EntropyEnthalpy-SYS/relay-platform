@@ -806,13 +806,14 @@ async function deleteTemplate(template) {
 async function rolloutTemplate(template) {
   const nodes = state.nodes; const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'batch_size', '每批节点数（1–50）', '1', 'number');
+  const rollback = el('label'); rollback.append(el('span', '失败时回滚已应用节点'), Object.assign(el('input'), { type: 'checkbox', name: 'rollback_on_failure' })); grid.append(rollback);
   const targets = textarea(grid, 'targets', '目标 JSON（node_id/expected_revision/name/listen 数组）',
     JSON.stringify(nodes.slice(0, 1).map(n => ({ node_id: n.id, expected_revision: 0, name: template.name, listen: '127.0.0.1:9000' })), null, 2));
   targets.rows = 10;
   form.append(grid, el('p', '按顺序分批应用；某批失败后停止后续批次，成功节点仍保留，并返回每个节点的结果。', 'fine'));
   submit(form, '开始批量应用', async data => {
     const parsed = JSON.parse(String(data.get('targets')));
-    const report = await api(`/templates/${template.id}/rollout`, { method: 'POST', body: { batch_size: Number(data.get('batch_size')), targets: parsed } });
+    const report = await api(`/templates/${template.id}/rollout`, { method: 'POST', body: { batch_size: Number(data.get('batch_size')), rollback_on_failure: data.get('rollback_on_failure') === 'on', targets: parsed } });
     $('#dialog').close(); modal(`批量结果 · ${template.name}`, el('pre', JSON.stringify(report, null, 2), 'json-preview'));
   });
   modal(`批量应用 · ${template.name}`, form);

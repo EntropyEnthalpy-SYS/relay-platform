@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.47.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.47.0.txt](verification-0.47.0.txt)，逐项清单见 [validation-evidence-0.47.0.json](validation-evidence-0.47.0.json)。
+0.48.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.48.0.txt](verification-0.48.0.txt)，逐项清单见 [validation-evidence-0.48.0.json](validation-evidence-0.48.0.json)。
 
-## 0.47.0 模板 canary 验证
+## 0.48.0 模板 canary 回滚验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 回滚 | 3 节点、batch=1、失败批次后成功节点规则被移除，`rolled_back=1` |
+| 顺序 | 按成功应用反序移除；使用应用后修订，冲突回滚会显式失败 |
+| 限制 | 只移除本次新建规则，不恢复旧配置快照；无百分比/健康阈值/浏览器点击验收 |
+
+## 0.47.0 模板 canary 验证（历史）
+
+0.47.0 开发版在 macOS 27.0.1 arm64 通过 **381 项自动化测试（352 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 382 项。日志见 [verification-0.47.0.txt](verification-0.47.0.txt)，逐项清单见 [validation-evidence-0.47.0.json](validation-evidence-0.47.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

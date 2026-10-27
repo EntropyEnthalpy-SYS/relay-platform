@@ -191,6 +191,20 @@ impl Store {
             error,
         })
     }
+    fn remove_rule(
+        &self,
+        actor: &Actor,
+        node: &str,
+        expected_revision: u64,
+        rule_id: &str,
+    ) -> Result<NodeConfig> {
+        let mut config = self.config(actor, node, None)?;
+        let before = config.rules.len();
+        config.rules.retain(|rule| rule.id != rule_id);
+        ensure!(config.rules.len() < before, "rollout rule no longer exists");
+        self.set_config_with_rate(actor, node, expected_revision, config.rules, None)
+    }
+
     /// Apply a template to ordered node batches. A failure in a batch stops
     /// later batches; successful nodes in that batch remain applied and are
     /// reported individually. Each node's expected revision still guards it.
@@ -200,6 +214,7 @@ impl Store {
         template_id: &str,
         targets: &[crate::template::RolloutTarget],
         batch_size: usize,
+        rollback_on_failure: bool,
     ) -> Result<crate::template::RolloutReport> {
         require_writer(actor)?;
         ensure!(!targets.is_empty(), "rollout requires at least one node");
@@ -214,6 +229,9 @@ impl Store {
         }
         let mut results = Vec::new();
         let mut applied = 0usize;
+        let mut rolled_back = 0usize;
+        let mut rollback_failed = 0usize;
+        let mut successes = Vec::<usize>::new();
         let mut aborted = false;
         let mut batches = 0usize;
         for (index, batch) in targets.chunks(batch_size).enumerate() {
@@ -238,7 +256,10 @@ impl Store {
                             revision: Some(config.revision),
                             rule_id: rule.map(|rule| rule.id.clone()),
                             error: None,
+                            rolled_back: false,
+                            rollback_error: None,
                         });
+                        successes.push(results.len() - 1);
                     }
                     Err(error) => {
                         failed = true;
@@ -249,12 +270,42 @@ impl Store {
                             revision: None,
                             rule_id: None,
                             error: Some(error.to_string()),
+                            rolled_back: false,
+                            rollback_error: None,
                         });
                     }
                 }
             }
             if failed {
                 aborted = true;
+                if rollback_on_failure {
+                    for result_index in successes.iter().rev().copied() {
+                        let (node_id, revision, rule_id) = {
+                            let result = &results[result_index];
+                            (
+                                result.node_id.clone(),
+                                result.revision,
+                                result.rule_id.clone(),
+                            )
+                        };
+                        let outcome = match (revision, rule_id) {
+                            (Some(revision), Some(rule_id)) => {
+                                self.remove_rule(actor, &node_id, revision, &rule_id)
+                            }
+                            _ => Err(anyhow::anyhow!("rollout result has no rule identity")),
+                        };
+                        match outcome {
+                            Ok(_) => {
+                                rolled_back += 1;
+                                results[result_index].rolled_back = true;
+                            }
+                            Err(error) => {
+                                rollback_failed += 1;
+                                results[result_index].rollback_error = Some(error.to_string());
+                            }
+                        }
+                    }
+                }
                 for target in targets.iter().skip((index + 1) * batch_size) {
                     results.push(crate::template::RolloutResult {
                         node_id: target.node_id.clone(),
@@ -263,6 +314,8 @@ impl Store {
                         revision: None,
                         rule_id: None,
                         error: Some("not attempted after canary failure".into()),
+                        rolled_back: false,
+                        rollback_error: None,
                     });
                 }
                 break;
@@ -273,6 +326,8 @@ impl Store {
             batch_size,
             batches,
             applied,
+            rolled_back,
+            rollback_failed,
             aborted,
             results,
         })

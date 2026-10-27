@@ -1459,6 +1459,8 @@ async fn mptcp_diagnostics(
 #[serde(deny_unknown_fields)]
 struct RolloutInput {
     batch_size: usize,
+    #[serde(default)]
+    rollback_on_failure: bool,
     targets: Vec<crate::template::RolloutTargetInput>,
 }
 async fn rollout_template(
@@ -1490,7 +1492,13 @@ async fn rollout_template(
         .collect::<std::result::Result<Vec<_>, ApiError>>()?;
     Ok(Json(
         database(state.store, move |db| {
-            db.rollout_template(&actor, &id, &targets, input.batch_size)
+            db.rollout_template(
+                &actor,
+                &id,
+                &targets,
+                input.batch_size,
+                input.rollback_on_failure,
+            )
         })
         .await?,
     ))

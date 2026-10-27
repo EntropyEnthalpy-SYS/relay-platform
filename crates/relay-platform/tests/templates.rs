@@ -134,10 +134,15 @@ fn rollout_stops_after_a_failed_canary_batch() {
                 target(&c, rc.revision, 19003),
             ],
             1,
+            true,
         )
         .unwrap();
     assert!(report.aborted);
     assert_eq!(report.applied, 1);
+    assert_eq!(report.rolled_back, 1);
+    assert_eq!(report.rollback_failed, 0);
+    assert!(report.results[0].rolled_back);
+    assert!(store.config(&admin, &a.id, None).unwrap().rules.is_empty());
     assert_eq!(report.batches, 2);
     assert_eq!(report.results.len(), 3);
     assert!(report.results[0].applied);

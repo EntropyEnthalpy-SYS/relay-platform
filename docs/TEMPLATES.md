@@ -42,7 +42,7 @@
 `POST /templates/{id}/rollout`：
 
 ```json
-{"batch_size": 2, "targets": [
+{"batch_size": 2, "rollback_on_failure": true, "targets": [
   {"node_id":"node-a","expected_revision":3,"name":"Web","listen":"127.0.0.1:19090"},
   {"node_id":"node-b","expected_revision":3,"name":"Web","listen":"127.0.0.1:19090"}
 ]}
@@ -50,8 +50,8 @@
 
 - 目标按输入顺序分批，`batch_size` 1–50，最多 100 个节点；节点不能重复。
 - 每个节点仍按自己的 `expected_revision` 应用，生成新的规则 ID/名称/监听/计量周期。
-- 一批中任一节点失败即停止后续批次；同批已成功的节点保留，后续节点标记 `not attempted after canary failure`。
-- 返回 `batch/batches/applied/aborted/results`；每项包含 revision、rule_id 或错误。没有自动回滚；需要用户显式修复或重新发布。
+- 一批中任一节点失败即停止后续批次；默认同批已成功节点保留。请求可选 `rollback_on_failure=true`，按成功应用的反序移除本次 rollout 创建的规则；回滚失败逐节点报告，不隐藏。
+- 返回 `batch/batches/applied/rolled_back/rollback_failed/aborted/results`；每项包含 revision、rule_id、`rolled_back` 或错误。回滚使用应用后的修订作为 expected revision，后续并发配置变更会使该项回滚失败。
 - 面板模板页“批量应用”接受目标 JSON 和批大小，显示逐节点结果。
 
 ## 界面与 API
@@ -70,4 +70,4 @@
 
 - Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`，以及 canary 批次失败后停止后续节点。
 - HTTP 测试覆盖创建、viewer 403、节点配置修订、应用后规则名称。
-- 未实现模板版本化、完整配置差异视图、变量参数化、自动回滚、百分比/健康阈值灰度、模板引用依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。
+- 自动回滚只覆盖本次 rollout 新建规则的移除，不做旧配置的全量快照恢复；未实现模板版本化、完整差异视图、变量参数化、百分比/健康阈值灰度、依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。

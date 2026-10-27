@@ -47,6 +47,10 @@ pub struct RolloutResult {
     pub revision: Option<u64>,
     pub rule_id: Option<String>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub rolled_back: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_error: Option<String>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct RolloutReport {
@@ -54,6 +58,8 @@ pub struct RolloutReport {
     pub batch_size: usize,
     pub batches: usize,
     pub applied: usize,
+    pub rolled_back: usize,
+    pub rollback_failed: usize,
     pub aborted: bool,
     pub results: Vec<RolloutResult>,
 }
