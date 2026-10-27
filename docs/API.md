@@ -440,3 +440,7 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | POST | `/nodes/{node}/templates/{id}` | `{expected_revision,name,listen}` 应用为新规则 |
 
 模板创建/更新校验规则主体；应用生成新 ID、名称、监听和计量周期，走正常配置修订校验。`/templates*` 与节点模板应用仅登录会话。详见 [TEMPLATES.md](TEMPLATES.md)。
+
+## 0.40.0 MPTCP 诊断
+
+`GET /api/v1/diagnostics/mptcp`（仅系统管理员、登录会话）返回 `platform/supported/enabled/probe_error/interfaces/routes/endpoints/active_connections/note`。Linux 探测 MPTCP socket 与 `/proc` 配置；非 Linux 返回 `supported=false`。这是观测，不是数据面。CLI：`relay mptcp-info`。详见 [MPTCP.md](MPTCP.md)。

@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.39.0 开发版在 macOS 27.0.1 arm64 通过 **367 项自动化测试（338 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 368 项。日志见 [verification-0.39.0.txt](verification-0.39.0.txt)，逐项清单见 [validation-evidence-0.39.0.json](validation-evidence-0.39.0.json)。
+0.40.0 开发版在 macOS 27.0.1 arm64 通过 **368 项自动化测试（339 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 369 项。日志见 [verification-0.40.0.txt](verification-0.40.0.txt)，逐项清单见 [validation-evidence-0.40.0.json](validation-evidence-0.40.0.json)。
 
-## 0.39.0 SOCKS5 UDP 性能验证
+## 0.40.0 MPTCP 能力观测验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 单元 | 平台字段、note、非 Linux 明确 unsupported；路由/端点上限 |
+| HTTP | 管理员读取 `supported/note`，viewer 403 |
+| 边界 | 只读观测，不修改规则/监听/转发；`active_connections=null` |
+
+## 0.39.0 SOCKS5 UDP 性能验证（历史）
+
+0.39.0 开发版在 macOS 27.0.1 arm64 通过 **367 项自动化测试（338 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 368 项。日志见 [verification-0.39.0.txt](verification-0.39.0.txt)，逐项清单见 [validation-evidence-0.39.0.json](validation-evidence-0.39.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

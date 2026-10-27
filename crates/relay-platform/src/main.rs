@@ -24,6 +24,8 @@ struct Cli {
 enum Command {
     /// Report build target and the deployment state compatibility contract.
     BuildInfo,
+    /// Observe MPTCP kernel capability, interfaces, routes and endpoints.
+    MptcpInfo,
     /// Run the control API and embedded administration interface.
     Server {
         #[arg(long, default_value = "127.0.0.1:8080")]
@@ -119,6 +121,12 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
     match cli.command {
+        Command::MptcpInfo => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&relay_platform::mptcp::detect())?
+            );
+        }
         Command::BuildInfo => {
             // Bump the relevant contract before an incompatible persisted-state
             // change. Deployment rollback requires exact contract equality and

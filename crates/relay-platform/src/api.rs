@@ -174,6 +174,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
         || path.starts_with("tickets")
         || path == "templates"
         || path.starts_with("templates/")
+        || path == "diagnostics/mptcp"
         || path.contains("/templates/")
         || path.starts_with("api-tokens")
         || path.ends_with("/mfa/reset")
@@ -298,6 +299,7 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/subscriptions/{id}/preview",
             get(preview_subscription),
         )
+        .route("/api/v1/diagnostics/mptcp", get(mptcp_diagnostics))
         .route("/api/v1/tickets", get(tickets).post(create_ticket))
         .route("/api/v1/templates", get(templates).post(create_template))
         .route(
@@ -1434,6 +1436,20 @@ async fn public_subscription(
     Ok(response)
 }
 
+async fn mptcp_diagnostics(
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::mptcp::Capability> {
+    if actor.role != Role::SystemAdmin {
+        return Err(ApiError(
+            Rejection {
+                status: 403,
+                message: "system administrator required for MPTCP diagnostics".into(),
+            }
+            .into(),
+        ));
+    }
+    Ok(Json(crate::mptcp::detect()))
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ApplyTemplate {
@@ -2480,7 +2496,7 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","destination-acl","config-templates","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","destination-acl","config-templates","mptcp-diagnostics","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }

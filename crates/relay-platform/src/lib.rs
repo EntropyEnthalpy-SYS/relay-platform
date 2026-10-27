@@ -15,6 +15,7 @@ pub mod journal;
 pub mod lease;
 pub mod metrics;
 pub mod model;
+pub mod mptcp;
 pub mod multipath;
 mod network;
 pub mod node;
