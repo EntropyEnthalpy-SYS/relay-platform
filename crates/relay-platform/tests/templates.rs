@@ -1,7 +1,8 @@
 mod common;
 use common::*;
 use relay_platform::{
-    model::Protocol,
+    health::{ProbeKind, Status, TargetHealthReport},
+    model::{EngineStats, Protocol},
     store::{Rejection, Store},
     template::TemplateInput,
 };
@@ -140,6 +141,7 @@ fn rollout_stops_after_a_failed_canary_batch() {
             true,
             None,
             false,
+            false,
             None,
         )
         .unwrap();
@@ -238,6 +240,7 @@ fn rollout_reports_a_missing_post_apply_receipt() {
             false,
             None,
             false,
+            false,
             Some(100),
         )
         .unwrap();
@@ -283,6 +286,7 @@ fn rollout_can_require_a_recent_healthy_node() {
             false,
             None,
             true,
+            false,
             None,
         )
         .unwrap();
@@ -295,9 +299,97 @@ fn rollout_can_require_a_recent_healthy_node() {
             .contains("synced")
     );
     let applied = store
-        .rollout_template(&admin, &template.id, &[target], 1, false, None, false, None)
+        .rollout_template(
+            &admin,
+            &template.id,
+            &[target],
+            1,
+            false,
+            None,
+            false,
+            false,
+            None,
+        )
         .unwrap();
     assert_eq!(applied.applied, 1);
+}
+
+#[test]
+fn rollout_can_require_all_targets_to_be_eligible() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = temp.path().join("controller.db");
+    let store = Store::open(&db).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (node, _) = store.create_node(&admin, "default", "target-gate").unwrap();
+    let revision = store.set_config(&admin, &node.id, 0, vec![]).unwrap();
+    let stats = EngineStats {
+        target_health: vec![TargetHealthReport {
+            probe_kind: ProbeKind::TcpConnect,
+            rule_id: "rule-one".into(),
+            target_index: 0,
+            listen_port: 9000,
+            protocol: Protocol::Tcp,
+            target_address: "127.0.0.1:9".into(),
+            status: Status::Healthy,
+            eligible: true,
+            selection_reason: "fixture".into(),
+            sample_age_ms: Some(10),
+            max_age_ms: 30_000,
+            checked_at_ms: Some(1),
+            latency_ewma_us: Some(1000),
+            window_checks: 1,
+            window_failures: 0,
+            jitter_us: None,
+            consecutive_successes: 1,
+            consecutive_failures: 0,
+            completed_checks: 1,
+            successful_checks: 1,
+            last_error: None,
+            probe_sent_bytes: 1,
+            probe_received_bytes: 1,
+            priority: 0,
+            active_sessions: 0,
+            max_sessions: None,
+        }],
+        ..Default::default()
+    };
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE nodes SET stats_json=?1 WHERE id=?2",
+            rusqlite::params![serde_json::to_string(&stats).unwrap(), node.id],
+        )
+        .unwrap();
+    let template = store
+        .create_template(
+            &admin,
+            input(None, rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp)),
+        )
+        .unwrap();
+    let target = relay_platform::template::RolloutTarget {
+        node_id: node.id.clone(),
+        expected_revision: revision.revision,
+        name: "target-gate".into(),
+        listen: "127.0.0.1:19105".parse().unwrap(),
+        variables: Default::default(),
+        template_version: None,
+    };
+    let report = store
+        .rollout_template(
+            &admin,
+            &template.id,
+            &[target],
+            1,
+            false,
+            None,
+            false,
+            true,
+            None,
+        )
+        .unwrap();
+    assert_eq!(report.applied, 1);
+    assert!(report.require_target_health);
 }
 
 #[test]
@@ -331,6 +423,7 @@ fn canary_percent_sizes_the_first_batch() {
             2,
             false,
             Some(34),
+            false,
             false,
             None,
         )

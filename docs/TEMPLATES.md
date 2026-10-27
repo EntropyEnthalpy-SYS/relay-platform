@@ -61,6 +61,8 @@
 
 `wait_for_apply_ms` 可选：每批配置写入后等待目标节点回报 `applied_revision` 达到该批修订，且无 `apply_error`，超过时限则 `aborted` 并记录 `gate_error`。它只验证**配置应用回执**，不检查流量、错误率或延迟。
 
+`require_target_health: true` 可选：每批应用后，轮询该批节点的 `target_health`，直到每个节点至少有一个报告且所有报告 `eligible=true`；超时（默认 5 秒，或 `wait_for_apply_ms`）则 `aborted` 并记录 `gate_error`。它复用 Agent 的探测结果，不等同于完整流量健康或自动放量。
+
 ## 健康预检
 
 `require_healthy: true` 时，每个目标在应用前必须：
@@ -142,4 +144,4 @@
 
 - Store 测试覆盖创建、列表、预览、应用生成新 ID/名称/监听/owner/tenant/meter、过期修订 409、viewer 403、预览不改变修订、重复监听 `valid=false`、canary 批次失败后停止后续节点，以及失败后只重试失败节点。
 - HTTP 测试覆盖创建、viewer 403、节点配置修订、应用后规则名称。
-- 自动回滚只覆盖本次 rollout 新建规则的移除，不做旧配置的全量快照恢复；未实现模板版本化、完整差异视图、变量参数化、百分比/健康阈值灰度、依赖图、批量撤销和浏览器点击验收；模块 06 仍为部分实现。
+- 自动回滚只覆盖本次 rollout 新建规则的移除，不做旧配置的全量快照恢复；未实现依赖图、批量撤销和浏览器点击验收；目标健康门控只检查 Agent 最近探测的 eligible，不检查真实业务流量；模块 06 仍为部分实现。

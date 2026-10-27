@@ -373,6 +373,7 @@ impl Store {
         rollback_on_failure: bool,
         canary_percent: Option<u8>,
         require_healthy: bool,
+        require_target_health: bool,
         wait_for_apply_ms: Option<u64>,
     ) -> Result<crate::template::RolloutReport> {
         require_writer(actor)?;
@@ -504,6 +505,23 @@ impl Store {
                     }
                 }
             }
+            if !failed && require_target_health {
+                let nodes: Vec<_> = results
+                    .iter()
+                    .filter(|result| result.batch == index && result.applied)
+                    .map(|result| result.node_id.clone())
+                    .collect();
+                if !nodes.is_empty()
+                    && let Err(error) = self.wait_for_target_health(
+                        actor,
+                        &nodes,
+                        wait_for_apply_ms.unwrap_or(5_000),
+                    )
+                {
+                    failed = true;
+                    gate_error = Some(error.to_string());
+                }
+            }
             if !failed && let Some(timeout_ms) = wait_for_apply_ms {
                 let expected: Vec<_> = results
                     .iter()
@@ -572,6 +590,7 @@ impl Store {
             batch_size,
             canary_percent,
             require_healthy,
+            require_target_health,
             wait_for_apply_ms,
             gate_error,
             batches,
@@ -586,6 +605,7 @@ impl Store {
             rollback_on_failure,
             canary_percent,
             require_healthy,
+            require_target_health,
             wait_for_apply_ms,
             report: report.clone(),
         };
@@ -596,6 +616,37 @@ impl Store {
         Ok(report)
     }
 
+    fn wait_for_target_health(
+        &self,
+        actor: &Actor,
+        node_ids: &[String],
+        timeout_ms: u64,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let nodes = self.nodes(actor)?;
+            let ready = node_ids.iter().all(|id| {
+                nodes.iter().any(|node| {
+                    &node.id == id
+                        && !node.stats.target_health.is_empty()
+                        && node
+                            .stats
+                            .target_health
+                            .iter()
+                            .all(|target| target.eligible)
+                })
+            });
+            if ready {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "target health did not become eligible for every node within {timeout_ms}ms"
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
     pub fn retry_rollout(
         &self,
         actor: &Actor,
@@ -638,6 +689,7 @@ impl Store {
             record.rollback_on_failure,
             record.canary_percent,
             record.require_healthy,
+            record.require_target_health,
             record.wait_for_apply_ms,
         )
     }
