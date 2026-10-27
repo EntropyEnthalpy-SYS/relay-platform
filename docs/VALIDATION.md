@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.83.0 开发版在 macOS 27.0.1 arm64 通过 **408 项自动化测试（379 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 409 项。日志见 [verification-0.83.0.txt](verification-0.83.0.txt)，逐项清单见 [validation-evidence-0.83.0.json](validation-evidence-0.83.0.json)。
+0.84.0 开发版在 macOS 27.0.1 arm64 通过 **408 项自动化测试（379 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 409 项。日志见 [verification-0.84.0.txt](verification-0.84.0.txt)，逐项清单见 [validation-evidence-0.84.0.json](validation-evidence-0.84.0.json)。
 
-## 0.83.0 反向多路复用流上限
+## 0.84.0 测试稳定性
+
+| 检查 | 结果 |
+| --- | --- |
+| 端口分配 | 进程内单调计数 + PID 起点 |
+| 多路径端口对 | 额外消费一个候选，避免相邻冲突 |
+| 串行 | verify.sh 使用 RUST_TEST_THREADS=1 |
+| 限制 | 仅测试稳定性，不改变运行时语义 |
+
+## 0.83.0 反向多路复用流上限（历史）
+
+0.83.0 开发版在 macOS 27.0.1 arm64 通过 **408 项自动化测试（379 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 409 项。日志见 [verification-0.83.0.txt](verification-0.83.0.txt)，逐项清单见 [validation-evidence-0.83.0.json](validation-evidence-0.83.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

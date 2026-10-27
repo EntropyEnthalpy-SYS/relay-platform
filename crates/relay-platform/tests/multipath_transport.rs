@@ -21,6 +21,9 @@ fn port_pair() -> SocketAddr {
     loop {
         let first = free_address();
         if std::net::TcpListener::bind((first.ip(), first.port() + 1)).is_ok() {
+            // The server uses first and first+1. Consume one more candidate so
+            // the next caller cannot place its listener on the second path.
+            let _ = free_address();
             return first;
         }
     }

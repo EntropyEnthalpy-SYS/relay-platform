@@ -10,11 +10,17 @@ use tokio_util::sync::CancellationToken;
 
 pub const PASSWORD: &str = "test-password-only-29x!";
 pub fn free_address() -> SocketAddr {
-    use rand::Rng;
-    loop {
-        // Keep test listeners outside the usual ephemeral client-port range.
-        // A concurrent outbound connect could otherwise claim a just-released port.
-        let port = rand::thread_rng().gen_range(12_000..30_000);
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // Keep test listeners outside the usual ephemeral client-port range.
+    // A process-local counter avoids two tests in the same binary randomly
+    // choosing the same port; the PID-derived start separates test binaries.
+    // Each allocation skips three ports so a test can reserve a short
+    // listen range without overlapping the next allocation.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let start = 12_000u32 + (u32::from(std::process::id() as u16).wrapping_mul(37) % 18_000);
+    for _ in 0..4_500 {
+        let slot = NEXT.fetch_add(1, Ordering::Relaxed) % 4_500;
+        let port = (12_000 + (start - 12_000 + slot * 4) % 18_000) as u16;
         let Ok(listener) = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         else {
             continue;
@@ -24,6 +30,7 @@ pub fn free_address() -> SocketAddr {
             return address;
         }
     }
+    panic!("no free test port in 12000..30000");
 }
 pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
     Rule {

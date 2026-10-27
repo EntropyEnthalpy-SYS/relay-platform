@@ -3,7 +3,7 @@ set -eu
 cd "$(dirname "$0")/.."
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+RUST_TEST_THREADS=1 cargo test --locked --all-targets
 node --check web/app.js
 node scripts/test_web_editor.cjs web/app.js
 node scripts/test_web_views.cjs web/index.html web/app.js
