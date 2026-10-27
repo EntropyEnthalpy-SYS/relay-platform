@@ -26,6 +26,21 @@ enum Command {
     BuildInfo,
     /// Observe MPTCP kernel capability, interfaces, routes and endpoints.
     MptcpInfo,
+    /// Request or delete a UPnP IGD UDP port mapping.
+    UpnpMap {
+        #[arg(long)]
+        description_url: String,
+        #[arg(long, default_value = "127.0.0.1")]
+        internal_client: String,
+        #[arg(long)]
+        internal_port: u16,
+        #[arg(long)]
+        external_port: u16,
+        #[arg(long, default_value_t = 3600)]
+        lifetime_secs: u32,
+        #[arg(long)]
+        delete: bool,
+    },
     /// Request or delete a PCP UDP port mapping.
     PcpMap {
         #[arg(long)]
@@ -149,6 +164,24 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
     match cli.command {
+        Command::UpnpMap {
+            description_url,
+            internal_client,
+            internal_port,
+            external_port,
+            lifetime_secs,
+            delete,
+        } => {
+            let mapping = tokio::runtime::Runtime::new()?.block_on(relay_platform::upnp::map(
+                &description_url,
+                &internal_client,
+                internal_port,
+                external_port,
+                lifetime_secs,
+                delete,
+            ))?;
+            println!("{}", serde_json::to_string_pretty(&mapping)?);
+        }
         Command::PcpMap {
             gateway,
             internal_port,

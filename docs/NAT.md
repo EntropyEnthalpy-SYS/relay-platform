@@ -1,6 +1,6 @@
 # NAT 端口映射
 
-0.42.0 增加 NAT-PMP（RFC 6886）UDP 端口映射客户端；0.43.0 增加 PCP（RFC 6887）MAP 客户端。它们是端口映射管理工具，不是 NAT 穿透服务器、反向隧道或 WireGuard。
+0.42.0 增加 NAT-PMP（RFC 6886）UDP 端口映射客户端；0.43.0 增加 PCP（RFC 6887）MAP 客户端；0.44.0 增加 UPnP IGD AddPortMapping/DeletePortMapping 客户端。它们是端口映射管理工具，不是 NAT 穿透服务器、反向隧道或 WireGuard。
 
 ## CLI
 
@@ -29,8 +29,22 @@ relay pcp-map --gateway 192.168.1.1:5351 --internal-port 9000 --delete
 - 外部 IP 使用 16 字节字段，IPv4-mapped 地址会还原成 IPv4；生命周期上限 7 天。
 - 与 NAT-PMP 一样只管理一个映射，不改变 Relay 数据路径。
 
+## UPnP IGD
+
+```text
+relay upnp-map --description-url http://192.168.1.1:5000/rootDesc.xml \
+  --internal-client 192.168.1.10 --internal-port 9000 \
+  --external-port 40000 --lifetime-secs 3600
+relay upnp-map --description-url ... --internal-port 9000 --external-port 40000 --delete
+```
+
+- 不实现 SSDP 发现；调用者提供 IGD description URL。
+- 从 description 中定位 `WANIPConnection`/`WANPPPConnection` 的 `controlURL`，解析相对 URL。
+- 发送 SOAP `AddPortMapping` 或 `DeletePortMapping`，UDP、租约时间、启用标记和固定描述；HTTP/SOAP 错误码明确失败。
+- `internal-client` 默认 `127.0.0.1`，真实使用应填内网地址；external port 必须非 0。
+
 ## 验证与限制
 
-- 集成测试用本机假 NAT-PMP 网关验证请求字段、成功映射、epoch/外部端口解析、删除请求和拒绝响应；假 PCP 网关验证 nonce、成功映射、IPv4-mapped 外部地址、删除和拒绝。
-- 未实现 UPnP IGD、NAT-PMP/PCP 续租/重试、PCP 固定源端口 5351、IPv6 完整矩阵、映射状态持久化、反向隧道、WireGuard、公网入口和真实家用路由器验收；模块 16 仍为部分实现。
+- 集成测试用本机假 NAT-PMP 网关验证请求字段、成功映射、epoch/外部端口解析、删除请求和拒绝响应；假 PCP 网关验证 nonce、成功映射、IPv4-mapped 外部地址、删除和拒绝；假 UPnP HTTP 服务验证 description 解析、AddPortMapping/DeletePortMapping 的 control URL 和 SOAP 字段。
+- 未实现 SSDP 发现、UPnP 事件订阅、NAT-PMP/PCP/UPnP 续租/重试、PCP 固定源端口 5351、IPv6 完整矩阵、映射状态持久化、反向隧道、WireGuard、公网入口和真实家用路由器验收；模块 16 仍为部分实现。
 - 该命令只管理一个映射，不改变 Relay 规则或监听；需要网关实际支持 NAT-PMP。

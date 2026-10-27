@@ -35,5 +35,6 @@ pub mod ticket;
 pub mod topology;
 pub mod totp;
 pub mod transport;
+pub mod upnp;
 pub mod user_rate;
 pub mod websocket;
