@@ -1,18 +1,18 @@
 {
-  "at_utc": "2026-10-27T02:39:40.988454+00:00",
+  "at_utc": "2026-10-27T02:47:43.613463+00:00",
   "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
   "machine": "arm64",
   "python": "3.14.4",
-  "binary_sha256": "2c68cff8e531ca192bae9a3ebfca7707bfc70be30182e5aeaa8350dd15b3d362",
+  "binary_sha256": "828d025867ea52affd81884e02193baea2a3874d7ef2a37dce9498dc49686694",
   "scope": "local loopback SOCKS5 UDP ASSOCIATE; verified payloads; no WAN/TLS/real client",
   "packets": 1000,
   "payload_bytes": 1200,
   "window": 32,
   "received": 1000,
   "lost": 0,
-  "seconds": 0.03762537497095764,
-  "goodput_mbps": 255.14695886512948,
-  "batch_rtt_p50_ms": 0.035412107536103576,
-  "batch_rtt_p95_ms": 0.04486587204155512,
-  "relay": "127.0.0.1:63334"
+  "seconds": 0.036193624953739345,
+  "goodput_mbps": 265.2400806017684,
+  "batch_rtt_p50_ms": 0.03443814057391137,
+  "batch_rtt_p95_ms": 0.0452825624961406,
+  "relay": "127.0.0.1:65305"
 }
