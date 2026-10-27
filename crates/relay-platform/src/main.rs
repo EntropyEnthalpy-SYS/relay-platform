@@ -64,6 +64,9 @@ enum Command {
         target: String,
         #[arg(long)]
         token_file: PathBuf,
+        /// Concurrent control sessions (1-64).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=64))]
+        sessions: u8,
     },
     /// Discover UPnP IGDs with SSDP and print LOCATION candidates.
     UpnpDiscover {
@@ -269,12 +272,17 @@ async fn main() -> Result<()> {
             server,
             target,
             token_file,
+            sessions,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
-            tokio::runtime::Runtime::new()?
-                .block_on(relay_platform::reverse::client(server, target, token))?;
+            tokio::runtime::Runtime::new()?.block_on(relay_platform::reverse::client_pool(
+                server,
+                target,
+                token,
+                usize::from(sessions),
+            ))?;
         }
         Command::UpnpDiscover { timeout_secs } => {
             let found = tokio::runtime::Runtime::new()?.block_on(

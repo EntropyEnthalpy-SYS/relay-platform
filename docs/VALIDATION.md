@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.56.0 开发版在 macOS 27.0.1 arm64 通过 **389 项自动化测试（360 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 390 项。日志见 [verification-0.56.0.txt](verification-0.56.0.txt)，逐项清单见 [validation-evidence-0.56.0.json](validation-evidence-0.56.0.json)。
+0.57.0 开发版在 macOS 27.0.1 arm64 通过 **390 项自动化测试（361 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 391 项。日志见 [verification-0.57.0.txt](verification-0.57.0.txt)，逐项清单见 [validation-evidence-0.57.0.json](validation-evidence-0.57.0.json)。
 
-## 0.56.0 固定版本应用验证
+## 0.57.0 反向会话池验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 并发 | `--sessions 2` 时两个公网连接同时回显 |
+| 顺序 | 原有两顺序连接仍通过 |
+| 认证 | 错误 token 仍 DENY |
+| 限制 | 每条控制连接仍单会话；无 mux/计量/ACL/TLS/WireGuard |
+
+## 0.56.0 固定版本应用验证（历史）
+
+0.56.0 开发版在 macOS 27.0.1 arm64 通过 **389 项自动化测试（360 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 390 项。日志见 [verification-0.56.0.txt](verification-0.56.0.txt)，逐项清单见 [validation-evidence-0.56.0.json](validation-evidence-0.56.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

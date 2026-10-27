@@ -21,6 +21,7 @@ pub async fn serve(control: TcpListener, public: TcpListener, token: String) -> 
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
     );
+    let public = std::sync::Arc::new(public);
     loop {
         let (mut control_stream, peer) = control.accept().await?;
         let authorized = match read_line(&mut control_stream).await {
@@ -40,47 +41,78 @@ pub async fn serve(control: TcpListener, public: TcpListener, token: String) -> 
             continue;
         }
         tracing::info!(%peer, "reverse client connected");
-        let (mut exposed, public_peer) = match public.accept().await {
-            Ok(pair) => pair,
-            Err(error) => {
-                tracing::warn!(%error, "reverse public accept failed");
-                continue;
-            }
-        };
-        if control_stream
-            .write_all(format!("{OPEN}\n").as_bytes())
-            .await
-            .is_err()
-        {
-            continue;
+        let public = public.clone();
+        tokio::spawn(async move {
+            serve_session(control_stream, public).await;
+        });
+    }
+}
+
+async fn serve_session(mut control_stream: TcpStream, public: std::sync::Arc<TcpListener>) {
+    let (mut exposed, public_peer) = match public.accept().await {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::warn!(%error, "reverse public accept failed");
+            return;
         }
-        let reply = match read_line(&mut control_stream).await {
-            Ok(line) => line,
-            Err(_) => continue,
-        };
-        if reply != OK {
-            tracing::warn!(%public_peer, reply = %reply, "reverse client refused public connection");
-            let _ = exposed.shutdown().await;
-            continue;
-        }
-        if let Err(error) = copy_bidirectional(&mut exposed, &mut control_stream).await {
-            tracing::debug!(%error, %public_peer, "reverse bridge ended");
-        }
-        tracing::info!(%peer, "reverse client disconnected");
+    };
+    if control_stream
+        .write_all(format!("{OPEN}\n").as_bytes())
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let reply = match read_line(&mut control_stream).await {
+        Ok(line) => line,
+        Err(_) => return,
+    };
+    if reply != OK {
+        tracing::warn!(%public_peer, reply = %reply, "reverse client refused public connection");
+        let _ = exposed.shutdown().await;
+        return;
+    }
+    if let Err(error) = copy_bidirectional(&mut exposed, &mut control_stream).await {
+        tracing::debug!(%error, %public_peer, "reverse bridge ended");
     }
 }
 
 pub async fn client(server: SocketAddr, target: String, token: String) -> Result<()> {
+    client_pool(server, target, token, 1).await
+}
+
+/// Run several independent control sessions. Each public connection occupies
+/// one session; a pool therefore provides bounded concurrency without a
+/// multiplexing frame protocol.
+pub async fn client_pool(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    sessions: usize,
+) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
     );
-    loop {
-        if let Err(error) = client_session(server, &target, &token).await {
-            tracing::warn!(%error, "reverse client session ended; reconnecting");
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
+    ensure!(
+        (1..=64).contains(&sessions),
+        "reverse sessions must be 1..=64"
+    );
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..sessions {
+        let target = target.clone();
+        let token = token.clone();
+        tasks.spawn(async move {
+            loop {
+                if let Err(error) = client_session(server, &target, &token).await {
+                    tracing::warn!(%error, "reverse client session ended; reconnecting");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+            }
+        });
     }
+    while tasks.join_next().await.is_some() {}
+    Ok(())
 }
 
 async fn client_session(server: SocketAddr, target: &str, token: &str) -> Result<()> {
