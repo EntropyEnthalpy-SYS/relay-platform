@@ -48,6 +48,7 @@ pub struct Event {
     pub sid: String,
     pub sequence: Option<String>,
     pub body: String,
+    pub properties: std::collections::BTreeMap<String, String>,
 }
 /// Extract the first WANIPConnection/WANPPPConnection service and its
 /// control URL from an IGD description document. This deliberately avoids a
@@ -445,6 +446,48 @@ where
     Ok(())
 }
 
+/// Extract simple leaf property elements from a UPnP event document. This is
+/// intentionally bounded and does not execute XML, resolve entities, or
+/// interpret nested property sets.
+pub fn parse_event_properties(body: &str) -> std::collections::BTreeMap<String, String> {
+    let mut properties = std::collections::BTreeMap::new();
+    let mut rest = body;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start..];
+        if rest.starts_with("</") || rest.starts_with("<?") || rest.starts_with("<!") {
+            let Some(end) = rest.find('>') else {
+                break;
+            };
+            rest = &rest[end + 1..];
+            continue;
+        }
+        let Some(tag_end) = rest.find('>') else {
+            break;
+        };
+        let tag = rest[1..tag_end]
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        let name = tag.rsplit(':').next().unwrap_or(tag);
+        let after = &rest[tag_end + 1..];
+        if name.is_empty() || name == "propertyset" || name == "property" {
+            rest = after;
+            continue;
+        }
+        let close = format!("</{tag}>");
+        let Some(value_end) = after.find(&close) else {
+            rest = after;
+            continue;
+        };
+        let value = after[..value_end].trim();
+        if !value.is_empty() && value.len() <= 4096 && properties.len() < 64 {
+            properties.insert(name.to_owned(), value.to_owned());
+        }
+        rest = &after[value_end + close.len()..];
+    }
+    properties
+}
+
 /// Run a callback HTTP server, subscribe the IGD to it, print events through
 /// `on_event`, and renew the subscription at half its timeout until cancelled.
 /// The callback URL must include a concrete loopback or local IP and port.
@@ -498,10 +541,12 @@ where
             .get("SEQ")
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let properties = parse_event_properties(&body);
         let _ = tx.send(Event {
             sid,
             sequence,
             body,
+            properties,
         });
         axum::http::StatusCode::OK
     }

@@ -270,7 +270,7 @@ async fn upnp_event_callback_server_receives_notify_and_unsubscribes() {
             .post(&callback)
             .header("SID", "uuid:callback-test")
             .header("SEQ", "0")
-            .body("<e:propertyset/>")
+            .body("<e:propertyset><e:property><ExternalIPAddress>203.0.113.5</ExternalIPAddress><PortMappingNumberOfEntries>2</PortMappingNumberOfEntries></e:property></e:propertyset>")
             .send()
             .await
             .is_ok()
@@ -287,6 +287,20 @@ async fn upnp_event_callback_server_receives_notify_and_unsubscribes() {
         .unwrap();
     assert_eq!(event.sid, "uuid:callback-test");
     assert_eq!(event.sequence.as_deref(), Some("0"));
+    assert_eq!(
+        event
+            .properties
+            .get("ExternalIPAddress")
+            .map(String::as_str),
+        Some("203.0.113.5")
+    );
+    assert_eq!(
+        event
+            .properties
+            .get("PortMappingNumberOfEntries")
+            .map(String::as_str),
+        Some("2")
+    );
     cancel.cancel();
     let subscription = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
@@ -301,4 +315,22 @@ async fn upnp_event_callback_server_receives_notify_and_unsubscribes() {
             .iter()
             .any(|method| method.starts_with("UNSUBSCRIBE"))
     );
+}
+
+#[test]
+fn event_properties_are_namespace_agnostic_and_bounded() {
+    let properties = upnp::parse_event_properties(
+        "<e:propertyset><e:property><ExternalIPAddress>203.0.113.5</ExternalIPAddress><PortMappingNumberOfEntries>2</PortMappingNumberOfEntries></e:property></e:propertyset>",
+    );
+    assert_eq!(
+        properties.get("ExternalIPAddress").map(String::as_str),
+        Some("203.0.113.5")
+    );
+    assert_eq!(
+        properties
+            .get("PortMappingNumberOfEntries")
+            .map(String::as_str),
+        Some("2")
+    );
+    assert!(upnp::parse_event_properties("<e:propertyset/>").is_empty());
 }

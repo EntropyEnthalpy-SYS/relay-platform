@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.63.0 开发版在 macOS 27.0.1 arm64 通过 **395 项自动化测试（366 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 396 项。日志见 [verification-0.63.0.txt](verification-0.63.0.txt)，逐项清单见 [validation-evidence-0.63.0.json](validation-evidence-0.63.0.json)。
+0.64.0 开发版在 macOS 27.0.1 arm64 通过 **396 项自动化测试（367 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 397 项。日志见 [verification-0.64.0.txt](verification-0.64.0.txt)，逐项清单见 [validation-evidence-0.64.0.json](validation-evidence-0.64.0.json)。
 
-## 0.63.0 UPnP 事件回调验证
+## 0.64.0 UPnP 事件属性验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 提取 | ExternalIPAddress、PortMappingNumberOfEntries 按叶级元素提取 |
+| 命名空间 | 去掉前缀后按键输出 |
+| 边界 | 空属性集为空；最多 64 项/4096 字节 |
+| 限制 | 不执行 XML/实体，不做嵌套语义或事件动作分发 |
+
+## 0.63.0 UPnP 事件回调验证（历史）
+
+0.63.0 开发版在 macOS 27.0.1 arm64 通过 **395 项自动化测试（366 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 396 项。日志见 [verification-0.63.0.txt](verification-0.63.0.txt)，逐项清单见 [validation-evidence-0.63.0.json](validation-evidence-0.63.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |
