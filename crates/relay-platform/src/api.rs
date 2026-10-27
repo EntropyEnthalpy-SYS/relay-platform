@@ -17,14 +17,26 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
 
+#[derive(Default)]
+struct ApiMetrics {
+    total: AtomicU64,
+    success: AtomicU64,
+    client_error: AtomicU64,
+    server_error: AtomicU64,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub store: Store,
+    api_metrics: Arc<ApiMetrics>,
     instance: String,
     login_attempts: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     second_factor_failures: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
@@ -39,6 +51,7 @@ impl AppState {
         Self {
             sync_queue: crate::sync_queue::SyncQueue::new(store.clone(), 16).unwrap(),
             store,
+            api_metrics: Arc::new(ApiMetrics::default()),
             instance: uuid::Uuid::new_v4().to_string(),
             login_attempts: Arc::new(Mutex::new(HashMap::new())),
             second_factor_failures: Arc::new(Mutex::new(HashMap::new())),
@@ -224,6 +237,29 @@ async fn security_headers(request: Request, next: Next) -> Response {
         response
             .headers_mut()
             .insert(name, HeaderValue::from_static(value));
+    }
+    response
+}
+
+async fn api_metrics_middleware(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let response = next.run(request).await;
+    state.api_metrics.total.fetch_add(1, Ordering::Relaxed);
+    if response.status().is_success() {
+        state.api_metrics.success.fetch_add(1, Ordering::Relaxed);
+    } else if response.status().is_server_error() {
+        state
+            .api_metrics
+            .server_error
+            .fetch_add(1, Ordering::Relaxed);
+    } else {
+        state
+            .api_metrics
+            .client_error
+            .fetch_add(1, Ordering::Relaxed);
     }
     response
 }
@@ -483,6 +519,10 @@ pub fn router(state: AppState) -> Router {
         })
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            api_metrics_middleware,
+        ))
         .with_state(state)
 }
 
@@ -1345,6 +1385,26 @@ async fn prometheus_metrics(
         "# HELP relay_build_info Build identity.\n# TYPE relay_build_info gauge\nrelay_build_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     );
+    body.push_str("# HELP relay_api_requests HTTP requests handled by the controller.\n# TYPE relay_api_requests counter\n");
+    body.push_str(&format!(
+        "relay_api_requests{{class=\"total\"}} {}\n",
+        state.api_metrics.total.load(Ordering::Relaxed)
+    ));
+    for (class, value) in [
+        ("success", state.api_metrics.success.load(Ordering::Relaxed)),
+        (
+            "client_error",
+            state.api_metrics.client_error.load(Ordering::Relaxed),
+        ),
+        (
+            "server_error",
+            state.api_metrics.server_error.load(Ordering::Relaxed),
+        ),
+    ] {
+        body.push_str(&format!(
+            "relay_api_requests{{class=\"{class}\"}} {value}\n"
+        ));
+    }
     let mux = crate::reverse_mux::stats();
     body.push_str("# HELP relay_reverse_mux_controls Authorized reverse mux control connections.\n# TYPE relay_reverse_mux_controls gauge\n");
     body.push_str(&format!(

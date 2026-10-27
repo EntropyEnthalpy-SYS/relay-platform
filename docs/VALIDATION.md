@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.93.0 开发版在 macOS 27.0.1 arm64 通过 **413 项自动化测试（384 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 414 项。日志见 [verification-0.93.0.txt](verification-0.93.0.txt)，逐项清单见 [validation-evidence-0.93.0.json](validation-evidence-0.93.0.json)。
+0.94.0 开发版在 macOS 27.0.1 arm64 通过 **413 项自动化测试（384 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 414 项。日志见 [verification-0.94.0.txt](verification-0.94.0.txt)，逐项清单见 [validation-evidence-0.94.0.json](validation-evidence-0.94.0.json)。
 
-## 0.93.0 反向 mux 指标
+## 0.94.0 HTTP 请求指标
+
+| 检查 | 结果 |
+| --- | --- |
+| 序列 | `relay_api_requests{class=...}` |
+| 分类 | total/success/client_error/server_error |
+| 注入 | 路由外层中间件 |
+| 限制 | 无路径/方法/延迟直方图 |
+
+## 0.93.0 反向 mux 指标（历史）
+
+0.93.0 开发版在 macOS 27.0.1 arm64 通过 **413 项自动化测试（384 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 414 项。日志见 [verification-0.93.0.txt](verification-0.93.0.txt)，逐项清单见 [validation-evidence-0.93.0.json](validation-evidence-0.93.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |
