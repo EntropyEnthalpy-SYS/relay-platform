@@ -23,6 +23,7 @@ pub mod node;
 pub mod pcp;
 pub mod proxy;
 pub mod reverse;
+pub mod reverse_mux;
 mod routing;
 pub mod shadowsocks;
 pub mod socks5;

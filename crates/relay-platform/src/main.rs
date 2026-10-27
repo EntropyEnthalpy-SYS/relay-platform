@@ -80,6 +80,24 @@ enum Command {
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=64))]
         sessions: u8,
     },
+    /// Serve a multiplexed reverse tunnel on one control connection.
+    ReverseMuxServer {
+        #[arg(long)]
+        control_listen: SocketAddr,
+        #[arg(long)]
+        public_listen: SocketAddr,
+        #[arg(long)]
+        token_file: PathBuf,
+    },
+    /// Connect a private target to a multiplexed reverse server.
+    ReverseMuxClient {
+        #[arg(long)]
+        server: SocketAddr,
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        token_file: PathBuf,
+    },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
         #[arg(long)]
@@ -394,6 +412,36 @@ async fn main() -> Result<()> {
                 .to_owned();
             relay_platform::reverse::client_pool(server, target, token, usize::from(sessions))
                 .await?;
+        }
+        Command::ReverseMuxServer {
+            control_listen,
+            public_listen,
+            token_file,
+        } => {
+            let token = std::fs::read_to_string(&token_file)?
+                .trim_end_matches(['\r', '\n'])
+                .to_owned();
+            let control = tokio::net::TcpListener::bind(control_listen).await?;
+            let public = tokio::net::TcpListener::bind(public_listen).await?;
+            relay_platform::reverse_mux::serve_mux(control, public, token).await?;
+        }
+        Command::ReverseMuxClient {
+            server,
+            target,
+            token_file,
+        } => {
+            let token = std::fs::read_to_string(&token_file)?
+                .trim_end_matches(['\r', '\n'])
+                .to_owned();
+            loop {
+                if let Err(error) =
+                    relay_platform::reverse_mux::client_mux(server, target.clone(), token.clone())
+                        .await
+                {
+                    tracing::warn!(%error, "reverse mux client ended; reconnecting");
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
         }
         Command::UpnpSubscribe {
             description_url,

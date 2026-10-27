@@ -1,6 +1,6 @@
-# 单会话反向 TCP 隧道
+# 反向 TCP 隧道：会话池与单连接多路复用
 
-0.53.0 增加最小反向 TCP 隧道，0.57.0 增加会话池并发。每条已认证控制连接一次承载一个公网 TCP 连接；客户端可用 `--sessions N` 并发多条控制连接，从而并发服务 N 个公网连接。它不是单连接多路复用反向隧道，也不是 WireGuard。
+0.53.0 增加最小反向 TCP 隧道，0.57.0 增加会话池并发，0.82.0 增加独立的单连接多路复用协议。旧 `reverse-server`/`reverse-client` 仍是一条控制连接承载一个公网连接；新 `reverse-mux-server`/`reverse-mux-client` 在一条控制连接上用长度前缀帧复用多个公网连接。两者都不是 WireGuard。
 
 ## 使用
 
@@ -26,6 +26,20 @@ relay reverse-client \
 
 公网客户端连接 `PUBLIC:19001`，流量由私有节点拨号到 `--target`。
 
+单连接多路复用：
+
+```bash
+relay reverse-mux-server \
+  --control-listen 0.0.0.0:19010 \
+  --public-listen 0.0.0.0:19011 \
+  --token-file /etc/relay/reverse.token
+
+relay reverse-mux-client \
+  --server PUBLIC:19010 \
+  --target 127.0.0.1:8080 \
+  --token-file /etc/relay/reverse.token
+```
+
 ## 协议与边界
 
 - 控制连接首行：`REVERSE <token>`；成功 `READY`，失败 `DENY`。
@@ -34,4 +48,7 @@ relay reverse-client \
 - 客户端 `--sessions 1..64` 启动多个独立控制会话，服务端为每个已认证控制连接派生会话任务，因此可并发服务多个公网连接；并发度受会话数限制，不是单连接多路复用。
 - 客户端在会话结束/失败后 250ms 重连；服务器持续接受新的已认证控制连接。
 - 没有单连接 mux、流量计量、ACL、TLS、重放保护或流量填充；控制/公网端口应置于受信网络或外部 TLS 隧道后。
-- 测试覆盖错误的 token、两个顺序公网连接、两个并发公网连接（session pool）、目标回显和会话重连；未做真实公网、NAT、长时或高并发验收。
+- 多路复用握手：`REVERSE-MUX <token>`；随后 9 字节帧头（kind、u32 id、u32 长度）+ 负载，kind 为 `OPEN/OK/FAIL/DATA/FIN/RESET`；帧负载上限 64 KiB。
+- 服务端为每个公网连接分配 id 并发 `OPEN`，客户端拨号目标后回 `OK`，再按 id 双向转发；一条控制连接可并发承载多个公网连接。
+- 客户端 `reverse-mux-client` 在控制连接断开后 250ms 重连；不提供按连接计量、ACL、TLS、重放保护或流量填充。
+- 测试覆盖错误 token、单控制连接上两个并发公网连接、双目标回显；旧测试覆盖顺序连接和 session pool。未做真实公网、NAT、长时或高并发验收。
