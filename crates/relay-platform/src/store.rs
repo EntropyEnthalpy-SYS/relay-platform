@@ -27,6 +27,7 @@ mod recovery;
 mod reservations;
 mod subscriptions;
 mod sync;
+mod tickets;
 mod topology;
 mod user_rates;
 pub use accounts::{

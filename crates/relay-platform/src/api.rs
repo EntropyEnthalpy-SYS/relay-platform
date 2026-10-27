@@ -171,6 +171,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     if path.starts_with("account/")
         || path.starts_with("dns/")
         || path.starts_with("commerce/")
+        || path.starts_with("tickets")
         || path.starts_with("api-tokens")
         || path.ends_with("/mfa/reset")
         || path == "auth/logout"
@@ -293,6 +294,13 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/subscriptions/{id}/preview",
             get(preview_subscription),
+        )
+        .route("/api/v1/tickets", get(tickets).post(create_ticket))
+        .route("/api/v1/tickets/{id}", get(ticket))
+        .route("/api/v1/tickets/{id}/messages", post(reply_ticket))
+        .route(
+            "/api/v1/tickets/{id}/status",
+            axum::routing::put(set_ticket_status),
         )
         .route(
             "/api/v1/commerce/plans",
@@ -1402,6 +1410,91 @@ async fn public_subscription(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct NewTicketInput {
+    subject: String,
+    body: String,
+    #[serde(default = "ticket_normal")]
+    priority: crate::ticket::TicketPriority,
+}
+fn ticket_normal() -> crate::ticket::TicketPriority {
+    crate::ticket::TicketPriority::Normal
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TicketReplyInput {
+    body: String,
+    #[serde(default)]
+    internal: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TicketStatusInput {
+    status: crate::ticket::TicketStatus,
+}
+async fn tickets(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::ticket::Ticket>> {
+    Ok(Json(
+        database(state.store, move |db| db.tickets(&actor)).await?,
+    ))
+}
+async fn ticket(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::ticket::TicketView> {
+    Ok(Json(
+        database(state.store, move |db| db.ticket(&actor, &id)).await?,
+    ))
+}
+async fn create_ticket(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<NewTicketInput>,
+) -> ApiResult<crate::ticket::TicketView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_ticket(
+                &actor,
+                crate::ticket::NewTicket {
+                    subject: input.subject,
+                    body: input.body,
+                    priority: input.priority,
+                },
+            )
+        })
+        .await?,
+    ))
+}
+async fn reply_ticket(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<TicketReplyInput>,
+) -> ApiResult<crate::ticket::TicketView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.reply_ticket(&actor, &id, &input.body, input.internal)
+        })
+        .await?,
+    ))
+}
+async fn set_ticket_status(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<TicketStatusInput>,
+) -> ApiResult<crate::ticket::TicketView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.set_ticket_status(&actor, &id, input.status)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CommercePlanInput {
     name: String,
     #[serde(default)]
@@ -2129,7 +2222,7 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }

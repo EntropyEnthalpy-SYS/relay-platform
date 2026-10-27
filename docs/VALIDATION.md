@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.28.0 开发版在 macOS 27.0.1 arm64 通过 **350 项自动化测试（321 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 351 项。日志见 [verification-0.28.0.txt](verification-0.28.0.txt)，逐项清单见 [validation-evidence-0.28.0.json](validation-evidence-0.28.0.json)。
+0.29.0 开发版在 macOS 27.0.1 arm64 通过 **352 项自动化测试（323 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 353 项。日志见 [verification-0.29.0.txt](verification-0.29.0.txt)，逐项清单见 [validation-evidence-0.29.0.json](validation-evidence-0.29.0.json)。
 
-## 0.28.0 外部支付回调验证
+## 0.29.0 工单验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Store | 所有者/其他用户/租户管理员/其他租户/系统管理员作用域、内部备注隔离、关闭权限、关闭后回复 409、重开 |
+| HTTP | 创建、其他用户 403、管理员内部备注、所有者只看到公开消息、关闭/关闭后 409 |
+| 面板 | `node --check web/app.js` 与视图结构检查；工单页源码，未做浏览器点击验收 |
+
+## 0.28.0 外部支付回调验证（历史）
+
+0.28.0 开发版在 macOS 27.0.1 arm64 通过 **350 项自动化测试（321 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 351 项。日志见 [verification-0.28.0.txt](verification-0.28.0.txt)，逐项清单见 [validation-evidence-0.28.0.json](validation-evidence-0.28.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

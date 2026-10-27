@@ -394,3 +394,14 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 | POST | `/commerce/payments/callback` | 无登录公开回调，HMAC-SHA256 验证原始请求体 |
 
 回调 body：`{payment_id,status:"paid"|"failed",external_id,amount_cents}`；`X-Relay-Signature` 为原始 JSON 的 HMAC-SHA256 十六进制（可带 `sha256=`）。重复同状态回调幂等；金额不符/状态冲突/错误签名 4xx。外部支付成功订单 `channel=external`，钱包不变；钱包订单退款仍走 `/orders/{id}/refund`，外部订单该接口 409。其他 `/commerce/*` 仍仅登录会话。详见 [COMMERCE.md](COMMERCE.md)。
+
+## 0.29.0 工单
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET/POST | `/tickets` | 当前角色可见列表/创建 `{subject,body,priority}` |
+| GET | `/tickets/{id}` | 工单与可见消息 |
+| POST | `/tickets/{id}/messages` | `{body,internal}`；内部备注仅管理员 |
+| PUT | `/tickets/{id}/status` | `open` / `pending` / `closed` |
+
+普通用户仅自己的工单，租户管理员本租户，系统管理员全部；关闭后拒绝消息。`/tickets/*` 仅登录会话。详见 [TICKETS.md](TICKETS.md)。
