@@ -16,8 +16,9 @@
 
 - `username` 与 `password` 必须同时填写（各 1..255 字节，不含控制字符），或同时省略。启用认证时使用 RFC 1929 用户名/密码子协商；未启用时只接受无认证方法。
 - `allow_private_destinations=false` 默认拒绝回环、私网、链路本地、组播等非公网目标，和 Shadowsocks 的默认策略一致。设为 `true` 仅用于本机/内网测试。
-- 规则必须 `targets=[]`。TCP CONNECT 可使用 `protocol=tcp`；UDP ASSOCIATE 需要 `protocol=both` 且单监听端口。SOCKS5 与 Shadowsocks、HTTP CONNECT 入口不能同时配置。
-- BIND 仍未实现并返回状态 7。UDP ASSOCIATE 的控制连接保持打开；客户端向服务器返回的 UDP 中继地址发送带 SOCKS5 UDP 头的报文，服务器按目标解析/ACL 转发并包装来源地址回复。
+- 规则必须 `targets=[]`。TCP CONNECT/BIND 可使用 `protocol=tcp`；UDP ASSOCIATE 需要 `protocol=both` 且单监听端口。SOCKS5 与 Shadowsocks、HTTP CONNECT 入口不能同时配置。
+- BIND 在控制连接上返回临时监听地址，等待入站 TCP 连接后返回第二份绑定地址并双向转发；等待受 `connect_timeout_ms` 和规则取消约束。BIND 的入站来源不套用规则的来源 ACL，只保护控制连接。
+- UDP ASSOCIATE 的控制连接保持打开；客户端向服务器返回的 UDP 中继地址发送带 SOCKS5 UDP 头的报文，服务器按目标解析/ACL 转发并包装来源地址回复。
 - 可以与入口 TLS、WebSocket/WSS、PROXY protocol 组合；处理顺序是 PROXY（位置按配置）→ TLS → WS → SOCKS5。
 - 客户端来源 ACL、来源哈希、连接数、配额和限速沿用规则引擎。
 

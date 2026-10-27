@@ -1,6 +1,7 @@
 mod common;
 use common::*;
 use relay_platform::{engine::Engine, model::*, shadowsocks, socks5, store::Store};
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -204,6 +205,64 @@ async fn socks5_udp_associate_relays_a_datagram_to_a_real_target() {
     assert!(expected.is_empty());
 
     let _ = control.shutdown().await;
+    drop(control);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn socks5_bind_accepts_an_inbound_connection_and_relays_bytes() {
+    let mut rule = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+    rule.targets.clear();
+    rule.inbound_socks5 = Some(socks5::ServerConfig {
+        username: None,
+        password: None,
+        allow_private_destinations: true,
+    });
+    let listen = rule.listen;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    engine.apply(config(rule)).await.unwrap();
+    let mut control = TcpStream::connect(listen).await.unwrap();
+    control.write_all(&[5, 1, 0]).await.unwrap();
+    let mut selected = [0u8; 2];
+    control.read_exact(&mut selected).await.unwrap();
+    assert_eq!(selected, [5, 0]);
+    control
+        .write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    let mut first = [0u8; 10];
+    timeout(Duration::from_secs(2), control.read_exact(&mut first))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&first[..4], &[5, 0, 0, 1]);
+    let bind = SocketAddr::from((
+        [first[4], first[5], first[6], first[7]],
+        u16::from_be_bytes([first[8], first[9]]),
+    ));
+    let mut inbound = TcpStream::connect(bind).await.unwrap();
+    let mut second = [0u8; 10];
+    timeout(Duration::from_secs(2), control.read_exact(&mut second))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&second[..4], &[5, 0, 0, 1]);
+    inbound.write_all(b"from-inbound").await.unwrap();
+    let mut buffer = [0u8; 12];
+    timeout(Duration::from_secs(2), control.read_exact(&mut buffer))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&buffer, b"from-inbound");
+    control.write_all(b"from-control").await.unwrap();
+    let mut reply = [0u8; 12];
+    timeout(Duration::from_secs(2), inbound.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"from-control");
+    drop(inbound);
     drop(control);
     engine.shutdown().await.unwrap();
 }

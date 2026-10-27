@@ -2901,8 +2901,47 @@ async fn tcp_session(
                 return Ok(());
             }
         };
-        let destination = match request {
-            socks5::Request::Connect(destination) => destination,
+        let (destination, bound) = match request {
+            socks5::Request::Connect(destination) => (Some(destination), None),
+            socks5::Request::Bind => {
+                let local_ip = info.destination.ip();
+                let local_ip = if local_ip.is_unspecified() {
+                    if local_ip.is_ipv4() {
+                        std::net::Ipv4Addr::LOCALHOST.into()
+                    } else {
+                        std::net::Ipv6Addr::LOCALHOST.into()
+                    }
+                } else {
+                    local_ip
+                };
+                let listener = match TcpListener::bind(SocketAddr::new(local_ip, 0)).await {
+                    Ok(listener) => listener,
+                    Err(error) => {
+                        let _ = socks5::reply(&mut client, 5).await;
+                        return Err(error.into());
+                    }
+                };
+                let bind_address = listener.local_addr()?;
+                socks5::bind_reply(&mut client, bind_address).await?;
+                let accepted = tokio::select! {
+                    biased;
+                    _ = rule.cancel.cancelled() => return Ok(()),
+                    accepted = tokio::time::timeout(
+                        Duration::from_millis(rule.spec.connect_timeout_ms),
+                        listener.accept(),
+                    ) => accepted,
+                };
+                let (inbound, bound_peer) = match accepted {
+                    Ok(Ok(pair)) => pair,
+                    _ => {
+                        let _ = socks5::reply(&mut client, 5).await;
+                        return Ok(());
+                    }
+                };
+                inbound.set_nodelay(true)?;
+                socks5::bind_reply(&mut client, bound_peer).await?;
+                (None, Some(Box::new(inbound) as BoxStream))
+            }
             socks5::Request::UdpAssociate => {
                 let Some(registry) = &rule.socks5_udp else {
                     let _ = socks5::reply(&mut client, 7).await;
@@ -2954,15 +2993,21 @@ async fn tcp_session(
                 return Ok(());
             }
         };
-        let target = match connect_socks5_destination(&rule, server, &destination, inlet).await {
-            Ok(target) => {
-                socks5::reply(&mut client, 0).await?;
-                target
+        let target = match (destination, bound) {
+            (Some(destination), None) => {
+                match connect_socks5_destination(&rule, server, &destination, inlet).await {
+                    Ok(target) => {
+                        socks5::reply(&mut client, 0).await?;
+                        target
+                    }
+                    Err(error) => {
+                        let _ = socks5::reply(&mut client, 5).await;
+                        return Err(error);
+                    }
+                }
             }
-            Err(error) => {
-                let _ = socks5::reply(&mut client, 5).await;
-                return Err(error);
-            }
+            (None, Some(bound)) => bound,
+            _ => unreachable!("SOCKS5 request has exactly one destination path"),
         };
         (client, target)
     } else if let Some(server) = &rule.shadowsocks {

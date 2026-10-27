@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.44.0 开发版在 macOS 27.0.1 arm64 通过 **374 项自动化测试（345 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 375 项。日志见 [verification-0.44.0.txt](verification-0.44.0.txt)，逐项清单见 [validation-evidence-0.44.0.json](validation-evidence-0.44.0.json)。
+0.45.0 开发版在 macOS 27.0.1 arm64 通过 **375 项自动化测试（346 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 376 项。日志见 [verification-0.45.0.txt](verification-0.45.0.txt)，逐项清单见 [validation-evidence-0.45.0.json](validation-evidence-0.45.0.json)。
 
-## 0.44.0 UPnP 验证
+## 0.45.0 SOCKS5 BIND 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 集成 | TCP 控制握手、BIND 两次回复、入站 TCP 连接、双向 12 字节回显 |
+| 规则 | 零端口仅 BIND/UDP 允许，CONNECT 仍拒绝 |
+| 限制 | 入站来源未套用规则 ACL/限速；无真实 FTP/客户端矩阵 |
+
+## 0.44.0 UPnP 验证（历史）
+
+0.44.0 开发版在 macOS 27.0.1 arm64 通过 **374 项自动化测试（345 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 375 项。日志见 [verification-0.44.0.txt](verification-0.44.0.txt)，逐项清单见 [validation-evidence-0.44.0.json](validation-evidence-0.44.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

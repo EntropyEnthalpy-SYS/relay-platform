@@ -42,6 +42,7 @@ pub struct Server {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Connect(Destination),
+    Bind,
     UdpAssociate,
 }
 #[derive(Clone, Debug)]
@@ -134,7 +135,7 @@ impl Server {
         let mut header = [0u8; 4];
         exact(stream, &mut header, deadline).await?;
         ensure!(header[0] == 5 && header[2] == 0, "malformed SOCKS5 request");
-        let allow_zero_port = header[1] == 3;
+        let allow_zero_port = matches!(header[1], 2 | 3);
         let destination = match header[3] {
             1 => {
                 let mut bytes = [0u8; 4];
@@ -171,6 +172,7 @@ impl Server {
                 );
                 Ok(Request::Connect(destination))
             }
+            2 => Ok(Request::Bind),
             3 => Ok(Request::UdpAssociate),
             command => {
                 let _ = reply(stream, 7).await;
@@ -233,7 +235,7 @@ fn destination_port(destination: &Destination) -> u16 {
         Destination::Domain(_, port) => *port,
     }
 }
-/// Encodes the server's UDP relay endpoint for a successful UDP ASSOCIATE.
+/// Encodes a successful BIND/UDP ASSOCIATE reply with the bound endpoint.
 pub async fn udp_bind_reply<S>(stream: &mut S, address: SocketAddr) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -251,6 +253,12 @@ where
     }
     packet.extend_from_slice(&address.port().to_be_bytes());
     write_all(stream, &packet).await
+}
+pub async fn bind_reply<S>(stream: &mut S, address: SocketAddr) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    udp_bind_reply(stream, address).await
 }
 /// Parses a SOCKS5 UDP request datagram (RSV, FRAG, destination, payload).
 pub fn parse_udp_datagram(packet: &[u8]) -> Result<UdpDatagram> {
@@ -384,7 +392,7 @@ mod tests {
         let request = task.await.unwrap().unwrap();
         match request {
             Request::Connect(destination) => assert_eq!(destination.to_string(), "example.com:443"),
-            Request::UdpAssociate => panic!("expected CONNECT"),
+            Request::Bind | Request::UdpAssociate => panic!("expected CONNECT"),
         }
     }
 
