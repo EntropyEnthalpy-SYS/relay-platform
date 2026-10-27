@@ -168,3 +168,7 @@ HTTP CONNECT 在入口 TLS/WS/PROXY 之后解析 HTTP/1.x 请求行与 Basic 认
 ## 0.35.0：SOCKS5 UDP ASSOCIATE
 
 UDP 关联由 TCP 控制连接注册到每条规则的 UdpRegistry，UDP listener 以客户端 IP 查找关联并解析 SOCKS5 UDP 头。目标仍走统一的 resolver、目的地 ACL、私网策略和出口绑定；回复由中继 listener 发送，保持客户端看到的中继地址。每个数据报当前独立建出口 socket，后续再优化为按目标复用。
+
+## 0.36.0：SOCKS5 UDP socket 复用
+
+UDP 关联首次收到数据报时创建 IPv4/IPv6 出口 socket，并为每个 socket 启动常驻响应任务；后续数据报复用 socket 发送，回复任务统一包装来源地址。关联取消时响应任务与发送循环同时退出。这个改动消除了每包建 socket 的系统调用开销，但尚未按目标做连接缓存或背压。

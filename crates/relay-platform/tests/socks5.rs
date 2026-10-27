@@ -122,8 +122,13 @@ async fn socks5_udp_associate_relays_a_datagram_to_a_real_target() {
     let backend_address = backend.local_addr().unwrap();
     let _echo = tokio::spawn(async move {
         let mut buffer = [0u8; 128];
-        if let Ok((size, peer)) = backend.recv_from(&mut buffer).await {
-            let _ = backend.send_to(&buffer[..size], peer).await;
+        loop {
+            let Ok((size, peer)) = backend.recv_from(&mut buffer).await else {
+                break;
+            };
+            if backend.send_to(&buffer[..size], peer).await.is_err() {
+                break;
+            }
         }
     });
     let mut rule = rule(backend_address, Protocol::Both);
@@ -172,6 +177,32 @@ async fn socks5_udp_associate_relays_a_datagram_to_a_real_target() {
         datagram.destination.to_string(),
         backend_address.to_string()
     );
+    // The association reuses one outbound socket for many datagrams.
+    let mut expected = std::collections::HashSet::new();
+    for sequence in 0..16u8 {
+        let payload = format!("udp-{sequence}");
+        expected.insert(payload.clone());
+        client
+            .send_to(
+                &socks5::encode_udp_datagram(
+                    &shadowsocks::Destination::Ip(backend_address),
+                    payload.as_bytes(),
+                ),
+                relay,
+            )
+            .await
+            .unwrap();
+    }
+    for _ in 0..16 {
+        let (size, _) = timeout(Duration::from_secs(2), client.recv_from(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        let datagram = socks5::parse_udp_datagram(&reply[..size]).unwrap();
+        assert!(expected.remove(std::str::from_utf8(&datagram.payload).unwrap()));
+    }
+    assert!(expected.is_empty());
+
     let _ = control.shutdown().await;
     drop(control);
     engine.shutdown().await.unwrap();
