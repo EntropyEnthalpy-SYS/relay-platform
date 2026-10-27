@@ -164,3 +164,7 @@ HTTP CONNECT 在入口 TLS/WS/PROXY 之后解析 HTTP/1.x 请求行与 Basic 认
 ## 0.34.0：目的地 ACL
 
 规则编译时把目的地模式解析为强类型策略，避免每次连接解析字符串。Engine 在解析目标后、拨号/转发前同时检查原始主机名和解析出的全部地址；拒绝优先，允许列表为空表示全通。代理入口和多路径/预热路径共用同一检查，防止从旁路绕过。
+
+## 0.35.0：SOCKS5 UDP ASSOCIATE
+
+UDP 关联由 TCP 控制连接注册到每条规则的 UdpRegistry，UDP listener 以客户端 IP 查找关联并解析 SOCKS5 UDP 头。目标仍走统一的 resolver、目的地 ACL、私网策略和出口绑定；回复由中继 listener 发送，保持客户端看到的中继地址。每个数据报当前独立建出口 socket，后续再优化为按目标复用。

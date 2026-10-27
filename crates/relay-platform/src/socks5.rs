@@ -1,11 +1,14 @@
-//! SOCKS5 inbound (RFC 1928/1929) with optional username/password and TCP
-//! CONNECT. UDP ASSOCIATE is deliberately rejected until it has its own
-//! datagram, metering and ACL path.
+//! SOCKS5 inbound (RFC 1928/1929) with optional username/password, TCP
+//! CONNECT and UDP ASSOCIATE.
 use crate::shadowsocks::Destination;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Mutex as StdMutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+type UdpReply = UnboundedSender<(SocketAddr, Vec<u8>)>;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
 
@@ -36,6 +39,59 @@ pub fn validate(config: &ServerConfig) -> Result<()> {
 pub struct Server {
     config: ServerConfig,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    Connect(Destination),
+    UdpAssociate,
+}
+#[derive(Clone, Debug)]
+pub struct UdpDatagram {
+    pub client: SocketAddr,
+    pub destination: Destination,
+    pub payload: Vec<u8>,
+}
+struct UdpAssociation {
+    id: u64,
+    tx: UnboundedSender<UdpDatagram>,
+}
+#[derive(Default)]
+pub struct UdpRegistry {
+    inner: StdMutex<HashMap<IpAddr, UdpAssociation>>,
+    reply: StdMutex<Option<UdpReply>>,
+    next: std::sync::atomic::AtomicU64,
+}
+impl UdpRegistry {
+    /// Registers one control association for a client IP. A newer control
+    /// connection replaces the older binding; the old task exits when its
+    /// control socket closes.
+    pub fn register(&self, ip: IpAddr) -> (u64, tokio::sync::mpsc::UnboundedReceiver<UdpDatagram>) {
+        let (tx, rx) = unbounded_channel();
+        let id = self
+            .next
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(ip, UdpAssociation { id, tx });
+        (id, rx)
+    }
+    pub fn unregister(&self, ip: IpAddr, id: u64) {
+        let mut map = self.inner.lock().unwrap();
+        if map.get(&ip).is_some_and(|association| association.id == id) {
+            map.remove(&ip);
+        }
+    }
+    pub fn sender(&self, ip: IpAddr) -> Option<UnboundedSender<UdpDatagram>> {
+        self.inner.lock().unwrap().get(&ip).map(|a| a.tx.clone())
+    }
+    pub fn set_reply(&self, tx: UdpReply) {
+        *self.reply.lock().unwrap() = Some(tx);
+    }
+    pub fn reply_sender(&self) -> Option<UdpReply> {
+        self.reply.lock().unwrap().clone()
+    }
+}
 impl Server {
     pub fn new(config: &ServerConfig) -> Result<Self> {
         validate(config)?;
@@ -50,7 +106,7 @@ impl Server {
     /// On success the caller must connect to the returned destination and then
     /// call [`reply`] with a status. On malformed/unsupported input this method
     /// sends a failure reply where the protocol still permits one.
-    pub async fn accept<S>(&self, stream: &mut S, deadline: Instant) -> Result<Destination>
+    pub async fn accept<S>(&self, stream: &mut S, deadline: Instant) -> Result<Request>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
@@ -78,17 +134,18 @@ impl Server {
         let mut header = [0u8; 4];
         exact(stream, &mut header, deadline).await?;
         ensure!(header[0] == 5 && header[2] == 0, "malformed SOCKS5 request");
+        let allow_zero_port = header[1] == 3;
         let destination = match header[3] {
             1 => {
                 let mut bytes = [0u8; 4];
                 exact(stream, &mut bytes, deadline).await?;
-                let port = port(stream, deadline).await?;
+                let port = port(stream, deadline, allow_zero_port).await?;
                 Destination::Ip(SocketAddr::new(Ipv4Addr::from(bytes).into(), port))
             }
             4 => {
                 let mut bytes = [0u8; 16];
                 exact(stream, &mut bytes, deadline).await?;
-                let port = port(stream, deadline).await?;
+                let port = port(stream, deadline, allow_zero_port).await?;
                 Destination::Ip(SocketAddr::new(Ipv6Addr::from(bytes).into(), port))
             }
             3 => {
@@ -98,7 +155,7 @@ impl Server {
                 let mut name = vec![0u8; usize::from(length[0])];
                 exact(stream, &mut name, deadline).await?;
                 let name = String::from_utf8(name).context("SOCKS5 destination is not UTF-8")?;
-                let port = port(stream, deadline).await?;
+                let port = port(stream, deadline, allow_zero_port).await?;
                 Destination::Domain(name, port)
             }
             _ => {
@@ -106,12 +163,20 @@ impl Server {
                 bail!("unsupported SOCKS5 address type");
             }
         };
-        if header[1] != 1 {
-            // UDP ASSOCIATE (3) and BIND (2) need separate data paths.
-            let _ = reply(stream, 7).await;
-            bail!("SOCKS5 command {} is not supported", header[1]);
+        match header[1] {
+            1 => {
+                ensure!(
+                    destination_port(&destination) != 0,
+                    "SOCKS5 CONNECT port is zero"
+                );
+                Ok(Request::Connect(destination))
+            }
+            3 => Ok(Request::UdpAssociate),
+            command => {
+                let _ = reply(stream, 7).await;
+                bail!("SOCKS5 command {command} is not supported");
+            }
         }
-        Ok(destination)
     }
     async fn authenticate<S>(&self, stream: &mut S, deadline: Instant) -> Result<()>
     where
@@ -152,15 +217,122 @@ where
         .context("SOCKS5 handshake timed out")??;
     Ok(())
 }
-async fn port<S>(stream: &mut S, deadline: Instant) -> Result<u16>
+async fn port<S>(stream: &mut S, deadline: Instant, allow_zero: bool) -> Result<u16>
 where
     S: AsyncRead + Unpin,
 {
     let mut bytes = [0u8; 2];
     exact(stream, &mut bytes, deadline).await?;
     let port = u16::from_be_bytes(bytes);
-    ensure!(port != 0, "SOCKS5 destination port is zero");
+    ensure!(allow_zero || port != 0, "SOCKS5 destination port is zero");
     Ok(port)
+}
+fn destination_port(destination: &Destination) -> u16 {
+    match destination {
+        Destination::Ip(address) => address.port(),
+        Destination::Domain(_, port) => *port,
+    }
+}
+/// Encodes the server's UDP relay endpoint for a successful UDP ASSOCIATE.
+pub async fn udp_bind_reply<S>(stream: &mut S, address: SocketAddr) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let mut packet = vec![5, 0, 0];
+    match address {
+        SocketAddr::V4(address) => {
+            packet.push(1);
+            packet.extend_from_slice(&address.ip().octets());
+        }
+        SocketAddr::V6(address) => {
+            packet.push(4);
+            packet.extend_from_slice(&address.ip().octets());
+        }
+    }
+    packet.extend_from_slice(&address.port().to_be_bytes());
+    write_all(stream, &packet).await
+}
+/// Parses a SOCKS5 UDP request datagram (RSV, FRAG, destination, payload).
+pub fn parse_udp_datagram(packet: &[u8]) -> Result<UdpDatagram> {
+    ensure!(packet.len() >= 4, "SOCKS5 UDP datagram is too short");
+    ensure!(
+        packet[0] == 0 && packet[1] == 0,
+        "SOCKS5 UDP reserved bytes"
+    );
+    ensure!(packet[2] == 0, "SOCKS5 UDP fragmentation is not supported");
+    let (destination, payload_start) = parse_udp_address(&packet[3..])?;
+    Ok(UdpDatagram {
+        client: SocketAddr::from(([0, 0, 0, 0], 0)),
+        destination,
+        payload: packet[3 + payload_start..].to_vec(),
+    })
+}
+fn parse_udp_address(data: &[u8]) -> Result<(Destination, usize)> {
+    ensure!(!data.is_empty(), "SOCKS5 UDP address is missing");
+    let (destination, port_start) = match data[0] {
+        1 => {
+            ensure!(data.len() >= 7, "SOCKS5 UDP IPv4 address is truncated");
+            (
+                Destination::Ip(SocketAddr::from(([data[1], data[2], data[3], data[4]], 0))),
+                5,
+            )
+        }
+        4 => {
+            ensure!(data.len() >= 19, "SOCKS5 UDP IPv6 address is truncated");
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&data[1..17]);
+            (
+                Destination::Ip(SocketAddr::from((Ipv6Addr::from(bytes), 0))),
+                17,
+            )
+        }
+        3 => {
+            ensure!(data.len() >= 2, "SOCKS5 UDP domain length is missing");
+            let length = usize::from(data[1]);
+            ensure!(
+                length > 0 && data.len() >= 2 + length + 2,
+                "SOCKS5 UDP domain is truncated"
+            );
+            let name = std::str::from_utf8(&data[2..2 + length])?.to_owned();
+            (Destination::Domain(name, 0), 2 + length)
+        }
+        _ => bail!("unknown SOCKS5 UDP address type"),
+    };
+    let port = u16::from_be_bytes([data[port_start], data[port_start + 1]]);
+    ensure!(port != 0, "SOCKS5 UDP destination port is zero");
+    let destination = match destination {
+        Destination::Ip(address) => Destination::Ip(SocketAddr::new(address.ip(), port)),
+        Destination::Domain(name, _) => Destination::Domain(name, port),
+    };
+    Ok((destination, port_start + 2))
+}
+
+/// Wraps a UDP reply with the source address and payload.
+pub fn encode_udp_datagram(destination: &Destination, payload: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0, 0, 0];
+    match destination {
+        Destination::Ip(address) => {
+            match address.ip() {
+                IpAddr::V4(ip) => {
+                    packet.push(1);
+                    packet.extend_from_slice(&ip.octets());
+                }
+                IpAddr::V6(ip) => {
+                    packet.push(4);
+                    packet.extend_from_slice(&ip.octets());
+                }
+            }
+            packet.extend_from_slice(&address.port().to_be_bytes());
+        }
+        Destination::Domain(name, port) => {
+            packet.push(3);
+            packet.push(name.len() as u8);
+            packet.extend_from_slice(name.as_bytes());
+            packet.extend_from_slice(&port.to_be_bytes());
+        }
+    }
+    packet.extend_from_slice(payload);
+    packet
 }
 async fn write_all<S>(stream: &mut S, bytes: &[u8]) -> Result<()>
 where
@@ -209,8 +381,11 @@ mod tests {
         request.extend_from_slice(b"example.com");
         request.extend_from_slice(&443u16.to_be_bytes());
         client.write_all(&request).await.unwrap();
-        let destination = task.await.unwrap().unwrap();
-        assert_eq!(destination.to_string(), "example.com:443");
+        let request = task.await.unwrap().unwrap();
+        match request {
+            Request::Connect(destination) => assert_eq!(destination.to_string(), "example.com:443"),
+            Request::UdpAssociate => panic!("expected CONNECT"),
+        }
     }
 
     #[tokio::test]
@@ -223,7 +398,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authentication_and_unsupported_udp_are_rejected() {
+    async fn authentication_and_udp_associate_are_parsed() {
         let server = Server::new(&ServerConfig {
             username: Some("user".into()),
             password: Some("pass".into()),
@@ -256,11 +431,8 @@ mod tests {
             .write_all(&[5, 3, 0, 1, 127, 0, 0, 1, 0, 53])
             .await
             .unwrap();
-        let error = task.await.unwrap().unwrap_err();
-        assert!(error.to_string().contains("not supported"), "{error}");
-        let mut response = [0u8; 10];
-        client.read_exact(&mut response).await.unwrap();
-        assert_eq!(response[1], 7);
+        let request = task.await.unwrap().unwrap();
+        assert!(matches!(request, Request::UdpAssociate));
     }
 
     #[tokio::test]

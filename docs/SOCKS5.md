@@ -1,6 +1,6 @@
 # SOCKS5 入口
 
-0.25.0 增加 SOCKS5（RFC 1928/1929）TCP CONNECT 入口。它和 Shadowsocks 入口一样，由客户端在连接时指定目的地；规则本身没有固定目标，仍共享连接数、来源 ACL、额度、速率、跨节点用户份额、PROXY 前置和 TLS/WS 包装。
+0.25.0 增加 SOCKS5（RFC 1928/1929）TCP CONNECT 入口；0.35.0 增加 UDP ASSOCIATE。它和 Shadowsocks 入口一样，由客户端在连接时指定目的地；规则本身没有固定目标，仍共享连接数、来源 ACL、额度、速率、跨节点用户份额、PROXY 前置和 TLS/WS 包装。
 
 ## 配置
 
@@ -16,8 +16,8 @@
 
 - `username` 与 `password` 必须同时填写（各 1..255 字节，不含控制字符），或同时省略。启用认证时使用 RFC 1929 用户名/密码子协商；未启用时只接受无认证方法。
 - `allow_private_destinations=false` 默认拒绝回环、私网、链路本地、组播等非公网目标，和 Shadowsocks 的默认策略一致。设为 `true` 仅用于本机/内网测试。
-- 规则必须 `protocol=tcp`，且 `targets=[]`。SOCKS5 与 Shadowsocks 入口不能同时配置。
-- 目前只实现 CONNECT；BIND 和 UDP ASSOCIATE 返回 SOCKS5 状态 7（命令不支持）。因此 `udp_max_sessions` 对 SOCKS5 无意义。
+- 规则必须 `targets=[]`。TCP CONNECT 可使用 `protocol=tcp`；UDP ASSOCIATE 需要 `protocol=both` 且单监听端口。SOCKS5 与 Shadowsocks、HTTP CONNECT 入口不能同时配置。
+- BIND 仍未实现并返回状态 7。UDP ASSOCIATE 的控制连接保持打开；客户端向服务器返回的 UDP 中继地址发送带 SOCKS5 UDP 头的报文，服务器按目标解析/ACL 转发并包装来源地址回复。
 - 可以与入口 TLS、WebSocket/WSS、PROXY protocol 组合；处理顺序是 PROXY（位置按配置）→ TLS → WS → SOCKS5。
 - 客户端来源 ACL、来源哈希、连接数、配额和限速沿用规则引擎。
 
@@ -30,5 +30,6 @@
 - 协议单元测试覆盖无认证域名 CONNECT、成功回复编码、用户名密码认证、错误密码和 UDP ASSOCIATE 拒绝。
 - 真实 Engine 测试启动 SOCKS5 入口与 TCP 回显目标，完成握手、CONNECT、字节双向转发并关闭。
 - 规则校验测试覆盖必须有 TCP、不能有固定目标、认证成对和两种代理入口互斥。
-- 未测试真实浏览器/系统 SOCKS5 客户端矩阵、UDP ASSOCIATE、SOCKS5 over TLS 的客户端组合、认证暴力破解限速和完整性能。
+- UDP ASSOCIATE 测试使用真实 TCP 控制连接、UDP 回显目标和 SOCKS5 头，验证关联、目标转发和回复；当前每个数据报创建独立出口 UDP socket，尚未做长连接/高吞吐优化。
+- 未测试真实浏览器/系统 SOCKS5 客户端矩阵、UDP 分片、多目标并发性能、SOCKS5 over TLS 的客户端组合、认证暴力破解限速和完整性能。
 - 模块 10 仍是部分实现：SOCKS5 是新增的一种入站协议，不代表 VLESS/REALITY/Hysteria2/TUIC 等其余协议已完成。

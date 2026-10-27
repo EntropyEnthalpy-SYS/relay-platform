@@ -419,8 +419,12 @@ impl Rule {
                 "a rule cannot combine proxy inbounds"
             );
             ensure!(
-                self.protocol == Protocol::Tcp,
-                "the SOCKS5 inbound currently supports TCP CONNECT only"
+                matches!(self.protocol, Protocol::Tcp | Protocol::Both),
+                "the SOCKS5 inbound requires a TCP control listener"
+            );
+            ensure!(
+                self.protocol != Protocol::Both || self.listen_end_port.is_none(),
+                "SOCKS5 UDP ASSOCIATE requires a single listen port"
             );
         }
         if let Some(config) = &self.inbound_http_connect {

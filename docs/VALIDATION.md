@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.34.0 开发版在 macOS 27.0.1 arm64 通过 **364 项自动化测试（335 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 365 项。日志见 [verification-0.34.0.txt](verification-0.34.0.txt)，逐项清单见 [validation-evidence-0.34.0.json](validation-evidence-0.34.0.json)。
+0.35.0 开发版在 macOS 27.0.1 arm64 通过 **365 项自动化测试（336 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 366 项。日志见 [verification-0.35.0.txt](verification-0.35.0.txt)，逐项清单见 [validation-evidence-0.35.0.json](validation-evidence-0.35.0.json)。
 
-## 0.34.0 目的地 ACL 验证
+## 0.35.0 SOCKS5 UDP ASSOCIATE 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 协议 | TCP 控制握手、UDP ASSOCIATE、绑定地址回复、UDP 头解析/编码 |
+| Engine | 真实 TCP 控制 + UDP 回显目标；ACL/私网、来源地址包装、控制关闭清理 |
+| 规则 | `protocol=both`、单端口、TCP-only 拒绝/端口段拒绝 |
+| 性能 | 当前每数据报独立出口 socket，未做吞吐优化或真实客户端矩阵 |
+
+## 0.34.0 目的地 ACL 验证（历史）
+
+0.34.0 开发版在 macOS 27.0.1 arm64 通过 **364 项自动化测试（335 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 365 项。日志见 [verification-0.34.0.txt](verification-0.34.0.txt)，逐项清单见 [validation-evidence-0.34.0.json](validation-evidence-0.34.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

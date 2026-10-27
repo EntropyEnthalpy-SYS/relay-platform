@@ -863,6 +863,7 @@ struct RuntimeRule {
     shadowsocks: Option<shadowsocks::Server>,
     socks5: Option<socks5::Server>,
     http_connect: Option<http_connect::Server>,
+    socks5_udp: Option<Arc<socks5::UdpRegistry>>,
     destination: destination_acl::DestinationPolicy,
     multipath_server: Option<Arc<multipath::Server>>,
     multipath_client: Option<Arc<Semaphore>>,
@@ -942,6 +943,10 @@ impl RuntimeRule {
                 .inbound_http_connect
                 .as_ref()
                 .map(|config| http_connect::Server::new(config).expect("validated configuration")),
+            socks5_udp: spec
+                .inbound_socks5
+                .as_ref()
+                .map(|_| Arc::new(socks5::UdpRegistry::default())),
             destination: destination_acl::DestinationPolicy::parse(
                 &spec.allow_destinations,
                 &spec.deny_destinations,
@@ -2506,6 +2511,100 @@ async fn connect_http_connect_destination(
     .context("HTTP CONNECT destination connection timed out")?
 }
 
+async fn socks5_udp_association(
+    rule: Arc<RuntimeRule>,
+    mut incoming: tokio::sync::mpsc::UnboundedReceiver<socks5::UdpDatagram>,
+    reply: tokio::sync::mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
+    inlet: ListenerKey,
+    stats: Arc<Counters>,
+) {
+    loop {
+        let datagram = tokio::select! {
+            biased;
+            _ = rule.cancel.cancelled() => break,
+            datagram = incoming.recv() => match datagram {
+                Some(datagram) => datagram,
+                None => break,
+            },
+        };
+        let rule = rule.clone();
+        let reply = reply.clone();
+        let stats = stats.clone();
+        tokio::spawn(async move {
+            let Some(server) = &rule.socks5 else {
+                return;
+            };
+            let endpoint = datagram.destination.to_string();
+            let addresses = match resolve_destination(&rule, &endpoint).await {
+                Ok(addresses) => addresses,
+                Err(error) => {
+                    stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(%error, rule = %rule.spec.id, "SOCKS5 UDP destination rejected");
+                    return;
+                }
+            };
+            let mut last = None;
+            for address in addresses {
+                if !server.permits(address.ip()) {
+                    last = Some("destination is not public");
+                    continue;
+                }
+                let socket = match network::outbound_udp(
+                    rule.spec.outbound_bind.as_ref(),
+                    address.is_ipv4(),
+                ) {
+                    Ok(socket) => socket,
+                    Err(error) => {
+                        last = Some("outbound socket");
+                        tracing::debug!(%error, "SOCKS5 UDP socket failed");
+                        continue;
+                    }
+                };
+                let route = match rule.routes.reserve(inlet, address) {
+                    Ok(route) => route,
+                    Err(error) => {
+                        last = Some("route rejected");
+                        tracing::debug!(%error, "SOCKS5 UDP route rejected");
+                        continue;
+                    }
+                };
+                if let Err(error) = socket.connect(address).await {
+                    last = Some("connect failed");
+                    tracing::debug!(%error, "SOCKS5 UDP connect failed");
+                    continue;
+                }
+                if let Err(error) = socket.send(&datagram.payload).await {
+                    last = Some("send failed");
+                    tracing::debug!(%error, "SOCKS5 UDP send failed");
+                    continue;
+                }
+                let mut buffer = vec![0u8; 65_535];
+                match tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut buffer))
+                    .await
+                {
+                    Ok(Ok((size, source))) => {
+                        let packet = socks5::encode_udp_datagram(
+                            &shadowsocks::Destination::Ip(source),
+                            &buffer[..size],
+                        );
+                        let _ = reply.send((datagram.client, packet));
+                        return;
+                    }
+                    Ok(Err(error)) => {
+                        last = Some("receive failed");
+                        tracing::debug!(%error, "SOCKS5 UDP receive failed");
+                    }
+                    Err(_) => last = Some("receive timed out"),
+                }
+                drop(route);
+            }
+            if last.is_some() {
+                stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+    }
+}
+
 async fn connect_socks5_destination(
     rule: &RuntimeRule,
     server: &socks5::Server,
@@ -2736,11 +2835,63 @@ async fn tcp_session(
             };
         (client, target)
     } else if let Some(server) = &rule.socks5 {
-        let destination = match server.accept(&mut client, handshake_deadline).await {
-            Ok(destination) => destination,
+        let request = match server.accept(&mut client, handshake_deadline).await {
+            Ok(request) => request,
             Err(error) => {
                 stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
                 tracing::debug!(%error, rule = %rule.spec.id, "SOCKS5 request rejected");
+                return Ok(());
+            }
+        };
+        let destination = match request {
+            socks5::Request::Connect(destination) => destination,
+            socks5::Request::UdpAssociate => {
+                let Some(registry) = &rule.socks5_udp else {
+                    let _ = socks5::reply(&mut client, 7).await;
+                    return Ok(());
+                };
+                if rule.spec.protocol != Protocol::Both {
+                    let _ = socks5::reply(&mut client, 7).await;
+                    return Ok(());
+                }
+                let mut reply = registry.reply_sender();
+                for _ in 0..20 {
+                    if reply.is_some() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    reply = registry.reply_sender();
+                }
+                let Some(reply) = reply else {
+                    let _ = socks5::reply(&mut client, 7).await;
+                    return Ok(());
+                };
+                let relay = SocketAddr::new(info.destination.ip(), rule.spec.listen.port());
+                let (association, receiver) = registry.register(peer.ip());
+                if let Err(error) = socks5::udp_bind_reply(&mut client, relay).await {
+                    registry.unregister(peer.ip(), association);
+                    return Err(error);
+                }
+                tasks.spawn(socks5_udp_association(
+                    rule.clone(),
+                    receiver,
+                    reply,
+                    inlet,
+                    stats.clone(),
+                ));
+                let mut control = client;
+                let mut discard = [0u8; 512];
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = rule.cancel.cancelled() => break,
+                        read = control.read(&mut discard) => match read {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                }
+                registry.unregister(peer.ip(), association);
                 return Ok(());
             }
         };
@@ -2989,6 +3140,10 @@ async fn udp_listener(
 ) {
     let bound = listener.local_addr().expect("bound UDP listener");
     let listener = Arc::new(listener);
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
+    if let Some(registry) = &updates.borrow().socks5_udp {
+        registry.set_reply(reply_tx.clone());
+    }
     let mut sessions = HashMap::<UdpSessionKey, UdpEntry>::new();
     let (finished_tx, mut finished_rx) = mpsc::unbounded_channel::<(UdpSessionKey, u64)>();
     let mut associations = HashMap::<AssociationKey, Association>::new();
@@ -3000,6 +3155,11 @@ async fn udp_listener(
         tokio::select! {
             biased;
             _=stop.cancelled()=>break,
+            Some((peer,packet))=reply_rx.recv()=>{
+                if let Err(error)=listener.send_to(&packet,peer).await {
+                    tracing::debug!(%error,"SOCKS5 UDP reply send failed");
+                }
+            },
             Some((key,id))=finished_rx.recv()=>{if sessions.get(&key).is_some_and(|s|s.generation==id){sessions.remove(&key);}},
             Some((key,id))=ended_rx.recv()=>{
                 if associations.get(&key).is_some_and(|a|a.generation==id) {
@@ -3007,7 +3167,11 @@ async fn udp_listener(
                     if let AssociationKey::Session(session)=key {ended_windows.keep(session,ended.window);}
                 }
             },
-            changed=updates.changed()=>{if changed.is_err(){break;}sessions.retain(|_,entry|!entry.sender.is_closed());},
+            changed=updates.changed()=>{
+                if changed.is_err(){break;}
+                if let Some(registry)=&updates.borrow().socks5_udp {registry.set_reply(reply_tx.clone());}
+                sessions.retain(|_,entry|!entry.sender.is_closed());
+            },
             received=datagram::receive(&listener,&mut buffer,bound)=>{
                 let (size,peer,local)=match received {
                     Ok(packet)=>packet,
@@ -3018,6 +3182,24 @@ async fn udp_listener(
                 };
                 let runtime=updates.borrow().clone();
                 if !runtime.accepts_transport(peer){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
+                if let Some(registry)=&runtime.socks5_udp {
+                    registry.set_reply(reply_tx.clone());
+                    if let Some(sender)=registry.sender(peer.ip()) {
+                        match socks5::parse_udp_datagram(&buffer[..size]) {
+                            Ok(mut datagram) => {
+                                datagram.client = peer;
+                                if !sender.send(datagram).is_ok() {
+                                    stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);
+                                }
+                            }
+                            Err(error) => {
+                                stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);
+                                tracing::debug!(rule_id=%runtime.spec.id,%error,"SOCKS5 UDP datagram rejected");
+                            }
+                        }
+                        continue;
+                    }
+                }
                 let original=ConnectionInfo{source:peer,destination:local};
                 let (info,header_size)=if let Some(policy)=&runtime.spec.inbound_proxy {
                     match proxy::decode_v2(&buffer[..size],false,policy.max_header_bytes,original) {

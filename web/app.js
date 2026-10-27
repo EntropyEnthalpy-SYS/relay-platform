@@ -747,7 +747,7 @@ function socks5Editor(spec) {
   const username = field(fields, 'socks5_user', '用户名（留空不认证）', spec?.username || '', 'text', false); username.maxLength = 255;
   const password = field(fields, 'socks5_password', '密码（与用户名同时填写）', spec?.password || '', 'password', false); password.maxLength = 255;
   select(fields, 'socks5_private', '允许连接内网/回环目的地', [['no', '拒绝（推荐）'], ['yes', '允许']], spec?.allow_private_destinations ? 'yes' : 'no');
-  const note = el('p', 'SOCKS5 仅支持 TCP CONNECT；UDP ASSOCIATE 会返回“命令不支持”。启用后规则不能有固定目标，协议必须为 TCP。用户名和密码要么都留空（无认证），要么都填写。分享链接包含密码，请只发给使用者。', 'fine');
+  const note = el('p', '支持 TCP CONNECT 与 UDP ASSOCIATE。使用 UDP 时请把协议设为 TCP + UDP；启用后规则不能有固定目标。用户名和密码要么都留空（无认证），要么都填写。分享链接包含密码，请只发给使用者。', 'fine');
   function show() { const on = enabled.value === 'on'; username.disabled = password.disabled = !on; fields.querySelectorAll('select')[1].disabled = !on; note.classList.toggle('hidden', !on); }
   enabled.addEventListener('change', show); show(); box.append(fields, note);
   return { box, enabled: () => enabled.value === 'on', onchange: fn => enabled.addEventListener('change', fn), read: () => {
