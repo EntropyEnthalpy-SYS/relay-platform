@@ -90,6 +90,7 @@ async fn nat_pmp_renews_until_cancelled() {
         0,
         120,
         Duration::from_millis(50),
+        None,
         cancel.clone(),
         move |mapping| {
             tx.send(mapping.epoch).unwrap();
@@ -104,6 +105,52 @@ async fn nat_pmp_renews_until_cancelled() {
         .unwrap()
         .unwrap();
     assert_eq!((first, second), (1, 2));
+    cancel.cancel();
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn nat_pmp_retries_a_refused_request() {
+    let gateway = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let address = gateway.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut buffer = [0u8; 32];
+        let (_, peer) = gateway.recv_from(&mut buffer).await.unwrap();
+        gateway
+            .send_to(&[0, 129, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], peer)
+            .await
+            .unwrap();
+        let (size, peer) = gateway.recv_from(&mut buffer).await.unwrap();
+        assert_eq!(size, 12);
+        let mut reply = vec![0, 129, 0, 0];
+        reply.extend_from_slice(&2u32.to_be_bytes());
+        reply.extend_from_slice(&9000u16.to_be_bytes());
+        reply.extend_from_slice(&40000u16.to_be_bytes());
+        reply.extend_from_slice(&120u32.to_be_bytes());
+        gateway.send_to(&reply, peer).await.unwrap();
+    });
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let task = tokio::spawn(nat::maintain(
+        address,
+        9000,
+        0,
+        120,
+        Duration::from_millis(500),
+        Some(Duration::from_millis(50)),
+        cancel.clone(),
+        move |mapping| tx.send(mapping.epoch).unwrap(),
+    ));
+    let epoch = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(epoch, 2);
     cancel.cancel();
     timeout(Duration::from_secs(2), task)
         .await

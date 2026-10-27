@@ -140,12 +140,14 @@ pub async fn map(
 }
 
 /// Renew a PCP mapping until cancelled. Callers normally pass half the lease.
+#[allow(clippy::too_many_arguments)]
 pub async fn maintain<F>(
     gateway: SocketAddr,
     internal_port: u16,
     external_port: u16,
     lifetime_secs: u32,
     renew_after: Duration,
+    retry_after: Option<Duration>,
     cancel: CancellationToken,
     mut on_mapping: F,
 ) -> Result<()>
@@ -154,11 +156,27 @@ where
 {
     ensure!(!renew_after.is_zero(), "renew interval is zero");
     ensure!(
+        retry_after.is_none_or(|delay| !delay.is_zero()),
+        "retry interval is zero"
+    );
+    ensure!(
         renew_after < Duration::from_secs(u64::from(lifetime_secs.max(1))),
         "renew interval must be shorter than the lease"
     );
     loop {
-        let mapping = map(gateway, internal_port, external_port, lifetime_secs).await?;
+        let mapping = match map(gateway, internal_port, external_port, lifetime_secs).await {
+            Ok(mapping) => mapping,
+            Err(error) if retry_after.is_some() => {
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => break,
+                    _ = sleep(retry_after.unwrap()) => {}
+                }
+                let _ = error;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         on_mapping(&mapping);
         tokio::select! {
             biased;

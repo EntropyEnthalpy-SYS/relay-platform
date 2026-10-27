@@ -114,6 +114,7 @@ async fn pcp_renews_until_cancelled() {
         0,
         120,
         Duration::from_millis(50),
+        None,
         cancel.clone(),
         move |mapping| tx.send(mapping.epoch).unwrap(),
     ));

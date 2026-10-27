@@ -99,6 +99,7 @@ async fn upnp_renews_until_cancelled() {
             40000,
             600,
             std::time::Duration::from_millis(50),
+            None,
             task_cancel,
             move |mapping| tx.send(mapping.external_port).unwrap(),
         )

@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.61.0 开发版在 macOS 27.0.1 arm64 通过 **393 项自动化测试（364 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 394 项。日志见 [verification-0.61.0.txt](verification-0.61.0.txt)，逐项清单见 [validation-evidence-0.61.0.json](validation-evidence-0.61.0.json)。
+0.62.0 开发版在 macOS 27.0.1 arm64 通过 **394 项自动化测试（365 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 395 项。日志见 [verification-0.62.0.txt](verification-0.62.0.txt)，逐项清单见 [validation-evidence-0.62.0.json](validation-evidence-0.62.0.json)。
 
-## 0.61.0 目的地端口 ACL 验证
+## 0.62.0 NAT 重试验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 重试 | 假网关首次拒绝、第二次成功；`--retry-secs` 后 epoch 生效 |
+| 边界 | 省略重试则失败退出；零间隔拒绝 |
+| 限制 | 固定间隔，无指数退避/状态持久化/真实路由器验收 |
+
+## 0.61.0 目的地端口 ACL 验证（历史）
+
+0.61.0 开发版在 macOS 27.0.1 arm64 通过 **393 项自动化测试（364 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 394 项。日志见 [verification-0.61.0.txt](verification-0.61.0.txt)，逐项清单见 [validation-evidence-0.61.0.json](validation-evidence-0.61.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

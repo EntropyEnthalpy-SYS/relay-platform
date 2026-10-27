@@ -46,6 +46,9 @@ enum Command {
         /// Seconds between renewals (defaults to half the lifetime).
         #[arg(long)]
         renew_after_secs: Option<u64>,
+        /// Retry a failed request after this many seconds (omit to fail fast).
+        #[arg(long)]
+        retry_secs: Option<u64>,
     },
     /// Run the public side of a single-session reverse TCP tunnel.
     ReverseServer {
@@ -108,6 +111,9 @@ enum Command {
         /// Seconds between renewals (defaults to half the lifetime).
         #[arg(long)]
         renew_after_secs: Option<u64>,
+        /// Retry a failed request after this many seconds (omit to fail fast).
+        #[arg(long)]
+        retry_secs: Option<u64>,
     },
     /// Request or delete a NAT-PMP UDP port mapping.
     NatMap {
@@ -128,6 +134,9 @@ enum Command {
         /// Seconds between renewals (defaults to half the lifetime).
         #[arg(long)]
         renew_after_secs: Option<u64>,
+        /// Retry a failed request after this many seconds (omit to fail fast).
+        #[arg(long)]
+        retry_secs: Option<u64>,
     },
     /// Run the control API and embedded administration interface.
     Server {
@@ -233,6 +242,7 @@ async fn main() -> Result<()> {
             delete,
             renew,
             renew_after_secs,
+            retry_secs,
         } => {
             let runtime = tokio::runtime::Runtime::new()?;
             if renew && !delete {
@@ -248,6 +258,7 @@ async fn main() -> Result<()> {
                     external_port,
                     lifetime_secs,
                     after,
+                    retry_secs.map(Duration::from_secs),
                     stop,
                     |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
                 );
@@ -332,6 +343,7 @@ async fn main() -> Result<()> {
             delete,
             renew,
             renew_after_secs,
+            retry_secs,
         } => {
             let gateway = relay_platform::pcp::gateway_from(&gateway)?;
             let lifetime = if delete { 0 } else { lifetime_secs };
@@ -348,6 +360,7 @@ async fn main() -> Result<()> {
                     external_port,
                     lifetime,
                     after,
+                    retry_secs.map(Duration::from_secs),
                     stop,
                     |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
                 );
@@ -375,6 +388,7 @@ async fn main() -> Result<()> {
             delete,
             renew,
             renew_after_secs,
+            retry_secs,
         } => {
             let gateway = relay_platform::nat::gateway_from(&gateway)?;
             relay_platform::nat::validate_ports(internal_port, external_port)?;
@@ -393,6 +407,7 @@ async fn main() -> Result<()> {
                     external_port,
                     lifetime,
                     after,
+                    retry_secs.map(Duration::from_secs),
                     stop,
                     |mapping| println!("{}", serde_json::to_string(mapping).unwrap_or_default()),
                 );
