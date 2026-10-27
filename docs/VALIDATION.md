@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.33.0 开发版在 macOS 27.0.1 arm64 通过 **360 项自动化测试（331 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 361 项。日志见 [verification-0.33.0.txt](verification-0.33.0.txt)，逐项清单见 [validation-evidence-0.33.0.json](validation-evidence-0.33.0.json)。
+0.34.0 开发版在 macOS 27.0.1 arm64 通过 **364 项自动化测试（335 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 365 项。日志见 [verification-0.34.0.txt](verification-0.34.0.txt)，逐项清单见 [validation-evidence-0.34.0.json](validation-evidence-0.34.0.json)。
 
-## 0.33.0 性能验证
+## 0.34.0 目的地 ACL 验证
+
+| 检查 | 结果 |
+| --- | --- |
+| 单元 | 后缀/精确域名、CIDR/IP、拒绝优先、空允许为全通、非法模式拒绝 |
+| Engine | 拒绝目的地时目标 listener 零连接；允许 CIDR 时真实 TCP 回显 |
+| 面板 | `node --check web/app.js`、编辑器序列化与视图结构检查；未做浏览器点击验收 |
+
+## 0.33.0 性能验证（历史）
+
+0.33.0 开发版在 macOS 27.0.1 arm64 通过 **360 项自动化测试（331 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 361 项。日志见 [verification-0.33.0.txt](verification-0.33.0.txt)，逐项清单见 [validation-evidence-0.33.0.json](validation-evidence-0.33.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

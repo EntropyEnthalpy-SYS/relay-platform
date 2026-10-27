@@ -6,6 +6,7 @@ pub mod budget;
 pub mod commerce;
 pub mod credential;
 mod datagram;
+pub mod destination_acl;
 pub mod dns;
 pub mod engine;
 pub mod health;

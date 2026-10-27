@@ -420,3 +420,13 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 ```
 
 仅接受 `CONNECT host:port HTTP/1.x`；可选 Basic 认证，缺失/错误返回 407，其他方法 405；默认拒绝非公网目的地。规则必须 `protocol=tcp`、`targets=[]`，不能同时配置 `inbound_shadowsocks`/`inbound_socks5`。连接成功后返回 200，失败 502。详见 [HTTP_CONNECT.md](HTTP_CONNECT.md)。
+
+## 0.34.0 目的地 ACL
+
+规则可选：
+
+```json
+{"allow_destinations":["*.example.com","10.0.0.0/8"],"deny_destinations":["secret.example.com"]}
+```
+
+支持 IP/CIDR/精确域名/`*.domain` 后缀/`*`；拒绝优先，空 allow 为全通。同时检查原始域名与解析 IP，适用于固定 TCP/UDP、Shadowsocks、SOCKS5 TCP、HTTP CONNECT、多路径和预热连接。非法模式在配置校验时拒绝。详见 [DESTINATION_ACL.md](DESTINATION_ACL.md)。

@@ -1,5 +1,5 @@
 use crate::{
-    datagram,
+    datagram, destination_acl,
     health::{self, HealthSet, Observation},
     http_connect,
     metrics::{MeterStats, Timing},
@@ -863,6 +863,7 @@ struct RuntimeRule {
     shadowsocks: Option<shadowsocks::Server>,
     socks5: Option<socks5::Server>,
     http_connect: Option<http_connect::Server>,
+    destination: destination_acl::DestinationPolicy,
     multipath_server: Option<Arc<multipath::Server>>,
     multipath_client: Option<Arc<Semaphore>>,
     health: Option<Arc<HealthSet>>,
@@ -941,6 +942,11 @@ impl RuntimeRule {
                 .inbound_http_connect
                 .as_ref()
                 .map(|config| http_connect::Server::new(config).expect("validated configuration")),
+            destination: destination_acl::DestinationPolicy::parse(
+                &spec.allow_destinations,
+                &spec.deny_destinations,
+            )
+            .expect("validated configuration"),
             multipath_server: spec
                 .inbound_multipath
                 .clone()
@@ -1961,6 +1967,8 @@ fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
         || old.inbound_shadowsocks != new.inbound_shadowsocks
         || old.inbound_socks5 != new.inbound_socks5
         || old.inbound_http_connect != new.inbound_http_connect
+        || old.allow_destinations != new.allow_destinations
+        || old.deny_destinations != new.deny_destinations
         || old.targets.iter().any(|previous| {
             new.targets.iter().any(|current| {
                 current.address == previous.address
@@ -2301,22 +2309,6 @@ async fn try_target(
     deadline: Instant,
 ) -> Result<(BoxStream, LoopGuard), String> {
     let mut last = None;
-    if let Some(dialed) = rule
-        .prewarm
-        .as_ref()
-        .and_then(|set| set.targets[index].as_ref())
-        .and_then(Prewarm::take)
-    {
-        // A pre-warmed connection that fails to activate falls back to a fresh dial.
-        match timeout_at(deadline, activate_target(rule, index, dialed, Some(info))).await {
-            Ok(Ok(dialed)) => {
-                stats.prewarmed_connections.fetch_add(1, Ordering::Relaxed);
-                return Ok(dialed);
-            }
-            Ok(Err(error)) => last = Some(error.to_string()),
-            Err(_) => last = Some("pre-warmed connection timed out".into()),
-        }
-    }
     let target = rule
         .spec
         .target_address(index, inlet.address.port())
@@ -2326,6 +2318,35 @@ async fn try_target(
         Ok(Err(error)) => return Err(error.to_string()),
         Err(_) => return Err("target resolution timed out".into()),
     };
+    if !rule.destination.permits(
+        destination_acl::host_from_endpoint(&target),
+        addresses.iter().map(SocketAddr::ip),
+    ) {
+        return Err(format!("destination denied by rule policy: {target}"));
+    }
+    if let Some(dialed) = rule
+        .prewarm
+        .as_ref()
+        .and_then(|set| set.targets[index].as_ref())
+        .and_then(Prewarm::take)
+    {
+        // A pre-warmed connection that fails to activate falls back to a fresh dial.
+        if !rule
+            .destination
+            .permits(&dialed.address.ip().to_string(), [dialed.address.ip()])
+        {
+            last = Some("pre-warmed destination denied by rule policy".into());
+        } else {
+            match timeout_at(deadline, activate_target(rule, index, dialed, Some(info))).await {
+                Ok(Ok(dialed)) => {
+                    stats.prewarmed_connections.fetch_add(1, Ordering::Relaxed);
+                    return Ok(dialed);
+                }
+                Ok(Err(error)) => last = Some(error.to_string()),
+                Err(_) => last = Some("pre-warmed connection timed out".into()),
+            }
+        }
+    }
     for address in addresses {
         match timeout_at(
             deadline,
@@ -2415,6 +2436,17 @@ async fn connect_tcp(
     bail!("all targets failed: {}", last.unwrap_or_default())
 }
 
+async fn resolve_destination(rule: &RuntimeRule, endpoint: &str) -> Result<Vec<SocketAddr>> {
+    let addresses = rule.resolver.resolve(endpoint).await?;
+    if !rule.destination.permits(
+        destination_acl::host_from_endpoint(endpoint),
+        addresses.iter().map(SocketAddr::ip),
+    ) {
+        bail!("destination denied by rule policy: {endpoint}");
+    }
+    Ok(addresses)
+}
+
 /// Connects a Shadowsocks client to the destination it named.
 async fn connect_destination(
     rule: &RuntimeRule,
@@ -2425,7 +2457,7 @@ async fn connect_destination(
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     timeout_at(deadline, async {
         let mut last = None;
-        for address in rule.resolver.resolve(&destination.to_string()).await? {
+        for address in resolve_destination(rule, &destination.to_string()).await? {
             if !server.permits(address.ip()) {
                 last = Some(anyhow::anyhow!("{destination} is not a public address"));
                 continue;
@@ -2454,7 +2486,7 @@ async fn connect_http_connect_destination(
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     timeout_at(deadline, async {
         let mut last = None;
-        for address in rule.resolver.resolve(&destination.to_string()).await? {
+        for address in resolve_destination(rule, &destination.to_string()).await? {
             if !server.permits(address.ip()) {
                 last = Some(anyhow::anyhow!("{destination} is not a public address"));
                 continue;
@@ -2483,7 +2515,7 @@ async fn connect_socks5_destination(
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     timeout_at(deadline, async {
         let mut last = None;
-        for address in rule.resolver.resolve(&destination.to_string()).await? {
+        for address in resolve_destination(rule, &destination.to_string()).await? {
             if !server.permits(address.ip()) {
                 last = Some(anyhow::anyhow!("{destination} is not a public address"));
                 continue;
@@ -2513,7 +2545,7 @@ async fn open_multipath_path(
         .target_guard(index)
         .context("multipath target capacity reached")?;
     let target = rule.spec.target_address(index, inlet.address.port())?;
-    let addresses = rule.resolver.resolve(&target).await?;
+    let addresses = resolve_destination(rule, &target).await?;
     let mut last = None;
     for address in addresses {
         match open_tcp_target(rule, index, address, inlet, Some(info)).await {
@@ -3074,7 +3106,7 @@ async fn udp_target(
             continue;
         };
         let target = rule.spec.target_address(index, inlet.address.port())?;
-        let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
+        let addresses = match timeout_at(deadline, resolve_destination(rule, &target)).await {
             Ok(Ok(a)) => a,
             Ok(Err(error)) => {
                 last = Some(error.to_string());

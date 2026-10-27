@@ -71,6 +71,8 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         rate_bytes_per_sec: None,
         meter_epoch: "epoch-one".into(),
         allow_sources: vec![],
+        allow_destinations: vec![],
+        deny_destinations: vec![],
         deny_sources: vec![],
     }
 }

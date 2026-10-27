@@ -501,6 +501,8 @@ mod tests {
             rate_bytes_per_sec: None,
             meter_epoch: "epoch".into(),
             allow_sources: vec![],
+            allow_destinations: vec![],
+            deny_destinations: vec![],
             deny_sources: vec![],
         }
     }

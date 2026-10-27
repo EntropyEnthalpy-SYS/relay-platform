@@ -367,6 +367,12 @@ pub struct Rule {
     pub allow_sources: Vec<IpNet>,
     #[serde(default)]
     pub deny_sources: Vec<IpNet>,
+    /// Destination IP/CIDR/domain allowlist; empty means all not denied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_destinations: Vec<String>,
+    /// Destination denylist; evaluated before the allowlist.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_destinations: Vec<String>,
 }
 
 impl Rule {
@@ -401,6 +407,10 @@ impl Rule {
     }
     pub fn validate(&self) -> Result<()> {
         crate::multipath::validate_rule(self)?;
+        crate::destination_acl::DestinationPolicy::parse(
+            &self.allow_destinations,
+            &self.deny_destinations,
+        )?;
         crate::shadowsocks::validate_rule(self)?;
         if let Some(config) = &self.inbound_socks5 {
             crate::socks5::validate(config)?;
@@ -658,6 +668,10 @@ impl Rule {
         ensure!(
             self.allow_sources.len() <= 256 && self.deny_sources.len() <= 256,
             "too many source networks"
+        );
+        ensure!(
+            self.allow_destinations.len() <= 256 && self.deny_destinations.len() <= 256,
+            "too many destination patterns"
         );
         Ok(())
     }
