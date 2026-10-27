@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.75.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.75.0.txt](verification-0.75.0.txt)，逐项清单见 [validation-evidence-0.75.0.json](validation-evidence-0.75.0.json)。
+0.76.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.76.0.txt](verification-0.76.0.txt)，逐项清单见 [validation-evidence-0.76.0.json](validation-evidence-0.76.0.json)。
 
-## 0.75.0 多路径指标验证
+## 0.76.0 系统资源指标验证
+
+| 检查 | 结果 |
+| --- | --- |
+| CPU | `relay_node_system{kind="cpu_percent"} 12.5` |
+| 内存/RSS/负载 | 有值时输出，无值省略 |
+| 限制 | 节点级采样，无直方图/长期历史 |
+
+## 0.75.0 多路径指标验证（历史）
+
+0.75.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.75.0.txt](verification-0.75.0.txt)，逐项清单见 [validation-evidence-0.75.0.json](validation-evidence-0.75.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

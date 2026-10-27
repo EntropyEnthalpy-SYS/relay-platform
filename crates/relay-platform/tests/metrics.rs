@@ -88,6 +88,11 @@ async fn prometheus_metrics_expose_node_counters_to_a_viewer() {
     };
     let stats = EngineStats {
         target_health: vec![report],
+        system: Some(relay_platform::system::SystemStats {
+            cpu_percent: Some(12.5),
+            rss_bytes: Some(4096),
+            ..Default::default()
+        }),
         multipath: Some(relay_platform::multipath::Stats {
             active_sessions: 1,
             active_paths: 2,

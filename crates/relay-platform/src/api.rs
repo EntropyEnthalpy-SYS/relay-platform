@@ -1439,6 +1439,39 @@ async fn prometheus_metrics(
             node.stats.prewarmed_connections
         ));
     }
+    body.push_str(
+        "# HELP relay_node_system Resource statistics.\n# TYPE relay_node_system gauge\n",
+    );
+    for node in &nodes {
+        if let Some(system) = &node.stats.system {
+            for (kind, value) in [
+                ("cpu_percent", system.cpu_percent.map(f64::from)),
+                (
+                    "process_cpu_percent",
+                    system.process_cpu_percent.map(f64::from),
+                ),
+                ("rss_bytes", system.rss_bytes.map(|value| value as f64)),
+                (
+                    "memory_total_bytes",
+                    system.memory_total_bytes.map(|value| value as f64),
+                ),
+                (
+                    "memory_available_bytes",
+                    system.memory_available_bytes.map(|value| value as f64),
+                ),
+                ("load_1m", system.load_1m.map(f64::from)),
+            ] {
+                if let Some(value) = value {
+                    body.push_str(&format!(
+                        "relay_node_system{{node=\"{}\",kind=\"{}\"}} {}\n",
+                        metric_label(&node.id),
+                        kind,
+                        value
+                    ));
+                }
+            }
+        }
+    }
     body.push_str("# HELP relay_multipath_active_sessions Active aggregation sessions.\n# TYPE relay_multipath_active_sessions gauge\n");
     for node in &nodes {
         if let Some(stats) = &node.stats.multipath {
