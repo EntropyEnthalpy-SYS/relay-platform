@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod model;
 pub mod mptcp;
 pub mod multipath;
+pub mod nat;
 mod network;
 pub mod node;
 pub mod proxy;

@@ -445,3 +445,7 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 ## 0.40.0 MPTCP 诊断
 
 `GET /api/v1/diagnostics/mptcp`（仅系统管理员、登录会话）返回 `platform/supported/enabled/probe_error/interfaces/routes/endpoints/active_connections/note`。Linux 探测 MPTCP socket 与 `/proc` 配置；非 Linux 返回 `supported=false`。这是观测，不是数据面。CLI：`relay mptcp-info`。详见 [MPTCP.md](MPTCP.md)。
+
+## 0.42.0 NAT-PMP CLI
+
+`relay nat-map --gateway IP[:PORT] --internal-port N [--external-port N] [--lifetime-secs N] [--delete]` 管理一个 NAT-PMP UDP 映射；默认端口 5351，生命周期上限 7 天，`--external-port 0` 由网关分配。无 HTTP API。详见 [NAT.md](NAT.md)。
