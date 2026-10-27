@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.73.0 开发版在 macOS 27.0.1 arm64 通过 **403 项自动化测试（374 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 404 项。日志见 [verification-0.73.0.txt](verification-0.73.0.txt)，逐项清单见 [validation-evidence-0.73.0.json](validation-evidence-0.73.0.json)。
+0.74.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.74.0.txt](verification-0.74.0.txt)，逐项清单见 [validation-evidence-0.74.0.json](validation-evidence-0.74.0.json)。
 
-## 0.73.0 目标健康指标验证
+## 0.74.0 映射恢复与 CLI runtime 修复
+
+| 检查 | 结果 |
+| --- | --- |
+| 旧映射 | 先删除状态文件中的旧外部端口 40000 |
+| 新映射 | 再创建 40001 并写回状态 |
+| CLI | 真实子进程退出码 0，无嵌套 runtime panic |
+| 限制 | 需显式 `--restore-state`，无真实路由器验收 |
+
+## 0.73.0 目标健康指标验证（历史）
+
+0.73.0 开发版在 macOS 27.0.1 arm64 通过 **403 项自动化测试（374 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 404 项。日志见 [verification-0.73.0.txt](verification-0.73.0.txt)，逐项清单见 [validation-evidence-0.73.0.json](validation-evidence-0.73.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

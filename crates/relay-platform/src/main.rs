@@ -55,6 +55,9 @@ enum Command {
         /// Write the last successful mapping as JSON (atomically).
         #[arg(long)]
         state_file: Option<PathBuf>,
+        /// Delete the mapping recorded in --state-file before creating a new one.
+        #[arg(long)]
+        restore_state: bool,
     },
     /// Run the public side of a single-session reverse TCP tunnel.
     ReverseServer {
@@ -135,6 +138,9 @@ enum Command {
         /// Write the last successful mapping as JSON (atomically).
         #[arg(long)]
         state_file: Option<PathBuf>,
+        /// Delete the mapping recorded in --state-file before creating a new one.
+        #[arg(long)]
+        restore_state: bool,
     },
     /// Request or delete a NAT-PMP UDP port mapping.
     NatMap {
@@ -164,6 +170,9 @@ enum Command {
         /// Write the last successful mapping as JSON (atomically).
         #[arg(long)]
         state_file: Option<PathBuf>,
+        /// Delete the mapping recorded in --state-file before creating a new one.
+        #[arg(long)]
+        restore_state: bool,
     },
     /// Run the control API and embedded administration interface.
     Server {
@@ -293,8 +302,29 @@ async fn main() -> Result<()> {
             retry_secs,
             retry_max_secs,
             state_file,
+            restore_state,
         } => {
-            let runtime = tokio::runtime::Runtime::new()?;
+            if restore_state && !delete {
+                let path = state_file
+                    .as_ref()
+                    .context("--restore-state requires --state-file")?;
+                if let Some(previous) =
+                    relay_platform::state::read_json::<relay_platform::upnp::Mapping>(path)?
+                    && (previous.internal_port != internal_port
+                        || previous.external_port != external_port)
+                {
+                    relay_platform::upnp::map(
+                        &description_url,
+                        &internal_client,
+                        previous.internal_port,
+                        previous.external_port,
+                        0,
+                        true,
+                    )
+                    .await?;
+                    relay_platform::state::remove_if_present(path)?;
+                }
+            }
             if renew && !delete {
                 let after = renew_after_secs
                     .map(Duration::from_secs)
@@ -317,21 +347,20 @@ async fn main() -> Result<()> {
                         }
                     },
                 );
-                runtime.block_on(async {
-                    tokio::select! {
-                        result = task => result,
-                        _ = tokio::signal::ctrl_c() => { cancel.cancel(); Ok(()) }
-                    }
-                })?;
+                tokio::select! {
+                    result = task => result,
+                    _ = tokio::signal::ctrl_c() => { cancel.cancel(); Ok(()) }
+                }?;
             } else {
-                let mapping = runtime.block_on(relay_platform::upnp::map(
+                let mapping = relay_platform::upnp::map(
                     &description_url,
                     &internal_client,
                     internal_port,
                     external_port,
                     lifetime_secs,
                     delete,
-                ))?;
+                )
+                .await?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
                 if let Some(path) = &state_file {
                     if delete {
@@ -350,12 +379,9 @@ async fn main() -> Result<()> {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(async {
-                let control = tokio::net::TcpListener::bind(control_listen).await?;
-                let public = tokio::net::TcpListener::bind(public_listen).await?;
-                relay_platform::reverse::serve(control, public, token).await
-            })?;
+            let control = tokio::net::TcpListener::bind(control_listen).await?;
+            let public = tokio::net::TcpListener::bind(public_listen).await?;
+            relay_platform::reverse::serve(control, public, token).await?;
         }
         Command::ReverseClient {
             server,
@@ -366,24 +392,16 @@ async fn main() -> Result<()> {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
-            tokio::runtime::Runtime::new()?.block_on(relay_platform::reverse::client_pool(
-                server,
-                target,
-                token,
-                usize::from(sessions),
-            ))?;
+            relay_platform::reverse::client_pool(server, target, token, usize::from(sessions))
+                .await?;
         }
         Command::UpnpSubscribe {
             description_url,
             callback,
             timeout_secs,
         } => {
-            let runtime = tokio::runtime::Runtime::new()?;
-            let subscription = runtime.block_on(relay_platform::upnp::subscribe(
-                &description_url,
-                &callback,
-                timeout_secs,
-            ))?;
+            let subscription =
+                relay_platform::upnp::subscribe(&description_url, &callback, timeout_secs).await?;
             println!("{}", serde_json::to_string_pretty(&subscription)?);
         }
         Command::UpnpEvents {
@@ -391,7 +409,6 @@ async fn main() -> Result<()> {
             callback,
             timeout_secs,
         } => {
-            let runtime = tokio::runtime::Runtime::new()?;
             let cancel = CancellationToken::new();
             let stop = cancel.clone();
             let task = relay_platform::upnp::run_events(
@@ -406,19 +423,16 @@ async fn main() -> Result<()> {
                 let _ = tokio::signal::ctrl_c().await;
                 signal_cancel.cancel();
             });
-            let subscription = runtime.block_on(task)?;
+            let subscription = task.await?;
             signal.abort();
             println!("{}", serde_json::to_string_pretty(&subscription)?);
         }
         Command::UpnpUnsubscribe { event_url, sid } => {
-            tokio::runtime::Runtime::new()?
-                .block_on(relay_platform::upnp::unsubscribe(&event_url, &sid))?;
+            relay_platform::upnp::unsubscribe(&event_url, &sid).await?;
             println!("{}", serde_json::json!({"ok": true}));
         }
         Command::UpnpDiscover { timeout_secs } => {
-            let found = tokio::runtime::Runtime::new()?.block_on(
-                relay_platform::upnp::discover(Duration::from_secs(timeout_secs)),
-            )?;
+            let found = relay_platform::upnp::discover(Duration::from_secs(timeout_secs)).await?;
             println!("{}", serde_json::to_string_pretty(&found)?);
         }
         Command::PcpMap {
@@ -432,10 +446,29 @@ async fn main() -> Result<()> {
             retry_secs,
             retry_max_secs,
             state_file,
+            restore_state,
         } => {
             let gateway = relay_platform::pcp::gateway_from(&gateway)?;
             let lifetime = if delete { 0 } else { lifetime_secs };
-            let runtime = tokio::runtime::Runtime::new()?;
+            if restore_state && !delete {
+                let path = state_file
+                    .as_ref()
+                    .context("--restore-state requires --state-file")?;
+                if let Some(previous) =
+                    relay_platform::state::read_json::<relay_platform::pcp::Mapping>(path)?
+                    && (previous.internal_port != internal_port
+                        || previous.external_port != external_port)
+                {
+                    relay_platform::pcp::map(
+                        gateway,
+                        previous.internal_port,
+                        previous.external_port,
+                        0,
+                    )
+                    .await?;
+                    relay_platform::state::remove_if_present(path)?;
+                }
+            }
             if renew && !delete {
                 let after = renew_after_secs
                     .map(Duration::from_secs)
@@ -457,19 +490,14 @@ async fn main() -> Result<()> {
                         }
                     },
                 );
-                runtime.block_on(async {
-                    tokio::select! {
-                        result = task => result,
-                        _ = tokio::signal::ctrl_c() => { cancel.cancel(); Ok(()) }
-                    }
-                })?;
+                tokio::select! {
+                    result = task => result,
+                    _ = tokio::signal::ctrl_c() => { cancel.cancel(); Ok(()) }
+                }?;
             } else {
-                let mapping = runtime.block_on(relay_platform::pcp::map(
-                    gateway,
-                    internal_port,
-                    external_port,
-                    lifetime,
-                ))?;
+                let mapping =
+                    relay_platform::pcp::map(gateway, internal_port, external_port, lifetime)
+                        .await?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
                 if let Some(path) = &state_file {
                     if delete {
@@ -491,12 +519,31 @@ async fn main() -> Result<()> {
             retry_secs,
             retry_max_secs,
             state_file,
+            restore_state,
         } => {
             let gateway = relay_platform::nat::gateway_from(&gateway)?;
             relay_platform::nat::validate_ports(internal_port, external_port)?;
             relay_platform::nat::validate_lifetime(lifetime_secs)?;
             let lifetime = if delete { 0 } else { lifetime_secs };
-            let runtime = tokio::runtime::Runtime::new()?;
+            if restore_state && !delete {
+                let path = state_file
+                    .as_ref()
+                    .context("--restore-state requires --state-file")?;
+                if let Some(previous) =
+                    relay_platform::state::read_json::<relay_platform::nat::Mapping>(path)?
+                    && (previous.internal_port != internal_port
+                        || previous.external_port != external_port)
+                {
+                    relay_platform::nat::map(
+                        gateway,
+                        previous.internal_port,
+                        previous.external_port,
+                        0,
+                    )
+                    .await?;
+                    relay_platform::state::remove_if_present(path)?;
+                }
+            }
             if renew && !delete {
                 let after = renew_after_secs
                     .map(Duration::from_secs)
@@ -518,22 +565,17 @@ async fn main() -> Result<()> {
                         }
                     },
                 );
-                runtime.block_on(async {
-                    tokio::select! {
-                        result = task => result,
-                        _ = tokio::signal::ctrl_c() => {
-                            cancel.cancel();
-                            Ok(())
-                        }
+                tokio::select! {
+                    result = task => result,
+                    _ = tokio::signal::ctrl_c() => {
+                        cancel.cancel();
+                        Ok(())
                     }
-                })?;
+                }?;
             } else {
-                let mapping = runtime.block_on(relay_platform::nat::map(
-                    gateway,
-                    internal_port,
-                    external_port,
-                    lifetime,
-                ))?;
+                let mapping =
+                    relay_platform::nat::map(gateway, internal_port, external_port, lifetime)
+                        .await?;
                 println!("{}", serde_json::to_string_pretty(&mapping)?);
                 if let Some(path) = &state_file {
                     if delete {
