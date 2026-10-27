@@ -30,6 +30,6 @@
 - 协议单元测试覆盖无认证域名 CONNECT、成功回复编码、用户名密码认证、错误密码和 UDP ASSOCIATE 拒绝。
 - 真实 Engine 测试启动 SOCKS5 入口与 TCP 回显目标，完成握手、CONNECT、字节双向转发并关闭。
 - 规则校验测试覆盖必须有 TCP、不能有固定目标、认证成对和两种代理入口互斥。
-- UDP ASSOCIATE 测试使用真实 TCP 控制连接、UDP 回显目标和 SOCKS5 头，验证关联、目标转发、16 个连续数据报和回复；每个关联复用 IPv4/IPv6 出口 UDP socket 与响应任务，减少每包建 socket 的开销。
+- UDP ASSOCIATE 测试使用真实 TCP 控制连接、UDP 回显目标和 SOCKS5 头，验证关联、目标转发、16 个连续数据报和回复；每个关联复用 IPv4/IPv6 出口 UDP socket 与响应任务，减少每包建 socket 的开销。UDP 载荷计入规则计量与限速。
 - 未测试真实浏览器/系统 SOCKS5 客户端矩阵、UDP 分片、多目标高并发吞吐、SOCKS5 over TLS 的客户端组合、认证暴力破解限速和正式性能报告；出口 socket 按地址族复用，但未按目标分别复用或做背压。
 - 模块 10 仍是部分实现：SOCKS5 是新增的一种入站协议，不代表 VLESS/REALITY/Hysteria2/TUIC 等其余协议已完成。

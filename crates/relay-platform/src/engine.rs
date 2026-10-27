@@ -2517,6 +2517,7 @@ async fn socks5_udp_association(
     reply: tokio::sync::mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
     inlet: ListenerKey,
     stats: Arc<Counters>,
+    meter: Meter,
 ) {
     let Some(server) = &rule.socks5 else {
         return;
@@ -2546,7 +2547,15 @@ async fn socks5_udp_association(
                         let reply = reply.clone();
                         let client = datagram.client;
                         let cancel = rule.cancel.clone();
-                        tokio::spawn(socks5_udp_replies(socket, reply, client, cancel));
+                        tokio::spawn(socks5_udp_replies(
+                            socket,
+                            reply,
+                            client,
+                            cancel,
+                            rule.clone(),
+                            meter.clone(),
+                            stats.clone(),
+                        ));
                     }
                     Err(error) => {
                         stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
@@ -2583,19 +2592,41 @@ async fn socks5_udp_association(
                 continue;
             }
         };
-        if let Err(error) = socket.send_to(&datagram.payload, address).await {
-            stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(%error, "SOCKS5 UDP send failed");
+        rule.throttle(datagram.payload.len()).await;
+        match meter
+            .admit(&rule.spec, true, datagram.payload.len(), true)
+            .await
+        {
+            Ok(Some(allowed)) if allowed == datagram.payload.len() => {}
+            _ => {
+                stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+        }
+        match socket.send_to(&datagram.payload, address).await {
+            Ok(sent) => {
+                stats
+                    .forwarded_upload_bytes
+                    .fetch_add(sent as u64, Ordering::Relaxed);
+            }
+            Err(error) => {
+                stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(%error, "SOCKS5 UDP send failed");
+            }
         }
         drop(route);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn socks5_udp_replies(
     socket: Arc<UdpSocket>,
     reply: tokio::sync::mpsc::UnboundedSender<(SocketAddr, Vec<u8>)>,
     client: SocketAddr,
     cancel: tokio_util::sync::CancellationToken,
+    rule: Arc<RuntimeRule>,
+    meter: Meter,
+    stats: Arc<Counters>,
 ) {
     let mut buffer = vec![0u8; 65_535];
     loop {
@@ -2604,6 +2635,17 @@ async fn socks5_udp_replies(
             _ = cancel.cancelled() => break,
             received = socket.recv_from(&mut buffer) => match received {
                 Ok((size, source)) => {
+                    rule.throttle(size).await;
+                    match meter.admit(&rule.spec, false, size, true).await {
+                        Ok(Some(allowed)) if allowed == size => {}
+                        _ => {
+                            stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                    }
+                    stats
+                        .forwarded_download_bytes
+                        .fetch_add(size as u64, Ordering::Relaxed);
                     let packet = socks5::encode_udp_datagram(
                         &shadowsocks::Destination::Ip(source),
                         &buffer[..size],
@@ -2894,6 +2936,7 @@ async fn tcp_session(
                     reply,
                     inlet,
                     stats.clone(),
+                    meter.clone(),
                 ));
                 let mut control = client;
                 let mut discard = [0u8; 512];

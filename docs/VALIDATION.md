@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.36.0 开发版在 macOS 27.0.1 arm64 通过 **365 项自动化测试（336 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 366 项。日志见 [verification-0.36.0.txt](verification-0.36.0.txt)，逐项清单见 [validation-evidence-0.36.0.json](validation-evidence-0.36.0.json)。
+0.37.0 开发版在 macOS 27.0.1 arm64 通过 **365 项自动化测试（336 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 366 项。日志见 [verification-0.37.0.txt](verification-0.37.0.txt)，逐项清单见 [validation-evidence-0.37.0.json](validation-evidence-0.37.0.json)。
 
-## 0.36.0 SOCKS5 UDP socket 复用验证
+## 0.37.0 SOCKS5 UDP 计量验证
+
+| 检查 | 结果 |
+| --- | --- |
+| Engine | 16 个连续 UDP 数据报复用出口 socket、全部回显 |
+| 计量 | 载荷上传/下载计入规则计量并受限速；头部不计；不足时丢弃 |
+| 限制 | 未做 UDP 吞吐报告、背压、分片、真实客户端矩阵 |
+
+## 0.36.0 SOCKS5 UDP socket 复用验证（历史）
+
+0.36.0 开发版在 macOS 27.0.1 arm64 通过 **365 项自动化测试（336 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 366 项。日志见 [verification-0.36.0.txt](verification-0.36.0.txt)，逐项清单见 [validation-evidence-0.36.0.json](validation-evidence-0.36.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |
