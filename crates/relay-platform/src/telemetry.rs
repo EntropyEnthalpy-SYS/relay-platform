@@ -11,8 +11,8 @@ use std::{
     sync::Mutex,
 };
 
-pub const WINDOW_MS: i64 = 60 * 60 * 1000;
-const MAX_SAMPLES: usize = 1440;
+pub const WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+const MAX_SAMPLES: usize = 20_000;
 const MAX_EVENTS: usize = 500;
 /// A report after this much silence is a reconnection.
 pub const OFFLINE_AFTER_MS: i64 = 30_000;

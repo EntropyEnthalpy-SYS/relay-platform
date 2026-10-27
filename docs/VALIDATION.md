@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.76.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.76.0.txt](verification-0.76.0.txt)，逐项清单见 [validation-evidence-0.76.0.json](validation-evidence-0.76.0.json)。
+0.77.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.77.0.txt](verification-0.77.0.txt)，逐项清单见 [validation-evidence-0.77.0.json](validation-evidence-0.77.0.json)。
 
-## 0.76.0 系统资源指标验证
+## 0.77.0 24 小时遥测窗口
+
+| 检查 | 结果 |
+| --- | --- |
+| 窗口 | WINDOW_MS 24 小时，每节点最多 20000 采样 |
+| 文案 | 总览页显示最近 24 小时 |
+| 边界 | 控制器重启仍从空历史开始，事件上限 500 |
+| 限制 | 内存历史，不是持久化时序库 |
+
+## 0.76.0 系统资源指标验证（历史）
+
+0.76.0 开发版在 macOS 27.0.1 arm64 通过 **404 项自动化测试（375 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 405 项。日志见 [verification-0.76.0.txt](verification-0.76.0.txt)，逐项清单见 [validation-evidence-0.76.0.json](validation-evidence-0.76.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

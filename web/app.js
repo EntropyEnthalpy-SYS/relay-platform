@@ -246,10 +246,10 @@ async function renderOverview() {
   pill.textContent = attention ? `${attention} 个节点需要关注` : `运行正常 · ${enrolled.length} 个节点`;
   const graphPanel = panel('转发链路', '按规则声明的下一跳绘制；连线颜色为该段目标的最新探测结果，点击节点查看规则。', legend());
   graphPanel.classList.add('graph-panel'); graphPanel.append(chainGraph(topology, byId));
-  const incidents = panel('事件', `最近 1 小时 · 共 ${events.length} 条`, events.length ? button('全部事件', () => modal('全部事件', eventTable(events, byId, now)), 'table-action') : undefined);
+  const incidents = panel('事件', `最近 24 小时 · 共 ${events.length} 条`, events.length ? button('全部事件', () => modal('全部事件', eventTable(events, byId, now)), 'table-action') : undefined);
   incidents.classList.add('incident-panel');
   const list = el('ol', undefined, 'incidents');
-  if (!events.length) list.append(el('li', '最近 1 小时没有目标故障、配置拒绝或节点离线。', 'incident-empty'));
+  if (!events.length) list.append(el('li', '最近 24 小时没有目标故障、配置拒绝或节点离线。', 'incident-empty'));
   events.slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', e.message, 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
   incidents.append(list);
   const middle = el('div', undefined, 'overview-grid'); middle.append(graphPanel, incidents);

@@ -37,7 +37,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/recovery` | `{enabled,healthy,head}`；仅系统管理员，读取控制器恢复日志状态 |
 | GET | `/control/metrics` | 仅系统管理员；返回本次控制器运行的节点同步统计 |
 | GET | `/metrics` | 认证的 Prometheus 文本：构建信息、节点在线、应用/期望修订、配置同步、最后同步、活动 TCP/UDP、接纳/拒绝/失败/丢弃/预热计数、转发字节、应用错误、系统资源、目标健康，以及多路径会话/路径/负载/失败计数 |
-| GET | `/telemetry` | 可见节点最近 1 小时的逐次回报采样和事件，供总览页使用；见下文“0.19.0 遥测” |
+| GET | `/telemetry` | 可见节点最近 24 小时的逐次回报采样和事件，供总览页使用；见下文“0.19.0 遥测” |
 | GET | `/alerts` | 仅系统管理员；告警设置、通道（不含地址和密钥）、当前与最近恢复的告警、发送记录；见下文“0.19.0 告警通知” |
 | PUT | `/alerts/settings` | `{maintenance_until_ms}`；仅系统管理员，登录会话 |
 | POST | `/alerts/channels` | `{name,enabled,min_severity,target}`；仅系统管理员，登录会话 |
@@ -230,7 +230,7 @@ API 令牌使用同一个 `Authorization: Bearer` 头，格式为 `rpat_` 加 64
 }
 ```
 
-每次成功提交的同步记录一个采样，每节点最多 1440 个、最长 1 小时。`forwarded_bytes` 是 Agent 进程启动以来双向转发字节累计，Agent 重启后归零，速率应按相邻采样差值计算并把负差值视为重启。`probe_latency_us` 是当前可选目标最近探测耗时（EWMA）的中位数，是节点到目标的探测往返，不是中转增加的延迟。`severity` 为 `info`、`recovered`、`warning`、`critical`；`kind` 为 `target_down`（由可用变为不可用，或首次出现时就不可用，包括控制器重启后的第一次回报）、`target_recovered`、`target_removed`（不可用的目标从配置中移除）、`config_rejected`、`config_recovered`、`config_applied`、`node_reconnected`（超过 30 秒无回报后恢复），以及读取时生成的 `node_offline`（已注册节点超过 30 秒无回报，`id` 为 0）。事件全局最多保留 500 条，按时间升序。`subject` 是事件在节点内的对象，目标事件为 `规则/目标序号/监听端口/协议`，其他事件为空字符串；同一目标的下线、恢复与移除事件 `subject` 相同。
+每次成功提交的同步记录一个采样，每节点最多 20000 个、最长 24 小时。`forwarded_bytes` 是 Agent 进程启动以来双向转发字节累计，Agent 重启后归零，速率应按相邻采样差值计算并把负差值视为重启。`probe_latency_us` 是当前可选目标最近探测耗时（EWMA）的中位数，是节点到目标的探测往返，不是中转增加的延迟。`severity` 为 `info`、`recovered`、`warning`、`critical`；`kind` 为 `target_down`（由可用变为不可用，或首次出现时就不可用，包括控制器重启后的第一次回报）、`target_recovered`、`target_removed`（不可用的目标从配置中移除）、`config_rejected`、`config_recovered`、`config_applied`、`node_reconnected`（超过 30 秒无回报后恢复），以及读取时生成的 `node_offline`（已注册节点超过 30 秒无回报，`id` 为 0）。事件全局最多保留 500 条，按时间升序。`subject` 是事件在节点内的对象，目标事件为 `规则/目标序号/监听端口/协议`，其他事件为空字符串；同一目标的下线、恢复与移除事件 `subject` 相同。
 
 采样和事件只保存在控制器内存，控制器重启后从空开始；不进入恢复日志，不作为计量、计费或配额依据。权限与 `/nodes` 相同：只读用户可查看本租户，系统管理员可查看全部。
 
