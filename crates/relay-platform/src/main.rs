@@ -103,6 +103,12 @@ enum Command {
         /// CA bundle used to require a client certificate (requires TLS).
         #[arg(long)]
         tls_client_ca: Option<PathBuf>,
+        /// TLS certificate chain for the public listener (requires --public-tls-key).
+        #[arg(long)]
+        public_tls_cert: Option<PathBuf>,
+        /// TLS private key for the public listener (requires --public-tls-cert).
+        #[arg(long)]
+        public_tls_key: Option<PathBuf>,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -449,12 +455,23 @@ async fn main() -> Result<()> {
             tls_cert,
             tls_key,
             tls_client_ca,
+            public_tls_cert,
+            public_tls_key,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
+            let public_tls = match (public_tls_cert, public_tls_key) {
+                (Some(cert), Some(key)) => {
+                    Some(relay_platform::reverse_mux::tls_acceptor(&cert, &key)?)
+                }
+                (None, None) => None,
+                _ => anyhow::bail!(
+                    "--public-tls-cert and --public-tls-key must be supplied together"
+                ),
+            };
             match (tls_cert, tls_key, tls_client_ca) {
                 (Some(cert), Some(key), client_ca) => {
                     let acceptor = match client_ca {
@@ -463,26 +480,55 @@ async fn main() -> Result<()> {
                         )?,
                         None => relay_platform::reverse_mux::tls_acceptor(&cert, &key)?,
                     };
-                    relay_platform::reverse_mux::serve_mux_tls(
-                        control,
-                        public,
-                        token,
-                        acceptor,
-                        usize::from(max_streams),
-                        u64::from(idle_timeout_secs),
-                    )
-                    .await?;
+                    match public_tls {
+                        Some(public_acceptor) => {
+                            relay_platform::reverse_mux::serve_mux_tls_public(
+                                control,
+                                public,
+                                token,
+                                acceptor,
+                                Some(public_acceptor),
+                                usize::from(max_streams),
+                                u64::from(idle_timeout_secs),
+                            )
+                            .await?;
+                        }
+                        None => {
+                            relay_platform::reverse_mux::serve_mux_tls(
+                                control,
+                                public,
+                                token,
+                                acceptor,
+                                usize::from(max_streams),
+                                u64::from(idle_timeout_secs),
+                            )
+                            .await?;
+                        }
+                    }
                 }
-                (None, None, None) => {
-                    relay_platform::reverse_mux::serve_mux_with_options(
-                        control,
-                        public,
-                        token,
-                        usize::from(max_streams),
-                        u64::from(idle_timeout_secs),
-                    )
-                    .await?;
-                }
+                (None, None, None) => match public_tls {
+                    Some(public_acceptor) => {
+                        relay_platform::reverse_mux::serve_mux_public_tls(
+                            control,
+                            public,
+                            token,
+                            public_acceptor,
+                            usize::from(max_streams),
+                            u64::from(idle_timeout_secs),
+                        )
+                        .await?;
+                    }
+                    None => {
+                        relay_platform::reverse_mux::serve_mux_with_options(
+                            control,
+                            public,
+                            token,
+                            usize::from(max_streams),
+                            u64::from(idle_timeout_secs),
+                        )
+                        .await?;
+                    }
+                },
                 _ => anyhow::bail!(
                     "--tls-cert, --tls-key and --tls-client-ca require both certificate and key"
                 ),

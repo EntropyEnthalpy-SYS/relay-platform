@@ -1,8 +1,19 @@
 # 本地验证记录
 
-0.90.0 开发版在 macOS 27.0.1 arm64 通过 **411 项自动化测试（382 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 412 项。日志见 [verification-0.90.0.txt](verification-0.90.0.txt)，逐项清单见 [validation-evidence-0.90.0.json](validation-evidence-0.90.0.json)。
+0.91.0 开发版在 macOS 27.0.1 arm64 通过 **412 项自动化测试（383 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 413 项。日志见 [verification-0.91.0.txt](verification-0.91.0.txt)，逐项清单见 [validation-evidence-0.91.0.json](validation-evidence-0.91.0.json)。
 
-## 0.90.0 反向 mux mTLS
+## 0.91.0 反向 mux 公网 TLS
+
+| 检查 | 结果 |
+| --- | --- |
+| 参数 | `--public-tls-cert/--public-tls-key` 成对 |
+| 握手 | 公网 accept 后、OPEN 前完成 |
+| 组合 | 可与控制 TLS/mTLS 同时启用 |
+| 限制 | 无按流 ACL/计量/重放保护 |
+
+## 0.90.0 反向 mux mTLS（历史）
+
+0.90.0 开发版在 macOS 27.0.1 arm64 通过 **411 项自动化测试（382 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 412 项。日志见 [verification-0.90.0.txt](verification-0.90.0.txt)，逐项清单见 [validation-evidence-0.90.0.json](validation-evidence-0.90.0.json)。
 
 | 检查 | 结果 |
 | --- | --- |

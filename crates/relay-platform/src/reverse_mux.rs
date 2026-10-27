@@ -42,6 +42,9 @@ const FIN: u8 = 5;
 const RESET: u8 = 6;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 
+trait PublicIo: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> PublicIo for T {}
+type PublicStream = Box<dyn PublicIo>;
 type ControlRead = Box<dyn AsyncRead + Send + Unpin>;
 type ControlWrite = Box<dyn AsyncWrite + Send + Unpin>;
 type Writer = Arc<Mutex<ControlWrite>>;
@@ -65,6 +68,36 @@ pub async fn serve_mux_with_options(
     control: TcpListener,
     public: TcpListener,
     token: String,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+) -> Result<()> {
+    serve_mux_plain_public(control, public, token, None, max_streams, idle_timeout_secs).await
+}
+
+pub async fn serve_mux_public_tls(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    public_acceptor: TlsAcceptor,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+) -> Result<()> {
+    serve_mux_plain_public(
+        control,
+        public,
+        token,
+        Some(public_acceptor),
+        max_streams,
+        idle_timeout_secs,
+    )
+    .await
+}
+
+async fn serve_mux_plain_public(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    public_acceptor: Option<TlsAcceptor>,
     max_streams: usize,
     idle_timeout_secs: u64,
 ) -> Result<()> {
@@ -104,11 +137,13 @@ pub async fn serve_mux_with_options(
         }
         tracing::info!(%peer, "reverse mux client connected");
         let public = public.clone();
+        let public_acceptor = public_acceptor.clone();
         let token = token.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_authorized_control(
                 control_stream,
                 public,
+                public_acceptor,
                 token,
                 max_streams,
                 idle_timeout_secs,
@@ -124,6 +159,7 @@ pub async fn serve_mux_with_options(
 async fn serve_authorized_control<S>(
     control: S,
     public: Arc<TcpListener>,
+    public_acceptor: Option<TlsAcceptor>,
     token: String,
     max_streams: usize,
     idle_timeout_secs: u64,
@@ -137,6 +173,7 @@ where
         Box::new(reader),
         Box::new(writer),
         public,
+        public_acceptor,
         max_streams,
         idle_timeout_secs,
     )
@@ -147,6 +184,7 @@ async fn serve_control(
     reader: ControlRead,
     writer: ControlWrite,
     public: Arc<TcpListener>,
+    public_acceptor: Option<TlsAcceptor>,
     max_streams: usize,
     idle_timeout_secs: u64,
 ) -> Result<()> {
@@ -172,6 +210,17 @@ async fn serve_control(
             let _ = exposed.shutdown().await;
             continue;
         }
+        let mut exposed: PublicStream = if let Some(acceptor) = &public_acceptor {
+            match acceptor.accept(exposed).await {
+                Ok(stream) => Box::new(stream),
+                Err(error) => {
+                    tracing::warn!(%peer, %error, "reverse mux public TLS handshake failed");
+                    continue;
+                }
+            }
+        } else {
+            Box::new(exposed)
+        };
         let id = next_id.fetch_add(1, Ordering::Relaxed);
         active_streams.fetch_add(1, Ordering::Relaxed);
         let (data_tx, data_rx) = mpsc::channel(32);
@@ -227,7 +276,7 @@ async fn serve_control(
 #[allow(clippy::too_many_arguments)]
 async fn bridge_public(
     id: u32,
-    exposed: TcpStream,
+    exposed: PublicStream,
     mut frames: mpsc::Receiver<(u8, Vec<u8>)>,
     writer: Writer,
     sessions: Sessions,
@@ -235,8 +284,7 @@ async fn bridge_public(
     cancel: CancellationToken,
     idle_timeout: Duration,
 ) -> Result<()> {
-    exposed.set_nodelay(true).ok();
-    let (mut reader, mut writer_stream) = exposed.into_split();
+    let (mut reader, mut writer_stream) = tokio::io::split(exposed);
     let mut buffer = vec![0u8; 16 * 1024];
     loop {
         let idle = tokio::time::sleep(idle_timeout);
@@ -397,6 +445,27 @@ pub async fn serve_mux_tls(
     max_streams: usize,
     idle_timeout_secs: u64,
 ) -> Result<()> {
+    serve_mux_tls_public(
+        control,
+        public,
+        token,
+        acceptor,
+        None,
+        max_streams,
+        idle_timeout_secs,
+    )
+    .await
+}
+
+pub async fn serve_mux_tls_public(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    acceptor: TlsAcceptor,
+    public_acceptor: Option<TlsAcceptor>,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
@@ -439,11 +508,13 @@ pub async fn serve_mux_tls(
         }
         tracing::info!(%peer, "reverse mux TLS client connected");
         let public = public.clone();
+        let public_acceptor = public_acceptor.clone();
         let token = token.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_authorized_control(
                 control_stream,
                 public,
+                public_acceptor,
                 token,
                 max_streams,
                 idle_timeout_secs,
