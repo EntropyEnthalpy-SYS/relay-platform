@@ -17,6 +17,7 @@ type Graph = HashMap<Endpoint, HashSet<Endpoint>>;
 #[derive(Default)]
 pub(crate) struct Topology {
     listeners: HashMap<(u16, bool), Vec<Endpoint>>,
+    gateway_endpoints: HashSet<Endpoint>,
     local_ips: HashSet<IpAddr>,
     edges: Graph,
 }
@@ -27,26 +28,38 @@ impl Topology {
             ..Self::default()
         };
         for rule in config.rules.iter().filter(|r| r.enabled) {
+            let mut endpoints = vec![];
             for address in rule.listen_addresses() {
+                for tcp in [true, false] {
+                    if (tcp && rule.protocol.tcp()) || (!tcp && rule.protocol.udp()) {
+                        endpoints.push(Endpoint { address, tcp });
+                    }
+                }
+            }
+            if let Some(gateway) = &rule.protocol_gateway {
+                let endpoint = Endpoint {
+                    address: gateway.listen,
+                    tcp: !gateway.protocol.uses_udp_socket(),
+                };
+                topology.gateway_endpoints.insert(endpoint);
+                endpoints.push(endpoint);
+            }
+            for endpoint in endpoints {
+                let Endpoint { address, tcp } = endpoint;
                 if !address.ip().is_unspecified() {
                     topology.local_ips.insert(address.ip());
                 }
-                for tcp in [true, false] {
-                    if (tcp && !rule.protocol.tcp()) || (!tcp && !rule.protocol.udp()) {
-                        continue;
-                    }
-                    let bucket = topology.listeners.entry((address.port(), tcp)).or_default();
-                    ensure!(
-                        !bucket
-                            .iter()
-                            .any(|e| e.address.is_ipv4() == address.is_ipv4()
-                                && (e.address.ip().is_unspecified()
-                                    || address.ip().is_unspecified()
-                                    || e.address.ip() == address.ip())),
-                        "overlapping listeners at {address}"
-                    );
-                    bucket.push(Endpoint { address, tcp });
-                }
+                let bucket = topology.listeners.entry((address.port(), tcp)).or_default();
+                ensure!(
+                    !bucket
+                        .iter()
+                        .any(|e| e.address.is_ipv4() == address.is_ipv4()
+                            && (e.address.ip().is_unspecified()
+                                || address.ip().is_unspecified()
+                                || e.address.ip() == address.ip())),
+                    "overlapping listeners at {address}"
+                );
+                bucket.push(endpoint);
             }
         }
         for rule in config.rules.iter().filter(|r| r.enabled) {
@@ -165,6 +178,10 @@ impl Routes {
         let Some(destination) = state.topology.destination(target, source.tcp) else {
             return Ok(LoopGuard(None));
         };
+        ensure!(
+            !state.topology.gateway_endpoints.contains(&destination),
+            "native egress cannot target a gateway owned by this node"
+        );
         let already_active = state
             .active
             .get(&source)

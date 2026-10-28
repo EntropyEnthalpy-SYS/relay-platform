@@ -61,6 +61,8 @@ Generated from the locked Cargo resolution by `scripts/generate_sbom.py`. Includ
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | [Source](https://github.com/RustCrypto/traits) |
 | crypto-common | 0.2.2 | MIT OR Apache-2.0 | [Source](https://github.com/RustCrypto/traits) |
 | ctutils | 0.4.6 | Apache-2.0 OR MIT | [Source](https://github.com/RustCrypto/utils) |
+| curve25519-dalek | 4.1.3 | BSD-3-Clause | [Source](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek) |
+| curve25519-dalek-derive | 0.1.1 | MIT/Apache-2.0 | [Source](https://github.com/dalek-cryptography/curve25519-dalek) |
 | data-encoding | 2.11.1 | MIT | [Source](https://github.com/ia0/data-encoding) |
 | digest | 0.10.7 | MIT OR Apache-2.0 | [Source](https://github.com/RustCrypto/traits) |
 | digest | 0.11.3 | MIT OR Apache-2.0 | [Source](https://github.com/RustCrypto/traits) |
@@ -73,6 +75,7 @@ Generated from the locked Cargo resolution by `scripts/generate_sbom.py`. Includ
 | fallible-iterator | 0.3.0 | MIT/Apache-2.0 | [Source](https://github.com/sfackler/rust-fallible-iterator) |
 | fallible-streaming-iterator | 0.1.9 | MIT/Apache-2.0 | [Source](https://github.com/sfackler/fallible-streaming-iterator) |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT | [Source](https://github.com/smol-rs/fastrand) |
+| fiat-crypto | 0.2.9 | MIT OR Apache-2.0 OR BSD-1-Clause | [Source](https://github.com/mit-plv/fiat-crypto) |
 | find-msvc-tools | 0.1.15 | MIT OR Apache-2.0 | [Source](https://github.com/rust-lang/cc-rs) |
 | fnv | 1.0.7 | Apache-2.0 / MIT | [Source](https://github.com/servo/rust-fnv) |
 | foldhash | 0.2.0 | Zlib | [Source](https://github.com/orlp/foldhash) |
@@ -291,6 +294,7 @@ Generated from the locked Cargo resolution by `scripts/generate_sbom.py`. Includ
 | windows_x86_64_gnullvm | 0.52.6 | MIT OR Apache-2.0 | [Source](https://github.com/microsoft/windows-rs) |
 | windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | [Source](https://github.com/microsoft/windows-rs) |
 | writeable | 0.6.4 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
+| x25519-dalek | 2.0.1 | BSD-3-Clause | [Source](https://github.com/dalek-cryptography/curve25519-dalek/tree/main/x25519-dalek) |
 | yoke | 0.8.4 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
 | yoke-derive | 0.8.4 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
 | zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | [Source](https://github.com/google/zerocopy) |
@@ -298,7 +302,12 @@ Generated from the locked Cargo resolution by `scripts/generate_sbom.py`. Includ
 | zerofrom | 0.1.8 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
 | zerofrom-derive | 0.1.8 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
 | zeroize | 1.9.1 | Apache-2.0 OR MIT | [Source](https://github.com/RustCrypto/utils) |
+| zeroize_derive | 1.5.0 | Apache-2.0 OR MIT | [Source](https://github.com/RustCrypto/utils) |
 | zerotrie | 0.2.5 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
 | zerovec | 0.11.9 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
 | zerovec-derive | 0.11.7 | Unicode-3.0 | [Source](https://github.com/unicode-org/icu4x) |
 | zmij | 1.0.23 | MIT | [Source](https://github.com/dtolnay/zmij) |
+
+## Optional protocol engine
+
+sing-box 1.14.4 runs as a separate process. Source archive SHA-256: `0958ccd23b1ea9a141d715d15478b1e040fd04bcca19d8ff5529636b1b753e18`. GPL-3.0-or-later; upstream also prohibits derivative naming/association without permission. Preserve LICENSE. Source, dependency declarations/checksums and licenses are in `third_party/sing-box/`. Go transitive dependencies are not expanded in this Cargo inventory. See `docs/PROTOCOL_GATEWAYS.md` for build and staging instructions.

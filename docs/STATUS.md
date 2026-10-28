@@ -1,5 +1,7 @@
 # 开发状态与下一步
 
+0.115.0 开发更新：六类受管协议接入原生规则执行，Reality/Vision、五类 UDP、sing-box 与 mihomo 客户端、计量/ACL/限速、自动重启/回滚已有测试；新增类型化 UI、客户端订阅、模板端口分配与上游源码许可包。macOS/Linux 全量回归及六协议双机 WAN 验收通过，浏览器已验证发布、编辑、模板与修订回执。Reality 伪装流量已纳入计量，QUIC 初始报文适配 1280 MTU 路径；撤回 32 KiB 缓冲建议，保留失败证据与 128 KiB 对照测量。最终数据和未完成项见 [RELEASE_0.115.0.md](RELEASE_0.115.0.md)，完整英文非支付目标见 [NONPAYMENT_TARGETS_EN.md](NONPAYMENT_TARGETS_EN.md)。
+
 0.114.0 开发更新：已接入真实 MPTCP 收发 socket、连接/子流与回退观测、规则 UI；Linux 隔离网络中三条子流和主路径断开后继续传输已验证。新增 TLS/STARTTLS 邮件告警、租户专用通道与隔离视图、重试前撤销检查及 CycloneDX 依赖清单生成。完整验收与未完范围见 [NONPAYMENT_DELIVERY.md](NONPAYMENT_DELIVERY.md)。
 
 0.113.0 更新：HTTP/2 CONNECT 已接入受管规则、计量/配额、ACL、共享限速、模板、UI、Bearer 摘要轮换、mTLS 和低内存缓冲选项。此段更新早期独立命令的历史状态；本次实际验收范围见 [RELEASE_0.113.0.md](RELEASE_0.113.0.md)。完整 22 模块与 72 小时发布门槛仍单独跟踪。

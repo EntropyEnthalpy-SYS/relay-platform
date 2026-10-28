@@ -69,8 +69,12 @@ def settings(role, supplied):
         require(ip.is_loopback or result['behind_tls_proxy'], 'non-loopback controller requires behind_tls_proxy')
         require('[' not in address if ip.version == 4 else address.startswith('[') and address.endswith(']'), 'invalid listen address')
         return result
-    require(set(supplied) <= {'controller', 'node_id', 'poll_seconds'} and {'controller', 'node_id'} <= set(supplied), 'agent settings require controller and node_id')
+    require(set(supplied) <= {'controller', 'node_id', 'poll_seconds', 'protocol_engine', 'tls_directory'} and {'controller', 'node_id'} <= set(supplied), 'agent settings require controller and node_id')
     result = {'poll_seconds': 5, **supplied}
+    for key in ('protocol_engine', 'tls_directory'):
+        if key in result:
+            value = result[key]
+            require(isinstance(value, str) and re.fullmatch(r'/[A-Za-z0-9_./-]+', value) and '..' not in Path(value).parts, f'{key} must be an absolute local path without traversal or shell metacharacters')
     require(isinstance(result['node_id'], str) and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', result['node_id']), 'invalid node identifier')
     require(type(result['poll_seconds']) is int and 1 <= result['poll_seconds'] <= 300, 'poll_seconds must be 1..300')
     url = urlsplit(result['controller'])
@@ -261,6 +265,10 @@ class Layout:
                      '--enrollment-token-file', str(self.config / 'enrollment.secret')]
             if ca:
                 args += ['--ca-certificate', str(folder / 'ca.pem')]
+            if config.get('tls_directory'):
+                args += ['--tls-directory', config['tls_directory']]
+            if config.get('protocol_engine'):
+                args = ['/usr/bin/env', 'RELAY_PROTOCOL_ENGINE=' + config['protocol_engine'], *args]
         return ('#!/bin/sh\numask 077\nexec ' + shlex.join(args) + '\n').encode()
 
     def write_generation(self, verified, config, ca):

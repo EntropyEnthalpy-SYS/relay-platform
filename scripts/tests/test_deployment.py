@@ -80,6 +80,17 @@ class DeploymentTests(unittest.TestCase):
         path.write_bytes(stream.getvalue())
         return path
 
+    def test_optional_engine_and_tls_paths_survive_generation_wrapper(self):
+        config = install.settings('agent', {'controller':'https://relay.test', 'node_id':'test-node',
+            'protocol_engine':'/usr/local/lib/relay-engines/sing-box-1.14.4', 'tls_directory':'/etc/relay-platform/tls'})
+        layout = install.Layout(self.root, 'agent', 'systemd')
+        text = layout.wrapper(config, self.root/'generation', False).decode()
+        self.assertIn('RELAY_PROTOCOL_ENGINE=/usr/local/lib/relay-engines/sing-box-1.14.4', text)
+        self.assertIn('--tls-directory /etc/relay-platform/tls', text)
+        for bad in ('relative', '/tmp/../engine', '/tmp/engine;id', '/tmp/engine\nextra'):
+            with self.assertRaises(DeployError):
+                install.settings('agent', {**config, 'protocol_engine':bad})
+
     def test_signed_manifest_and_payload_match_without_executing_payload(self):
         with patch('subprocess.run', wraps=bundle.subprocess.run) as run:
             result = bundle.verify(self.archives[0], self.keys['public_key'])

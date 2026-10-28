@@ -8,6 +8,7 @@ node --check web/app.js
 node scripts/test_web_editor.cjs web/app.js
 node scripts/test_web_http2.cjs web/app.js
 node scripts/test_web_mptcp.cjs web/app.js
+node scripts/test_web_gateways.cjs web/app.js
 node scripts/test_web_smtp.cjs web/app.js
 node scripts/test_web_views.cjs web/index.html web/app.js
 python3 -m py_compile scripts/*.py

@@ -14,6 +14,7 @@ pub const MAX_EXPIRY_DAYS: u32 = 3650;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
+    SingBox,
     V2ray,
     Clash,
     Surge,
@@ -159,6 +160,8 @@ pub struct Entry {
     pub method: String,
     pub password: String,
     pub udp: bool,
+    #[serde(skip)]
+    outbound: Option<serde_json::Value>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Skipped {
@@ -224,6 +227,14 @@ fn unique_names(entries: &mut [Entry]) {
         if *seen > 0 {
             entry.name = format!("{} #{}", entry.name, *seen + 1);
         }
+        if let Some(outbound) = &mut entry.outbound {
+            let key = if outbound.get("tag").is_some() {
+                "tag"
+            } else {
+                "name"
+            };
+            outbound[key] = entry.name.clone().into();
+        }
         *seen += 1;
     }
 }
@@ -231,6 +242,10 @@ fn clash(entries: &[Entry]) -> Result<String> {
     use serde_yaml::{Mapping, Value};
     let mut proxies = vec![];
     for entry in entries {
+        if let Some(proxy) = &entry.outbound {
+            proxies.push(serde_yaml::to_value(proxy)?);
+            continue;
+        }
         let mut proxy = Mapping::new();
         proxy.insert(Value::from("name"), Value::from(entry.name.clone()));
         proxy.insert(Value::from("type"), Value::from("ss"));
@@ -312,6 +327,74 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 rule_id: rule.id.clone(),
                 rule_name: rule.name.clone(),
                 reason: "rule is disabled".into(),
+            });
+            continue;
+        }
+        if !template.node_tags.is_empty()
+            && !template
+                .node_tags
+                .iter()
+                .any(|tag| candidate.node_tags.contains(tag))
+        {
+            skipped.push(Skipped {
+                rule_id: rule.id.clone(),
+                rule_name: rule.name.clone(),
+                reason: "node tag is not selected".into(),
+            });
+            continue;
+        }
+        if let Some(gateway) = &rule.protocol_gateway {
+            let skip = |reason: &str| Skipped {
+                rule_id: rule.id.clone(),
+                rule_name: rule.name.clone(),
+                reason: reason.into(),
+            };
+            if !matches!(format, Format::SingBox | Format::Clash) {
+                skipped.push(skip(
+                    "managed protocol gateways require sing_box or Clash/mihomo subscription format",
+                ));
+                continue;
+            }
+            let host = if let Some(host) = &template.host {
+                normalize_host(host)?
+            } else if !gateway.listen.ip().is_unspecified() {
+                gateway.listen.ip().to_string()
+            } else {
+                skipped.push(skip(
+                    "gateway listener is wildcard; set a public template host",
+                ));
+                continue;
+            };
+            let name = client_name(
+                template,
+                &candidate.node_name,
+                &rule.name,
+                gateway.listen.port(),
+                false,
+            );
+            let udp = template.udp && rule.protocol.udp();
+            let mut outbound = if format == Format::Clash {
+                gateway.mihomo_proxy(&host, &name, udp)?
+            } else {
+                gateway.client_outbound(&host, &name)?
+            };
+            if format == Format::SingBox
+                && !udp
+                && !matches!(
+                    gateway.protocol,
+                    crate::gateway::WireProtocol::AnyTls { .. }
+                )
+            {
+                outbound["network"] = "tcp".into();
+            }
+            entries.push(Entry {
+                name,
+                host,
+                port: gateway.listen.port(),
+                method: gateway.protocol.kind().into(),
+                password: String::new(),
+                udp,
+                outbound: Some(outbound),
             });
             continue;
         }
@@ -402,15 +485,39 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 method: method_name(shadowsocks.method),
                 password: shadowsocks.password.clone(),
                 udp: template.udp && rule.protocol.udp(),
+                outbound: None,
             });
         }
     }
     unique_names(&mut entries);
     let content_type = match format {
         Format::Clash => "text/yaml; charset=utf-8",
+        Format::SingBox => "application/json; charset=utf-8",
         _ => "text/plain; charset=utf-8",
     };
     let content = match format {
+        Format::SingBox => {
+            let mut outbounds: Vec<_> = entries.iter().map(|entry| entry.outbound.clone().unwrap_or_else(|| {
+                let mut value = serde_json::json!({"type":"shadowsocks","tag":entry.name,"server":entry.host,"server_port":entry.port,"method":entry.method,"password":entry.password});
+                if !entry.udp { value["network"] = "tcp".into(); }
+                value
+            })).collect();
+            // A selector name cannot collide with an arbitrary user-facing rule label.
+            let mut selector = "Relay".to_owned();
+            while entries.iter().any(|e| e.name == selector) {
+                selector.push('_');
+            }
+            if entries.is_empty() {
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"outbounds":[],"route":{"rules":[{"action":"reject"}]}}),
+                )?
+            } else {
+                outbounds.push(serde_json::json!({"type":"selector","tag":selector,"outbounds":entries.iter().map(|e| &e.name).collect::<Vec<_>>()}));
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"outbounds":outbounds,"route":{"final":selector}}),
+                )?
+            }
+        }
         Format::Clash => clash(&entries)?,
         Format::Surge => surge(&entries),
         Format::V2ray => {
@@ -464,6 +571,7 @@ mod tests {
 
     fn rule() -> Rule {
         Rule {
+            protocol_gateway: None,
             mptcp: None,
             inbound_multipath: None,
             outbound_multipath: None,

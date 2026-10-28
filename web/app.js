@@ -478,6 +478,10 @@ function nodeDiagnostics(node) {
     body.append(table(['项目', '最近采样'], [['计量请求（包含重试）', meter.admission_requests], ['计量批次失败', meter.failed_batches], ['正在等待额度的方向 / 会话', meter.budget_waiting], ['额度等待超时', meter.budget_timeouts], ['累计额度等待 / 秒', (meter.budget_wait.total_us / 1000000).toFixed(3)], ['活跃 TCP / UDP / 探测', `${stats.active_tcp} / ${stats.active_udp} / ${stats.active_probes || 0}`], ['HTTP/2 活跃隧道', stats.active_http2_streams || 0], ['MPTCP 观测中的连接', stats.mptcp?.active_sockets || 0], ['MPTCP 协商 / TCP 回退 / 无法确定（累计）', `${stats.mptcp?.negotiated_total || 0} / ${stats.mptcp?.fallback_total || 0} / ${stats.mptcp?.unknown_total || 0}`]]));
     body.append(el('p', '本地计量耗时包括线程池调度、数据库锁等待与事务执行，不是纯磁盘时间。额度等待按每次休眠片段计数，包含被取消的片段；并发等待时间可重叠相加。统计从进程启动累计，不作为用量或额度依据。', 'fine'));
   }
+  if (stats.protocol_gateway) {
+    const g = stats.protocol_gateway;
+    body.append(el('h3', '协议引擎'), table(['项目', '最近采样'], [['引擎版本', g.engine_version], ['受管入口', g.gateways], ['进程状态', g.running ? '运行中' : '已停止'], ['累计自动重启', g.restarts], ['最近错误', g.last_error || '—']]));
+  }
   if (stats.mptcp) {
     body.append(el('h3', '内核 MPTCP 连接'), table(['规则', '方向', '本地 / 对端', '协商', '实际子流数'], stats.mptcp.connections.map(c => [c.rule_id, c.direction, `${c.local} → ${c.peer}`, c.info.negotiated === null ? '未知' : c.info.negotiated ? 'MPTCP' : 'TCP 回退', c.info.total_subflows ?? '内核未提供'])));
     body.append(el('p', '最多观测 128 个活跃 socket；子流数取自内核，不等于独立线路数。每次节点上报重新采样。', 'fine'));
@@ -582,7 +586,7 @@ async function renderRules() {
   toolbar.append(badge(`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? `节点总限速 ${mbit(config.rate_bytes_per_sec)}` : '节点不限速', config.rate_bytes_per_sec ? 'orange' : ''), button('版本历史', history)); if (canWrite()) toolbar.append(button('节点总限速', () => editNodeRate(config)));
   const p = panel('转发规则', '配额按上下行接纳字节合计。更改安全策略会终止关联会话。', canWrite() ? button('＋ 添加规则', () => editRule(), 'primary') : null);
   if (!config.rules.length) p.append(empty('创建一条真实转发规则', '支持 TCP、UDP 和双协议，可设置多个目标、配额、速率和来源网段。', canWrite() ? button('添加规则', () => editRule(), 'primary') : null));
-  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button('分享链接', () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button('分享链接', () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button('分享链接', () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { if (state.actor.role !== 'viewer') actions.append(button('存为模板', () => saveTemplate(rule), 'table-action')); actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell(rule.listen + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.inbound_shadowsocks ? namedCell('Shadowsocks 代理服务', rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell('SOCKS5 代理服务', rule.inbound_socks5.username ? '用户名密码认证' : '无认证') : rule.inbound_http_connect ? namedCell('HTTP CONNECT 代理服务', rule.inbound_http_connect.username ? 'Basic 认证' : '无认证') : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', `并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
+  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button('分享链接', () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button('分享链接', () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button('分享链接', () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { if (state.actor.role !== 'viewer') actions.append(button('存为模板', () => saveTemplate(rule), 'table-action')); actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell('Shadowsocks 代理服务', rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell('SOCKS5 代理服务', rule.inbound_socks5.username ? '用户名密码认证' : '无认证') : rule.inbound_http_connect ? namedCell('HTTP CONNECT 代理服务', rule.inbound_http_connect.username ? 'Basic 认证' : '无认证') : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', `并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
   content.replaceChildren(toolbar, p);
 }
 function mbit(rate) { return `${+(rate * 8 / 1e6).toFixed(2)} Mbit/s`; }
@@ -592,6 +596,73 @@ function editNodeRate(baseConfig) {
   modal('节点总限速', form);
 }
 async function saveRules(rules, baseConfig) { const expected_revision = baseConfig.revision; await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision, rules } }); $('#dialog').close(); notify('配置已发布。请在节点总览确认实际应用修订号。'); await renderRules(); }
+function gatewayConfig(type, listen, uuid, password, vision, security, identity, serverName, handshake, privateKey, shortId, allowPrivate, payload) {
+  if (type === 'off') return null;
+  if (!['vless', 'hysteria2', 'tuic', 'any_tls', 'trojan', 'vmess'].includes(type)) throw new Error('未知协议');
+  if (payload === 'udp' || (type === 'any_tls' && payload !== 'tcp')) throw new Error('协议入口需要 TCP 控制连接；AnyTLS 当前仅支持 TCP 业务');
+  const protocol = { type };
+  if (['vless', 'vmess', 'tuic'].includes(type)) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(uuid) || /^0{8}-0{4}-0{4}-0{4}-0{12}$/.test(uuid)) throw new Error('请填写有效的非空 UUID');
+    protocol.uuid = uuid;
+  }
+  if (['hysteria2', 'tuic', 'any_tls', 'trojan'].includes(type)) {
+    if (new TextEncoder().encode(password).length < 16 || new TextEncoder().encode(password).length > 256 || /[\x00-\x1f\x7f]/.test(password)) throw new Error('协议密码需要 16–256 字节，不能含控制字符');
+    protocol.password = password;
+  }
+  if (type === 'vless') protocol.vision = vision === 'yes';
+  let secure;
+  if (security === 'certificate') {
+    if (!identity.trim()) throw new Error('请填写节点本地证书编号');
+    secure = { type: 'certificate', identity: identity.trim() };
+    if (serverName.trim()) secure.server_name = serverName.trim();
+  } else if (security === 'reality' && type === 'vless') {
+    if (!serverName.trim() || !handshake.trim() || !/^[A-Za-z0-9_-]{43}$/.test(privateKey) || !/^(?:[0-9a-f]{2}){1,8}$/i.test(shortId)) throw new Error('Reality 需要服务器名称、握手地址、32 字节 Base64URL 私钥和 2–16 位偶数长度十六进制 short ID');
+    secure = { type: 'reality', server_name: serverName.trim(), handshake: handshake.trim(), private_key: privateKey, short_id: shortId };
+  } else throw new Error('Reality 仅支持 VLESS');
+  return { listen, protocol, security: secure, allow_private_destinations: allowPrivate === 'yes' };
+}
+function gatewayBridge(existing, rules, publicListen) {
+  if (existing?.protocol_gateway) return existing.listen;
+  const ports = new Set(rules.flatMap(r => [r.listen, r.protocol_gateway?.listen]).filter(Boolean).map(v => Number(v.slice(v.lastIndexOf(':') + 1))));
+  ports.add(Number(publicListen.slice(publicListen.lastIndexOf(':') + 1)));
+  const start = crypto.getRandomValues(new Uint32Array(1))[0] % 40000;
+  for (let n = 0; n < 40000; n++) { const port = 20000 + (start + n) % 40000; if (!ports.has(port) && !rules.some(r => port >= Number(r.listen.slice(r.listen.lastIndexOf(':') + 1)) && port <= (r.listen_end_port || Number(r.listen.slice(r.listen.lastIndexOf(':') + 1))))) return `127.0.0.1:${port}`; }
+  throw new Error('没有可分配的内部监听端口');
+}
+function gatewayEditor(spec, payload, publicListen) {
+  const box = el('details'); box.open = !!spec; box.append(el('summary', 'VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'));
+  const type = select(box, 'gateway_type', '协议入口', [['off', '关闭'], ['vless', 'VLESS'], ['hysteria2', 'Hysteria2'], ['tuic', 'TUIC'], ['any_tls', 'AnyTLS'], ['trojan', 'Trojan'], ['vmess', 'VMess']], spec?.protocol.type || 'off');
+  const fields = el('div', undefined, 'form-grid');
+  const uuid = field(fields, 'gateway_uuid', '客户端 UUID', spec?.protocol.uuid || '', 'text', false);
+  const password = field(fields, 'gateway_password', '客户端密码', spec?.protocol.password || '', 'password', false);
+  const vision = select(fields, 'gateway_vision', 'VLESS Vision', [['no', '关闭'], ['yes', 'xtls-rprx-vision']], spec?.protocol.vision ? 'yes' : 'no');
+  const security = select(fields, 'gateway_security', '安全传输', [['certificate', 'TLS 证书'], ['reality', 'Reality（仅 VLESS）']], spec?.security.type || 'certificate');
+  const identity = field(fields, 'gateway_identity', '节点证书编号', spec?.security.identity || '', 'text', false);
+  const serverName = field(fields, 'gateway_sni', '客户端 TLS 服务器名称（证书模式留空沿用订阅域名）', spec?.security.server_name || '', 'text', false);
+  const handshake = field(fields, 'gateway_handshake', 'Reality 握手服务器 host:port', spec?.security.handshake || '', 'text', false);
+  const privateKey = field(fields, 'gateway_private_key', 'Reality 私钥', spec?.security.private_key || '', 'password', false);
+  const shortId = field(fields, 'gateway_short_id', 'Reality short ID', spec?.security.short_id || '', 'text', false);
+  const allowPrivate = select(fields, 'gateway_private', '内网 / 回环目的地', [['no', '拒绝（推荐）'], ['yes', '允许']], spec?.allow_private_destinations ? 'yes' : 'no');
+  const generate = button('生成客户端凭据', () => {
+    uuid.value = crypto.randomUUID();
+    password.value = Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, '0')).join('');
+  });
+  const keys = button('生成 Reality 密钥', () => {
+    privateKey.value = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    shortId.value = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
+  });
+  function show() {
+    const on = type.value !== 'off', reality = security.value === 'reality';
+    for (const [control, visible] of [[uuid, ['vless', 'vmess', 'tuic'].includes(type.value)], [password, ['hysteria2', 'tuic', 'any_tls', 'trojan'].includes(type.value)], [vision, type.value === 'vless'], [identity, !reality], [handshake, reality], [privateKey, reality], [shortId, reality], [security, true], [serverName, true], [allowPrivate, true]]) {
+      control.disabled = !on || !visible; control.parentElement.classList.toggle('hidden', !visible);
+    }
+    fields.classList.toggle('hidden', !on); generate.disabled = !on; keys.disabled = !on || !reality;
+  }
+  type.addEventListener('change', () => { if (type.value !== 'vless') security.value = 'certificate'; if (type.value !== 'off') payload.value = type.value === 'any_tls' ? 'tcp' : 'both'; show(); });
+  security.addEventListener('change', show);
+  box.append(fields, generate, keys, el('p', '节点需要安装受支持的协议引擎。面板负责规则权限、流量账本、配额、限速和目的地 ACL。上方监听地址用于客户端连接；来源 ACL 使用实际客户端 IP。订阅请选择 sing-box JSON 或 mihomo YAML。证书模式须让客户端信任签发 CA。Reality 握手与伪装回落流量也计入配额并受目的地限制；请允许握手服务器地址与端口。来源 ACL 不替代握手前的主机防火墙。', 'fine')); show();
+  return { box, enabled: () => type.value !== 'off', onchange: f => type.addEventListener('change', f), read: () => gatewayConfig(type.value, publicListen.value, uuid.value, password.value, vision.value, security.value, identity.value, serverName.value, handshake.value, privateKey.value, shortId.value, allowPrivate.value, payload.value) };
+}
 function mptcpConfig(inbound, outbound, protocol) {
   const allowed = ['off', 'prefer', 'require'];
   if (!allowed.includes(inbound) || !allowed.includes(outbound)) throw new Error('无效的 MPTCP 策略');
@@ -611,7 +682,7 @@ async function editRule(existing) {
   const baseConfig = state.config; const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || {};
   field(grid, 'name', '规则名称', r.name || '').maxLength = 120;
   const protocolControl = select(grid, 'protocol', '协议', [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], r.protocol || 'tcp');
-  field(grid, 'listen', '监听地址', r.listen || '127.0.0.1:9000');
+  const listenControl = field(grid, 'listen', '监听地址', r.protocol_gateway?.listen || r.listen || '127.0.0.1:9000');
   field(grid, 'advertise', '供其他节点连接的地址（跨节点引用时填写）', r.advertise || '', 'text', false);
   const endPort = field(grid, 'listen_end_port', '结束端口（留空只监听一个端口，最多 256 个）', r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
   select(grid, 'port_mapping', '端口段的目标映射', [['fixed', '全部入口连接同一目标端口'], ['offset', '按入口端口偏移目标端口']], r.port_mapping || 'fixed');
@@ -620,6 +691,7 @@ async function editRule(existing) {
   const socks5 = socks5Editor(r.inbound_socks5); form.append(socks5.box);
   const httpConnect = httpConnectEditor(r.inbound_http_connect); form.append(httpConnect.box);
   const http2Connect = http2ConnectEditor(r.inbound_http2_connect); form.append(http2Connect.box);
+  const gateway = gatewayEditor(r.protocol_gateway, protocolControl, listenControl); form.append(gateway.box);
   const mptcp = mptcpEditor(r.mptcp); form.append(mptcp.box);
   const routed = el('div'); form.append(routed);
   const readHealth = healthEditor(routed, r.health_check, protocolControl);
@@ -627,7 +699,7 @@ async function editRule(existing) {
   const readTargets = targetEditor(routed, r.targets?.length ? r.targets : [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id, r.outbound_multipath?.paths, multipath.mode);
   // A Shadowsocks server goes where each client asks, so it has no targets.
   function showRouted() {
-    const legacy = shadowsocks.enabled() || socks5.enabled() || httpConnect.enabled(), server = legacy || http2Connect.enabled();
+    const legacy = shadowsocks.enabled() || socks5.enabled() || httpConnect.enabled() || gateway.enabled(), server = legacy || http2Connect.enabled();
     for (const [part, hidden] of [[routed, server], [transport, legacy], [inboundWs.box, server]]) {
       part.classList.toggle('hidden', hidden);
       part.querySelectorAll('input, select, textarea').forEach(input => {
@@ -652,6 +724,7 @@ async function editRule(existing) {
   const inboundWs = websocketEditor('inbound-ws', r.inbound_websocket, true); form.append(inboundWs.box);
   // Clients also send QUIC, DNS and games over UDP, so a new server carries both.
   shadowsocks.onchange(() => { if (!existing && shadowsocks.enabled() && protocolControl.value === 'tcp') protocolControl.value = 'both'; showRouted(); }); socks5.onchange(() => { if (!existing && socks5.enabled()) protocolControl.value = 'tcp'; showRouted(); }); httpConnect.onchange(() => { if (!existing && httpConnect.enabled()) protocolControl.value = 'tcp'; showRouted(); }); http2Connect.onchange(() => { if (http2Connect.enabled()) protocolControl.value = 'tcp'; showRouted(); }); showRouted();
+  gateway.onchange(showRouted);
   const proxyInput = el('details'); proxyInput.append(el('summary', '接收可信上游传递的原始地址（PROXY protocol）'));
   const proxyMode = select(proxyInput, 'proxy_input_version', '入口 PROXY 报头', [['off', '关闭'], ['v1', '要求 v1 · 仅 TCP'], ['v2', '要求 v2 · TCP / UDP'], ['any', '要求 v1 或 v2 · 仅 TCP']], r.inbound_proxy?.version || 'off');
   const proxyOptions = el('div', undefined, 'form-grid');
@@ -670,16 +743,17 @@ async function editRule(existing) {
   form.append(el('p', '同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。', 'fine'));
   submit(form, existing ? '发布修改' : '创建并发布', async data => {
     const node = state.nodes.find(n => n.id === baseConfig.node_id), lines = key => String(data.get(key)).split('\n').map(s => s.trim()).filter(Boolean);
-    const server = shadowsocks.read(), socks = socks5.read(), http = httpConnect.read(), h2 = http2Connect.read();
-    if ([server, socks, http, h2].filter(Boolean).length > 1) throw new Error('每条规则只能启用一种代理入口');
+    const server = shadowsocks.read(), socks = socks5.read(), http = httpConnect.read(), h2 = http2Connect.read(), wire = gateway.read();
+    if ([server, socks, http, h2, wire].filter(Boolean).length > 1) throw new Error('每条规则只能启用一种代理入口');
     if (h2 && data.get('protocol') !== 'tcp') throw new Error('HTTP/2 CONNECT 必须使用 TCP');
-    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: server || socks || http || h2 ? [] : readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources'), allow_destinations: lines('allow_destinations'), deny_destinations: lines('deny_destinations'), allow_destination_ports: lines('allow_destination_ports'), deny_destination_ports: lines('deny_destination_ports') };
+    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: server || socks || http || h2 || wire ? [] : readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources'), allow_destinations: lines('allow_destinations'), deny_destinations: lines('deny_destinations'), allow_destination_ports: lines('allow_destination_ports'), deny_destination_ports: lines('deny_destination_ports') };
     if (server) rule.inbound_shadowsocks = server;
     else if (socks) rule.inbound_socks5 = socks;
     else if (http) rule.inbound_http_connect = http;
     else if (h2) rule.inbound_http2_connect = h2;
+    if (wire) { rule.protocol_gateway = wire; rule.targets = []; rule.listen = gatewayBridge(r, baseConfig.rules, wire.listen); }
+    if (!server && !socks && !http && !h2 && !wire) { rule.health_check = readHealth(); Object.assign(rule, multipath.read(readTargets.multipathPaths())); }
     const kernelMultipath = mptcp.read(rule.protocol); if (kernelMultipath) rule.mptcp = kernelMultipath;
-    else { rule.health_check = readHealth(); Object.assign(rule, multipath.read(readTargets.multipathPaths())); }
     rule.advertise = String(data.get('advertise')).trim() || null;
     rule.listen_end_port = number(data, 'listen_end_port'); rule.port_mapping = data.get('port_mapping');
     const outboundIp = String(data.get('outbound_ip')).trim(), outboundInterface = String(data.get('outbound_interface')).trim();
@@ -689,7 +763,7 @@ async function editRule(existing) {
     const identity = String(data.get('tls_identity') ?? '').trim(), clientCa = String(data.get('tls_client_ca') ?? '').trim();
     if (clientCa && !identity) throw new Error('要求客户端证书时，请同时填写入口证书编号');
     if (identity) rule.inbound_tls = { identity, client_ca: clientCa || null };
-    const websocket = h2 ? null : inboundWs.read(); if (websocket) rule.inbound_websocket = websocket;
+    const websocket = h2 || wire ? null : inboundWs.read(); if (websocket) rule.inbound_websocket = websocket;
     if (rule.protocol !== 'tcp' && (websocket || rule.targets.some(target => target.websocket))) throw new Error('WebSocket / WSS 流隧道只支持 TCP，请调整规则协议');
     if (data.get('proxy_input_version') !== 'off') rule.inbound_proxy = { version: data.get('proxy_input_version'), trusted_sources: lines('proxy_trusted_sources'), placement: data.get('proxy_input_placement'), max_header_bytes: number(data, 'proxy_header_limit'), accept_prewarmed: data.get('proxy_accept_prewarmed') === 'yes' };
     for (const key of ['quota_bytes', 'rate_bytes_per_sec', 'expires_at_ms', 'connect_timeout_ms', 'idle_timeout_secs', 'max_connections', 'udp_max_sessions']) rule[key] = number(data, key);
@@ -760,7 +834,7 @@ function http2ConnectEditor(spec) {
   const password = field(fields, 'h2_password', 'Basic 密码', spec?.password || '', 'password', false);
   const hashes = textarea(fields, 'h2_hashes', 'Bearer SHA-256 摘要（每行一个，可同时保留新旧令牌）', (spec?.bearer_token_sha256 || []).join('\n'));
   const streams = field(fields, 'h2_streams', '整条规则的并发隧道上限', spec?.max_concurrent_streams ?? 128, 'number'); streams.min = 1; streams.max = 4096;
-  const socketBuffer = field(fields, 'h2_socket_buffer', '每方向 TCP 缓冲请求 / bytes（低内存可选 32768，留空自动）', spec?.socket_buffer_bytes ?? '', 'number', false); socketBuffer.min = 16384; socketBuffer.max = 4194304;
+  const socketBuffer = field(fields, 'h2_socket_buffer', '每方向 TCP 缓冲请求 / bytes（留空自动，手动值需按实际负载验证）', spec?.socket_buffer_bytes ?? '', 'number', false); socketBuffer.min = 16384; socketBuffer.max = 4194304;
   const privateMode = select(fields, 'h2_private', '内网 / 回环目的地', [['no', '拒绝（推荐）'], ['yes', '允许']], spec?.allow_private_destinations ? 'yes' : 'no');
   const secret = el('pre', '', 'secret-box mono'); secret.hidden = true;
   const generate = button('生成 Bearer 令牌', async () => {
@@ -841,7 +915,7 @@ function shareSocks5(rule) {
   body.append(grid, link, el('p', '链接包含认证信息；需要停用时删除规则或修改用户名/密码。', 'fine'), actions);
   modal(`分享 ${rule.name}`, body);
 }
-const subscriptionFormats = { v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'Clash / mihomo（YAML）', surge: 'Surge（文本）', shadowrocket: 'Shadowrocket（ss:// 列表）' };
+const subscriptionFormats = { sing_box: 'sing-box JSON（全部已接入协议）', v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'mihomo / Clash Meta（YAML）', surge: 'Surge（Shadowsocks 文本）', shadowrocket: 'Shadowrocket（ss:// 列表）' };
 const dnsModes = { observe: '观察（只读，不写服务商）', apply: '应用（创建/更新/删除托管记录）' };
 const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];
 const announcementSeverities = { info: '信息', warning: '警告', critical: '严重' };
@@ -856,7 +930,7 @@ async function renderTemplates() {
   else p.append(table(['名称', '范围', '说明', '源监听', '操作'], templates.map(template => {
     const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button('预览', () => previewTemplate(template), 'table-action')); actions.append(button('应用', () => applyTemplate(template), 'table-action')); actions.append(button('批量应用', () => rolloutTemplate(template), 'table-action')); actions.append(button('版本', () => templateVersions(template), 'table-action')); actions.append(button('差异', () => templateDiff(template), 'table-action')); }
     if (state.actor.role === 'system_admin' || template.tenant_id === state.actor.tenant_id) actions.append(button('删除', () => deleteTemplate(template), 'table-action danger'));
-    return [namedCell(template.name, template.id), template.tenant_id || '全局', template.description || '—', template.rule.listen, actions];
+    return [namedCell(template.name, template.id), template.tenant_id || '全局', template.description || '—', template.rule.protocol_gateway?.listen || template.rule.listen, actions];
   })));
   $('#content').replaceChildren(p);
 }
@@ -1354,8 +1428,8 @@ async function ddnsRecord(record) {
 
 async function renderSubscriptions() {
   const subscriptions = await api('/subscriptions');
-  const p = panel('客户端订阅', '把 Shadowsocks 规则快照成可撤销的订阅链接。链接只包含客户端连接参数，不包含控制器会话或节点凭据；轮换后旧链接立即失效。', canWrite() ? button('＋ 新建订阅', newSubscription, 'primary') : null);
-  if (!subscriptions.length) p.append(empty('还没有订阅链接', '先创建至少一条启用中的 Shadowsocks 规则，再按客户端格式生成订阅。'));
+  const p = panel('客户端订阅', '把支持的代理规则快照成可撤销的订阅链接。链接只包含客户端连接参数，不包含控制器会话或节点凭据；轮换后旧链接立即失效。', canWrite() ? button('＋ 新建订阅', newSubscription, 'primary') : null);
+  if (!subscriptions.length) p.append(empty('还没有订阅链接', '先创建至少一条启用中的 Shadowsocks 或受管协议规则，再按客户端格式生成订阅。'));
   else p.append(table(['名称', '格式', '所有者', '到期', '最近使用', '操作'], subscriptions.map(item => {
     const actions = el('div');
     actions.append(button('预览', () => previewSubscription(item), 'table-action'));
@@ -1371,7 +1445,7 @@ async function newSubscription() {
   const users = state.actor.role === 'viewer' ? [] : await api('/users').catch(() => []);
   const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'name', '名称（说明用途，如“手机订阅”）').maxLength = 120;
-  select(grid, 'format', '客户端格式', Object.entries(subscriptionFormats), 'v2ray');
+  select(grid, 'format', '客户端格式', Object.entries(subscriptionFormats), 'sing_box');
   field(grid, 'prefix', '客户端显示名称前缀（可选）', 'Relay ').maxLength = 64;
   const host = field(grid, 'host', '替换所有节点地址（可选，NAT / 域名场景）', '', 'text', false); host.maxLength = 253;
   const tags = field(grid, 'tags', '只包含这些节点标签（逗号分隔，留空全部）', '', 'text', false);
@@ -1612,7 +1686,7 @@ function editAlertChannel(existing) {
   });
   modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
 }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', 'smtp-alerts': 'Email / SMTP 告警（TLS / STARTTLS）', 'tenant-alerts': '按租户隔离通知与事件', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', tickets: '支持工单', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-coupons': '优惠码', 'commerce-gifts': '礼品码', 'http-connect': 'HTTP CONNECT 入站', 'http2-connect-managed': 'HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer', 'destination-acl': '目的地 ACL', 'config-templates': '规则模板', 'mptcp-diagnostics': 'MPTCP 能力观测', 'mptcp-rule-transport': 'MPTCP 规则传输与连接观测', 'nat-pmp': 'NAT-PMP 端口映射', 'pcp': 'PCP 端口映射', 'upnp': 'UPnP 端口映射', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', 'smtp-alerts': 'Email / SMTP 告警（TLS / STARTTLS）', 'tenant-alerts': '按租户隔离通知与事件', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', tickets: '支持工单', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-coupons': '优惠码', 'commerce-gifts': '礼品码', 'http-connect': 'HTTP CONNECT 入站', 'http2-connect-managed': 'HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer', 'protocol-gateways': '受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess', 'protocol-client-exports': 'sing-box / mihomo 协议订阅', 'destination-acl': '目的地 ACL', 'config-templates': '规则模板', 'mptcp-diagnostics': 'MPTCP 能力观测', 'mptcp-rule-transport': 'MPTCP 规则传输与连接观测', 'nat-pmp': 'NAT-PMP 端口映射', 'pcp': 'PCP 端口映射', 'upnp': 'UPnP 端口映射', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

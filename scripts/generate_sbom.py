@@ -56,6 +56,19 @@ def generate(repo):
     for p in rows:
         url = p.get('repository') or p.get('homepage') or f"https://crates.io/crates/{p['name']}/{p['version']}"
         report += f"| {p['name']} | {p['version']} | {p.get('license') or 'See upstream'} | [Source]({url}) |\n"
+    engine_manifest = repo / 'third_party/sing-box/manifest.json'
+    if engine_manifest.exists():
+        engine = json.loads(engine_manifest.read_text())
+        engine_ref = f"pkg:golang/github.com/sagernet/sing-box@v{engine['version']}"
+        bom['components'].append({'type':'application','bom-ref':engine_ref,'name':'sing-box','version':engine['version'],
+            'purl':engine_ref,'scope':'optional','licenses':[{'expression':'GPL-3.0-or-later'}],
+            'externalReferences':[{'type':'vcs','url':engine['upstream']},
+                {'type':'distribution','url':engine['source']['url'],'hashes':[{'alg':'SHA-256','content':engine['source']['sha256']}]}],
+            'properties':[{'name':'relay:upstream-license-notice','value':engine['license_notice']},
+                {'name':'relay:inventory:scope','value':'Optional separate process. Its go.mod/go.sum and upstream source are bundled; Go transitive dependencies are not expanded in this Cargo inventory.'}]})
+        next(d for d in bom['dependencies'] if d['ref']==ref[root_id])['dependsOn'].append(engine_ref)
+        bom['dependencies'].append({'ref':engine_ref})
+        report += f"\n## Optional protocol engine\n\nsing-box {engine['version']} runs as a separate process. Source archive SHA-256: `{engine['source']['sha256']}`. {engine['license_notice']} Source, dependency declarations/checksums and licenses are in `third_party/sing-box/`. Go transitive dependencies are not expanded in this Cargo inventory. See `docs/PROTOCOL_GATEWAYS.md` for build and staging instructions.\n"
     return bom, report
 
 

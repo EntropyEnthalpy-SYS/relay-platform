@@ -982,3 +982,97 @@ fn later_healthy_revision_cannot_qualify_canary_or_receipt_gate() {
         );
     }
 }
+
+#[test]
+fn gateway_templates_apply_public_endpoints_and_allocate_distinct_private_bridges() {
+    use relay_platform::gateway::{Config, Security, WireProtocol};
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (node, _) = store
+        .create_node(&admin, "default", "gateway-node")
+        .unwrap();
+    let mut source = rule("127.0.0.1:9".parse().unwrap(), Protocol::Both);
+    source.targets.clear();
+    source.protocol_gateway = Some(Config {
+        listen: "0.0.0.0:443".parse().unwrap(),
+        protocol: WireProtocol::Trojan {
+            password: "template-client-password".into(),
+        },
+        security: Security::Certificate {
+            identity: "server".into(),
+            server_name: Some("relay.test".into()),
+        },
+        allow_private_destinations: false,
+    });
+    let template = store.create_template(&admin, input(None, source)).unwrap();
+    let preview = store
+        .preview_template(
+            &admin,
+            &node.id,
+            &template.id,
+            "preview",
+            "0.0.0.0:8443".parse().unwrap(),
+        )
+        .unwrap();
+    assert!(preview.valid, "{:?}", preview.error);
+    assert!(preview.rule.listen.ip().is_loopback());
+    assert_eq!(
+        preview
+            .rule
+            .protocol_gateway
+            .as_ref()
+            .unwrap()
+            .listen
+            .port(),
+        8443
+    );
+    let first = store
+        .apply_template(
+            &admin,
+            &node.id,
+            &template.id,
+            0,
+            "first",
+            "0.0.0.0:8443".parse().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(first.rules[0].listen, preview.rule.listen);
+    let second = store
+        .apply_template(
+            &admin,
+            &node.id,
+            &template.id,
+            first.revision,
+            "second",
+            "0.0.0.0:9443".parse().unwrap(),
+        )
+        .unwrap();
+    assert_ne!(second.rules[0].listen, second.rules[1].listen);
+    assert_eq!(
+        second.rules[1]
+            .protocol_gateway
+            .as_ref()
+            .unwrap()
+            .listen
+            .port(),
+        9443
+    );
+    assert_eq!(
+        second.rules[1].protocol_gateway.as_ref().unwrap().protocol,
+        template.rule.protocol_gateway.as_ref().unwrap().protocol
+    );
+    assert!(
+        store
+            .apply_template(
+                &admin,
+                &node.id,
+                &template.id,
+                second.revision,
+                "conflict",
+                "0.0.0.0:9443".parse().unwrap()
+            )
+            .is_err()
+    );
+}

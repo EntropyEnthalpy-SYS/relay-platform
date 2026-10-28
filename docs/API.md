@@ -476,3 +476,13 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 Rules accept optional `mptcp: {inbound: "off|prefer|require", outbound: "off|prefer|require"}`. Live transport observations appear under `stats.mptcp`; see [MPTCP.md](MPTCP.md) for fallback semantics and the bound on observed sockets. Changing an active listener mode requires disabling and applying that rule first. SOCKS5 BIND peer sockets use the outbound policy.
 
 SMTP targets use `{kind: "smtp", config: {...}}`. Channels accept optional `tenant_id`, and `GET /alerts` now permits tenant administrators with scoped results and `can_manage: false`. Mutations remain system-administrator session operations. SMTP passwords and full SMTP editing details are not exposed to tenant administrators. See [ALERTS.md](ALERTS.md).
+
+## Managed protocol gateways (0.115.0)
+
+Rules accept optional `protocol_gateway`: `{listen, protocol, security, allow_private_destinations}`. `listen` is the public endpoint; the enclosing rule's `listen` is a single loopback-only SOCKS bridge. Fixed targets must be empty. `protocol.type` is `vless`, `hysteria2`, `tuic`, `any_tls`, `trojan` or `vmess`. VLESS/VMess/TUIC require a non-nil UUID; Hysteria2/TUIC/AnyTLS/Trojan require a 16–256-byte password. VLESS accepts `vision`. AnyTLS currently requires rule protocol `tcp`; the other gateways accept `tcp` or `both`.
+
+`security.type=certificate` requires a node-local `identity` and accepts optional client `server_name`. `security.type=reality` requires VLESS, `server_name`, `handshake` (host:port), `private_key` (32-byte base64url), and an even 2–16-digit hexadecimal `short_id`. Config access contains server secrets and follows existing rule configuration authorization. Subscription exports derive the Reality public key and never export its private key.
+
+Gateway rules use the existing configuration/template APIs and rule policy fields. `EngineStats.protocol_gateway` reports `gateways`, `running`, `restarts`, `last_error`, `engine_version`, and local `process_id`. Engine binaries are selected only by node-local `RELAY_PROTOCOL_ENGINE` or deployment settings. The API cannot upload a binary or supply arbitrary engine configuration.
+
+Subscriptions add format `sing_box`. Both `sing_box` and `clash` (mihomo/Clash Meta) render managed gateways; legacy formats explicitly report unsupported rules in preview. Set template `host` for wildcard public listeners. See [PROTOCOL_GATEWAYS.md](PROTOCOL_GATEWAYS.md) for source/license provenance, supported payloads and lifecycle limits.

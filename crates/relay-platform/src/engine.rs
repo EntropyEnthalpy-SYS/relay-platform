@@ -67,6 +67,7 @@ struct Counters {
 impl Counters {
     fn snapshot(&self) -> EngineStats {
         EngineStats {
+            protocol_gateway: None,
             mptcp: self.mptcp.snapshot(),
             budget_recovery: None,
             multipath: Some(self.multipath.snapshot()),
@@ -893,6 +894,7 @@ impl Drop for TargetGuard {
 }
 
 struct RuleResources {
+    gateway_auth: Option<socks5::ServerConfig>,
     mptcp: Arc<crate::mptcp::Tracker>,
     node_rate: Arc<Limiter>,
     user_limit: Option<Arc<UserLimit>>,
@@ -975,9 +977,10 @@ impl RuntimeRule {
                 )
                 .expect("validated configuration")
             }),
-            socks5: spec
-                .inbound_socks5
+            socks5: resources
+                .gateway_auth
                 .as_ref()
+                .or(spec.inbound_socks5.as_ref())
                 .map(|config| socks5::Server::new(config).expect("validated configuration")),
             http_connect: spec
                 .inbound_http_connect
@@ -1439,6 +1442,7 @@ fn overlapping(a: ListenerKey, b: ListenerKey) -> bool {
 }
 #[derive(Default)]
 struct EngineInner {
+    gateway: Option<crate::gateway::Running>,
     config: Option<NodeConfig>,
     listeners: HashMap<ListenerKey, ListenerHandle>,
     rules: HashMap<String, Arc<RuntimeRule>>,
@@ -1450,6 +1454,8 @@ struct EngineInner {
 }
 
 pub struct Engine {
+    gateway_executable: Option<PathBuf>,
+    gateway_metrics: crate::gateway::Metrics,
     health_runtimes: StdMutex<Vec<Arc<RuntimeRule>>>,
     probe_slots: Arc<Semaphore>,
     store: Store,
@@ -1498,6 +1504,8 @@ impl Engine {
     }
     pub fn with_tls_directory(store: Store, tls_directory: Option<PathBuf>) -> Self {
         Self {
+            gateway_executable: std::env::var_os("RELAY_PROTOCOL_ENGINE").map(PathBuf::from),
+            gateway_metrics: Arc::new(StdMutex::new(Default::default())),
             health_runtimes: StdMutex::new(vec![]),
             probe_slots: Arc::new(Semaphore::new(health::MAX_CONCURRENT)),
             tls_directory,
@@ -1514,6 +1522,10 @@ impl Engine {
     /// Holds each controller share until `sent + LEASE`, `sent` being when
     /// the sync request left, so it never outlives the controller's view.
     /// Users left out lose their limit.
+    pub fn with_protocol_engine(mut self, executable: PathBuf) -> Self {
+        self.gateway_executable = Some(executable);
+        self
+    }
     pub fn set_user_shares(&self, shares: &[UserShare], sent: Instant) {
         self.hold_user_shares(shares, sent + crate::user_rate::LEASE);
     }
@@ -1600,6 +1612,10 @@ impl Engine {
     }
     pub fn stats(&self) -> EngineStats {
         let mut stats = self.stats.snapshot();
+        let gateway = self.gateway_metrics.lock().unwrap().clone();
+        if gateway.gateways > 0 {
+            stats.protocol_gateway = Some(gateway);
+        }
         stats.user_rates = self
             .user_limits
             .held()
@@ -1673,6 +1689,20 @@ impl Engine {
                 return Ok(());
             }
         }
+        let gateway_plan = if config
+            .rules
+            .iter()
+            .any(|r| r.enabled && r.protocol_gateway.is_some())
+        {
+            let executable = self
+                .gateway_executable
+                .as_deref()
+                .context("protocol gateways require local RELAY_PROTOCOL_ENGINE configuration")?;
+            crate::gateway::Plan::prepare(&config, self.tls_directory.as_deref(), executable)
+                .await?
+        } else {
+            None
+        };
         let mut wanted = HashMap::new();
         let mut rules = HashMap::new();
         // Cloned so an early rejection leaves the running rules' replay state
@@ -1694,11 +1724,9 @@ impl Engine {
                 Arc::new(TargetResolver::new(spec.dns_cache.as_ref())?)
             };
             resolvers.insert(spec.dns_cache.clone(), resolver.clone());
-            let runtime = if let Some(old) = inner
-                .rules
-                .get(&spec.id)
-                .filter(|old| old.spec == *spec && !spec.uses_tls())
-            {
+            let runtime = if let Some(old) = inner.rules.get(&spec.id).filter(|old| {
+                old.spec == *spec && !spec.uses_tls() && spec.protocol_gateway.is_none()
+            }) {
                 old.clone()
             } else {
                 let tls_spec = spec.clone();
@@ -1714,6 +1742,10 @@ impl Engine {
                     resolver,
                     self.routes.clone(),
                     RuleResources {
+                        gateway_auth: gateway_plan
+                            .as_ref()
+                            .and_then(|p| p.auth.get(&spec.id))
+                            .cloned(),
                         mptcp: self.stats.mptcp.clone(),
                         node_rate: self.node_rate.clone(),
                         user_limit: Some(self.user_limits.get(&spec.tenant_id, &spec.owner_id)),
@@ -1828,7 +1860,32 @@ impl Engine {
                 }
             }
         }
-        // No running state is modified before the transaction and all binds succeed.
+        // Gateway generations authenticate with fresh private bridge credentials.
+        // Their public sockets can start here, but cannot forward through the old
+        // native runtimes before this transaction installs the matching credentials.
+        let previous_gateway = inner.gateway.as_ref().map(|r| r.plan.clone());
+        if let Some(mut running) = inner.gateway.take() {
+            running.stop().await;
+        }
+        let mut next_gateway = if let Some(plan) = &gateway_plan {
+            match plan
+                .start(
+                    self.gateway_executable.clone().expect("validated"),
+                    self.gateway_metrics.clone(),
+                )
+                .await
+            {
+                Ok(running) => Some(running),
+                Err(error) => {
+                    self.reopen(&mut inner, released);
+                    self.restore_gateway(&mut inner, previous_gateway).await?;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        // All native binds and the gateway startup have succeeded before the durable commit.
         let db = self.store.clone();
         let saved = config.clone();
         if let Err(error) = tokio::task::spawn_blocking(move || db.save_agent_config(&saved))
@@ -1836,7 +1893,11 @@ impl Engine {
             .map_err(anyhow::Error::from)
             .and_then(|saved| saved)
         {
+            if let Some(running) = &mut next_gateway {
+                running.stop().await;
+            }
             self.reopen(&mut inner, released);
+            self.restore_gateway(&mut inner, previous_gateway).await?;
             return Err(error);
         }
         self.routes.install(topology);
@@ -1930,9 +1991,36 @@ impl Engine {
         inner.rules = rules;
         inner.resolvers = resolvers;
         inner.config = Some(config);
+        inner.gateway = next_gateway;
+        if inner.gateway.is_none() {
+            *self.gateway_metrics.lock().unwrap() = Default::default();
+        }
         // Old runtimes are gone now; keep only replay state still in use.
         salts.retain(|_, cache| Arc::strong_count(cache) > 1);
         inner.shadowsocks_salts = salts;
+        Ok(())
+    }
+
+    async fn restore_gateway(
+        &self,
+        inner: &mut EngineInner,
+        plan: Option<Arc<crate::gateway::Plan>>,
+    ) -> Result<()> {
+        inner.gateway = if let Some(plan) = plan {
+            Some(
+                plan.start(
+                    self.gateway_executable
+                        .clone()
+                        .context("gateway executable unavailable during rollback")?,
+                    self.gateway_metrics.clone(),
+                )
+                .await
+                .context("previous gateway could not be restarted")?,
+            )
+        } else {
+            *self.gateway_metrics.lock().unwrap() = Default::default();
+            None
+        };
         Ok(())
     }
 
@@ -1984,6 +2072,9 @@ impl Engine {
     pub async fn shutdown(&self) -> Result<()> {
         let mut inner = self.inner.lock().await;
         inner.stopped = true;
+        if let Some(mut gateway) = inner.gateway.take() {
+            gateway.stop().await;
+        }
         for runtime in inner.rules.values() {
             runtime.cancel.cancel();
             if let Some(health) = &runtime.health {
@@ -2008,7 +2099,7 @@ impl Engine {
 }
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
-    if old.mptcp != new.mptcp {
+    if old.protocol_gateway != new.protocol_gateway || old.mptcp != new.mptcp {
         return true;
     }
     old.inbound_multipath != new.inbound_multipath
@@ -2642,6 +2733,10 @@ async fn socks5_udp_association(
 ) {
     let Some(server) = &rule.socks5 else {
         return;
+    };
+    let inlet = ListenerKey {
+        tcp: false,
+        ..inlet
     };
     let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<(SocketAddr, Vec<u8>)>();
     let allowed = Arc::new(StdMutex::new(std::collections::HashSet::<SocketAddr>::new()));

@@ -15,8 +15,10 @@ import socket
 import ssl
 import statistics
 import subprocess
+import tempfile
 import threading
 import time
+import uuid
 import urllib.request
 import urllib.error
 
@@ -56,6 +58,13 @@ class Origin(http.server.BaseHTTPRequestHandler):
                 size -= len(data)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+
+class OriginServer(http.server.ThreadingHTTPServer):
+    # The origin must accept the complete 64-client load without its default
+    # five-connection listen backlog becoming the test's bottleneck.
+    request_queue_size = 256
+    daemon_threads = True
 
 
 class Unit:
@@ -101,9 +110,19 @@ def main():
     parser.add_argument('--public-host', required=True)
     parser.add_argument('--client-ip', required=True)
     parser.add_argument('--endurance-seconds', type=int, default=600)
+    parser.add_argument('--socket-buffer-bytes', type=int, default=131072,
+                        help='per-direction HTTP/2 socket buffer request; 0 keeps OS autotuning')
+    parser.add_argument('--steady-rounds', type=int, default=3,
+                        help='independent 64-reader rounds; every round must pass')
+    parser.add_argument('--protocol-engine', type=Path, help='also run six managed gateways in the agent cgroup; profiles become 64/128/192/256 MiB')
+    parser.add_argument('--start-soak-immediately', action='store_true', help='do not wait for an external coordination file')
     args = parser.parse_args()
     if args.endurance_seconds < 10 or args.endurance_seconds > 86400:
         parser.error('endurance-seconds must be 10..86400')
+    if args.socket_buffer_bytes != 0 and not 16384 <= args.socket_buffer_bytes <= 4194304:
+        parser.error('socket-buffer-bytes must be 0 or 16384..4194304')
+    if not 1 <= args.steady_rounds <= 20:
+        parser.error('steady-rounds must be 1..20')
     os.umask(0o077)
     root = args.workdir.resolve(); root.mkdir(parents=True, exist_ok=False)
     evidence = root / 'evidence'; evidence.mkdir()
@@ -124,10 +143,20 @@ def main():
     run('openssl','x509','-req','-in',tls/'server/request.pem','-CA',tls/'root/ca.pem','-CAkey',tls/'root/key.pem',
         '-CAcreateserial','-days','2','-extfile',ext,'-out',tls/'server/cert.pem')
     for key in tls.rglob('key.pem'): key.chmod(0o600)
-    origin = http.server.ThreadingHTTPServer(('127.0.0.1',0), Origin)
+    origin = OriginServer(('127.0.0.1',0), Origin)
     threading.Thread(target=origin.serve_forever, daemon=True).start()
     origin_port = origin.server_address[1]
-    https_origin = http.server.ThreadingHTTPServer(('127.0.0.1',0), Origin)
+    udp_origin = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp_origin.bind(('127.0.0.1',0))
+    udp_port = udp_origin.getsockname()[1]
+    def echo_udp():
+        while True:
+            try:
+                data, peer = udp_origin.recvfrom(65536)
+                udp_origin.sendto(data, peer)
+            except OSError: return
+    threading.Thread(target=echo_udp,daemon=True).start()
+    https_origin = OriginServer(('127.0.0.1',0), Origin)
     context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); context.load_cert_chain(tls/'server/cert.pem',tls/'server/key.pem')
     https_origin.socket=context.wrap_socket(https_origin.socket,server_side=True)
     threading.Thread(target=https_origin.serve_forever,daemon=True).start()
@@ -176,15 +205,42 @@ def main():
         h2={**base,'id':'h2-linux','name':'Managed HTTP2 TLS','listen':f'0.0.0.0:{h2_port}','targets':[],
             'inbound_tls':{'identity':'server','client_ca':None},
             'inbound_http2_connect':{'username':user,'password':proxy_password,'bearer_token_sha256':[hashlib.sha256(token.encode()).hexdigest()],
-                                    'allow_private_destinations':True,'max_concurrent_streams':128,'socket_buffer_bytes':32768},
+                                    'allow_private_destinations':True,'max_concurrent_streams':128,
+                                    'socket_buffer_bytes':args.socket_buffer_bytes or None},
             'allow_destinations':['127.0.0.1/32'],'allow_destination_ports':[str(origin_port),str(https_port)]}
         tcp={**base,'id':'tcp-linux','name':'TCP Linux baseline','listen':f'127.0.0.1:{tcp_port}',
              'targets':[{'address':f'127.0.0.1:{origin_port}','weight':1}]}
-        api(f'/nodes/{node_id}/config',{'expected_revision':0,'rules':[h2,tcp]},'PUT')
+        rules=[h2,tcp]
+        gateways=[]
+        if args.protocol_engine:
+            for kind in ('vless','hysteria2','tuic','any_tls','trojan','vmess'):
+                credential={'type':kind}
+                if kind in ('vless','vmess','tuic'): credential['uuid']=str(uuid.uuid4())
+                if kind in ('hysteria2','tuic','any_tls','trojan'): credential['password']=secrets.token_hex(24)
+                port=free_port()
+                rule={**base,'id':'gateway-'+kind,'name':kind,'protocol':'tcp' if kind=='any_tls' else 'both',
+                      'listen':f'127.0.0.1:{free_port()}','targets':[],
+                      'allow_destinations':['127.0.0.1/32'],'allow_destination_ports':[str(origin_port),str(https_port),str(udp_port)],
+                      'protocol_gateway':{'listen':f'0.0.0.0:{port}','protocol':credential,
+                          'security':{'type':'certificate','identity':'server','server_name':args.public_host},'allow_private_destinations':True}}
+                rules.append(rule)
+                outbound={'type':'anytls' if kind=='any_tls' else kind,'tag':kind,'server':args.public_host,'server_port':port,
+                          **{k:v for k,v in credential.items() if k!='type'},
+                          'tls':{'enabled':True,'server_name':args.public_host,'certificate':[ (tls/'root/ca.pem').read_text() ]}}
+                if kind in ('hysteria2','tuic'):
+                    outbound['tls']['alpn']=['h3']
+                    outbound['initial_packet_size']=1200
+                if kind=='vmess':outbound['security']='auto'
+                gateways.append(outbound)
+            save(root/'gateway-clients.private.json',{'outbounds':gateways,'origin_port':origin_port,'https_origin_port':https_port,'udp_port':udp_port})
+            results['method'] += ' Optional shared sing-box child included in each agent memory/CPU cap.'
+        api(f'/nodes/{node_id}/config',{'expected_revision':0,'rules':rules},'PUT')
         agent_state=root/'agent'
         def launch_agent(memory,label):
-            unit=Unit(prefix+'-agent-'+label,memory,[binary,'agent','--controller',controller_url,'--node-id',node_id,
-                '--state',agent_state,'--enrollment-token-file',enrollment,'--poll-seconds','1','--tls-directory',tls],evidence)
+            command=[binary,'agent','--controller',controller_url,'--node-id',node_id,
+                '--state',agent_state,'--enrollment-token-file',enrollment,'--poll-seconds','1','--tls-directory',tls]
+            if args.protocol_engine: command=['/usr/bin/env','RELAY_PROTOCOL_ENGINE='+str(args.protocol_engine.resolve()),*command]
+            unit=Unit(prefix+'-agent-'+label,memory,command,evidence)
             units.append(unit)
             try:
                 ready(h2_port,unit)
@@ -207,8 +263,45 @@ def main():
             return {'ok':completed.returncode==0 and int(value.get('size_download',0))==size,
                 'exit_code':completed.returncode,'bytes':int(value.get('size_download',0)),
                 'connect_status':value.get('http_connect'),'seconds':value.get('time_total'),
+                'time_connect':value.get('time_connect'),'time_appconnect':value.get('time_appconnect'),'time_starttransfer':value.get('time_starttransfer'),
                 'error':completed.stderr[:200] if completed.returncode else None}
-        for memory in (16,32,64,128):
+        def gateway_batch(unit):
+            # Client and HTTP origin are load generators outside the measured
+            # agent cgroup. The managed server engine remains inside it.
+            ports={out['tag']:free_port() for out in gateways}
+            outbounds=[{**out,'server':'127.0.0.1'} for out in gateways]
+            document={'log':{'level':'error'},'inbounds':[{'type':'socks','tag':name,'listen':'127.0.0.1','listen_port':port} for name,port in ports.items()],
+                'outbounds':outbounds,'route':{'rules':[{'inbound':[name],'action':'route','outbound':name} for name in ports]+[{'action':'reject'}]}}
+            with tempfile.TemporaryDirectory(prefix='gateway-load-',dir=root) as directory:
+                config=Path(directory)/'config.json';save(config,document)
+                process=subprocess.Popen([str(args.protocol_engine),'run','-c',str(config)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                    env={**os.environ,'GOMAXPROCS':'1','GOMEMLIMIT':'96MiB'})
+                try:
+                    for port in ports.values():
+                        for _ in range(100):
+                            if process.poll() is not None: raise RuntimeError('gateway load client exited')
+                            try:
+                                with socket.create_connection(('127.0.0.1',port),timeout=.1):break
+                            except OSError:time.sleep(.05)
+                        else:raise RuntimeError('gateway load client startup timed out')
+                    def transfer(name):
+                        size=1024*1024
+                        completed=subprocess.run(['curl','--silent','--show-error','--fail','--connect-timeout','5','--max-time','25','--noproxy','',
+                            '--socks5-hostname',f'127.0.0.1:{ports[name]}',f'http://127.0.0.1:{origin_port}/bytes/{size}'],capture_output=True)
+                        return {'protocol':name,'ok':completed.returncode==0 and completed.stdout==b'x'*size,
+                            'bytes':len(completed.stdout),'exit_code':completed.returncode,'error':completed.stderr.decode(errors='replace')[:200]}
+                    before=unit.snapshot();start=time.monotonic()
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as pool:
+                        transfers=list(pool.map(transfer,list(ports)*4))
+                    elapsed=time.monotonic()-start
+                    return {'method':'24 concurrent connections, four per gateway protocol, 1 MiB exact body each; client/origin outside agent cgroup',
+                        'passed':all(p['ok'] for p in transfers),'seconds':elapsed,'mbps':sum(p['bytes'] for p in transfers)*8/elapsed/1e6,
+                        'before':before,'after':unit.snapshot(),'transfers':transfers}
+                finally:
+                    process.terminate()
+                    try:process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:process.kill();process.wait()
+        for memory in ((64,128,192,256) if args.protocol_engine else (16,32,64,128)):
             profile={'memory_mib':memory,'cpu_quota_percent':100,'swap':False,'cases':[]}
             try:
                 agent=launch_agent(memory,str(memory));time.sleep(2);profile['idle']=agent.snapshot()
@@ -228,6 +321,9 @@ def main():
                             'mbps':count*8/elapsed/1e6,'failures':failures,'cpu_seconds':cpu/1e6,'snapshot':after})
                         save(evidence/'capacity.json',{**results,'in_progress':profile})
                         if failures: raise RuntimeError('transfer failure under cap')
+                if args.protocol_engine:
+                    profile['gateway_batch']=gateway_batch(agent)
+                    if not profile['gateway_batch']['passed']:raise RuntimeError('gateway transfer failure under cap')
                 profile['passed']=True;profile['final']=agent.snapshot()
             except Exception as error:
                 profile['passed']=False;profile['error']=str(error)
@@ -235,22 +331,39 @@ def main():
                 if agent:agent.stop();agent=None
             results['profiles'].append(profile);save(evidence/'capacity.json',results)
         # A stable instance remains during the bounded soak and external WAN/browser probes.
-        agent=launch_agent(64,'soak');time.sleep(2)
+        soak_memory=192 if args.protocol_engine else 64
+        agent=launch_agent(soak_memory,'soak');time.sleep(2)
         ready_info={'controller_port':controller_port,'h2_port':h2_port,'tcp_port':tcp_port,'origin_port':origin_port,
                     'node_id':node_id,'https_origin_port':https_port,'ca_file':str(tls/'root/ca.pem'),'controller_unit':controller.name,'agent_unit':agent.name,
-                    'soak_seconds':args.endurance_seconds}
+                    'soak_seconds':args.endurance_seconds,'udp_port':udp_port}
         save(evidence/'ready.json',ready_info)
         save(root/'private-access.json',{**ready_info,'admin_password':password,'session':auth,'proxy_bearer':token,'proxy_user':user,'proxy_password':proxy_password})
         for _ in range(1500):
-            if (root/'start-soak').exists(): break
+            if args.start_soak_immediately or (root/'start-soak').exists(): break
             time.sleep(.2)
-        if not (root/'start-soak').exists(): raise RuntimeError('external probe gate timed out; no soak started')
+        if not args.start_soak_immediately and not (root/'start-soak').exists(): raise RuntimeError('external probe gate timed out; no soak started')
         steady_before=agent.snapshot(); start=time.monotonic()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
-            steady=list(pool.map(lambda _:curl('h2',16*1024*1024,slow=True),range(64)))
+        samples=[]; sampling=threading.Event()
+        def sample_load():
+            while not sampling.wait(.5):
+                samples.append({'seconds':round(time.monotonic()-start,3),'agent':agent.snapshot(),'controller':controller.snapshot()})
+        sampler=threading.Thread(target=sample_load,daemon=True);sampler.start()
+        rounds=[]
+        for round_number in range(args.steady_rounds):
+            began=time.monotonic()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+                transfers=list(pool.map(lambda _:curl('h2',16*1024*1024,slow=True),range(64)))
+            rounds.append({'round':round_number+1,'seconds':time.monotonic()-began,
+                           'passed':all(p['ok'] for p in transfers),'transfers':transfers,
+                           'agent':agent.snapshot(),'controller':controller.snapshot()})
+            save(evidence/'steady-rounds.json',rounds)
+        steady=[transfer for round_result in rounds for transfer in round_result['transfers']]
+        sampling.set();sampler.join(timeout=5)
         elapsed=time.monotonic()-start
-        save(evidence/'steady-load.json',{'method':'64 concurrent slow readers; each 16MiB at 256KiB/s; controller and agent share CPU 0, separate 64MiB caps; 32KiB per-direction socket buffer requests',
+        save(evidence/'steady-load.json',{'method':f'{args.steady_rounds} independent rounds of 64 concurrent slow readers; each 16MiB at 256KiB/s; controller and agent share CPU 0, separate 64/{soak_memory}MiB caps; socket buffer request {args.socket_buffer_bytes} bytes (0 means OS autotuning)',
+            'socket_buffer_bytes':args.socket_buffer_bytes,'rounds':args.steady_rounds,
             'passed':all(p['ok'] for p in steady),'seconds':elapsed,'mbps':sum(p['bytes'] for p in steady)*8/elapsed/1e6,'before':steady_before,'after':agent.snapshot(),'controller':controller.snapshot(),'transfers':steady})
+        save(evidence/'steady-samples.json',samples)
         samples=[];failures=[];start=time.monotonic()
         while time.monotonic()-start<args.endurance_seconds:
             probe=curl('h2',1024*1024)
@@ -262,12 +375,19 @@ def main():
         results['endurance']={'seconds':time.monotonic()-start,'transfers':len(samples),'failures':len(failures),
                               'first':samples[0],'last':samples[-1]}
         save(evidence/'endurance.json',{'requested_seconds':args.endurance_seconds,'elapsed_seconds':time.monotonic()-start,'complete':True,'failures':failures,'samples':samples})
+        # Lower cap profiles may fail while establishing the sizing boundary.
+        # The sustained workload must pass; a timeout must not yield exit 0.
+        passed=any(p['passed'] for p in results['profiles']) and all(p['ok'] for p in steady) and not failures
+        results['passed']=bool(passed)
         save(evidence/'capacity.json',results)
-        print(json.dumps({'complete':True,'controller_profiles':len(results['controller_profiles']),'agent_profiles':len(results['profiles']),'soak_failures':len(failures)}),flush=True)
+        print(json.dumps({'complete':True,'passed':bool(passed),'controller_profiles':len(results['controller_profiles']),'agent_profiles':len(results['profiles']),'soak_failures':len(failures)}),flush=True)
+        if not passed:
+            raise SystemExit(1)
     finally:
         for unit in reversed(units):unit.stop()
         origin.shutdown()
         https_origin.shutdown()
+        udp_origin.close()
         save(evidence/'cleanup.json',{'test_units_stopped':[unit.name for unit in units]})
 
 

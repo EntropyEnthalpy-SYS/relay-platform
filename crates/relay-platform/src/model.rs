@@ -301,6 +301,8 @@ pub fn canonical_address(address: SocketAddr) -> SocketAddr {
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_gateway: Option<crate::gateway::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mptcp: Option<crate::mptcp::Config>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_multipath: Option<crate::multipath::ServerConfig>,
@@ -423,6 +425,9 @@ impl Rule {
         self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(gateway) = &self.protocol_gateway {
+            gateway.validate(self)?;
+        }
         if let Some(policy) = self.mptcp {
             policy.validate(self.protocol.tcp())?;
         }
@@ -587,7 +592,8 @@ impl Rule {
                 "DNS cache limits exceeded"
             );
         }
-        if self.inbound_shadowsocks.is_some()
+        if self.protocol_gateway.is_some()
+            || self.inbound_shadowsocks.is_some()
             || self.inbound_socks5.is_some()
             || self.inbound_http_connect.is_some()
             || self.inbound_http2_connect.is_some()
@@ -734,6 +740,11 @@ impl Rule {
     }
 
     pub fn permits(&self, ip: std::net::IpAddr) -> bool {
+        // Gateway public source ACLs are enforced before its SOCKS outbound.
+        // This native listener is loopback-only and requires a private per-generation credential.
+        if self.protocol_gateway.is_some() {
+            return ip.is_loopback();
+        }
         let ip = match ip {
             std::net::IpAddr::V6(v) => v.to_ipv4_mapped().map(std::net::IpAddr::V4).unwrap_or(ip),
             _ => ip,
@@ -832,6 +843,14 @@ impl NodeConfig {
             multipath_payload <= 512 * 1024 * 1024,
             "node multipath send/reorder reservation exceeds 512 MiB"
         );
+        ensure!(
+            self.rules
+                .iter()
+                .filter(|r| r.enabled && r.protocol_gateway.is_some())
+                .count()
+                <= crate::gateway::MAX_GATEWAYS,
+            "at most 64 protocol gateways per node"
+        );
         let mut ids = HashSet::new();
         let mut listeners = HashSet::new();
         let mut policies = HashSet::new();
@@ -892,6 +911,8 @@ pub struct UsageAck {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineStats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_gateway: Option<crate::gateway::Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mptcp: Option<crate::mptcp::Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

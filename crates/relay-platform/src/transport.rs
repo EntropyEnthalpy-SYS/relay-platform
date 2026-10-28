@@ -253,3 +253,24 @@ impl PreparedTls {
         })
     }
 }
+
+/// Validate and copy local TLS material into a gateway's private immutable generation.
+pub(crate) fn identity_pem(root: Option<&Path>, profile: &str) -> Result<(String, String)> {
+    let mut material = Material {
+        root,
+        digest: Sha256::new(),
+    };
+    let certificate = material.read(profile, "cert.pem", false)?;
+    let key = material.read(profile, "key.pem", true)?;
+    let certs = CertificateDer::pem_slice_iter(&certificate).collect::<Result<Vec<_>, _>>()?;
+    ensure!(
+        !certs.is_empty() && certs.len() <= 32,
+        "TLS identity requires 1..32 certificates"
+    );
+    let private = PrivateKeyDer::from_pem_slice(&key)?;
+    rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_single_cert(certs, private)?;
+    Ok((String::from_utf8(certificate)?, String::from_utf8(key)?))
+}

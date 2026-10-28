@@ -2,7 +2,11 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.113.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.115.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+
+0.115.0 接入受管 VLESS/Reality、Hysteria2、TUIC、AnyTLS、Trojan 和 VMess，支持原生计量/ACL/限速、规则 UI、模板与 sing-box/mihomo 订阅。可选 sing-box 引擎的原始源码、许可和固定校验和随源码包提供，见 [协议入口说明](docs/PROTOCOL_GATEWAYS.md)。0.114.0 已增加原生 MPTCP 传输与租户 SMTP 告警。本轮排除支付开发；完整非支付范围及尚未通过的验收仍见 [交付清单](docs/NONPAYMENT_DELIVERY.md)。
+
+English: [complete non-payment target checklist](docs/NONPAYMENT_TARGETS_EN.md) and [0.115.0 verification and hardware report](docs/RELEASE_0.115.0.md). The older release notes below describe historical states; use the current report for supported combinations and measured limits.
 
 0.113.0 将 HTTP/2 CONNECT 接入规则引擎、计量/配额、ACL、限速、模板和面板，支持 Bearer 摘要、mTLS、共享并发上限及可选 TCP 缓冲预算。使用说明见 [HTTP2.md](docs/HTTP2.md)；本次验收与硬件测量见 [RELEASE_0.113.0.md](docs/RELEASE_0.113.0.md)。完整产品仍在开发中。
 

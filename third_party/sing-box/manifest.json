@@ -1,0 +1,29 @@
+{
+  "engine": "sing-box",
+  "version": "1.14.4",
+  "upstream": "https://github.com/SagerNet/sing-box",
+  "release_url": "https://github.com/SagerNet/sing-box/releases/tag/v1.14.4",
+  "license_notice": "GPL-3.0-or-later; upstream also prohibits derivative naming/association without permission. Preserve LICENSE.",
+  "source": {
+    "filename": "sing-box-1.14.4-source.tar.gz",
+    "url": "https://codeload.github.com/SagerNet/sing-box/tar.gz/refs/tags/v1.14.4",
+    "sha256": "0958ccd23b1ea9a141d715d15478b1e040fd04bcca19d8ff5529636b1b753e18"
+  },
+  "assets": [
+    {
+      "filename": "sing-box-1.14.4-linux-amd64.tar.gz",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-amd64.tar.gz",
+      "sha256": "699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968"
+    },
+    {
+      "filename": "sing-box-1.14.4-linux-arm64.tar.gz",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-arm64.tar.gz",
+      "sha256": "436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26"
+    },
+    {
+      "filename": "sing-box-1.14.4-darwin-arm64.tar.gz",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-darwin-arm64.tar.gz",
+      "sha256": "0d8c7f5ed5d587b0f1a5e9772a708ec3bfa4ac4c9329604b01d8d9c2ba406838"
+    }
+  ]
+}

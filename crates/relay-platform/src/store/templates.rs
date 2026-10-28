@@ -6,6 +6,34 @@ use anyhow::bail;
 fn key(id: &str) -> String {
     format!("template:{id}")
 }
+fn assign_template_listener(
+    rule: &mut Rule,
+    config: &NodeConfig,
+    listen: std::net::SocketAddr,
+) -> Result<()> {
+    if let Some(gateway) = &mut rule.protocol_gateway {
+        // The template API's listen argument always names the client endpoint.
+        // Allocate a separate bridge against the current optimistic revision.
+        gateway.listen = listen;
+        let port = (20000..60000)
+            .find(|port| {
+                *port != listen.port()
+                    && !config.rules.iter().any(|r| {
+                        (r.listen.port()..=r.listen_end_port.unwrap_or(r.listen.port()))
+                            .contains(port)
+                            || r.protocol_gateway
+                                .as_ref()
+                                .is_some_and(|g| g.listen.port() == *port)
+                    })
+            })
+            .context("no private gateway bridge port available")?;
+        rule.listen = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    } else {
+        rule.listen = listen;
+    }
+    rule.listen_end_port = None;
+    Ok(())
+}
 fn version_key(id: &str, version: u64) -> String {
     format!("template-version:{id}:{version}")
 }
@@ -342,8 +370,7 @@ impl Store {
         rule.tenant_id = tenant;
         rule.owner_id = actor.id.clone();
         rule.name = name.into();
-        rule.listen = listen;
-        rule.listen_end_port = None;
+        assign_template_listener(&mut rule, &config, listen)?;
         rule.meter_epoch = Uuid::new_v4().to_string();
         rule.enabled = true;
         config.rules.push(rule.clone());
@@ -893,8 +920,7 @@ impl Store {
         rule.tenant_id = tenant;
         rule.owner_id = actor.id.clone();
         rule.name = name.into();
-        rule.listen = listen;
-        rule.listen_end_port = None;
+        assign_template_listener(&mut rule, &config, listen)?;
         rule.meter_epoch = Uuid::new_v4().to_string();
         rule.enabled = true;
         config.rules.push(rule);

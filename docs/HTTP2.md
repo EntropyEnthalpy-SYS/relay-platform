@@ -1,4 +1,4 @@
-# Managed HTTP/2 CONNECT (0.113.0)
+# Managed HTTP/2 CONNECT (updated for 0.115.0)
 
 HTTP/2 CONNECT is now a managed TCP rule. Set `inbound_http2_connect` and an empty `targets` array. The controller, agent, templates, revision history and rule editor carry the same configuration. Upgrade the controller before the agents: older releases reject the new rule and telemetry fields.
 
@@ -26,7 +26,9 @@ Basic and Bearer can coexist. Leaving both empty explicitly creates an unauthent
 
 ## Low-memory settings
 
-An initial constrained profile is `max_connections=64`, `max_concurrent_streams=64`, `socket_buffer_bytes=32768`. These are operating parameters to validate against a workload, not hardware guarantees. Automatic TCP buffer growth can consume substantial kernel memory when many clients read slowly. A cgroup limit must include that memory, not just process RSS. Smaller buffers trade per-connection throughput over high-latency paths for lower memory demand. The default remains OS autotuning.
+The default is OS autotuning. A constrained profile can start with `max_connections=64` and `max_concurrent_streams=64`; choose an explicit socket buffer only after measuring the actual workload. Automatic TCP buffer growth can consume substantial kernel memory when many clients read slowly. A cgroup limit must include that memory, not just process RSS. Smaller buffers can reduce throughput and interact poorly with the host congestion control and path MTU.
+
+The earlier 32 KiB recommendation is withdrawn: repeated 64-reader tests on the one-vCPU Debian 13 / BBR host produced intermittent incomplete transfers, and socket traces showed retransmissions and severely reduced TCP pacing without a cgroup OOM. This is not evidence of a universally safe minimum buffer. The capacity harness now defaults to a 128 KiB per-direction request, supports `--socket-buffer-bytes 0` for autotuning, and records three independent slow-reader rounds. Use the versioned verification report for the measured outcomes and memory caps; neither the script default nor a passing short profile certifies a whole-VM hardware minimum. No host-wide TCP settings need to be changed by this harness.
 
 The verification package records both the exploratory failure under automatic socket buffers and subsequent tests with explicit buffers. Do not turn the smallest successful short batch into a general minimum-memory claim.
 
