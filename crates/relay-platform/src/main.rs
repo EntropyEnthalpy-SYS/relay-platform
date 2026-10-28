@@ -163,6 +163,9 @@ enum Command {
         /// Allow SOCKS5 UDP targets on private/loopback addresses.
         #[arg(long)]
         udp_socks5_allow_private: bool,
+        /// Restrict SOCKS5 UDP destinations to these CIDRs (repeatable).
+        #[arg(long = "udp-allow-cidr", value_name = "CIDR")]
+        udp_allow_cidr: Vec<String>,
     },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
@@ -655,6 +658,7 @@ async fn main() -> Result<()> {
             udp_target,
             udp_socks5,
             udp_socks5_allow_private,
+            udp_allow_cidr,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
@@ -665,6 +669,17 @@ async fn main() -> Result<()> {
             if udp_socks5_allow_private && !udp_socks5 {
                 anyhow::bail!("--udp-socks5-allow-private requires --udp-socks5");
             }
+            if !udp_allow_cidr.is_empty() && !udp_socks5 {
+                anyhow::bail!("--udp-allow-cidr requires --udp-socks5");
+            }
+            let udp_allow = udp_allow_cidr
+                .iter()
+                .map(|value| {
+                    value
+                        .parse::<ipnet::IpNet>()
+                        .with_context(|| format!("invalid UDP allow CIDR {value}"))
+                })
+                .collect::<Result<Vec<_>>>()?;
             let tls = match (tls_ca, tls_server_name, tls_client_cert, tls_client_key) {
                 (Some(ca), Some(name), Some(cert), Some(key)) => {
                     Some(relay_platform::reverse_mux::tls_connector_with_identity(
@@ -683,13 +698,14 @@ async fn main() -> Result<()> {
                 let result = match &tls {
                     Some((connector, name)) => {
                         if udp_socks5 {
-                            relay_platform::reverse_mux::client_mux_tls_udp_socks5_with_policy(
+                            relay_platform::reverse_mux::client_mux_tls_udp_socks5_with_allowlist(
                                 server,
                                 target.clone(),
                                 token.clone(),
                                 connector.clone(),
                                 name.clone(),
                                 udp_socks5_allow_private,
+                                udp_allow.clone(),
                             )
                             .await
                         } else {
@@ -706,11 +722,12 @@ async fn main() -> Result<()> {
                     }
                     None => {
                         if udp_socks5 {
-                            relay_platform::reverse_mux::client_mux_udp_socks5_with_policy(
+                            relay_platform::reverse_mux::client_mux_udp_socks5_with_allowlist(
                                 server,
                                 target.clone(),
                                 token.clone(),
                                 udp_socks5_allow_private,
+                                udp_allow.clone(),
                             )
                             .await
                         } else {

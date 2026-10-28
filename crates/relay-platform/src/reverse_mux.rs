@@ -114,12 +114,28 @@ impl StreamFlow {
 }
 type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
 type Responses = Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>;
-type UdpSessions = Arc<Mutex<HashMap<u32, (Arc<UdpSocket>, CancellationToken, bool, bool)>>>;
+type UdpSessions = Arc<
+    Mutex<
+        HashMap<
+            u32,
+            (
+                Arc<UdpSocket>,
+                CancellationToken,
+                bool,
+                bool,
+                Arc<Vec<IpNet>>,
+            ),
+        >,
+    >,
+>;
 
 #[derive(Clone, Debug)]
 enum UdpMode {
     Fixed(String),
-    Socks5 { allow_private: bool },
+    Socks5 {
+        allow_private: bool,
+        allow: Vec<IpNet>,
+    },
 }
 
 struct ActiveControl;
@@ -1308,13 +1324,38 @@ pub async fn client_mux_tls_udp_socks5_with_policy(
     server_name: ServerName<'static>,
     allow_private: bool,
 ) -> Result<()> {
+    client_mux_tls_udp_socks5_with_allowlist(
+        server,
+        target,
+        token,
+        connector,
+        server_name,
+        allow_private,
+        Vec::new(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn client_mux_tls_udp_socks5_with_allowlist(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    connector: TlsConnector,
+    server_name: ServerName<'static>,
+    allow_private: bool,
+    allow: Vec<IpNet>,
+) -> Result<()> {
     client_mux_tls_udp_mode(
         server,
         target,
         token,
         connector,
         server_name,
-        Some(UdpMode::Socks5 { allow_private }),
+        Some(UdpMode::Socks5 {
+            allow_private,
+            allow,
+        }),
     )
     .await
 }
@@ -1396,11 +1437,24 @@ pub async fn client_mux_udp_socks5_with_policy(
     token: String,
     allow_private: bool,
 ) -> Result<()> {
+    client_mux_udp_socks5_with_allowlist(server, target, token, allow_private, Vec::new()).await
+}
+
+pub async fn client_mux_udp_socks5_with_allowlist(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    allow_private: bool,
+    allow: Vec<IpNet>,
+) -> Result<()> {
     client_mux_udp_mode(
         server,
         target,
         token,
-        Some(UdpMode::Socks5 { allow_private }),
+        Some(UdpMode::Socks5 {
+            allow_private,
+            allow,
+        }),
     )
     .await
 }
@@ -1541,14 +1595,17 @@ async fn client_read_loop(
                     .lock()
                     .await
                     .get(&id)
-                    .map(|entry| (entry.0.clone(), entry.2, entry.3));
-                if let Some((socket, socks5, allow_private)) = session {
+                    .map(|entry| (entry.0.clone(), entry.2, entry.3, entry.4.clone()));
+                if let Some((socket, socks5, allow_private, allow)) = session {
                     if socks5 {
                         match crate::socks5::parse_udp_datagram(&payload) {
                             Ok(datagram) => {
-                                if let Some(destination) =
-                                    udp_socks5_destination(datagram.destination, allow_private)
-                                        .await
+                                if let Some(destination) = udp_socks5_destination(
+                                    datagram.destination,
+                                    allow_private,
+                                    &allow,
+                                )
+                                .await
                                 {
                                     let _ = socket
                                         .send_to(&datagram.payload, destination.to_string())
@@ -1565,7 +1622,7 @@ async fn client_read_loop(
                 }
             }
             Ok(Some((kind @ (FIN | RESET), id, _))) => {
-                if let Some((_, stream_cancel, _, _)) = udp_sessions.lock().await.remove(&id) {
+                if let Some((_, stream_cancel, _, _, _)) = udp_sessions.lock().await.remove(&id) {
                     stream_cancel.cancel();
                 }
                 dispatch_frame(&sessions, id, kind, vec![]).await;
@@ -1584,16 +1641,24 @@ async fn client_read_loop(
 async fn udp_socks5_destination(
     destination: crate::shadowsocks::Destination,
     allow_private: bool,
+    allow: &[IpNet],
 ) -> Option<crate::shadowsocks::Destination> {
     use crate::shadowsocks::Destination;
+    fn allowed(address: &SocketAddr, allow_private: bool, allow: &[IpNet]) -> bool {
+        (allow_private || crate::shadowsocks::public(address.ip()))
+            && (allow.is_empty() || allow.iter().any(|network| network.contains(&address.ip())))
+    }
     match destination {
-        Destination::Ip(address) => (allow_private || crate::shadowsocks::public(address.ip()))
-            .then_some(Destination::Ip(address)),
-        Destination::Domain(name, port) if allow_private => Some(Destination::Domain(name, port)),
+        Destination::Ip(address) => {
+            allowed(&address, allow_private, allow).then_some(Destination::Ip(address))
+        }
+        Destination::Domain(name, port) if allow_private && allow.is_empty() => {
+            Some(Destination::Domain(name, port))
+        }
         Destination::Domain(name, port) => {
             let addresses = tokio::net::lookup_host((name.as_str(), port)).await.ok()?;
             addresses
-                .filter(|address| crate::shadowsocks::public(address.ip()))
+                .filter(|address| allowed(address, allow_private, allow))
                 .map(Destination::Ip)
                 .next()
         }
@@ -1618,9 +1683,12 @@ async fn client_open_udp(
             return;
         }
     };
-    let (socks5, allow_private) = match &mode {
-        UdpMode::Fixed(_) => (false, false),
-        UdpMode::Socks5 { allow_private } => (true, *allow_private),
+    let (socks5, allow_private, allow) = match &mode {
+        UdpMode::Fixed(_) => (false, false, Vec::new()),
+        UdpMode::Socks5 {
+            allow_private,
+            allow,
+        } => (true, *allow_private, allow.clone()),
     };
     if let UdpMode::Fixed(target) = &mode
         && !matches!(
@@ -1633,13 +1701,14 @@ async fn client_open_udp(
     }
     let session_cancel = cancel.child_token();
     let socket = Arc::new(socket);
-    if let Some((_, previous, _, _)) = sessions.lock().await.insert(
+    if let Some((_, previous, _, _, _)) = sessions.lock().await.insert(
         id,
         (
             socket.clone(),
             session_cancel.clone(),
             socks5,
             allow_private,
+            Arc::new(allow),
         ),
     ) {
         previous.cancel();

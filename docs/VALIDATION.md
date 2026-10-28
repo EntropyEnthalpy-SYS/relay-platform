@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.107.0 开发版在 macOS 27.0.1 arm64 通过 **440 项自动化测试（411 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 441 项。日志见 [verification-0.107.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.107.0.json](validation-evidence-0.98.0.json)。
+0.108.0 开发版在 macOS 27.0.1 arm64 通过 **441 项自动化测试（412 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 442 项。日志见 [verification-0.108.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.108.0.json](validation-evidence-0.98.0.json)。
 
-## 0.107.0 SOCKS5 UDP 私有目标策略
+## 0.108.0 SOCKS5 UDP 目标 allowlist
+
+| 检查 | 结果 |
+| --- | --- |
+| 参数 | 可重复 `--udp-allow-cidr` |
+| 检查顺序 | 域名解析后 CIDR + 公网策略 |
+| 空列表 | 不额外限制 |
+| 固定目标 | 不受影响 |
+
+## 0.107.0 SOCKS5 UDP 私有目标策略（历史）
 
 | 检查 | 结果 |
 | --- | --- |
