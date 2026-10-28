@@ -667,3 +667,62 @@ async fn silent_public_tls_handshake_does_not_block_neighbors() {
     server.abort();
     client.abort();
 }
+
+#[test]
+fn max_controls_rejects_an_extra_established_control() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener as StdListener, TcpStream as StdStream};
+    use std::process::{Command, Stdio};
+    use std::time::Duration as StdDuration;
+    let control = StdListener::bind("127.0.0.1:0").unwrap();
+    let control_port = control.local_addr().unwrap().port();
+    drop(control);
+    let public = StdListener::bind("127.0.0.1:0").unwrap();
+    let public_port = public.local_addr().unwrap().port();
+    drop(public);
+    let temp = tempfile::tempdir().unwrap();
+    let token = temp.path().join("token");
+    std::fs::write(&token, "limit-token\n").unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args([
+            "reverse-mux-server",
+            "--control-listen",
+            &format!("127.0.0.1:{control_port}"),
+            "--public-listen",
+            &format!("127.0.0.1:{public_port}"),
+            "--token-file",
+            token.to_str().unwrap(),
+            "--max-controls",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut first = None;
+    for _ in 0..100 {
+        if let Ok(stream) = StdStream::connect(("127.0.0.1", control_port)) {
+            first = Some(stream);
+            break;
+        }
+        std::thread::sleep(StdDuration::from_millis(20));
+    }
+    let mut first = first.expect("server did not listen");
+    first
+        .set_read_timeout(Some(StdDuration::from_secs(2)))
+        .unwrap();
+    first.write_all(b"REVERSE-MUX limit-token\n").unwrap();
+    let mut ready = [0u8; 6];
+    first.read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"READY\n");
+    let mut second = StdStream::connect(("127.0.0.1", control_port)).unwrap();
+    second
+        .set_read_timeout(Some(StdDuration::from_secs(2)))
+        .unwrap();
+    second.write_all(b"REVERSE-MUX limit-token\n").unwrap();
+    let mut denied = [0u8; 5];
+    second.read_exact(&mut denied).unwrap();
+    assert_eq!(&denied, b"DENY\n");
+    child.kill().ok();
+    child.wait().ok();
+}

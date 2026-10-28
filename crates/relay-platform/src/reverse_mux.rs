@@ -11,8 +11,8 @@ use std::{
     path::Path,
     sync::{
         Arc,
+        atomic::AtomicU64,
         atomic::{AtomicBool, AtomicU32, Ordering},
-        atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
     time::Duration,
 };
@@ -84,6 +84,28 @@ type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
 type Responses = Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>;
 
 struct ActiveControl;
+impl ActiveControl {
+    fn try_new() -> Option<Self> {
+        let limit = MAX_CONTROLS.load(Ordering::Relaxed);
+        let mut current = ACTIVE_CONTROLS.load(Ordering::Relaxed);
+        loop {
+            if current >= limit {
+                return None;
+            }
+            match ACTIVE_CONTROLS.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+        TOTAL_CONTROLS.fetch_add(1, Ordering::Relaxed);
+        Some(Self)
+    }
+}
 impl Drop for ActiveControl {
     fn drop(&mut self) {
         ACTIVE_CONTROLS.fetch_sub(1, Ordering::Relaxed);
@@ -121,6 +143,7 @@ impl Drop for ActiveStream {
 type Frame = (u8, u32, Vec<u8>);
 
 static ACTIVE_CONTROLS: AtomicU32 = AtomicU32::new(0);
+static MAX_CONTROLS: AtomicU32 = AtomicU32::new(1024);
 static TOTAL_CONTROLS: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_STREAMS: AtomicU32 = AtomicU32::new(0);
 static TOTAL_STREAMS: AtomicU64 = AtomicU64::new(0);
@@ -135,6 +158,14 @@ pub struct Stats {
     pub total_streams: u64,
     pub public_to_target_bytes: u64,
     pub target_to_public_bytes: u64,
+}
+
+pub fn set_max_controls(max_controls: u32) {
+    MAX_CONTROLS.store(max_controls.clamp(1, 65_535), Ordering::Relaxed);
+}
+
+pub fn max_controls() -> u32 {
+    MAX_CONTROLS.load(Ordering::Relaxed)
 }
 
 pub fn stats() -> Stats {
@@ -257,8 +288,10 @@ async fn serve_mux_plain_public(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_authorized_control<S>(
     control: S,
+    active: ActiveControl,
     public: Arc<TcpListener>,
     public_acceptor: Option<TlsAcceptor>,
     token: String,
@@ -271,9 +304,7 @@ where
 {
     let _ = token;
     let (reader, writer) = tokio::io::split(control);
-    ACTIVE_CONTROLS.fetch_add(1, AtomicOrdering::Relaxed);
-    TOTAL_CONTROLS.fetch_add(1, AtomicOrdering::Relaxed);
-    let _active = ActiveControl;
+    let _active = active;
     serve_control(
         Box::new(reader),
         Box::new(writer),
@@ -770,6 +801,11 @@ async fn authenticate_control_and_spawn<S>(
         tracing::warn!(%peer, transport, "reverse mux control authentication failed");
         return;
     }
+    let Some(active) = ActiveControl::try_new() else {
+        let _ = tokio::time::timeout(AUTH_TIMEOUT, control_stream.write_all(b"DENY\n")).await;
+        tracing::warn!(%peer, transport, "reverse mux active control limit reached");
+        return;
+    };
     if !matches!(
         tokio::time::timeout(AUTH_TIMEOUT, control_stream.write_all(b"READY\n")).await,
         Ok(Ok(()))
@@ -780,6 +816,7 @@ async fn authenticate_control_and_spawn<S>(
     tracing::info!(%peer, transport, "reverse mux control connected");
     if let Err(error) = serve_authorized_control(
         control_stream,
+        active,
         public,
         public_acceptor,
         token,

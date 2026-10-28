@@ -115,6 +115,9 @@ enum Command {
         /// Optional loopback HTTP listener that serves reverse mux Prometheus metrics.
         #[arg(long)]
         metrics_listen: Option<SocketAddr>,
+        /// Maximum established control connections (1-65535).
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(1..=65535))]
+        max_controls: u32,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -465,10 +468,12 @@ async fn main() -> Result<()> {
             public_tls_key,
             allow_public_cidr,
             metrics_listen,
+            max_controls,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
+            relay_platform::reverse_mux::set_max_controls(max_controls);
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
             if let Some(address) = metrics_listen {
