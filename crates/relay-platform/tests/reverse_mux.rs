@@ -416,6 +416,7 @@ fn mux_metrics_identify_the_tunnel_process() {
     assert!(text.contains("relay_reverse_mux_control_limit_rejections_total "));
     assert!(text.contains("relay_reverse_mux_stream_limit_rejections_total "));
     assert!(text.contains("relay_reverse_mux_stream_byte_limit_resets_total "));
+    assert!(text.contains("relay_reverse_mux_udp_dropped_total "));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]

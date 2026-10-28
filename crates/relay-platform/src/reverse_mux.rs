@@ -47,7 +47,7 @@ const RESET: u8 = 6;
 const WINDOW: u8 = 7;
 const DATAGRAM: u8 = 8;
 const UDP_FEATURE: &[u8] = b"udp-v1";
-const UDP_IDLE: Duration = Duration::from_secs(60);
+static UDP_IDLE_SECS: AtomicU64 = AtomicU64::new(60);
 // OPEN/OK opt-in preserves interoperability with the original six-frame peers.
 const FLOW_CONTROL_V1: &[u8] = b"flow-control-v1";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -203,6 +203,7 @@ static PUBLIC_TO_TARGET_BYTES: AtomicU64 = AtomicU64::new(0);
 static CONTROL_LIMIT_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 static STREAM_LIMIT_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 static STREAM_BYTE_LIMIT_RESETS: AtomicU64 = AtomicU64::new(0);
+static UDP_DROPPED: AtomicU64 = AtomicU64::new(0);
 static TARGET_TO_PUBLIC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
@@ -216,6 +217,7 @@ pub struct Stats {
     pub control_limit_rejections: u64,
     pub stream_limit_rejections: u64,
     pub stream_byte_limit_resets: u64,
+    pub udp_dropped: u64,
 }
 
 pub fn set_max_controls(max_controls: u32) {
@@ -242,6 +244,14 @@ pub fn max_stream_bytes() -> u64 {
     MAX_STREAM_BYTES.load(Ordering::Relaxed)
 }
 
+pub fn set_udp_idle_secs(seconds: u64) {
+    UDP_IDLE_SECS.store(seconds.clamp(1, 86_400), Ordering::Relaxed);
+}
+
+pub fn udp_idle_secs() -> u64 {
+    UDP_IDLE_SECS.load(Ordering::Relaxed)
+}
+
 pub fn stats() -> Stats {
     Stats {
         active_controls: ACTIVE_CONTROLS.load(Ordering::Relaxed),
@@ -253,6 +263,7 @@ pub fn stats() -> Stats {
         control_limit_rejections: CONTROL_LIMIT_REJECTIONS.load(Ordering::Relaxed),
         stream_limit_rejections: STREAM_LIMIT_REJECTIONS.load(Ordering::Relaxed),
         stream_byte_limit_resets: STREAM_BYTE_LIMIT_RESETS.load(Ordering::Relaxed),
+        udp_dropped: UDP_DROPPED.load(Ordering::Relaxed),
     }
 }
 
@@ -470,6 +481,7 @@ async fn serve_udp(
     let mut peers: HashMap<SocketAddr, UdpPeer> = HashMap::new();
     let mut addresses: HashMap<u32, SocketAddr> = HashMap::new();
     let mut buffer = vec![0u8; 65_535];
+    let idle = Duration::from_secs(UDP_IDLE_SECS.load(Ordering::Relaxed));
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
@@ -559,7 +571,7 @@ async fn serve_udp(
             _ = sweep.tick() => {
                 let now = std::time::Instant::now();
                 let expired: Vec<SocketAddr> = peers.iter()
-                    .filter(|(_, entry)| now.duration_since(entry.last) >= UDP_IDLE)
+                    .filter(|(_, entry)| now.duration_since(entry.last) >= idle)
                     .map(|(peer, _)| *peer)
                     .collect();
                 for peer in expired {
@@ -956,8 +968,10 @@ async fn read_frames(
                 }
                 DATA | FIN | RESET | WINDOW => dispatch_frame(&sessions, id, kind, payload).await,
                 DATAGRAM => {
-                    if let Some(sender) = &udp_down {
-                        let _ = sender.try_send((id, payload));
+                    if let Some(sender) = &udp_down
+                        && sender.try_send((id, payload)).is_err()
+                    {
+                        UDP_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 _ => {}
@@ -1681,7 +1695,7 @@ async fn read_frame(reader: &mut ControlRead) -> Result<Option<Frame>> {
 pub fn metrics_text() -> String {
     let stats = stats();
     format!(
-        "# HELP relay_reverse_mux_process_available 1 when metrics come from the tunnel process.\n# TYPE relay_reverse_mux_process_available gauge\nrelay_reverse_mux_process_available 1\n# HELP relay_reverse_mux_controls Authorized reverse mux controls.\n# TYPE relay_reverse_mux_controls gauge\nrelay_reverse_mux_controls {}\nrelay_reverse_mux_controls_total {}\n# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\nrelay_reverse_mux_streams {}\nrelay_reverse_mux_streams_total {}\n# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\nrelay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\nrelay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n# HELP relay_reverse_mux_control_limit_rejections_total Controls denied by --max-controls.\n# TYPE relay_reverse_mux_control_limit_rejections_total counter\nrelay_reverse_mux_control_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_limit_rejections_total Public streams refused by --max-streams or --max-total-streams.\n# TYPE relay_reverse_mux_stream_limit_rejections_total counter\nrelay_reverse_mux_stream_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_byte_limit_resets_total Streams reset by --max-stream-bytes.\n# TYPE relay_reverse_mux_stream_byte_limit_resets_total counter\nrelay_reverse_mux_stream_byte_limit_resets_total {}\n",
+        "# HELP relay_reverse_mux_process_available 1 when metrics come from the tunnel process.\n# TYPE relay_reverse_mux_process_available gauge\nrelay_reverse_mux_process_available 1\n# HELP relay_reverse_mux_controls Authorized reverse mux controls.\n# TYPE relay_reverse_mux_controls gauge\nrelay_reverse_mux_controls {}\nrelay_reverse_mux_controls_total {}\n# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\nrelay_reverse_mux_streams {}\nrelay_reverse_mux_streams_total {}\n# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\nrelay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\nrelay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n# HELP relay_reverse_mux_control_limit_rejections_total Controls denied by --max-controls.\n# TYPE relay_reverse_mux_control_limit_rejections_total counter\nrelay_reverse_mux_control_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_limit_rejections_total Public streams refused by --max-streams or --max-total-streams.\n# TYPE relay_reverse_mux_stream_limit_rejections_total counter\nrelay_reverse_mux_stream_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_byte_limit_resets_total Streams reset by --max-stream-bytes.\n# TYPE relay_reverse_mux_stream_byte_limit_resets_total counter\nrelay_reverse_mux_stream_byte_limit_resets_total {}\n# HELP relay_reverse_mux_udp_dropped_total UDP datagrams dropped by a full receive queue.\n# TYPE relay_reverse_mux_udp_dropped_total counter\nrelay_reverse_mux_udp_dropped_total {}\n",
         stats.active_controls,
         stats.total_controls,
         stats.active_streams,
@@ -1691,6 +1705,7 @@ pub fn metrics_text() -> String {
         stats.control_limit_rejections,
         stats.stream_limit_rejections,
         stats.stream_byte_limit_resets,
+        stats.udp_dropped,
     )
 }
 

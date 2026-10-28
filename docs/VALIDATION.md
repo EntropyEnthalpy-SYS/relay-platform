@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.105.0 开发版在 macOS 27.0.1 arm64 通过 **439 项自动化测试（410 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 440 项。日志见 [verification-0.105.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.105.0.json](validation-evidence-0.98.0.json)。
+0.106.0 开发版在 macOS 27.0.1 arm64 通过 **439 项自动化测试（410 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 440 项。日志见 [verification-0.106.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.106.0.json](validation-evidence-0.98.0.json)。
 
-## 0.105.0 SOCKS5 UDP 多目标
+## 0.106.0 UDP idle 与丢包指标
+
+| 检查 | 结果 |
+| --- | --- |
+| 参数 | `--udp-idle-secs 1..86400`，默认 60 |
+| 指标 | `relay_reverse_mux_udp_dropped_total` |
+| 队列 | 满队列丢新数据报并计数 |
+| 现有模式 | 固定目标/SOCKS5 多目标不变 |
+
+## 0.105.0 SOCKS5 UDP 多目标（历史）
 
 | 检查 | 结果 |
 | --- | --- |
