@@ -37,7 +37,8 @@ relay reverse-mux-server \
   --idle-timeout-secs 300 \
   --allow-public-cidr 203.0.113.0/24 \
   --max-controls 1024 \
-  --max-total-streams 4096
+  --max-total-streams 4096 \
+  --max-stream-bytes 0
 
 relay reverse-mux-client \
   --server PUBLIC:19010 \
@@ -67,6 +68,7 @@ relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 - 服务端为每个公网连接分配 id 并发 `OPEN`，客户端拨号目标后回 `OK`，再按 id 双向转发；一条控制连接可并发承载多个公网连接。
 - `--max-controls 1..65535` 限制单进程已建立控制连接总数，默认 1024；达到上限后新认证返回 `DENY`，不同于每控制公网流上限。
 - `--max-total-streams 1..1000000` 限制单进程所有控制的公网流总数，默认 4096；达到上限后新公网连接在 OPEN 前关闭。
+- `--max-stream-bytes` 限制单条流的双向累计字节数，默认 0（不限）；达到上限后该流被重置，不影响邻居流。
 - 认证首行有 10 秒超时，目标拨号有 5 秒超时；服务端每条控制连接默认最多 256 个并发公网流，`--max-streams 1..1024` 可调；超过上限的新公网连接立即关闭，不分配 id。
 - 公网流默认 300 秒无数据即被关闭并发送 `RESET`；`--idle-timeout-secs 1..86400` 可调。
 - 客户端 `reverse-mux-client` 在控制连接断开后 250ms 重连；mux 不提供重放保护、流量填充或按连接目标 ACL。
@@ -81,5 +83,6 @@ relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 - Blocked public socket writes are cancellable and bounded by the configured idle timeout. Blocked client target writes have a 30-second stall deadline. Connection loss cancels all child streams; stream resets cancel only that stream. A control frame has a 5-second write/lock deadline; any abandoned partial frame closes the entire control connection to prevent framing corruption.
 - `--max-controls` bounds established controls per server process (default 1024, range 1..65535); a denied control receives `DENY`. It is separate from the 64 pending authentications and per-control stream cap.
 - `--max-total-streams` bounds all public streams across controls in one process (default 4096, range 1..1000000); a stream beyond the limit is closed before OPEN.
+- `--max-stream-bytes` bounds cumulative bytes in both directions for one stream (default 0, unlimited); exceeding it resets that stream only.
 - The TLS server permits at most 64 simultaneous pending TLS/token authentications. TLS and authentication each have a 10-second deadline. The permit is released after READY, before serving the authenticated control. This is not a 64-established-control limit. Plaintext control authentication uses the same isolated pending-auth pattern. Each authorized control also permits at most 64 pending public TLS handshakes; public accept continues while they run. Active stream/control metrics use drop guards for cleanup.
 - Regression coverage includes an 8 MiB upload followed by an 8 MiB EOF-triggered reply, slow readers with an unrelated echo stream, cancellation in both roles, partial-frame abandonment, 80 simultaneously authenticated TLS controls, and the 64-pending-authentication bound. These are loopback correctness tests, not WAN throughput or endurance certification.

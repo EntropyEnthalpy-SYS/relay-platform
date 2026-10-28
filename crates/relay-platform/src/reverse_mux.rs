@@ -71,13 +71,42 @@ struct StreamInbox {
 struct StreamFlow {
     enabled: AtomicBool,
     credits: Semaphore,
+    max_bytes: u64,
+    bytes: AtomicU64,
 }
 impl StreamFlow {
     fn new(enabled: bool) -> Arc<Self> {
+        Self::with_limit(enabled, MAX_STREAM_BYTES.load(Ordering::Relaxed))
+    }
+    fn with_limit(enabled: bool, max_bytes: u64) -> Arc<Self> {
         Arc::new(Self {
             enabled: AtomicBool::new(enabled),
             credits: Semaphore::new(STREAM_QUEUE_CAPACITY),
+            max_bytes,
+            bytes: AtomicU64::new(0),
         })
+    }
+    fn consume(&self, size: usize) -> bool {
+        if self.max_bytes == 0 {
+            return true;
+        }
+        let size = size as u64;
+        let mut current = self.bytes.load(Ordering::Relaxed);
+        loop {
+            let next = match current.checked_add(size) {
+                Some(next) if next <= self.max_bytes => next,
+                _ => return false,
+            };
+            match self.bytes.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
@@ -156,6 +185,7 @@ type Frame = (u8, u32, Vec<u8>);
 static ACTIVE_CONTROLS: AtomicU32 = AtomicU32::new(0);
 static MAX_CONTROLS: AtomicU32 = AtomicU32::new(1024);
 static MAX_TOTAL_STREAMS: AtomicU32 = AtomicU32::new(4096);
+static MAX_STREAM_BYTES: AtomicU64 = AtomicU64::new(0);
 static TOTAL_CONTROLS: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_STREAMS: AtomicU32 = AtomicU32::new(0);
 static TOTAL_STREAMS: AtomicU64 = AtomicU64::new(0);
@@ -186,6 +216,14 @@ pub fn set_max_total_streams(max_total_streams: u32) {
 
 pub fn max_total_streams() -> u32 {
     MAX_TOTAL_STREAMS.load(Ordering::Relaxed)
+}
+
+pub fn set_max_stream_bytes(max_stream_bytes: u64) {
+    MAX_STREAM_BYTES.store(max_stream_bytes, Ordering::Relaxed);
+}
+
+pub fn max_stream_bytes() -> u64 {
+    MAX_STREAM_BYTES.load(Ordering::Relaxed)
 }
 
 pub fn stats() -> Stats {
@@ -557,6 +595,9 @@ where
                     write_frame(writer, FIN, id, &[]).await?;
                     return Ok::<_, anyhow::Error>(());
                 }
+                if !flow.consume(size) {
+                    bail!("reverse mux stream byte limit reached");
+                }
                 // Finish an in-progress control frame even when this stream is
                 // cancelled; abandoning it would corrupt neighboring streams.
                 write_frame(writer, DATA, id, &buffer[..size]).await?;
@@ -581,6 +622,9 @@ where
                 let Some((kind, payload)) = frame else { bail!("reverse mux stream closed without FIN") };
                 let io = async {
                     match kind {
+                        DATA if !flow.consume(payload.len()) => {
+                            Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reverse mux stream byte limit reached"))
+                        }
                         DATA => output.write_all(&payload).await,
                         FIN => output.shutdown().await,
                         _ => Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reverse mux stream reset")),
@@ -1214,6 +1258,17 @@ async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+
+    #[test]
+    fn stream_byte_limit_counts_both_directions() {
+        let flow = StreamFlow::with_limit(false, 8);
+        assert!(flow.consume(3));
+        assert!(flow.consume(5));
+        assert!(!flow.consume(1));
+        assert!(flow.consume(0));
+        let unlimited = StreamFlow::with_limit(false, 0);
+        assert!(unlimited.consume(usize::MAX / 2));
+    }
 
     #[tokio::test]
     async fn full_stream_queue_does_not_block_a_neighbor_or_reset() {

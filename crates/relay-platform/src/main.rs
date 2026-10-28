@@ -121,6 +121,9 @@ enum Command {
         /// Maximum public streams across all controls in this process (1-1000000).
         #[arg(long, default_value_t = 4096, value_parser = clap::value_parser!(u32).range(1..=1000000))]
         max_total_streams: u32,
+        /// Maximum bytes in both directions per public stream; 0 is unlimited.
+        #[arg(long, default_value_t = 0)]
+        max_stream_bytes: u64,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -473,12 +476,14 @@ async fn main() -> Result<()> {
             metrics_listen,
             max_controls,
             max_total_streams,
+            max_stream_bytes,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
             relay_platform::reverse_mux::set_max_controls(max_controls);
             relay_platform::reverse_mux::set_max_total_streams(max_total_streams);
+            relay_platform::reverse_mux::set_max_stream_bytes(max_stream_bytes);
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
             if let Some(address) = metrics_listen {

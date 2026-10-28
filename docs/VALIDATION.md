@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.100.0 开发版在 macOS 27.0.1 arm64 通过 **433 项自动化测试（404 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 434 项。日志见 [verification-0.100.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.100.0.json](validation-evidence-0.98.0.json)。
+0.101.0 开发版在 macOS 27.0.1 arm64 通过 **434 项自动化测试（405 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 435 项。日志见 [verification-0.101.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.101.0.json](validation-evidence-0.98.0.json)。
 
-## 0.100.0 进程级公网流上限
+## 0.101.0 单流双向字节上限
+
+| 检查 | 结果 |
+| --- | --- |
+| 参数 | `--max-stream-bytes`，默认 0（不限） |
+| 超限 | 只重置当前流 |
+| 计数 | 双向共享原子 CAS |
+| 限制 | 按 DATA 块计数，非计费级截断 |
+
+## 0.100.0 进程级公网流上限（历史）
 
 | 检查 | 结果 |
 | --- | --- |
