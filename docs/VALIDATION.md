@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.103.0 开发版在 macOS 27.0.1 arm64 通过 **437 项自动化测试（408 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 438 项。日志见 [verification-0.103.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.103.0.json](validation-evidence-0.98.0.json)。
+0.104.0 开发版在 macOS 27.0.1 arm64 通过 **438 项自动化测试（409 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 439 项。日志见 [verification-0.104.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.104.0.json](validation-evidence-0.98.0.json)。
 
-## 0.103.0 mux UDP 中继
+## 0.104.0 公网 TLS mTLS
+
+| 检查 | 结果 |
+| --- | --- |
+| 参数 | `--public-tls-client-ca` |
+| 无客户端证书 | 隧道不可用/无回显 |
+| 有客户端证书 | 公网 echo 成功 |
+| 独立于 | 控制连接 mTLS |
+
+## 0.103.0 mux UDP 中继（历史）
 
 | 检查 | 结果 |
 | --- | --- |

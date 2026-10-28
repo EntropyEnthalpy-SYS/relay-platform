@@ -1029,3 +1029,73 @@ fn udp_cli_forwards_a_datagram_to_the_udp_target() {
     server.wait().ok();
     client.wait().ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn public_tls_mtls_requires_a_client_identity() {
+    let certs = tls::Certificates::new();
+    let acceptor = reverse_mux::tls_acceptor_with_client_ca(
+        &certs.root.join("server/cert.pem"),
+        &certs.root.join("server/key.pem"),
+        &certs.root.join("root/ca.pem"),
+    )
+    .unwrap();
+    let (connector, name) =
+        reverse_mux::tls_connector(&certs.root.join("root/ca.pem"), "relay.test").unwrap();
+    let (identity, identity_name) = reverse_mux::tls_connector_with_identity(
+        &certs.root.join("root/ca.pem"),
+        "relay.test",
+        &certs.root.join("client/cert.pem"),
+        &certs.root.join("client/key.pem"),
+    )
+    .unwrap();
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public.local_addr().unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = target.accept().await.unwrap();
+        let mut buffer = [0u8; 64];
+        let size = stream.read(&mut buffer).await.unwrap();
+        stream.write_all(&buffer[..size]).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let server = tokio::spawn(reverse_mux::serve_mux_public_tls(
+        control,
+        public,
+        "public-mtls-token".into(),
+        acceptor,
+        8,
+        300,
+        vec![],
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux(
+        control_addr,
+        target_addr.to_string(),
+        "public-mtls-token".into(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let tcp = TcpStream::connect(public_addr).await.unwrap();
+    if let Ok(mut unauthenticated) = connector.connect(name, tcp).await {
+        let _ = unauthenticated.write_all(b"no-identity").await;
+        let mut byte = [0u8; 1];
+        let result = timeout(Duration::from_secs(1), unauthenticated.read(&mut byte)).await;
+        assert!(result.is_err() || matches!(result, Ok(Err(_))) || matches!(result, Ok(Ok(0))));
+    }
+    let tcp = TcpStream::connect(public_addr).await.unwrap();
+    let mut exposed = identity.connect(identity_name, tcp).await.unwrap();
+    exposed.write_all(b"mtls").await.unwrap();
+    let mut reply = [0u8; 4];
+    timeout(Duration::from_secs(2), exposed.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"mtls");
+    timeout(Duration::from_secs(2), echo)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    client.abort();
+}

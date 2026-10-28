@@ -109,6 +109,9 @@ enum Command {
         /// TLS private key for the public listener (requires --public-tls-cert).
         #[arg(long)]
         public_tls_key: Option<PathBuf>,
+        /// CA bundle that requires a client certificate on the public TLS listener.
+        #[arg(long)]
+        public_tls_client_ca: Option<PathBuf>,
         /// CIDR allowed to connect to the public listener (repeatable; empty allows all).
         #[arg(long = "allow-public-cidr", value_name = "CIDR")]
         allow_public_cidr: Vec<String>,
@@ -478,6 +481,7 @@ async fn main() -> Result<()> {
             tls_client_ca,
             public_tls_cert,
             public_tls_key,
+            public_tls_client_ca,
             allow_public_cidr,
             metrics_listen,
             max_controls,
@@ -514,13 +518,19 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("invalid public CIDR {value}"))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let public_tls = match (public_tls_cert, public_tls_key) {
-                (Some(cert), Some(key)) => {
+            let public_tls = match (public_tls_cert, public_tls_key, public_tls_client_ca) {
+                (Some(cert), Some(key), Some(ca)) => Some(
+                    relay_platform::reverse_mux::tls_acceptor_with_client_ca(&cert, &key, &ca)?,
+                ),
+                (Some(cert), Some(key), None) => {
                     Some(relay_platform::reverse_mux::tls_acceptor(&cert, &key)?)
                 }
-                (None, None) => None,
+                (None, None, None) => None,
+                (None, None, Some(_)) => anyhow::bail!(
+                    "--public-tls-client-ca requires --public-tls-cert and --public-tls-key"
+                ),
                 _ => anyhow::bail!(
-                    "--public-tls-cert and --public-tls-key must be supplied together"
+                    "--public-tls-cert, --public-tls-key and --public-tls-client-ca must be paired"
                 ),
             };
             match (tls_cert, tls_key, tls_client_ca) {

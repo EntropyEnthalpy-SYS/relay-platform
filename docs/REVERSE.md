@@ -39,7 +39,9 @@ relay reverse-mux-server \
   --max-controls 1024 \
   --max-total-streams 4096 \
   --max-stream-bytes 0 \
-  --udp-listen 0.0.0.0:19011
+  --udp-listen 0.0.0.0:19011 \
+  --public-tls-cert server.pem --public-tls-key server-key.pem \
+  --public-tls-client-ca client-ca.pem
 
 relay reverse-mux-client \
   --server PUBLIC:19010 \
@@ -54,7 +56,7 @@ relay reverse-mux-server ... --tls-cert cert.pem --tls-key key.pem
 relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 ```
 
-服务端加 `--tls-client-ca ca.pem`，客户端同时提供 `--tls-client-cert client.pem --tls-client-key client-key.pem` 即为双向 TLS。公网监听可另加 `--public-tls-cert/--public-tls-key`，让公网客户端直接使用 TLS。
+服务端加 `--tls-client-ca ca.pem`，客户端同时提供 `--tls-client-cert client.pem --tls-client-key client-key.pem` 即为双向 TLS。公网监听可另加 `--public-tls-cert/--public-tls-key`，让公网客户端直接使用 TLS；再加 `--public-tls-client-ca` 可要求公网客户端证书（mTLS）。
 
 ## 协议与边界
 
@@ -99,6 +101,7 @@ relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 - `--max-controls` bounds established controls per server process (default 1024, range 1..65535); a denied control receives `DENY`. It is separate from the 64 pending authentications and per-control stream cap.
 - `--max-total-streams` bounds all public streams across controls in one process (default 4096, range 1..1000000); a stream beyond the limit is closed before OPEN.
 - `--max-stream-bytes` bounds cumulative bytes in both directions for one stream (default 0, unlimited); exceeding it resets that stream only. UDP associations count both directions the same way.
+- Public TLS can require a client certificate with `--public-tls-client-ca`; the CA is used to verify the public client identity. It requires `--public-tls-cert` and `--public-tls-key`.
 - `--udp-listen` enables public UDP relay and currently requires `--max-controls 1`; the client supplies a fixed `--udp-target`. Each public source address is an association with a 60-second idle timeout. UDP has no TLS; place the public port behind a trusted network or external encrypted tunnel.
 - Metrics expose `relay_reverse_mux_control_limit_rejections_total`, `relay_reverse_mux_stream_limit_rejections_total`, and `relay_reverse_mux_stream_byte_limit_resets_total`.
 - The TLS server permits at most 64 simultaneous pending TLS/token authentications. TLS and authentication each have a 10-second deadline. The permit is released after READY, before serving the authenticated control. This is not a 64-established-control limit. Plaintext control authentication uses the same isolated pending-auth pattern. Each authorized control also permits at most 64 pending public TLS handshakes; public accept continues while they run. Active stream/control metrics use drop guards for cleanup.
