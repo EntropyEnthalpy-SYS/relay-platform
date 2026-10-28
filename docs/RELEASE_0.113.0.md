@@ -28,7 +28,7 @@ The verification package contains raw logs, structured measurements, source inve
 | Check | Result |
 |---|---|
 | macOS arm64 Rust suite | 434 passed, zero failed, across 41 test executables; one explicitly ignored crash-helper entry point is invoked by its parent test. |
-| Linux x86_64 Rust suite | 434 passed, zero failed, with the same crash-helper convention. |
+| Linux x86_64 Rust suite | 435 passed, zero failed, with the same crash-helper convention. Includes one Linux-only outbound socket allocation test. |
 | Deployment tests | 29 passed on each platform. Linux uses the optimized release binary. |
 | Formatting and lint | `cargo fmt` and Clippy with warnings denied passed. |
 | JavaScript | Application syntax and three assertion scripts passed. |
