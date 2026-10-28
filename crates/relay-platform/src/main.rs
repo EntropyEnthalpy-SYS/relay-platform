@@ -173,6 +173,18 @@ enum Command {
         #[arg(long = "udp-allow-cidr", value_name = "CIDR")]
         udp_allow_cidr: Vec<String>,
     },
+    /// Serve a cleartext HTTP/2 (h2c) CONNECT forward proxy.
+    Http2Connect {
+        #[arg(long)]
+        listen: SocketAddr,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        /// Allow private/loopback CONNECT destinations.
+        #[arg(long)]
+        allow_private: bool,
+    },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
         #[arg(long)]
@@ -756,6 +768,23 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(Duration::from_millis(250)).await;
                 }
             }
+        }
+        Command::Http2Connect {
+            listen,
+            username,
+            password,
+            allow_private,
+        } => {
+            let listener = tokio::net::TcpListener::bind(listen).await?;
+            relay_platform::http2_connect::serve(
+                listener,
+                relay_platform::http_connect::ServerConfig {
+                    username,
+                    password,
+                    allow_private_destinations: allow_private,
+                },
+            )
+            .await?;
         }
         Command::UpnpSubscribe {
             description_url,

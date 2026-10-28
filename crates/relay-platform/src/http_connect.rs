@@ -115,7 +115,7 @@ impl Server {
         parse_authority(authority)
     }
 }
-fn parse_authority(authority: &str) -> Result<Destination> {
+pub(crate) fn parse_authority(authority: &str) -> Result<Destination> {
     ensure!(
         !authority.contains(char::is_whitespace),
         "invalid HTTP CONNECT authority"

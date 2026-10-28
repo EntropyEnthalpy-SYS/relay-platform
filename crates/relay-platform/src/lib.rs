@@ -10,6 +10,7 @@ pub mod destination_acl;
 pub mod dns;
 pub mod engine;
 pub mod health;
+pub mod http2_connect;
 pub mod http_connect;
 pub mod journal;
 pub mod lease;
