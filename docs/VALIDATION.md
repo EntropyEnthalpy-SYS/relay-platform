@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.102.0 开发版在 macOS 27.0.1 arm64 通过 **435 项自动化测试（406 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 436 项。日志见 [verification-0.102.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.102.0.json](validation-evidence-0.98.0.json)。
+0.103.0 开发版在 macOS 27.0.1 arm64 通过 **437 项自动化测试（408 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 438 项。日志见 [verification-0.103.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.103.0.json](validation-evidence-0.98.0.json)。
 
-## 0.102.0 限制指标与字节上限端到端
+## 0.103.0 mux UDP 中继
+
+| 检查 | 结果 |
+| --- | --- |
+| UDP public | 源地址 association，`DATAGRAM` 双向 |
+| UDP target | 客户端固定 `--udp-target` |
+| 资源 | 计入流/总流/字节限制；队列满丢包 |
+| 安全 | 公网 UDP 无 TLS；要求单控制 |
+| 测试 | 库内 UDP echo + 独立 CLI UDP echo |
+
+## 0.102.0 限制指标与字节上限端到端（历史）
 
 | 检查 | 结果 |
 | --- | --- |

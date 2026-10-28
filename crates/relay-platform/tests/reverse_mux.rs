@@ -885,3 +885,147 @@ fn max_stream_bytes_resets_only_the_over_limit_stream() {
     server.wait().ok();
     client.wait().ok();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn udp_datagrams_round_trip_through_the_mux() {
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let public_udp_addr = public_udp.local_addr().unwrap();
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let mut buffer = [0u8; 64];
+        let (size, peer) = target.recv_from(&mut buffer).await.unwrap();
+        target.send_to(&buffer[..size], peer).await.unwrap();
+    });
+    let server = tokio::spawn(reverse_mux::serve_mux_plain_udp(
+        control,
+        public,
+        "udp-mux-token".into(),
+        std::sync::Arc::new(public_udp),
+        8,
+        300,
+        vec![],
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux_udp(
+        control_addr,
+        "127.0.0.1:9".into(),
+        "udp-mux-token".into(),
+        Some(target_addr.to_string()),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    probe.connect(public_udp_addr).await.unwrap();
+    probe.send(b"udp-ping").await.unwrap();
+    let mut reply = [0u8; 16];
+    let size = timeout(Duration::from_secs(3), probe.recv(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply[..size], b"udp-ping");
+    timeout(Duration::from_secs(3), echo)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    client.abort();
+}
+
+#[test]
+fn udp_cli_forwards_a_datagram_to_the_udp_target() {
+    use std::net::{TcpListener as StdListener, TcpStream as StdStream, UdpSocket as StdUdp};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration as StdDuration;
+    let control = StdListener::bind("127.0.0.1:0").unwrap();
+    let control_port = control.local_addr().unwrap().port();
+    drop(control);
+    let public = StdListener::bind("127.0.0.1:0").unwrap();
+    let public_port = public.local_addr().unwrap().port();
+    drop(public);
+    let public_udp = StdUdp::bind("127.0.0.1:0").unwrap();
+    let public_udp_port = public_udp.local_addr().unwrap().port();
+    drop(public_udp);
+    let target = StdUdp::bind("127.0.0.1:0").unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    target
+        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let echo = std::thread::spawn(move || {
+        ready_tx.send(()).unwrap();
+        let mut buffer = [0u8; 64];
+        let (size, peer) = target.recv_from(&mut buffer).unwrap();
+        target.send_to(&buffer[..size], peer).unwrap();
+    });
+    ready_rx.recv().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let token = temp.path().join("token");
+    std::fs::write(&token, "udp-cli-token\n").unwrap();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args([
+            "reverse-mux-server",
+            "--control-listen",
+            &format!("127.0.0.1:{control_port}"),
+            "--public-listen",
+            &format!("127.0.0.1:{public_port}"),
+            "--udp-listen",
+            &format!("127.0.0.1:{public_udp_port}"),
+            "--token-file",
+            token.to_str().unwrap(),
+            "--max-controls",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut client = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args([
+            "reverse-mux-client",
+            "--server",
+            &format!("127.0.0.1:{control_port}"),
+            "--target",
+            "127.0.0.1:9",
+            "--udp-target",
+            &format!("127.0.0.1:{target_port}"),
+            "--token-file",
+            token.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut connected = None;
+    for _ in 0..100 {
+        if let Ok(stream) = StdStream::connect(("127.0.0.1", control_port)) {
+            connected = Some(stream);
+            break;
+        }
+        std::thread::sleep(StdDuration::from_millis(20));
+    }
+    let connected = connected.expect("server did not listen");
+    connected
+        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .unwrap();
+    // Wait for the client to authenticate and the UDP listener to accept.
+    std::thread::sleep(StdDuration::from_millis(300));
+    let probe = StdUdp::bind("127.0.0.1:0").unwrap();
+    probe
+        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .unwrap();
+    probe
+        .send_to(b"udp-cli", ("127.0.0.1", public_udp_port))
+        .unwrap();
+    let mut reply = [0u8; 16];
+    let (size, _) = probe.recv_from(&mut reply).unwrap();
+    assert_eq!(&reply[..size], b"udp-cli");
+    echo.join().unwrap();
+    drop(connected);
+    server.kill().ok();
+    client.kill().ok();
+    server.wait().ok();
+    client.wait().ok();
+}

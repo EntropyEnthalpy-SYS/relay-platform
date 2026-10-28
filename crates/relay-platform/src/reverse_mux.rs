@@ -18,7 +18,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    net::{TcpListener, TcpStream, UdpSocket},
     sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, oneshot},
 };
 use tokio_rustls::{
@@ -45,6 +45,9 @@ const DATA: u8 = 4;
 const FIN: u8 = 5;
 const RESET: u8 = 6;
 const WINDOW: u8 = 7;
+const DATAGRAM: u8 = 8;
+const UDP_FEATURE: &[u8] = b"udp-v1";
+const UDP_IDLE: Duration = Duration::from_secs(60);
 // OPEN/OK opt-in preserves interoperability with the original six-frame peers.
 const FLOW_CONTROL_V1: &[u8] = b"flow-control-v1";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -111,6 +114,7 @@ impl StreamFlow {
 }
 type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
 type Responses = Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>;
+type UdpSessions = Arc<Mutex<HashMap<u32, (Arc<UdpSocket>, CancellationToken)>>>;
 
 struct ActiveControl;
 impl ActiveControl {
@@ -272,6 +276,7 @@ pub async fn serve_mux_with_options(
         public,
         token,
         None,
+        None,
         max_streams,
         idle_timeout_secs,
         allow_public,
@@ -293,6 +298,7 @@ pub async fn serve_mux_public_tls(
         public,
         token,
         Some(public_acceptor),
+        None,
         max_streams,
         idle_timeout_secs,
         allow_public,
@@ -300,11 +306,60 @@ pub async fn serve_mux_public_tls(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_mux_plain_udp(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    udp: Arc<UdpSocket>,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
+) -> Result<()> {
+    serve_mux_plain_public(
+        control,
+        public,
+        token,
+        None,
+        Some(udp),
+        max_streams,
+        idle_timeout_secs,
+        allow_public,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_mux_public_tls_udp(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    public_acceptor: TlsAcceptor,
+    udp: Arc<UdpSocket>,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
+) -> Result<()> {
+    serve_mux_plain_public(
+        control,
+        public,
+        token,
+        Some(public_acceptor),
+        Some(udp),
+        max_streams,
+        idle_timeout_secs,
+        allow_public,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_mux_plain_public(
     control: TcpListener,
     public: TcpListener,
     token: String,
     public_acceptor: Option<TlsAcceptor>,
+    udp: Option<Arc<UdpSocket>>,
     max_streams: usize,
     idle_timeout_secs: u64,
     allow_public: Vec<IpNet>,
@@ -335,6 +390,7 @@ async fn serve_mux_plain_public(
         };
         let public = public.clone();
         let public_acceptor = public_acceptor.clone();
+        let udp = udp.clone();
         let allow_public = allow_public.clone();
         let token = token.clone();
         tokio::spawn(async move {
@@ -346,6 +402,7 @@ async fn serve_mux_plain_public(
                 token,
                 public,
                 public_acceptor,
+                udp,
                 allow_public,
                 max_streams,
                 idle_timeout_secs,
@@ -361,6 +418,7 @@ async fn serve_authorized_control<S>(
     active: ActiveControl,
     public: Arc<TcpListener>,
     public_acceptor: Option<TlsAcceptor>,
+    udp: Option<Arc<UdpSocket>>,
     token: String,
     max_streams: usize,
     idle_timeout_secs: u64,
@@ -377,6 +435,7 @@ where
         Box::new(writer),
         public,
         public_acceptor,
+        udp,
         max_streams,
         idle_timeout_secs,
         allow_public,
@@ -384,11 +443,138 @@ where
     .await
 }
 
+struct UdpPeer {
+    id: u32,
+    _active: ActiveStream,
+    last: std::time::Instant,
+    bytes: u64,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn serve_udp(
+    socket: Arc<UdpSocket>,
+    writer: Writer,
+    active_streams: Arc<AtomicU32>,
+    max_streams: usize,
+    allow_public: Vec<IpNet>,
+    cancel: CancellationToken,
+    next_id: Arc<AtomicU32>,
+    mut down: mpsc::Receiver<(u32, Vec<u8>)>,
+) {
+    let mut peers: HashMap<SocketAddr, UdpPeer> = HashMap::new();
+    let mut addresses: HashMap<u32, SocketAddr> = HashMap::new();
+    let mut buffer = vec![0u8; 65_535];
+    let mut sweep = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        tokio::select! {
+            received = socket.recv_from(&mut buffer) => {
+                let (size, peer) = match received {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(%error, "reverse mux UDP receive failed");
+                        cancel.cancel();
+                        break;
+                    }
+                };
+                if size == 0 || (!allow_public.is_empty() && !allow_public.iter().any(|network| network.contains(&peer.ip()))) {
+                    continue;
+                }
+                let id = if let Some(existing) = peers.get_mut(&peer) {
+                    existing.last = std::time::Instant::now();
+                    existing.id
+                } else {
+                    let Some(active) = ActiveStream::try_new(active_streams.clone(), max_streams) else {
+                        STREAM_LIMIT_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    };
+                    let id = next_id.fetch_add(1, Ordering::Relaxed);
+                    if write_frame(&writer, OPEN, id, UDP_FEATURE).await.is_err() {
+                        cancel.cancel();
+                        break;
+                    }
+                    peers.insert(peer, UdpPeer {
+                        id,
+                        _active: active,
+                        last: std::time::Instant::now(),
+                        bytes: 0,
+                    });
+                    addresses.insert(id, peer);
+                    id
+                };
+                let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
+                let exceeds = limit != 0
+                    && peers
+                        .get(&peer)
+                        .is_some_and(|entry| entry.bytes.saturating_add(size as u64) > limit);
+                if exceeds {
+                    if let Some(entry) = peers.remove(&peer) {
+                        addresses.remove(&entry.id);
+                        STREAM_BYTE_LIMIT_RESETS.fetch_add(1, Ordering::Relaxed);
+                        let _ = write_frame(&writer, RESET, entry.id, &[]).await;
+                    }
+                    continue;
+                }
+                if let Some(entry) = peers.get_mut(&peer) {
+                    entry.bytes = entry.bytes.saturating_add(size as u64);
+                }
+                if write_frame(&writer, DATAGRAM, id, &buffer[..size]).await.is_err() {
+                    cancel.cancel();
+                    break;
+                }
+                PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+            }
+            message = down.recv() => {
+                let Some((id, payload)) = message else { break };
+                let Some(peer) = addresses.get(&id).copied() else { continue };
+                let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
+                let exceeds = limit != 0
+                    && peers
+                        .get(&peer)
+                        .is_some_and(|entry| entry.bytes.saturating_add(payload.len() as u64) > limit);
+                if exceeds {
+                    if let Some(entry) = peers.remove(&peer) {
+                        addresses.remove(&entry.id);
+                        STREAM_BYTE_LIMIT_RESETS.fetch_add(1, Ordering::Relaxed);
+                        let _ = write_frame(&writer, RESET, entry.id, &[]).await;
+                    }
+                    continue;
+                }
+                match socket.send_to(&payload, peer).await {
+                    Ok(size) => {
+                        TARGET_TO_PUBLIC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+                        if let Some(entry) = peers.get_mut(&peer) {
+                            entry.last = std::time::Instant::now();
+                            entry.bytes = entry.bytes.saturating_add(size as u64);
+                        }
+                    }
+                    Err(error) => tracing::debug!(%error, "reverse mux UDP send failed"),
+                }
+            }
+            _ = sweep.tick() => {
+                let now = std::time::Instant::now();
+                let expired: Vec<SocketAddr> = peers.iter()
+                    .filter(|(_, entry)| now.duration_since(entry.last) >= UDP_IDLE)
+                    .map(|(peer, _)| *peer)
+                    .collect();
+                for peer in expired {
+                    if let Some(entry) = peers.remove(&peer) {
+                        addresses.remove(&entry.id);
+                        let _ = write_frame(&writer, FIN, entry.id, &[]).await;
+                    }
+                }
+            }
+            _ = cancel.cancelled() => break,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_control(
     reader: ControlRead,
     writer: ControlWrite,
     public: Arc<TcpListener>,
     public_acceptor: Option<TlsAcceptor>,
+    udp: Option<Arc<UdpSocket>>,
     max_streams: usize,
     idle_timeout_secs: u64,
     allow_public: Vec<IpNet>,
@@ -402,14 +588,33 @@ async fn serve_control(
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let (udp_down_tx, udp_down_rx) = if udp.is_some() {
+        let (tx, rx) = mpsc::channel(1024);
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let read_task = tokio::spawn(read_frames(
         reader,
         sessions.clone(),
         responses.clone(),
+        udp_down_tx,
         cancel.clone(),
     ));
     let active_streams = Arc::new(AtomicU32::new(0));
     let next_id = Arc::new(AtomicU32::new(1));
+    if let (Some(socket), Some(down)) = (udp, udp_down_rx) {
+        tokio::spawn(serve_udp(
+            socket,
+            writer.clone(),
+            active_streams.clone(),
+            max_streams,
+            allow_public.clone(),
+            cancel.clone(),
+            next_id.clone(),
+            down,
+        ));
+    }
     let public_slots = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
     let result: Result<()> = loop {
         let (mut exposed, peer) = tokio::select! {
@@ -722,6 +927,7 @@ async fn read_frames(
     mut reader: ControlRead,
     sessions: Sessions,
     responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>,
+    udp_down: Option<mpsc::Sender<(u32, Vec<u8>)>>,
     cancel: CancellationToken,
 ) {
     loop {
@@ -743,6 +949,11 @@ async fn read_frames(
                     }
                 }
                 DATA | FIN | RESET | WINDOW => dispatch_frame(&sessions, id, kind, payload).await,
+                DATAGRAM => {
+                    if let Some(sender) = &udp_down {
+                        let _ = sender.try_send((id, payload));
+                    }
+                }
                 _ => {}
             },
             _ => {
@@ -856,6 +1067,7 @@ async fn authenticate_control_and_spawn<S>(
     token: String,
     public: Arc<TcpListener>,
     public_acceptor: Option<TlsAcceptor>,
+    udp: Option<Arc<UdpSocket>>,
     allow_public: Vec<IpNet>,
     max_streams: usize,
     idle_timeout_secs: u64,
@@ -896,6 +1108,7 @@ async fn authenticate_control_and_spawn<S>(
         active,
         public,
         public_acceptor,
+        udp,
         token,
         max_streams,
         idle_timeout_secs,
@@ -940,6 +1153,32 @@ pub async fn serve_mux_tls_public(
     idle_timeout_secs: u64,
     allow_public: Vec<IpNet>,
 ) -> Result<()> {
+    serve_mux_tls_public_udp(
+        control,
+        public,
+        token,
+        acceptor,
+        public_acceptor,
+        None,
+        max_streams,
+        idle_timeout_secs,
+        allow_public,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_mux_tls_public_udp(
+    control: TcpListener,
+    public: TcpListener,
+    token: String,
+    acceptor: TlsAcceptor,
+    public_acceptor: Option<TlsAcceptor>,
+    udp: Option<Arc<UdpSocket>>,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+    allow_public: Vec<IpNet>,
+) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
@@ -967,6 +1206,7 @@ pub async fn serve_mux_tls_public(
         let token = token.clone();
         let public = public.clone();
         let public_acceptor = public_acceptor.clone();
+        let udp = udp.clone();
         let allow_public = allow_public.clone();
         tokio::spawn(async move {
             let control_stream =
@@ -989,6 +1229,7 @@ pub async fn serve_mux_tls_public(
                 token,
                 public,
                 public_acceptor,
+                udp,
                 allow_public,
                 max_streams,
                 idle_timeout_secs,
@@ -1004,6 +1245,17 @@ pub async fn client_mux_tls(
     token: String,
     connector: TlsConnector,
     server_name: ServerName<'static>,
+) -> Result<()> {
+    client_mux_tls_udp(server, target, token, connector, server_name, None).await
+}
+
+pub async fn client_mux_tls_udp(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    connector: TlsConnector,
+    server_name: ServerName<'static>,
+    udp_target: Option<String>,
 ) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
@@ -1037,6 +1289,7 @@ pub async fn client_mux_tls(
     let read_task = tokio::spawn(client_read_loop(
         Box::new(reader),
         target,
+        udp_target,
         writer,
         sessions,
         cancel.clone(),
@@ -1047,6 +1300,15 @@ pub async fn client_mux_tls(
 }
 
 pub async fn client_mux(server: SocketAddr, target: String, token: String) -> Result<()> {
+    client_mux_udp(server, target, token, None).await
+}
+
+pub async fn client_mux_udp(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    udp_target: Option<String>,
+) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
@@ -1075,6 +1337,7 @@ pub async fn client_mux(server: SocketAddr, target: String, token: String) -> Re
     let read_task = tokio::spawn(client_read_loop(
         Box::new(reader),
         target,
+        udp_target,
         writer.clone(),
         sessions.clone(),
         cancel.clone(),
@@ -1087,10 +1350,12 @@ pub async fn client_mux(server: SocketAddr, target: String, token: String) -> Re
 async fn client_read_loop(
     mut reader: ControlRead,
     target: String,
+    udp_target: Option<String>,
     writer: Writer,
     sessions: Sessions,
     cancel: CancellationToken,
 ) {
+    let udp_sessions: UdpSessions = Arc::new(Mutex::new(HashMap::new()));
     loop {
         let frame = tokio::select! {
             frame = read_frame(&mut reader) => frame,
@@ -1098,6 +1363,17 @@ async fn client_read_loop(
         };
         match frame {
             Ok(Some((OPEN, id, payload))) => {
+                if payload == UDP_FEATURE {
+                    client_open_udp(
+                        id,
+                        udp_target.clone(),
+                        writer.clone(),
+                        udp_sessions.clone(),
+                        cancel.clone(),
+                    )
+                    .await;
+                    continue;
+                }
                 let stream_cancel = cancel.child_token();
                 let flow = StreamFlow::new(payload == FLOW_CONTROL_V1);
                 let (data_tx, data_rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
@@ -1158,13 +1434,93 @@ async fn client_read_loop(
                     stream_cancel.cancel();
                 });
             }
-            Ok(Some((kind @ (DATA | FIN | RESET | WINDOW), id, payload))) => {
+            Ok(Some((DATAGRAM, id, payload))) => {
+                let socket = udp_sessions
+                    .lock()
+                    .await
+                    .get(&id)
+                    .map(|entry| entry.0.clone());
+                if let Some(socket) = socket {
+                    let _ = socket.send(&payload).await;
+                }
+            }
+            Ok(Some((kind @ (FIN | RESET), id, _))) => {
+                if let Some((_, stream_cancel)) = udp_sessions.lock().await.remove(&id) {
+                    stream_cancel.cancel();
+                }
+                dispatch_frame(&sessions, id, kind, vec![]).await;
+            }
+            Ok(Some((kind @ (DATA | WINDOW), id, payload))) => {
                 dispatch_frame(&sessions, id, kind, payload).await
             }
             _ => {
                 cancel.cancel();
                 return;
             }
+        }
+    }
+}
+
+async fn client_open_udp(
+    id: u32,
+    target: Option<String>,
+    writer: Writer,
+    sessions: UdpSessions,
+    cancel: CancellationToken,
+) {
+    let Some(target) = target else {
+        let _ = write_frame(&writer, FAIL, id, &[]).await;
+        return;
+    };
+    let socket = match tokio::time::timeout(CONNECT_TIMEOUT, UdpSocket::bind("0.0.0.0:0")).await {
+        Ok(Ok(socket)) => socket,
+        _ => {
+            let _ = write_frame(&writer, FAIL, id, &[]).await;
+            return;
+        }
+    };
+    if !matches!(
+        tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(&target)).await,
+        Ok(Ok(()))
+    ) {
+        let _ = write_frame(&writer, FAIL, id, &[]).await;
+        return;
+    }
+    let session_cancel = cancel.child_token();
+    let socket = Arc::new(socket);
+    if let Some((_, previous)) = sessions
+        .lock()
+        .await
+        .insert(id, (socket.clone(), session_cancel.clone()))
+    {
+        previous.cancel();
+    }
+    tokio::spawn(client_udp_read(id, socket, writer, session_cancel));
+}
+
+async fn client_udp_read(
+    id: u32,
+    socket: Arc<UdpSocket>,
+    writer: Writer,
+    cancel: CancellationToken,
+) {
+    let mut buffer = vec![0u8; 65_535];
+    loop {
+        let size = tokio::select! {
+            result = socket.recv(&mut buffer) => match result {
+                Ok(size) => size,
+                Err(_) => return,
+            },
+            _ = cancel.cancelled() => return,
+        };
+        if size == 0 {
+            continue;
+        }
+        if write_frame(&writer, DATAGRAM, id, &buffer[..size])
+            .await
+            .is_err()
+        {
+            return;
         }
     }
 }

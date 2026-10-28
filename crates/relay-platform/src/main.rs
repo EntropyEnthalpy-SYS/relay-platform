@@ -124,6 +124,9 @@ enum Command {
         /// Maximum bytes in both directions per public stream; 0 is unlimited.
         #[arg(long, default_value_t = 0)]
         max_stream_bytes: u64,
+        /// Optional UDP public listener; relays datagrams to the client's --udp-target.
+        #[arg(long)]
+        udp_listen: Option<SocketAddr>,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -145,6 +148,9 @@ enum Command {
         /// Client private key for mTLS (requires --tls-client-cert).
         #[arg(long)]
         tls_client_key: Option<PathBuf>,
+        /// Optional UDP target for UDP datagrams arriving on the server's --udp-listen.
+        #[arg(long)]
+        udp_target: Option<String>,
     },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
@@ -477,6 +483,7 @@ async fn main() -> Result<()> {
             max_controls,
             max_total_streams,
             max_stream_bytes,
+            udp_listen,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
@@ -486,6 +493,15 @@ async fn main() -> Result<()> {
             relay_platform::reverse_mux::set_max_stream_bytes(max_stream_bytes);
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
+            let udp = match udp_listen {
+                Some(address) => Some(std::sync::Arc::new(
+                    tokio::net::UdpSocket::bind(address).await?,
+                )),
+                None => None,
+            };
+            if udp.is_some() && max_controls != 1 {
+                anyhow::bail!("--udp-listen currently requires --max-controls 1");
+            }
             if let Some(address) = metrics_listen {
                 let listener = tokio::net::TcpListener::bind(address).await?;
                 tokio::spawn(serve_mux_metrics(listener));
@@ -515,36 +531,71 @@ async fn main() -> Result<()> {
                         )?,
                         None => relay_platform::reverse_mux::tls_acceptor(&cert, &key)?,
                     };
-                    match public_tls {
-                        Some(public_acceptor) => {
-                            relay_platform::reverse_mux::serve_mux_tls_public(
-                                control,
-                                public,
-                                token,
-                                acceptor,
-                                Some(public_acceptor),
-                                usize::from(max_streams),
-                                u64::from(idle_timeout_secs),
-                                allow_public.clone(),
-                            )
-                            .await?;
-                        }
-                        None => {
-                            relay_platform::reverse_mux::serve_mux_tls(
-                                control,
-                                public,
-                                token,
-                                acceptor,
-                                usize::from(max_streams),
-                                u64::from(idle_timeout_secs),
-                                allow_public.clone(),
-                            )
-                            .await?;
-                        }
+                    if let Some(udp) = udp {
+                        relay_platform::reverse_mux::serve_mux_tls_public_udp(
+                            control,
+                            public,
+                            token,
+                            acceptor,
+                            public_tls,
+                            Some(udp),
+                            usize::from(max_streams),
+                            u64::from(idle_timeout_secs),
+                            allow_public.clone(),
+                        )
+                        .await?;
+                    } else if let Some(public_acceptor) = public_tls {
+                        relay_platform::reverse_mux::serve_mux_tls_public(
+                            control,
+                            public,
+                            token,
+                            acceptor,
+                            Some(public_acceptor),
+                            usize::from(max_streams),
+                            u64::from(idle_timeout_secs),
+                            allow_public.clone(),
+                        )
+                        .await?;
+                    } else {
+                        relay_platform::reverse_mux::serve_mux_tls(
+                            control,
+                            public,
+                            token,
+                            acceptor,
+                            usize::from(max_streams),
+                            u64::from(idle_timeout_secs),
+                            allow_public.clone(),
+                        )
+                        .await?;
                     }
                 }
-                (None, None, None) => match public_tls {
-                    Some(public_acceptor) => {
+                (None, None, None) => {
+                    if let Some(udp) = udp {
+                        if let Some(public_acceptor) = public_tls {
+                            relay_platform::reverse_mux::serve_mux_public_tls_udp(
+                                control,
+                                public,
+                                token,
+                                public_acceptor,
+                                udp,
+                                usize::from(max_streams),
+                                u64::from(idle_timeout_secs),
+                                allow_public.clone(),
+                            )
+                            .await?;
+                        } else {
+                            relay_platform::reverse_mux::serve_mux_plain_udp(
+                                control,
+                                public,
+                                token,
+                                udp,
+                                usize::from(max_streams),
+                                u64::from(idle_timeout_secs),
+                                allow_public.clone(),
+                            )
+                            .await?;
+                        }
+                    } else if let Some(public_acceptor) = public_tls {
                         relay_platform::reverse_mux::serve_mux_public_tls(
                             control,
                             public,
@@ -555,8 +606,7 @@ async fn main() -> Result<()> {
                             allow_public.clone(),
                         )
                         .await?;
-                    }
-                    None => {
+                    } else {
                         relay_platform::reverse_mux::serve_mux_with_options(
                             control,
                             public,
@@ -567,7 +617,7 @@ async fn main() -> Result<()> {
                         )
                         .await?;
                     }
-                },
+                }
                 _ => anyhow::bail!(
                     "--tls-cert, --tls-key and --tls-client-ca require both certificate and key"
                 ),
@@ -581,6 +631,7 @@ async fn main() -> Result<()> {
             tls_server_name,
             tls_client_cert,
             tls_client_key,
+            udp_target,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
@@ -602,20 +653,22 @@ async fn main() -> Result<()> {
             loop {
                 let result = match &tls {
                     Some((connector, name)) => {
-                        relay_platform::reverse_mux::client_mux_tls(
+                        relay_platform::reverse_mux::client_mux_tls_udp(
                             server,
                             target.clone(),
                             token.clone(),
                             connector.clone(),
                             name.clone(),
+                            udp_target.clone(),
                         )
                         .await
                     }
                     None => {
-                        relay_platform::reverse_mux::client_mux(
+                        relay_platform::reverse_mux::client_mux_udp(
                             server,
                             target.clone(),
                             token.clone(),
+                            udp_target.clone(),
                         )
                         .await
                     }
