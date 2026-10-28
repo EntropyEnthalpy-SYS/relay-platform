@@ -1,0 +1,17 @@
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const source = fs.readFileSync(process.argv[2] || 'web/app.js', 'utf8');
+const start = source.indexOf('function http2ConnectConfig('), end = source.indexOf('\nfunction http2ConnectEditor(', start);
+const context = {}; vm.createContext(context); vm.runInContext(source.slice(start,end) + '\nthis.read = http2ConnectConfig;', context);
+const digest = 'ab'.repeat(32);
+const parsed = context.read(' user ', 'pass', digest.toUpperCase(), 'yes', '32');
+assert.equal(parsed.username, 'user'); assert.equal(parsed.password, 'pass'); assert.equal(parsed.bearer_token_sha256[0], digest);
+assert.equal(parsed.max_concurrent_streams, 32); assert.equal(parsed.allow_private_destinations, true);
+assert.throws(() => context.read('user', '', '', 'no', 8));
+assert.throws(() => context.read('', '', 'raw-token', 'no', 8));
+assert.throws(() => context.read('', '', `${digest}\n${digest}`, 'no', 8));
+assert.throws(() => context.read('', '', '', 'no', 0));
+assert.throws(() => context.read('', '', '', 'no', 4097));
+assert.equal(context.read('', '', '', 'no', 128).bearer_token_sha256.length, 0);
+assert.equal(context.read('', '', '', 'no', 128, '32768').socket_buffer_bytes, 32768);
+assert.throws(() => context.read('', '', '', 'no', 128, 1024));
+console.log('HTTP/2 editor credential/stream serialization and rejection checks passed');

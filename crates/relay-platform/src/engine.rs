@@ -1,7 +1,7 @@
 use crate::{
     datagram, destination_acl,
     health::{self, HealthSet, Observation},
-    http_connect,
+    http_connect, http2_connect,
     metrics::{MeterStats, Timing},
     model::*,
     multipath,
@@ -53,6 +53,7 @@ struct Counters {
     multipath: Arc<multipath::Counters>,
     active_probes: AtomicU64,
     active_tcp: AtomicU64,
+    active_http2_streams: AtomicU64,
     active_udp: AtomicU64,
     accepted_tcp: AtomicU64,
     rejected_connections: AtomicU64,
@@ -72,6 +73,7 @@ impl Counters {
             target_health: vec![],
             system: None,
             active_tcp: self.active_tcp.load(Ordering::Relaxed),
+            active_http2_streams: self.active_http2_streams.load(Ordering::Relaxed),
             active_udp: self.active_udp.load(Ordering::Relaxed),
             accepted_tcp: self.accepted_tcp.load(Ordering::Relaxed),
             rejected_connections: self.rejected_connections.load(Ordering::Relaxed),
@@ -768,6 +770,7 @@ impl UserLimits {
     }
 }
 struct SharedRule {
+    http2_streams: Arc<AtomicUsize>,
     tcp: Arc<AtomicUsize>,
     udp: Arc<AtomicUsize>,
     rate: Limiter,
@@ -778,6 +781,7 @@ impl SharedRule {
         Self {
             target_counts: StdMutex::new(HashMap::new()),
             tcp: Arc::new(AtomicUsize::new(0)),
+            http2_streams: Arc::new(AtomicUsize::new(0)),
             udp: Arc::new(AtomicUsize::new(0)),
             rate: Limiter::new(rate),
         }
@@ -844,6 +848,39 @@ impl Drop for CountGuard {
         } else {
             self.stats.active_udp.fetch_sub(1, Ordering::Relaxed);
         }
+    }
+}
+struct Http2Guard {
+    count: Arc<AtomicUsize>,
+    stats: Arc<Counters>,
+}
+impl Http2Guard {
+    fn acquire(count: Arc<AtomicUsize>, limit: u32, stats: Arc<Counters>) -> Option<Self> {
+        let mut current = count.load(Ordering::Relaxed);
+        loop {
+            if current >= limit as usize {
+                return None;
+            }
+            match count.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(next) => current = next,
+            }
+        }
+        stats.active_http2_streams.fetch_add(1, Ordering::Relaxed);
+        Some(Self { count, stats })
+    }
+}
+impl Drop for Http2Guard {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::AcqRel);
+        self.stats
+            .active_http2_streams
+            .fetch_sub(1, Ordering::Relaxed);
     }
 }
 struct TargetGuard(Arc<AtomicUsize>);
@@ -1985,6 +2022,7 @@ fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
         || old.inbound_shadowsocks != new.inbound_shadowsocks
         || old.inbound_socks5 != new.inbound_socks5
         || old.inbound_http_connect != new.inbound_http_connect
+        || old.inbound_http2_connect != new.inbound_http2_connect
         || old.allow_destinations != new.allow_destinations
         || old.deny_destinations != new.deny_destinations
         || old.targets.iter().any(|previous| {
@@ -2520,7 +2558,7 @@ async fn connect_destination(
 
 async fn connect_http_connect_destination(
     rule: &RuntimeRule,
-    server: &http_connect::Server,
+    allow_private: bool,
     destination: &shadowsocks::Destination,
     inlet: ListenerKey,
 ) -> Result<BoxStream> {
@@ -2528,7 +2566,7 @@ async fn connect_http_connect_destination(
     timeout_at(deadline, async {
         let mut last = None;
         for address in resolve_destination(rule, &destination.to_string()).await? {
-            if !server.permits(address.ip()) {
+            if !allow_private && !shadowsocks::public(address.ip()) {
                 last = Some(anyhow::anyhow!("{destination} is not a public address"));
                 continue;
             }
@@ -2536,6 +2574,7 @@ async fn connect_http_connect_destination(
             match network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await {
                 Ok(stream) => {
                     stream.set_nodelay(true)?;
+                    configure_http2_socket(&stream, rule)?;
                     return Ok(transport::hold(Box::new(stream), route));
                 }
                 Err(error) => last = Some(error),
@@ -2868,6 +2907,20 @@ async fn connect_multipath(
     .context("multipath outbound setup timed out")?
 }
 
+fn configure_http2_socket(stream: &TcpStream, rule: &RuntimeRule) -> Result<()> {
+    if let Some(size) = rule
+        .spec
+        .inbound_http2_connect
+        .as_ref()
+        .and_then(|config| config.socket_buffer_bytes)
+    {
+        let socket = socket2::SockRef::from(stream);
+        socket.set_send_buffer_size(size as usize)?;
+        socket.set_recv_buffer_size(size as usize)?;
+    }
+    Ok(())
+}
+
 async fn tcp_session(
     mut client: TcpStream,
     inlet: ListenerKey,
@@ -2878,6 +2931,7 @@ async fn tcp_session(
     tasks: TaskTracker,
 ) -> Result<()> {
     client.set_nodelay(true)?;
+    configure_http2_socket(&client, &rule)?;
     let peer = client.peer_addr()?;
     let original = ConnectionInfo {
         source: peer,
@@ -2940,6 +2994,61 @@ async fn tcp_session(
         client
     };
     let client = transport::hold(client, guard);
+    if let Some(config) = rule.spec.inbound_http2_connect.clone() {
+        let dial_rule = rule.clone();
+        let dial_stats = stats.clone();
+        let relay_rule = rule.clone();
+        let relay_stats = stats.clone();
+        let session = http2_connect::Session {
+            config: Arc::new(config.clone()),
+            dial: Arc::new(move |destination| {
+                let rule = dial_rule.clone();
+                let stats = dial_stats.clone();
+                Box::pin(async move {
+                    use hyper::StatusCode;
+                    if !rule.accepts(info.source) {
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    let permit = Http2Guard::acquire(
+                        rule.shared.http2_streams.clone(),
+                        config.max_concurrent_streams,
+                        stats.clone(),
+                    )
+                    .ok_or_else(|| {
+                        stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                        StatusCode::TOO_MANY_REQUESTS
+                    })?;
+                    match connect_http_connect_destination(
+                        &rule,
+                        config.allow_private_destinations,
+                        &destination,
+                        inlet,
+                    )
+                    .await
+                    {
+                        Ok(stream) => Ok(transport::hold(stream, permit)),
+                        Err(error) => {
+                            stats.failed_connections.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!(%error, "managed HTTP/2 destination rejected");
+                            Err(StatusCode::BAD_GATEWAY)
+                        }
+                    }
+                })
+            }),
+            relay: Arc::new(move |client, target| {
+                let rule = relay_rule.clone();
+                let stats = relay_stats.clone();
+                let meter = meter.clone();
+                Box::pin(async move { relay_tcp(client, target, rule, meter, stats).await })
+            }),
+            cancel: rule.cancel.clone(),
+            tasks,
+            handshake_timeout: setup,
+            connect_timeout: setup,
+            idle_timeout: Duration::from_secs(rule.spec.idle_timeout_secs),
+        };
+        return http2_connect::serve_managed(client, session, info.source).await;
+    }
     let mut client = if let Some(server) = &rule.multipath_server {
         let identity =
             certificate.context("multipath requires a verified TLS client certificate")?;
@@ -2971,17 +3080,27 @@ async fn tcp_session(
                 return Ok(());
             }
         };
-        let target =
-            match connect_http_connect_destination(&rule, server, &destination, inlet).await {
-                Ok(target) => {
-                    http_connect::ok(&mut client).await?;
-                    target
-                }
-                Err(error) => {
-                    let _ = http_connect::reply(&mut client, 502, "Bad Gateway").await;
-                    return Err(error);
-                }
-            };
+        let target = match connect_http_connect_destination(
+            &rule,
+            rule.spec
+                .inbound_http_connect
+                .as_ref()
+                .unwrap()
+                .allow_private_destinations,
+            &destination,
+            inlet,
+        )
+        .await
+        {
+            Ok(target) => {
+                http_connect::ok(&mut client).await?;
+                target
+            }
+            Err(error) => {
+                let _ = http_connect::reply(&mut client, 502, "Bad Gateway").await;
+                return Err(error);
+            }
+        };
         (client, target)
     } else if let Some(server) = &rule.socks5 {
         let request = match server.accept(&mut client, handshake_deadline).await {
@@ -3110,6 +3229,15 @@ async fn tcp_session(
         let (target, target_guard, route_guard) = connect_tcp(&rule, info, inlet, &stats).await?;
         (client, transport::hold(target, (target_guard, route_guard)))
     };
+    relay_tcp(client, target, rule, meter, stats).await
+}
+async fn relay_tcp(
+    client: BoxStream,
+    target: BoxStream,
+    rule: Arc<RuntimeRule>,
+    meter: Meter,
+    stats: Arc<Counters>,
+) -> Result<()> {
     let activity = Arc::new(StdMutex::new(Instant::now()));
     let (cr, cw) = tokio::io::split(client);
     let (tr, tw) = tokio::io::split(target);

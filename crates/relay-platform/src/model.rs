@@ -342,6 +342,9 @@ pub struct Rule {
     /// An HTTP CONNECT proxy server with optional Basic authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_http_connect: Option<crate::http_connect::ServerConfig>,
+    /// Managed HTTP/2 CONNECT, with Basic and/or hashed Bearer credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbound_http2_connect: Option<crate::http2_connect::ServerConfig>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -419,6 +422,33 @@ impl Rule {
             &self.allow_destination_ports,
             &self.deny_destination_ports,
         )?;
+        ensure!(
+            [
+                self.inbound_shadowsocks.is_some(),
+                self.inbound_socks5.is_some(),
+                self.inbound_http_connect.is_some(),
+                self.inbound_http2_connect.is_some()
+            ]
+            .into_iter()
+            .filter(|enabled| *enabled)
+            .count()
+                <= 1,
+            "a rule cannot combine proxy inbounds"
+        );
+        if let Some(config) = &self.inbound_http2_connect {
+            config.validate()?;
+            ensure!(
+                self.protocol == Protocol::Tcp,
+                "HTTP/2 CONNECT requires TCP"
+            );
+            ensure!(
+                self.inbound_websocket.is_none()
+                    && self.inbound_multipath.is_none()
+                    && self.outbound_multipath.is_none()
+                    && self.health_check.is_none(),
+                "HTTP/2 CONNECT cannot combine WebSocket, multipath or target health probes"
+            );
+        }
         crate::shadowsocks::validate_rule(self)?;
         if let Some(config) = &self.inbound_socks5 {
             crate::socks5::validate(config)?;
@@ -549,6 +579,7 @@ impl Rule {
         if self.inbound_shadowsocks.is_some()
             || self.inbound_socks5.is_some()
             || self.inbound_http_connect.is_some()
+            || self.inbound_http2_connect.is_some()
         {
             ensure!(
                 self.targets.is_empty(),
@@ -863,6 +894,8 @@ pub struct EngineStats {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<crate::system::SystemStats>,
     pub active_tcp: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub active_http2_streams: u64,
     pub active_udp: u64,
     pub accepted_tcp: u64,
     pub rejected_connections: u64,

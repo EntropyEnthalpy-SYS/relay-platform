@@ -465,3 +465,8 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 ## 0.42.0 NAT-PMP CLI
 
 `relay nat-map --gateway IP[:PORT] --internal-port N [--external-port N] [--lifetime-secs N] [--delete]` 管理一个 NAT-PMP UDP 映射；默认端口 5351，生命周期上限 7 天，`--external-port 0` 由网关分配。无 HTTP API。详见 [NAT.md](NAT.md)。
+
+
+## 0.113.0 managed HTTP/2 CONNECT
+
+`Rule.inbound_http2_connect` enables the managed HTTP/2 path, requires `protocol="tcp"` and `targets=[]`, and supports Basic credentials, `bearer_token_sha256`, `max_concurrent_streams`, `allow_private_destinations` and optional `socket_buffer_bytes`. See [HTTP2.md](HTTP2.md) for defaults, bounds, TLS/ALPN, credential rotation, metering and client constraints. Statistics add `active_http2_streams`; Prometheus adds `relay_node_active_http2_streams`. Upgrade controllers first.

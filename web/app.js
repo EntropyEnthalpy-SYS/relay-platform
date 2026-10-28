@@ -475,7 +475,7 @@ function nodeDiagnostics(node) {
   if (!meter) body.append(empty('尚无计量诊断', '节点需要支持计量诊断的版本，并完成一次状态上报。'));
   else {
     body.append(table(['诊断阶段', '已完成采样数', '平均 / ms', '最大 / ms'], [timingRow('本地计量批次', meter.admission_batches), timingRow('额度等待片段', meter.budget_wait)]));
-    body.append(table(['项目', '最近采样'], [['计量请求（包含重试）', meter.admission_requests], ['计量批次失败', meter.failed_batches], ['正在等待额度的方向 / 会话', meter.budget_waiting], ['额度等待超时', meter.budget_timeouts], ['累计额度等待 / 秒', (meter.budget_wait.total_us / 1000000).toFixed(3)], ['活跃 TCP / UDP / 探测', `${stats.active_tcp} / ${stats.active_udp} / ${stats.active_probes || 0}`]]));
+    body.append(table(['项目', '最近采样'], [['计量请求（包含重试）', meter.admission_requests], ['计量批次失败', meter.failed_batches], ['正在等待额度的方向 / 会话', meter.budget_waiting], ['额度等待超时', meter.budget_timeouts], ['累计额度等待 / 秒', (meter.budget_wait.total_us / 1000000).toFixed(3)], ['活跃 TCP / UDP / 探测', `${stats.active_tcp} / ${stats.active_udp} / ${stats.active_probes || 0}`], ['HTTP/2 活跃隧道', stats.active_http2_streams || 0]]));
     body.append(el('p', '本地计量耗时包括线程池调度、数据库锁等待与事务执行，不是纯磁盘时间。额度等待按每次休眠片段计数，包含被取消的片段；并发等待时间可重叠相加。统计从进程启动累计，不作为用量或额度依据。', 'fine'));
   }
   if (stats.multipath) {
@@ -578,7 +578,7 @@ async function renderRules() {
   toolbar.append(badge(`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? `节点总限速 ${mbit(config.rate_bytes_per_sec)}` : '节点不限速', config.rate_bytes_per_sec ? 'orange' : ''), button('版本历史', history)); if (canWrite()) toolbar.append(button('节点总限速', () => editNodeRate(config)));
   const p = panel('转发规则', '配额按上下行接纳字节合计。更改安全策略会终止关联会话。', canWrite() ? button('＋ 添加规则', () => editRule(), 'primary') : null);
   if (!config.rules.length) p.append(empty('创建一条真实转发规则', '支持 TCP、UDP 和双协议，可设置多个目标、配额、速率和来源网段。', canWrite() ? button('添加规则', () => editRule(), 'primary') : null));
-  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button('分享链接', () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button('分享链接', () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button('分享链接', () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { if (state.actor.role !== 'viewer') actions.append(button('存为模板', () => saveTemplate(rule), 'table-action')); actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell(rule.listen + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.inbound_shadowsocks ? namedCell('Shadowsocks 代理服务', rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell('SOCKS5 代理服务', rule.inbound_socks5.username ? '用户名密码认证' : '无认证') : rule.inbound_http_connect ? namedCell('HTTP CONNECT 代理服务', rule.inbound_http_connect.username ? 'Basic 认证' : '无认证') : namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
+  else p.append(table(['名称', '监听 / 协议', '目标', '配额 / 限速', '状态', '操作'], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button('分享链接', () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button('分享链接', () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button('分享链接', () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { if (state.actor.role !== 'viewer') actions.append(button('存为模板', () => saveTemplate(rule), 'table-action')); actions.append(button('编辑', () => editRule(rule), 'table-action'), button(rule.enabled ? '停用' : '启用', () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button('删除', async () => { if (confirm(`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell(rule.listen + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.inbound_shadowsocks ? namedCell('Shadowsocks 代理服务', rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell('SOCKS5 代理服务', rule.inbound_socks5.username ? '用户名密码认证' : '无认证') : rule.inbound_http_connect ? namedCell('HTTP CONNECT 代理服务', rule.inbound_http_connect.username ? 'Basic 认证' : '无认证') : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', `并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, `${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? '不限量' : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? '不限速' : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? '已启用' : '已停用', rule.enabled ? 'green' : ''), actions]; })));
   content.replaceChildren(toolbar, p);
 }
 function mbit(rate) { return `${+(rate * 8 / 1e6).toFixed(2)} Mbit/s`; }
@@ -600,12 +600,23 @@ async function editRule(existing) {
   const shadowsocks = shadowsocksEditor(r.inbound_shadowsocks); form.append(shadowsocks.box);
   const socks5 = socks5Editor(r.inbound_socks5); form.append(socks5.box);
   const httpConnect = httpConnectEditor(r.inbound_http_connect); form.append(httpConnect.box);
+  const http2Connect = http2ConnectEditor(r.inbound_http2_connect); form.append(http2Connect.box);
   const routed = el('div'); form.append(routed);
   const readHealth = healthEditor(routed, r.health_check, protocolControl);
   const multipath = multipathEditor(routed, r);
   const readTargets = targetEditor(routed, r.targets?.length ? r.targets : [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id, r.outbound_multipath?.paths, multipath.mode);
   // A Shadowsocks server goes where each client asks, so it has no targets.
-  function showRouted() { const server = shadowsocks.enabled() || socks5.enabled() || httpConnect.enabled(), parts = [routed, transport, inboundWs.box]; parts.forEach(part => part.classList.toggle('hidden', server)); balance.parentElement.classList.toggle('hidden', server); parts.flatMap(part => [...part.querySelectorAll('input, select, textarea')]).forEach(input => { if (server) { input.dataset.wasDisabled ??= String(input.disabled); input.disabled = true; } else if (input.dataset.wasDisabled !== undefined) { input.disabled = input.dataset.wasDisabled === 'true'; delete input.dataset.wasDisabled; } }); }
+  function showRouted() {
+    const legacy = shadowsocks.enabled() || socks5.enabled() || httpConnect.enabled(), server = legacy || http2Connect.enabled();
+    for (const [part, hidden] of [[routed, server], [transport, legacy], [inboundWs.box, server]]) {
+      part.classList.toggle('hidden', hidden);
+      part.querySelectorAll('input, select, textarea').forEach(input => {
+        if (hidden) { input.dataset.wasDisabled ??= String(input.disabled); input.disabled = true; }
+        else if (input.dataset.wasDisabled !== undefined) { input.disabled = input.dataset.wasDisabled === 'true'; delete input.dataset.wasDisabled; }
+      });
+    }
+    balance.parentElement.classList.toggle('hidden', server);
+  }
   const routing = el('details'); routing.append(el('summary', '出口绑定与 DNS 缓存')); const routeFields = el('div', undefined, 'form-grid');
   field(routeFields, 'outbound_ip', '出口源 IP（留空由系统选择）', r.outbound_bind?.ip || '', 'text', false);
   field(routeFields, 'outbound_interface', '出口网卡名称（留空由系统选择）', r.outbound_bind?.interface || '', 'text', false);
@@ -620,7 +631,7 @@ async function editRule(existing) {
   field(tlsFields, 'tls_client_ca', '允许客户端的 CA 编号（留空不要求客户端证书）', r.inbound_tls?.client_ca || '', 'text', false); transport.append(tlsFields, el('p', '证书和私钥预先放在节点本地，面板只保存编号。TLS 仅用于 TCP；一条规则的所有出口必须使用相同的安全方式。', 'fine')); form.append(transport);
   const inboundWs = websocketEditor('inbound-ws', r.inbound_websocket, true); form.append(inboundWs.box);
   // Clients also send QUIC, DNS and games over UDP, so a new server carries both.
-  shadowsocks.onchange(() => { if (!existing && shadowsocks.enabled() && protocolControl.value === 'tcp') protocolControl.value = 'both'; showRouted(); }); socks5.onchange(() => { if (!existing && socks5.enabled()) protocolControl.value = 'tcp'; showRouted(); }); httpConnect.onchange(() => { if (!existing && httpConnect.enabled()) protocolControl.value = 'tcp'; showRouted(); }); showRouted();
+  shadowsocks.onchange(() => { if (!existing && shadowsocks.enabled() && protocolControl.value === 'tcp') protocolControl.value = 'both'; showRouted(); }); socks5.onchange(() => { if (!existing && socks5.enabled()) protocolControl.value = 'tcp'; showRouted(); }); httpConnect.onchange(() => { if (!existing && httpConnect.enabled()) protocolControl.value = 'tcp'; showRouted(); }); http2Connect.onchange(() => { if (http2Connect.enabled()) protocolControl.value = 'tcp'; showRouted(); }); showRouted();
   const proxyInput = el('details'); proxyInput.append(el('summary', '接收可信上游传递的原始地址（PROXY protocol）'));
   const proxyMode = select(proxyInput, 'proxy_input_version', '入口 PROXY 报头', [['off', '关闭'], ['v1', '要求 v1 · 仅 TCP'], ['v2', '要求 v2 · TCP / UDP'], ['any', '要求 v1 或 v2 · 仅 TCP']], r.inbound_proxy?.version || 'off');
   const proxyOptions = el('div', undefined, 'form-grid');
@@ -639,11 +650,14 @@ async function editRule(existing) {
   form.append(el('p', '同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。', 'fine'));
   submit(form, existing ? '发布修改' : '创建并发布', async data => {
     const node = state.nodes.find(n => n.id === baseConfig.node_id), lines = key => String(data.get(key)).split('\n').map(s => s.trim()).filter(Boolean);
-    const server = shadowsocks.read(), socks = socks5.read(), http = httpConnect.read();
-    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: server || socks || http ? [] : readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources'), allow_destinations: lines('allow_destinations'), deny_destinations: lines('deny_destinations'), allow_destination_ports: lines('allow_destination_ports'), deny_destination_ports: lines('deny_destination_ports') };
+    const server = shadowsocks.read(), socks = socks5.read(), http = httpConnect.read(), h2 = http2Connect.read();
+    if ([server, socks, http, h2].filter(Boolean).length > 1) throw new Error('每条规则只能启用一种代理入口');
+    if (h2 && data.get('protocol') !== 'tcp') throw new Error('HTTP/2 CONNECT 必须使用 TCP');
+    const rule = { id: r.id || crypto.randomUUID(), tenant_id: node.tenant_id, owner_id: r.owner_id || state.actor.id, name: data.get('name'), protocol: data.get('protocol'), listen: data.get('listen'), balance: data.get('balance'), enabled: data.get('enabled') === 'on', targets: server || socks || http || h2 ? [] : readTargets(), meter_epoch: data.get('new_meter_period')==='on'?crypto.randomUUID():(r.meter_epoch || crypto.randomUUID()), allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources'), allow_destinations: lines('allow_destinations'), deny_destinations: lines('deny_destinations'), allow_destination_ports: lines('allow_destination_ports'), deny_destination_ports: lines('deny_destination_ports') };
     if (server) rule.inbound_shadowsocks = server;
     else if (socks) rule.inbound_socks5 = socks;
     else if (http) rule.inbound_http_connect = http;
+    else if (h2) rule.inbound_http2_connect = h2;
     else { rule.health_check = readHealth(); Object.assign(rule, multipath.read(readTargets.multipathPaths())); }
     rule.advertise = String(data.get('advertise')).trim() || null;
     rule.listen_end_port = number(data, 'listen_end_port'); rule.port_mapping = data.get('port_mapping');
@@ -654,7 +668,7 @@ async function editRule(existing) {
     const identity = String(data.get('tls_identity') ?? '').trim(), clientCa = String(data.get('tls_client_ca') ?? '').trim();
     if (clientCa && !identity) throw new Error('要求客户端证书时，请同时填写入口证书编号');
     if (identity) rule.inbound_tls = { identity, client_ca: clientCa || null };
-    const websocket = inboundWs.read(); if (websocket) rule.inbound_websocket = websocket;
+    const websocket = h2 ? null : inboundWs.read(); if (websocket) rule.inbound_websocket = websocket;
     if (rule.protocol !== 'tcp' && (websocket || rule.targets.some(target => target.websocket))) throw new Error('WebSocket / WSS 流隧道只支持 TCP，请调整规则协议');
     if (data.get('proxy_input_version') !== 'off') rule.inbound_proxy = { version: data.get('proxy_input_version'), trusted_sources: lines('proxy_trusted_sources'), placement: data.get('proxy_input_placement'), max_header_bytes: number(data, 'proxy_header_limit'), accept_prewarmed: data.get('proxy_accept_prewarmed') === 'yes' };
     for (const key of ['quota_bytes', 'rate_bytes_per_sec', 'expires_at_ms', 'connect_timeout_ms', 'idle_timeout_secs', 'max_connections', 'udp_max_sessions']) rule[key] = number(data, key);
@@ -707,6 +721,39 @@ function shareShadowsocks(rule) {
   modal(`分享 ${rule.name}`, body);
 }
 async function history() { const baseConfig = state.config; const revisions = await api(`/nodes/${baseConfig.node_id}/history`); const body = table(['修订', '操作者', '时间', '操作'], revisions.map(r => [`v${r.revision}`, r.actor_id, timestamp(r.created_at_ms), canWrite() ? button('发布此版本', async () => { await api(`/nodes/${baseConfig.node_id}/rollback`, { method: 'POST', body: { revision: r.revision, expected_revision: baseConfig.revision } }); $('#dialog').close(); notify('历史配置已作为新修订发布。账本不回滚。'); await renderRules(); }, 'table-action') : '只读'])); modal('最近 100 次配置修订', body); }
+function http2ConnectConfig(username, password, hashes, privateMode, streams, socketBuffer = '') {
+  const user = username.trim(), digests = hashes.split(/\s+/).filter(Boolean).map(v => v.toLowerCase());
+  if (!!user !== !!password) throw new Error('Basic 用户名和密码必须同时填写');
+  if (digests.length > 8 || new Set(digests).size !== digests.length || digests.some(v => !/^[a-f0-9]{64}$/.test(v))) throw new Error('Bearer 需填写最多 8 个不重复的 SHA-256 十六进制摘要');
+  const limit = Number(streams);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 4096) throw new Error('HTTP/2 并发隧道上限为 1–4096');
+  const buffer = String(socketBuffer).trim() === '' ? null : Number(socketBuffer);
+  if (buffer !== null && (!Number.isInteger(buffer) || buffer < 16384 || buffer > 4194304)) throw new Error('TCP 缓冲请求为 16384–4194304 字节，留空由系统自动调整');
+  return { username: user || null, password: password || null, bearer_token_sha256: digests, allow_private_destinations: privateMode === 'yes', max_concurrent_streams: limit, socket_buffer_bytes: buffer };
+}
+function http2ConnectEditor(spec) {
+  const box = el('details'); box.open = !!spec; box.append(el('summary', 'HTTP/2 CONNECT 入口（TLS / h2c）'));
+  const fields = el('div', undefined, 'form-grid');
+  const enabled = select(box, 'h2_enabled', 'HTTP/2 服务', [['off', '关闭'], ['on', '启用']], spec ? 'on' : 'off');
+  const username = field(fields, 'h2_user', 'Basic 用户名（可选）', spec?.username || '', 'text', false);
+  const password = field(fields, 'h2_password', 'Basic 密码', spec?.password || '', 'password', false);
+  const hashes = textarea(fields, 'h2_hashes', 'Bearer SHA-256 摘要（每行一个，可同时保留新旧令牌）', (spec?.bearer_token_sha256 || []).join('\n'));
+  const streams = field(fields, 'h2_streams', '整条规则的并发隧道上限', spec?.max_concurrent_streams ?? 128, 'number'); streams.min = 1; streams.max = 4096;
+  const socketBuffer = field(fields, 'h2_socket_buffer', '每方向 TCP 缓冲请求 / bytes（低内存可选 32768，留空自动）', spec?.socket_buffer_bytes ?? '', 'number', false); socketBuffer.min = 16384; socketBuffer.max = 4194304;
+  const privateMode = select(fields, 'h2_private', '内网 / 回环目的地', [['no', '拒绝（推荐）'], ['yes', '允许']], spec?.allow_private_destinations ? 'yes' : 'no');
+  const secret = el('pre', '', 'secret-box mono'); secret.hidden = true;
+  const generate = button('生成 Bearer 令牌', async () => {
+    if (!crypto.subtle) throw new Error('生成令牌需要 HTTPS 或 localhost 面板连接');
+    if (hashes.value.split(/\s+/).filter(Boolean).length >= 8) throw new Error('请先删除旧摘要，最多保留 8 个');
+    const token = Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, '0')).join('');
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))), b => b.toString(16).padStart(2, '0')).join('');
+    hashes.value = [hashes.value.trim(), digest].filter(Boolean).join('\n'); secret.textContent = token; secret.hidden = false;
+  });
+  const note = el('p', '令牌原文仅在本次对话框显示，请保存后发给客户端。服务器仅保存摘要。删除旧摘要并发布会关闭已有连接。Basic 和 Bearer 都留空时无需认证；身份与计费归属规则所有者。公网使用下方入口 TLS，可选客户端 CA。h2c 仅供受信网络。HTTP/2 客户端必须支持 CONNECT；curl 使用 --proxy-http2。', 'fine');
+  function show() { const on = enabled.value === 'on'; fields.querySelectorAll('input, select, textarea').forEach(v => { v.disabled = !on; }); fields.classList.toggle('hidden', !on); generate.disabled = !on; }
+  enabled.addEventListener('change', show); box.append(fields, generate, secret, note); show();
+  return { box, enabled: () => enabled.value === 'on', onchange: f => enabled.addEventListener('change', f), read: () => enabled.value === 'on' ? http2ConnectConfig(username.value, password.value, hashes.value, privateMode.value, streams.value, socketBuffer.value) : null };
+}
 function httpConnectEditor(spec) {
   const box = el('details'); box.open = !!spec; box.append(el('summary', 'HTTP CONNECT 入口（TCP）'));
   const fields = el('div', undefined, 'form-grid');
@@ -1522,7 +1569,7 @@ function editAlertChannel(existing) {
   });
   modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
 }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', tickets: '支持工单', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-coupons': '优惠码', 'commerce-gifts': '礼品码', 'http-connect': 'HTTP CONNECT 入站', 'destination-acl': '目的地 ACL', 'config-templates': '规则模板', 'mptcp-diagnostics': 'MPTCP 能力观测', 'nat-pmp': 'NAT-PMP 端口映射', 'pcp': 'PCP 端口映射', 'upnp': 'UPnP 端口映射', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', tickets: '支持工单', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-coupons': '优惠码', 'commerce-gifts': '礼品码', 'http-connect': 'HTTP CONNECT 入站', 'http2-connect-managed': 'HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer', 'destination-acl': '目的地 ACL', 'config-templates': '规则模板', 'mptcp-diagnostics': 'MPTCP 能力观测', 'nat-pmp': 'NAT-PMP 端口映射', 'pcp': 'PCP 端口映射', 'upnp': 'UPnP 端口映射', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

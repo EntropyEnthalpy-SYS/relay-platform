@@ -74,19 +74,26 @@ async fn udp_preserves_datagrams_empty_payloads_and_peer_isolation() {
 
 #[tokio::test]
 async fn udp_bursts_reach_the_target_without_drops() {
-    let echo = udp_echo().await;
+    let echo = udp_buffered_echo().await;
     let temp = tempfile::tempdir().unwrap();
     let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
     let r = rule(echo.address, Protocol::Udp);
     let address = r.listen;
     engine.apply(config(r)).await.unwrap();
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket2::SockRef::from(&socket)
+        .set_recv_buffer_size(256 * 1024)
+        .unwrap();
     socket.connect(address).await.unwrap();
-    // Each burst arrives before the session runs; together they pass far more
-    // bytes through one session than it may hold at once.
+    // Eight-packet bursts fit even a 64 KiB Linux kernel receive default.
+    // Pace between bursts so this tests application buffering, not host UDP
+    // drops; receivers have explicit capacity for the complete echo round.
     for round in 0..8u8 {
         for n in 0..32u8 {
             socket.send(&[round, n].repeat(600)).await.unwrap();
+            if n % 8 == 7 {
+                sleep(Duration::from_millis(1)).await;
+            }
         }
         let mut seen = Vec::new();
         let mut buf = [0; 2048];
@@ -108,7 +115,7 @@ async fn udp_bursts_reach_the_target_without_drops() {
 
 #[tokio::test]
 async fn throttled_udp_session_drops_datagrams_that_waited_too_long() {
-    let echo = udp_echo().await;
+    let echo = udp_buffered_echo().await;
     let temp = tempfile::tempdir().unwrap();
     let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
     let mut r = rule(echo.address, Protocol::Udp);
@@ -116,11 +123,17 @@ async fn throttled_udp_session_drops_datagrams_that_waited_too_long() {
     let address = r.listen;
     engine.apply(config(r)).await.unwrap();
     let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket2::SockRef::from(&socket)
+        .set_recv_buffer_size(256 * 1024)
+        .unwrap();
     socket.connect(address).await.unwrap();
     // Seconds of traffic at this rate, sent at once, fit in the queue; the
     // datagrams that would leave late are dropped instead.
-    for _ in 0..128 {
+    for n in 0..128 {
         socket.send(&[0; 1200]).await.unwrap();
+        if n % 8 == 7 {
+            sleep(Duration::from_millis(1)).await;
+        }
     }
     let until = Instant::now() + Duration::from_secs(2);
     while engine.stats().dropped_datagrams == 0 {

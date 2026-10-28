@@ -66,6 +66,7 @@ struct Outbound {
 }
 pub struct PreparedTls {
     inbound: Option<TlsAcceptor>,
+    require_h2: bool,
     outbound: Vec<Option<Outbound>>,
     pub fingerprint: [u8; 32],
 }
@@ -177,6 +178,9 @@ impl PreparedTls {
                 material.certificates(&spec.identity, "cert.pem")?,
                 material.key(&spec.identity)?,
             )?;
+            if rule.inbound_http2_connect.is_some() {
+                config.alpn_protocols = vec![b"h2".to_vec()];
+            }
             if rule.inbound_websocket.is_some() {
                 config.alpn_protocols = vec![b"http/1.1".to_vec()];
             }
@@ -211,6 +215,7 @@ impl PreparedTls {
             outbound.push(client);
         }
         Ok(Self {
+            require_h2: rule.inbound_http2_connect.is_some(),
             inbound,
             outbound,
             fingerprint: material.digest.finalize().into(),
@@ -225,6 +230,10 @@ impl PreparedTls {
     ) -> Result<(BoxStream, Option<[u8; 32]>)> {
         Ok(if let Some(tls) = &self.inbound {
             let accepted = tls.accept(stream).await?;
+            ensure!(
+                !self.require_h2 || accepted.get_ref().1.alpn_protocol() == Some(&b"h2"[..]),
+                "HTTP/2 TLS requires h2 ALPN"
+            );
             let identity = accepted
                 .get_ref()
                 .1

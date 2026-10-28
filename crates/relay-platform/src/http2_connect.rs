@@ -1,10 +1,5 @@
-//! HTTP/2 cleartext (h2c) CONNECT forward proxy.
-//!
-//! This is a standalone listener for clients that use HTTP/2 prior knowledge.
-//! It reuses the HTTP CONNECT authentication/private-destination policy but
-//! speaks HTTP/2 frames instead of HTTP/1.1. It is intentionally separate from
-//! the rule engine until rule-level metering and ACL integration is added.
-use crate::{http_connect, shadowsocks::Destination};
+//! HTTP/2 CONNECT listeners and the managed rule-engine transport.
+use crate::{http_connect, shadowsocks::Destination, transport::BoxStream};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http_body_util::Empty;
@@ -15,7 +10,20 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    path::Path,
+    pin::Pin,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
+use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, copy_bidirectional},
     net::{TcpListener, TcpStream},
@@ -24,13 +32,122 @@ use tokio::{
 use tokio_rustls::{
     TlsAcceptor,
     rustls::{
-        RootCertStore, ServerConfig,
+        RootCertStore, ServerConfig as TlsServerConfig,
         pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     },
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Credentials belong to the rule owner. Multiple digests allow a short
+/// rotation overlap; replacing the configuration closes existing connections.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bearer_token_sha256: Vec<String>,
+    #[serde(default)]
+    pub allow_private_destinations: bool,
+    /// Shared across all TCP connections and listen ports of a managed rule.
+    #[serde(default = "default_streams")]
+    pub max_concurrent_streams: u32,
+    /// Optional per-direction OS socket buffer request on both sides of each tunnel.
+    /// Linux charges roughly twice this request per socket direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_buffer_bytes: Option<u32>,
+}
+fn default_streams() -> u32 {
+    128
+}
+impl From<http_connect::ServerConfig> for ServerConfig {
+    fn from(config: http_connect::ServerConfig) -> Self {
+        Self {
+            username: config.username,
+            password: config.password,
+            allow_private_destinations: config.allow_private_destinations,
+            bearer_token_sha256: vec![],
+            max_concurrent_streams: default_streams(),
+            socket_buffer_bytes: None,
+        }
+    }
+}
+impl ServerConfig {
+    pub fn validate(&self) -> Result<()> {
+        http_connect::validate(&http_connect::ServerConfig {
+            username: self.username.clone(),
+            password: self.password.clone(),
+            allow_private_destinations: self.allow_private_destinations,
+        })?;
+        ensure!(
+            (1..=4096).contains(&self.max_concurrent_streams),
+            "HTTP/2 stream limit must be 1..4096"
+        );
+        ensure!(
+            self.socket_buffer_bytes
+                .is_none_or(|size| (16_384..=4_194_304).contains(&size)),
+            "HTTP/2 socket buffer must be 16384..4194304 bytes"
+        );
+        ensure!(
+            self.bearer_token_sha256.len() <= 8,
+            "at most eight HTTP/2 bearer digests are allowed"
+        );
+        let mut hashes = std::collections::HashSet::new();
+        for digest in &self.bearer_token_sha256 {
+            ensure!(
+                digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+                "HTTP/2 bearer digest must be 64 hexadecimal characters"
+            );
+            ensure!(
+                hashes.insert(digest.to_ascii_lowercase()),
+                "duplicate HTTP/2 bearer digest"
+            );
+        }
+        Ok(())
+    }
+}
+
+type DialFuture = Pin<Box<dyn Future<Output = std::result::Result<BoxStream, StatusCode>> + Send>>;
+type RelayFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+pub(crate) type Dial = Arc<dyn Fn(Destination) -> DialFuture + Send + Sync>;
+pub(crate) type Relay = Arc<dyn Fn(BoxStream, BoxStream) -> RelayFuture + Send + Sync>;
+
+/// The engine supplies its ACL-aware connector and its ordinary metered copy
+/// loop. No payload bypasses the rule's accounting or shared throttles.
+pub(crate) struct Session {
+    pub config: Arc<ServerConfig>,
+    pub dial: Dial,
+    pub relay: Relay,
+    pub cancel: CancellationToken,
+    pub tasks: TaskTracker,
+    pub handshake_timeout: Duration,
+    pub connect_timeout: Duration,
+    pub idle_timeout: Duration,
+}
+#[derive(Default)]
+struct Activity {
+    active: AtomicUsize,
+    last: Mutex<Option<Instant>>,
+}
+struct Active(Arc<Activity>);
+impl Active {
+    fn new(activity: Arc<Activity>) -> Self {
+        activity.active.fetch_add(1, Ordering::Relaxed);
+        *activity.last.lock().unwrap() = Some(Instant::now());
+        Self(activity)
+    }
+}
+impl Drop for Active {
+    fn drop(&mut self) {
+        *self.0.last.lock().unwrap() = Some(Instant::now());
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 pub async fn serve(listener: TcpListener, config: http_connect::ServerConfig) -> Result<()> {
     http_connect::validate(&config)?;
@@ -78,27 +195,92 @@ pub async fn serve_tls(
 }
 
 async fn serve_connection<S>(
-    mut stream: S,
-    server: Arc<http_connect::ServerConfig>,
+    stream: S,
+    config: Arc<http_connect::ServerConfig>,
     peer: SocketAddr,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    // Bound the client's actual preface, including its initial SETTINGS, rather
-    // than the connection future (which also owns every established tunnel).
-    let preface = timeout(HANDSHAKE_TIMEOUT, read_preface(&mut stream))
+    let private = config.allow_private_destinations;
+    let session = Session {
+        config: Arc::new((*config).clone().into()),
+        dial: Arc::new(move |destination| {
+            Box::pin(async move {
+                let target = resolve_target(&destination, private)
+                    .await
+                    .ok_or(StatusCode::FORBIDDEN)?;
+                let stream = TcpStream::connect(target)
+                    .await
+                    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+                stream.set_nodelay(true).ok();
+                Ok(Box::new(stream) as BoxStream)
+            })
+        }),
+        relay: Arc::new(|mut client, mut upstream| {
+            Box::pin(async move {
+                copy_bidirectional(&mut client, &mut upstream).await?;
+                Ok(())
+            })
+        }),
+        cancel: CancellationToken::new(),
+        tasks: TaskTracker::new(),
+        handshake_timeout: HANDSHAKE_TIMEOUT,
+        connect_timeout: CONNECT_TIMEOUT,
+        idle_timeout: Duration::from_secs(300),
+    };
+    serve_managed(Box::new(stream), session, peer).await
+}
+
+pub(crate) async fn serve_managed(
+    mut stream: BoxStream,
+    session: Session,
+    peer: SocketAddr,
+) -> Result<()> {
+    let cancel = session.cancel.child_token();
+    // Also fires if the engine drops this future during disable/reload/shutdown.
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    let session = Arc::new(Session {
+        cancel: cancel.clone(),
+        ..session
+    });
+    let preface = timeout(session.handshake_timeout, read_preface(&mut stream))
         .await
         .context("HTTP/2 CONNECT handshake timed out")??;
     let (reader, writer) = tokio::io::split(stream);
     let stream = tokio::io::join(std::io::Cursor::new(preface).chain(reader), writer);
-    let service = service_fn(move |request| {
-        let server = server.clone();
-        async move { handle(request, server, peer).await }
-    });
-    hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-        .serve_connection(TokioIo::new(stream), service)
-        .await?;
+    let activity = Arc::new(Activity::default());
+    let idle_activity = activity.clone();
+    let idle = session.idle_timeout;
+    let max_streams = session.config.max_concurrent_streams;
+    let service =
+        service_fn(move |request| handle(request, session.clone(), activity.clone(), peer));
+    let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+    builder
+        .max_concurrent_streams(max_streams)
+        .max_header_list_size(16 * 1024)
+        .max_send_buf_size(64 * 1024)
+        .initial_stream_window_size(64 * 1024)
+        .initial_connection_window_size(1024 * 1024);
+    let inactive = async move {
+        loop {
+            tokio::time::sleep(idle).await;
+            if idle_activity.active.load(Ordering::Relaxed) == 0
+                && idle_activity
+                    .last
+                    .lock()
+                    .unwrap()
+                    .is_none_or(|last| last.elapsed() >= idle)
+            {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        result = builder.serve_connection(TokioIo::new(stream), service) => { result?; }
+        _ = cancel.cancelled() => {}
+        _ = inactive => {}
+    }
     Ok(())
 }
 
@@ -137,7 +319,7 @@ pub fn tls_acceptor_h2(
     let key = PrivateKeyDer::from_pem_slice(&std::fs::read(key_path)?)
         .context("cannot parse TLS private key")?;
     let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
-    let builder = ServerConfig::builder_with_provider(provider.clone())
+    let builder = TlsServerConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()?;
     let builder = if let Some(ca_path) = client_ca_path {
         let mut roots = RootCertStore::empty();
@@ -185,77 +367,104 @@ pub fn tls_connector_h2(
 
 async fn handle(
     mut request: Request<Incoming>,
-    server: Arc<http_connect::ServerConfig>,
+    session: Arc<Session>,
+    activity: Arc<Activity>,
     peer: SocketAddr,
 ) -> Result<Response<Empty<Bytes>>, hyper::Error> {
+    let active = Active::new(activity);
+    let config = &session.config;
     if request.method() != hyper::Method::CONNECT {
-        return Ok(reply(StatusCode::METHOD_NOT_ALLOWED));
+        return Ok(reply(StatusCode::METHOD_NOT_ALLOWED, config));
     }
-    let Some(authority) = request.uri().authority().map(|value| value.to_string()) else {
-        return Ok(reply(StatusCode::BAD_REQUEST));
+    let Some(authority) = request.uri().authority().map(|v| v.to_string()) else {
+        return Ok(reply(StatusCode::BAD_REQUEST, config));
     };
-    if server.username.is_some() && !authorized(request.headers(), &server) {
-        return Ok(reply(StatusCode::PROXY_AUTHENTICATION_REQUIRED));
+    if !authorized(request.headers(), config) {
+        return Ok(reply(StatusCode::PROXY_AUTHENTICATION_REQUIRED, config));
     }
     let destination = match http_connect::parse_authority(&authority) {
         Ok(destination) => destination,
-        Err(_) => return Ok(reply(StatusCode::BAD_REQUEST)),
+        Err(_) => return Ok(reply(StatusCode::BAD_REQUEST, config)),
     };
-    let (target, upstream) = match timeout(CONNECT_TIMEOUT, async {
-        let target = resolve_target(&destination, server.allow_private_destinations)
-            .await
-            .ok_or(StatusCode::FORBIDDEN)?;
-        let upstream = TcpStream::connect(target)
-            .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?;
-        Ok::<_, StatusCode>((target, upstream))
-    })
-    .await
-    {
-        Ok(Ok(connected)) => connected,
-        Ok(Err(status)) => return Ok(reply(status)),
-        Err(_) => return Ok(reply(StatusCode::BAD_GATEWAY)),
+    let upstream = tokio::select! {
+        _ = session.cancel.cancelled() => return Ok(reply(StatusCode::SERVICE_UNAVAILABLE, config)),
+        result = timeout(session.connect_timeout, (session.dial)(destination)) => match result {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(status)) => return Ok(reply(status, config)),
+            Err(_) => return Ok(reply(StatusCode::BAD_GATEWAY, config)),
+        }
     };
-    upstream.set_nodelay(true).ok();
     let upgrade = hyper::upgrade::on(&mut request);
-    tokio::spawn(async move {
-        if let Ok(upgraded) = upgrade.await {
-            let mut upgraded = TokioIo::new(upgraded);
-            let mut upstream = upstream;
-            let _ = copy_bidirectional(&mut upstream, &mut upgraded).await;
+    let task_session = session.clone();
+    session.tasks.spawn(async move {
+        let _active = active;
+        tokio::select! {
+            _ = task_session.cancel.cancelled() => {}
+            _ = async {
+                if let Ok(Ok(upgraded)) = timeout(task_session.connect_timeout, upgrade).await {
+                    let _ = (task_session.relay)(Box::new(TokioIo::new(upgraded)), upstream).await;
+                }
+            } => {}
         }
     });
-    tracing::debug!(%peer, %target, %destination, "HTTP/2 CONNECT tunnel established");
-    Ok(reply(StatusCode::OK))
+    tracing::debug!(%peer, "HTTP/2 CONNECT tunnel established");
+    Ok(reply(StatusCode::OK, config))
 }
-
-fn reply(status: StatusCode) -> Response<Empty<Bytes>> {
+fn reply(status: StatusCode, config: &ServerConfig) -> Response<Empty<Bytes>> {
     let mut response = Response::new(Empty::new());
     *response.status_mut() = status;
     if status == StatusCode::PROXY_AUTHENTICATION_REQUIRED {
-        response.headers_mut().insert(
-            hyper::header::PROXY_AUTHENTICATE,
-            hyper::header::HeaderValue::from_static("Basic realm=\"relay\""),
-        );
+        for challenge in [
+            config.username.as_ref().map(|_| "Basic realm=\"relay\""),
+            (!config.bearer_token_sha256.is_empty()).then_some("Bearer realm=\"relay\""),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            response.headers_mut().append(
+                hyper::header::PROXY_AUTHENTICATE,
+                hyper::header::HeaderValue::from_static(challenge),
+            );
+        }
     }
     response
 }
-
-fn authorized(headers: &hyper::HeaderMap, server: &http_connect::ServerConfig) -> bool {
-    headers
-        .get(PROXY_AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Basic "))
-        .and_then(|encoded| STANDARD.decode(encoded).ok())
-        .and_then(|decoded| String::from_utf8(decoded).ok())
-        .is_some_and(|credentials| {
-            credentials
-                == format!(
-                    "{}:{}",
-                    server.username.as_deref().unwrap_or_default(),
-                    server.password.as_deref().unwrap_or_default()
-                )
-        })
+fn authorized(headers: &hyper::HeaderMap, config: &ServerConfig) -> bool {
+    if config.username.is_none() && config.bearer_token_sha256.is_empty() {
+        return true;
+    }
+    let mut values = headers.get_all(PROXY_AUTHORIZATION).iter();
+    let Some(value) = values.next().and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let Some((scheme, credential)) = value.split_once(' ') else {
+        return false;
+    };
+    if scheme.eq_ignore_ascii_case("Basic") && config.username.is_some() {
+        let Ok(decoded) = STANDARD.decode(credential) else {
+            return false;
+        };
+        let expected = format!(
+            "{}:{}",
+            config.username.as_deref().unwrap_or_default(),
+            config.password.as_deref().unwrap_or_default()
+        );
+        return bool::from(Sha256::digest(decoded).ct_eq(&Sha256::digest(expected)));
+    }
+    if scheme.eq_ignore_ascii_case("Bearer") && !credential.is_empty() {
+        let digest = format!("{:x}", Sha256::digest(credential.as_bytes()));
+        let mut matched = subtle::Choice::from(0);
+        for expected in &config.bearer_token_sha256 {
+            matched |= digest
+                .as_bytes()
+                .ct_eq(expected.to_ascii_lowercase().as_bytes());
+        }
+        return bool::from(matched);
+    }
+    false
 }
 
 async fn resolve_target(destination: &Destination, allow_private: bool) -> Option<SocketAddr> {

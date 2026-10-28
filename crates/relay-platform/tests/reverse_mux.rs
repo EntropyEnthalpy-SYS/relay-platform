@@ -937,99 +937,132 @@ async fn udp_datagrams_round_trip_through_the_mux() {
 
 #[test]
 fn udp_cli_forwards_a_datagram_to_the_udp_target() {
-    use std::net::{TcpListener as StdListener, TcpStream as StdStream, UdpSocket as StdUdp};
-    use std::process::{Command, Stdio};
-    use std::sync::mpsc;
+    use std::net::{
+        Shutdown, TcpListener as StdListener, TcpStream as StdStream, UdpSocket as StdUdp,
+    };
+    use std::process::{Child, Command, Stdio};
     use std::time::Duration as StdDuration;
+    struct Process(Child);
+    impl Drop for Process {
+        fn drop(&mut self) {
+            self.0.kill().ok();
+            self.0.wait().ok();
+        }
+    }
+    // Retain all reservations until their distinct ports have been selected.
     let control = StdListener::bind("127.0.0.1:0").unwrap();
-    let control_port = control.local_addr().unwrap().port();
-    drop(control);
     let public = StdListener::bind("127.0.0.1:0").unwrap();
-    let public_port = public.local_addr().unwrap().port();
-    drop(public);
     let public_udp = StdUdp::bind("127.0.0.1:0").unwrap();
+    let control_port = control.local_addr().unwrap().port();
+    let public_port = public.local_addr().unwrap().port();
     let public_udp_port = public_udp.local_addr().unwrap().port();
-    drop(public_udp);
     let target = StdUdp::bind("127.0.0.1:0").unwrap();
     let target_port = target.local_addr().unwrap().port();
     target
-        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .set_read_timeout(Some(StdDuration::from_secs(10)))
         .unwrap();
-    let (ready_tx, ready_rx) = mpsc::channel();
+    let temp = tempfile::tempdir().unwrap();
+    let token = temp.path().join("token");
+    std::fs::write(&token, "udp-cli-token\n").unwrap();
+    let server_log = temp.path().join("server.log");
+    let client_log = temp.path().join("client.log");
+    drop((control, public, public_udp));
+    let mut server = Process(
+        Command::new(env!("CARGO_BIN_EXE_relay"))
+            .args([
+                "reverse-mux-server",
+                "--control-listen",
+                &format!("127.0.0.1:{control_port}"),
+                "--public-listen",
+                &format!("127.0.0.1:{public_port}"),
+                "--udp-listen",
+                &format!("127.0.0.1:{public_udp_port}"),
+                "--token-file",
+                token.to_str().unwrap(),
+                "--max-controls",
+                "1",
+            ])
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&server_log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    // Start the real client only after the listener exists. Otherwise Linux can
+    // assign its outgoing ephemeral port to a not-yet-bound listener port.
+    let deadline = std::time::Instant::now() + StdDuration::from_secs(5);
+    loop {
+        assert!(
+            server.0.try_wait().unwrap().is_none(),
+            "server exited: {}",
+            std::fs::read_to_string(&server_log).unwrap()
+        );
+        if let Ok(mut probe) = StdStream::connect(("127.0.0.1", control_port)) {
+            use std::io::Read;
+            probe
+                .set_read_timeout(Some(StdDuration::from_secs(3)))
+                .unwrap();
+            probe.shutdown(Shutdown::Write).unwrap();
+            // Let the server observe EOF and release its only control slot.
+            let _ = probe.read(&mut [0u8; 1]);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "server did not listen: {}",
+            std::fs::read_to_string(&server_log).unwrap()
+        );
+        std::thread::sleep(StdDuration::from_millis(20));
+    }
+    let mut client = Process(
+        Command::new(env!("CARGO_BIN_EXE_relay"))
+            .args([
+                "reverse-mux-client",
+                "--server",
+                &format!("127.0.0.1:{control_port}"),
+                "--target",
+                "127.0.0.1:9",
+                "--udp-target",
+                &format!("127.0.0.1:{target_port}"),
+                "--token-file",
+                token.to_str().unwrap(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(std::fs::File::create(&client_log).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let probe = StdUdp::bind("127.0.0.1:0").unwrap();
+    probe
+        .set_read_timeout(Some(StdDuration::from_millis(100)))
+        .unwrap();
     let echo = std::thread::spawn(move || {
-        ready_tx.send(()).unwrap();
         let mut buffer = [0u8; 64];
         let (size, peer) = target.recv_from(&mut buffer).unwrap();
         target.send_to(&buffer[..size], peer).unwrap();
     });
-    ready_rx.recv().unwrap();
-    let temp = tempfile::tempdir().unwrap();
-    let token = temp.path().join("token");
-    std::fs::write(&token, "udp-cli-token\n").unwrap();
-    let mut server = Command::new(env!("CARGO_BIN_EXE_relay"))
-        .args([
-            "reverse-mux-server",
-            "--control-listen",
-            &format!("127.0.0.1:{control_port}"),
-            "--public-listen",
-            &format!("127.0.0.1:{public_port}"),
-            "--udp-listen",
-            &format!("127.0.0.1:{public_udp_port}"),
-            "--token-file",
-            token.to_str().unwrap(),
-            "--max-controls",
-            "1",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut client = Command::new(env!("CARGO_BIN_EXE_relay"))
-        .args([
-            "reverse-mux-client",
-            "--server",
-            &format!("127.0.0.1:{control_port}"),
-            "--target",
-            "127.0.0.1:9",
-            "--udp-target",
-            &format!("127.0.0.1:{target_port}"),
-            "--token-file",
-            token.to_str().unwrap(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut connected = None;
-    for _ in 0..100 {
-        if let Ok(stream) = StdStream::connect(("127.0.0.1", control_port)) {
-            connected = Some(stream);
+    let deadline = std::time::Instant::now() + StdDuration::from_secs(5);
+    loop {
+        assert!(
+            client.0.try_wait().unwrap().is_none(),
+            "client exited: {}",
+            std::fs::read_to_string(&client_log).unwrap()
+        );
+        probe
+            .send_to(b"udp-cli", ("127.0.0.1", public_udp_port))
+            .unwrap();
+        let mut reply = [0u8; 16];
+        if let Ok((size, _)) = probe.recv_from(&mut reply) {
+            assert_eq!(&reply[..size], b"udp-cli");
             break;
         }
-        std::thread::sleep(StdDuration::from_millis(20));
+        assert!(
+            std::time::Instant::now() < deadline,
+            "UDP CLI timed out: {} / {}",
+            std::fs::read_to_string(&server_log).unwrap(),
+            std::fs::read_to_string(&client_log).unwrap()
+        );
     }
-    let connected = connected.expect("server did not listen");
-    connected
-        .set_read_timeout(Some(StdDuration::from_secs(3)))
-        .unwrap();
-    // Wait for the client to authenticate and the UDP listener to accept.
-    std::thread::sleep(StdDuration::from_millis(300));
-    let probe = StdUdp::bind("127.0.0.1:0").unwrap();
-    probe
-        .set_read_timeout(Some(StdDuration::from_secs(3)))
-        .unwrap();
-    probe
-        .send_to(b"udp-cli", ("127.0.0.1", public_udp_port))
-        .unwrap();
-    let mut reply = [0u8; 16];
-    let (size, _) = probe.recv_from(&mut reply).unwrap();
-    assert_eq!(&reply[..size], b"udp-cli");
     echo.join().unwrap();
-    drop(connected);
-    server.kill().ok();
-    client.kill().ok();
-    server.wait().ok();
-    client.wait().ok();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]

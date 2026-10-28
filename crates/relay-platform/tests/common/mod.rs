@@ -54,6 +54,7 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         inbound_shadowsocks: None,
         inbound_socks5: None,
         inbound_http_connect: None,
+        inbound_http2_connect: None,
         advertise: None,
         targets: vec![Target {
             priority: 0,
@@ -165,6 +166,15 @@ fn tcp_echo_from(listener: TcpListener, marker: Option<u8>) -> Echo {
         task,
     }
 }
+/// Explicit receive capacity for burst tests, independent of host sysctls.
+pub async fn udp_buffered_echo() -> Echo {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    socket2::SockRef::from(&socket)
+        .set_recv_buffer_size(256 * 1024)
+        .unwrap();
+    udp_echo_from(socket)
+}
+
 pub async fn udp_echo() -> Echo {
     udp_echo_at("127.0.0.1:0").await
 }
