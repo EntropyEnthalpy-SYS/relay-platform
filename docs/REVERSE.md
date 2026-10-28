@@ -41,6 +41,8 @@ relay reverse-mux-server \
   --max-stream-bytes 0 \
   --udp-listen 0.0.0.0:19011 \
   --udp-idle-secs 60 \
+  --udp-queue 1024 \
+  --udp-rate-pps 0 \
   --public-tls-cert server.pem --public-tls-key server-key.pem \
   --public-tls-client-ca client-ca.pem
 
@@ -74,7 +76,9 @@ relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 - `--max-total-streams 1..1000000` 限制单进程所有控制的公网流总数，默认 4096；达到上限后新公网连接在 OPEN 前关闭。
 - `--max-stream-bytes` 限制单条流的双向累计字节数，默认 0（不限）；达到上限后该流被重置，不影响邻居流。
 - `--udp-listen` 启用公网 UDP 中继；需要同时设置 `--max-controls 1`。客户端用 `--udp-target` 指定固定 UDP 目标，或用 `--udp-socks5` 让公网数据报携带 SOCKS5 UDP 目标头（多目标模式）；两者互斥。
-- `--udp-idle-secs` 设置 UDP association 空闲回收时间，默认 60 秒，范围 1..86400。每个公网源地址形成一条 UDP association，空闲 60 秒回收；UDP 不走 TLS，公网端口应置于可信网络或外部加密隧道后。
+- `--udp-idle-secs` 设置 UDP association 空闲回收时间，默认 60 秒，范围 1..86400。
+- `--udp-queue` 设置 UDP 接收队列长度，默认 1024，范围 16..65536。
+- `--udp-rate-pps` 设置每 association 双向包速率，默认 0（不限）；超速丢包并计数。每个公网源地址形成一条 UDP association，空闲 60 秒回收；UDP 不走 TLS，公网端口应置于可信网络或外部加密隧道后。
 - 认证首行有 10 秒超时，目标拨号有 5 秒超时；服务端每条控制连接默认最多 256 个并发公网流，`--max-streams 1..1024` 可调；超过上限的新公网连接立即关闭，不分配 id。
 - 公网流默认 300 秒无数据即被关闭并发送 `RESET`；`--idle-timeout-secs 1..86400` 可调。
 - 客户端 `reverse-mux-client` 在控制连接断开后 250ms 重连；mux 不提供重放保护、流量填充或按连接目标 ACL。
@@ -106,7 +110,9 @@ relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 - `--max-stream-bytes` bounds cumulative bytes in both directions for one stream (default 0, unlimited); exceeding it resets that stream only. UDP associations count both directions the same way.
 - Public TLS can require a client certificate with `--public-tls-client-ca`; the CA is used to verify the public client identity. It requires `--public-tls-cert` and `--public-tls-key`.
 - `--udp-idle-secs` controls UDP association idle expiry (default 60, range 1..86400).
+- `--udp-queue` sets the UDP receive queue (default 1024, range 16..65536).
+- `--udp-rate-pps` sets a per-association bidirectional packet rate (default 0, unlimited); excess datagrams are dropped and counted.
 - `--udp-listen` enables public UDP relay and currently requires `--max-controls 1`; the client supplies a fixed `--udp-target`, or `--udp-socks5` for multi-target SOCKS5 UDP datagrams. The two client modes are mutually exclusive. The SOCKS5 mode parses RSV/FRAG/ATYP and rejects nonzero FRAG; replies are wrapped with the source address. Each public source address is an association with a 60-second idle timeout. UDP has no TLS; place the public port behind a trusted network or external encrypted tunnel.
-- Metrics expose `relay_reverse_mux_control_limit_rejections_total`, `relay_reverse_mux_stream_limit_rejections_total`, `relay_reverse_mux_stream_byte_limit_resets_total`, and `relay_reverse_mux_udp_dropped_total`.
+- Metrics expose `relay_reverse_mux_control_limit_rejections_total`, `relay_reverse_mux_stream_limit_rejections_total`, `relay_reverse_mux_stream_byte_limit_resets_total`, and `relay_reverse_mux_udp_dropped_total`, and `relay_reverse_mux_udp_rate_limited_total`.
 - The TLS server permits at most 64 simultaneous pending TLS/token authentications. TLS and authentication each have a 10-second deadline. The permit is released after READY, before serving the authenticated control. This is not a 64-established-control limit. Plaintext control authentication uses the same isolated pending-auth pattern. Each authorized control also permits at most 64 pending public TLS handshakes; public accept continues while they run. Active stream/control metrics use drop guards for cleanup.
 - Regression coverage includes an 8 MiB upload followed by an 8 MiB EOF-triggered reply, slow readers with an unrelated echo stream, cancellation in both roles, partial-frame abandonment, 80 simultaneously authenticated TLS controls, and the 64-pending-authentication bound. These are loopback correctness tests, not WAN throughput or endurance certification.

@@ -133,6 +133,12 @@ enum Command {
         /// Idle UDP association timeout in seconds (1-86400).
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=86400))]
         udp_idle_secs: u32,
+        /// UDP receive-queue capacity in datagrams (16-65536).
+        #[arg(long, default_value_t = 1024, value_parser = clap::value_parser!(u32).range(16..=65536))]
+        udp_queue: u32,
+        /// Per-association UDP packet rate in packets/second; 0 is unlimited.
+        #[arg(long, default_value_t = 0)]
+        udp_rate_pps: u64,
     },
     /// Connect a private target to a multiplexed reverse server.
     ReverseMuxClient {
@@ -501,6 +507,8 @@ async fn main() -> Result<()> {
             max_stream_bytes,
             udp_listen,
             udp_idle_secs,
+            udp_queue,
+            udp_rate_pps,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
@@ -509,6 +517,8 @@ async fn main() -> Result<()> {
             relay_platform::reverse_mux::set_max_total_streams(max_total_streams);
             relay_platform::reverse_mux::set_max_stream_bytes(max_stream_bytes);
             relay_platform::reverse_mux::set_udp_idle_secs(u64::from(udp_idle_secs));
+            relay_platform::reverse_mux::set_udp_queue_capacity(udp_queue);
+            relay_platform::reverse_mux::set_udp_rate_pps(udp_rate_pps);
             let control = tokio::net::TcpListener::bind(control_listen).await?;
             let public = tokio::net::TcpListener::bind(public_listen).await?;
             let udp = match udp_listen {

@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.108.0 开发版在 macOS 27.0.1 arm64 通过 **441 项自动化测试（412 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 442 项。日志见 [verification-0.108.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.108.0.json](validation-evidence-0.98.0.json)。
+0.109.0 开发版在 macOS 27.0.1 arm64 通过 **441 项自动化测试（412 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 442 项。日志见 [verification-0.109.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.109.0.json](validation-evidence-0.98.0.json)。
 
-## 0.108.0 SOCKS5 UDP 目标 allowlist
+## 0.109.0 UDP 队列与速率限制
+
+| 检查 | 结果 |
+| --- | --- |
+| 队列 | `--udp-queue 16..65536`，默认 1024 |
+| 速率 | `--udp-rate-pps`，默认 0 不限 |
+| 超速 | 丢包并计 `udp_rate_limited_total` |
+| 队列满 | 计 `udp_dropped_total` |
+
+## 0.108.0 SOCKS5 UDP 目标 allowlist（历史）
 
 | 检查 | 结果 |
 | --- | --- |

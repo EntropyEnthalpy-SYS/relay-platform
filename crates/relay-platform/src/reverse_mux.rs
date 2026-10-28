@@ -48,6 +48,8 @@ const WINDOW: u8 = 7;
 const DATAGRAM: u8 = 8;
 const UDP_FEATURE: &[u8] = b"udp-v1";
 static UDP_IDLE_SECS: AtomicU64 = AtomicU64::new(60);
+static UDP_QUEUE_CAPACITY: AtomicU32 = AtomicU32::new(1024);
+static UDP_RATE_PPS: AtomicU64 = AtomicU64::new(0);
 // OPEN/OK opt-in preserves interoperability with the original six-frame peers.
 const FLOW_CONTROL_V1: &[u8] = b"flow-control-v1";
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -220,6 +222,7 @@ static CONTROL_LIMIT_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 static STREAM_LIMIT_REJECTIONS: AtomicU64 = AtomicU64::new(0);
 static STREAM_BYTE_LIMIT_RESETS: AtomicU64 = AtomicU64::new(0);
 static UDP_DROPPED: AtomicU64 = AtomicU64::new(0);
+static UDP_RATE_LIMITED: AtomicU64 = AtomicU64::new(0);
 static TARGET_TO_PUBLIC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
@@ -234,6 +237,7 @@ pub struct Stats {
     pub stream_limit_rejections: u64,
     pub stream_byte_limit_resets: u64,
     pub udp_dropped: u64,
+    pub udp_rate_limited: u64,
 }
 
 pub fn set_max_controls(max_controls: u32) {
@@ -268,6 +272,22 @@ pub fn udp_idle_secs() -> u64 {
     UDP_IDLE_SECS.load(Ordering::Relaxed)
 }
 
+pub fn set_udp_queue_capacity(capacity: u32) {
+    UDP_QUEUE_CAPACITY.store(capacity.clamp(16, 65_536), Ordering::Relaxed);
+}
+
+pub fn udp_queue_capacity() -> u32 {
+    UDP_QUEUE_CAPACITY.load(Ordering::Relaxed)
+}
+
+pub fn set_udp_rate_pps(rate: u64) {
+    UDP_RATE_PPS.store(rate.min(1_000_000), Ordering::Relaxed);
+}
+
+pub fn udp_rate_pps() -> u64 {
+    UDP_RATE_PPS.load(Ordering::Relaxed)
+}
+
 pub fn stats() -> Stats {
     Stats {
         active_controls: ACTIVE_CONTROLS.load(Ordering::Relaxed),
@@ -280,6 +300,7 @@ pub fn stats() -> Stats {
         stream_limit_rejections: STREAM_LIMIT_REJECTIONS.load(Ordering::Relaxed),
         stream_byte_limit_resets: STREAM_BYTE_LIMIT_RESETS.load(Ordering::Relaxed),
         udp_dropped: UDP_DROPPED.load(Ordering::Relaxed),
+        udp_rate_limited: UDP_RATE_LIMITED.load(Ordering::Relaxed),
     }
 }
 
@@ -481,6 +502,24 @@ struct UdpPeer {
     _active: ActiveStream,
     last: std::time::Instant,
     bytes: u64,
+    tokens: f64,
+    token_at: std::time::Instant,
+}
+impl UdpPeer {
+    fn allow(&mut self, now: std::time::Instant, rate: u64) -> bool {
+        if rate == 0 {
+            return true;
+        }
+        let elapsed = now.duration_since(self.token_at).as_secs_f64();
+        self.token_at = now;
+        self.tokens = (self.tokens + elapsed * rate as f64).min(rate as f64);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -531,10 +570,20 @@ async fn serve_udp(
                         _active: active,
                         last: std::time::Instant::now(),
                         bytes: 0,
+                        tokens: UDP_RATE_PPS.load(Ordering::Relaxed) as f64,
+                        token_at: std::time::Instant::now(),
                     });
                     addresses.insert(id, peer);
                     id
                 };
+                let rate = UDP_RATE_PPS.load(Ordering::Relaxed);
+                let rate_ok = peers
+                    .get_mut(&peer)
+                    .is_none_or(|entry| entry.allow(std::time::Instant::now(), rate));
+                if !rate_ok {
+                    UDP_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
                 let exceeds = limit != 0
                     && peers
@@ -560,6 +609,14 @@ async fn serve_udp(
             message = down.recv() => {
                 let Some((id, payload)) = message else { break };
                 let Some(peer) = addresses.get(&id).copied() else { continue };
+                let rate = UDP_RATE_PPS.load(Ordering::Relaxed);
+                let rate_ok = peers
+                    .get_mut(&peer)
+                    .is_none_or(|entry| entry.allow(std::time::Instant::now(), rate));
+                if !rate_ok {
+                    UDP_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
                 let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
                 let exceeds = limit != 0
                     && peers
@@ -623,7 +680,7 @@ async fn serve_control(
     let responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let (udp_down_tx, udp_down_rx) = if udp.is_some() {
-        let (tx, rx) = mpsc::channel(1024);
+        let (tx, rx) = mpsc::channel(UDP_QUEUE_CAPACITY.load(Ordering::Relaxed) as usize);
         (Some(tx), Some(rx))
     } else {
         (None, None)
@@ -1823,7 +1880,7 @@ async fn read_frame(reader: &mut ControlRead) -> Result<Option<Frame>> {
 pub fn metrics_text() -> String {
     let stats = stats();
     format!(
-        "# HELP relay_reverse_mux_process_available 1 when metrics come from the tunnel process.\n# TYPE relay_reverse_mux_process_available gauge\nrelay_reverse_mux_process_available 1\n# HELP relay_reverse_mux_controls Authorized reverse mux controls.\n# TYPE relay_reverse_mux_controls gauge\nrelay_reverse_mux_controls {}\nrelay_reverse_mux_controls_total {}\n# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\nrelay_reverse_mux_streams {}\nrelay_reverse_mux_streams_total {}\n# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\nrelay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\nrelay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n# HELP relay_reverse_mux_control_limit_rejections_total Controls denied by --max-controls.\n# TYPE relay_reverse_mux_control_limit_rejections_total counter\nrelay_reverse_mux_control_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_limit_rejections_total Public streams refused by --max-streams or --max-total-streams.\n# TYPE relay_reverse_mux_stream_limit_rejections_total counter\nrelay_reverse_mux_stream_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_byte_limit_resets_total Streams reset by --max-stream-bytes.\n# TYPE relay_reverse_mux_stream_byte_limit_resets_total counter\nrelay_reverse_mux_stream_byte_limit_resets_total {}\n# HELP relay_reverse_mux_udp_dropped_total UDP datagrams dropped by a full receive queue.\n# TYPE relay_reverse_mux_udp_dropped_total counter\nrelay_reverse_mux_udp_dropped_total {}\n",
+        "# HELP relay_reverse_mux_process_available 1 when metrics come from the tunnel process.\n# TYPE relay_reverse_mux_process_available gauge\nrelay_reverse_mux_process_available 1\n# HELP relay_reverse_mux_controls Authorized reverse mux controls.\n# TYPE relay_reverse_mux_controls gauge\nrelay_reverse_mux_controls {}\nrelay_reverse_mux_controls_total {}\n# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\nrelay_reverse_mux_streams {}\nrelay_reverse_mux_streams_total {}\n# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\nrelay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\nrelay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n# HELP relay_reverse_mux_control_limit_rejections_total Controls denied by --max-controls.\n# TYPE relay_reverse_mux_control_limit_rejections_total counter\nrelay_reverse_mux_control_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_limit_rejections_total Public streams refused by --max-streams or --max-total-streams.\n# TYPE relay_reverse_mux_stream_limit_rejections_total counter\nrelay_reverse_mux_stream_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_byte_limit_resets_total Streams reset by --max-stream-bytes.\n# TYPE relay_reverse_mux_stream_byte_limit_resets_total counter\nrelay_reverse_mux_stream_byte_limit_resets_total {}\n# HELP relay_reverse_mux_udp_dropped_total UDP datagrams dropped by a full receive queue.\n# TYPE relay_reverse_mux_udp_dropped_total counter\nrelay_reverse_mux_udp_dropped_total {}\n# HELP relay_reverse_mux_udp_rate_limited_total UDP datagrams dropped by the per-association rate limit.\n# TYPE relay_reverse_mux_udp_rate_limited_total counter\nrelay_reverse_mux_udp_rate_limited_total {}\n",
         stats.active_controls,
         stats.total_controls,
         stats.active_streams,
@@ -1834,6 +1891,7 @@ pub fn metrics_text() -> String {
         stats.stream_limit_rejections,
         stats.stream_byte_limit_resets,
         stats.udp_dropped,
+        stats.udp_rate_limited,
     )
 }
 
