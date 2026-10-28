@@ -135,12 +135,14 @@ fn source_address(bind: Option<&OutboundBind>, ipv4: bool) -> Result<SocketAddr>
     }
 }
 
-fn tcp_socket(bind: Option<&OutboundBind>, ipv4: bool) -> Result<TcpSocket> {
-    let socket = if ipv4 {
-        TcpSocket::new_v4()?
-    } else {
-        TcpSocket::new_v6()?
-    };
+fn tcp_socket(
+    bind: Option<&OutboundBind>,
+    ipv4: bool,
+    mode: crate::mptcp::Mode,
+) -> Result<TcpSocket> {
+    let raw = crate::mptcp::stream_socket(if ipv4 { Domain::IPV4 } else { Domain::IPV6 }, mode)?;
+    raw.set_nonblocking(true)?;
+    let socket = TcpSocket::from_std_stream(raw.into());
     let reference = SockRef::from(&socket);
     if !ipv4 {
         reference.set_only_v6(true)?;
@@ -165,8 +167,11 @@ fn tcp_socket(bind: Option<&OutboundBind>, ipv4: bool) -> Result<TcpSocket> {
 pub(crate) async fn connect_tcp(
     bind: Option<&OutboundBind>,
     target: SocketAddr,
+    mode: crate::mptcp::Mode,
 ) -> Result<TcpStream> {
-    Ok(tcp_socket(bind, target.is_ipv4())?.connect(target).await?)
+    Ok(tcp_socket(bind, target.is_ipv4(), mode)?
+        .connect(target)
+        .await?)
 }
 
 pub(crate) fn outbound_udp(bind: Option<&OutboundBind>, ipv4: bool) -> Result<UdpSocket> {
@@ -187,6 +192,12 @@ pub(crate) fn outbound_udp(bind: Option<&OutboundBind>, ipv4: bool) -> Result<Ud
 }
 
 pub(crate) fn preflight(rule: &Rule) -> Result<()> {
+    for mode in [rule.mptcp_inbound(), rule.mptcp_outbound()] {
+        if mode != crate::mptcp::Mode::Off {
+            let domain = Domain::for_address(rule.listen);
+            crate::mptcp::stream_socket(domain, mode)?;
+        }
+    }
     if let Some(bind) = &rule.outbound_bind {
         preflight_bind(
             bind,
@@ -227,7 +238,7 @@ fn preflight_bind(bind: &OutboundBind, addresses: &[&str], tcp: bool, udp: bool)
     };
     for ipv4 in families {
         if tcp {
-            tcp_socket(Some(bind), ipv4)?;
+            tcp_socket(Some(bind), ipv4, crate::mptcp::Mode::Off)?;
         }
         if udp {
             outbound_udp(Some(bind), ipv4)?;
@@ -236,12 +247,8 @@ fn preflight_bind(bind: &OutboundBind, addresses: &[&str], tcp: bool, udp: bool)
     Ok(())
 }
 
-pub(crate) fn tcp_listener(address: SocketAddr) -> Result<TcpListener> {
-    let socket = Socket::new(
-        Domain::for_address(address),
-        Type::STREAM,
-        Some(Protocol::TCP),
-    )?;
+pub(crate) fn tcp_listener(address: SocketAddr, mode: crate::mptcp::Mode) -> Result<TcpListener> {
+    let socket = crate::mptcp::stream_socket(Domain::for_address(address), mode)?;
     socket.set_reuse_address(true)?;
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
@@ -273,7 +280,7 @@ mod tests {
     async fn outbound_sockets_take_their_port_at_connect_time() {
         // A port reserved at bind time would be unique across destinations,
         // capping a node at one ephemeral range of outbound connections.
-        let socket = super::tcp_socket(None, true).unwrap();
+        let socket = super::tcp_socket(None, true, crate::mptcp::Mode::Off).unwrap();
         assert_eq!(socket.local_addr().unwrap().port(), 0);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let stream = socket

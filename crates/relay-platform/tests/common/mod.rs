@@ -34,6 +34,7 @@ pub fn free_address() -> SocketAddr {
 }
 pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
     Rule {
+        mptcp: None,
         inbound_multipath: None,
         outbound_multipath: None,
         health_check: None,

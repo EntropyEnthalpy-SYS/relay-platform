@@ -57,11 +57,11 @@
       <button data-view="users" class="nav-button"><span>♧</span>用户与权限</button>
       <button data-view="account" class="nav-button"><span>◈</span>账户安全</button>
       <button data-view="audit" class="nav-button admin-only"><span>≡</span>操作审计</button>
-      <button data-view="alerts" class="nav-button admin-only"><span>◬</span>告警通知</button>
+      <button data-view="alerts" class="nav-button tenant-admin-only"><span>◬</span>告警通知</button>
       <button data-view="recovery" class="nav-button admin-only"><span>↺</span>恢复保护</button>
       <button data-view="capabilities" class="nav-button"><span>◇</span>功能进度</button>
     </nav>
-    <div class="sidebar-bottom"><span class="version">DEVELOPMENT 0.113</span><p>完整范围持续开发中<br>数据来自实际节点回报</p><button id="logout" data-logout class="subtle">退出登录</button></div>
+    <div class="sidebar-bottom"><span class="version">DEVELOPMENT 0.114</span><p>完整范围持续开发中<br>数据来自实际节点回报</p><button id="logout" data-logout class="subtle">退出登录</button></div>
   </aside>
   <main>
     <header><div><p class="eyebrow">YOUR INFRASTRUCTURE</p><h1 id="view-title">运行总览</h1></div><div class="header-right"><span id="status-pill" class="status-pill" role="status"></span><span id="identity" class="identity"></span><button id="theme" class="subtle" type="button" aria-label="切换深色或浅色主题" title="切换深色或浅色主题">◐</button><button id="refresh" class="subtle">刷新数据 ↻</button><button data-logout class="subtle mobile-only">退出</button></div></header>

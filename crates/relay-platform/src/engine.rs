@@ -50,6 +50,7 @@ const UDP_QUEUE_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 struct Counters {
+    mptcp: Arc<crate::mptcp::Tracker>,
     multipath: Arc<multipath::Counters>,
     active_probes: AtomicU64,
     active_tcp: AtomicU64,
@@ -66,6 +67,7 @@ struct Counters {
 impl Counters {
     fn snapshot(&self) -> EngineStats {
         EngineStats {
+            mptcp: self.mptcp.snapshot(),
             budget_recovery: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
@@ -891,12 +893,14 @@ impl Drop for TargetGuard {
 }
 
 struct RuleResources {
+    mptcp: Arc<crate::mptcp::Tracker>,
     node_rate: Arc<Limiter>,
     user_limit: Option<Arc<UserLimit>>,
     salts: Option<shadowsocks::SaltCache>,
 }
 
 struct RuntimeRule {
+    mptcp: Arc<crate::mptcp::Tracker>,
     shadowsocks: Option<shadowsocks::Server>,
     socks5: Option<socks5::Server>,
     http_connect: Option<http_connect::Server>,
@@ -1006,6 +1010,7 @@ impl RuntimeRule {
             tls,
             shared,
             node_rate: resources.node_rate,
+            mptcp: resources.mptcp,
             cancel: CancellationToken::new(),
             cursor: AtomicU64::new(0),
             target_active,
@@ -1408,11 +1413,11 @@ enum StagedSocket {
     Udp(UdpSocket),
 }
 impl StagedSocket {
-    fn bind(key: ListenerKey) -> Result<Self> {
+    fn bind(key: ListenerKey, mode: crate::mptcp::Mode) -> Result<Self> {
         let address = key.address;
         Ok(if key.tcp {
             Self::Tcp(
-                network::tcp_listener(address)
+                network::tcp_listener(address, mode)
                     .with_context(|| format!("cannot stage TCP listener {address}"))?,
             )
         } else {
@@ -1709,6 +1714,7 @@ impl Engine {
                     resolver,
                     self.routes.clone(),
                     RuleResources {
+                        mptcp: self.stats.mptcp.clone(),
                         node_rate: self.node_rate.clone(),
                         user_limit: Some(self.user_limits.get(&spec.tenant_id, &spec.owner_id)),
                         salts: spec.inbound_shadowsocks.as_ref().map(|config| {
@@ -1752,11 +1758,16 @@ impl Engine {
                     wanted.insert(key, runtime.clone());
                     if let Some(existing) = inner.listeners.get(&key) {
                         ensure!(
+                            !tcp || existing.update.borrow().spec.mptcp_inbound()
+                                == spec.mptcp_inbound(),
+                            "changing MPTCP listener mode on an active port requires disabling and applying the rule first"
+                        );
+                        ensure!(
                             existing.rule_id == spec.id,
                             "listener ownership change requires removing the old listener first"
                         );
                     } else {
-                        match StagedSocket::bind(key) {
+                        match StagedSocket::bind(key, spec.mptcp_inbound()) {
                             Ok(socket) => {
                                 staged.insert(key, socket);
                             }
@@ -1806,7 +1817,7 @@ impl Engine {
                 }
             }
             for (key, _) in deferred {
-                match StagedSocket::bind(key) {
+                match StagedSocket::bind(key, wanted[&key].spec.mptcp_inbound()) {
                     Ok(socket) => {
                         staged.insert(key, socket);
                     }
@@ -1957,7 +1968,7 @@ impl Engine {
     /// Restores listeners closed for a handover that did not complete.
     fn reopen(&self, inner: &mut EngineInner, released: Vec<(ListenerKey, Arc<RuntimeRule>)>) {
         for (key, runtime) in released {
-            match StagedSocket::bind(key) {
+            match StagedSocket::bind(key, runtime.spec.mptcp_inbound()) {
                 Ok(socket) => {
                     inner
                         .listeners
@@ -1997,6 +2008,9 @@ impl Engine {
 }
 
 fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
+    if old.mptcp != new.mptcp {
+        return true;
+    }
     old.inbound_multipath != new.inbound_multipath
         || old.outbound_multipath != new.outbound_multipath
         || old.budget_ids != new.budget_ids
@@ -2116,6 +2130,7 @@ async fn tcp_listener(
 /// A target connection opened up to the point where its PROXY header is
 /// written: plain TCP when the header precedes TLS, otherwise after TLS.
 struct Dialed {
+    mptcp: Option<crate::mptcp::Guard>,
     stream: DialedStream,
     local: SocketAddr,
     address: SocketAddr,
@@ -2154,7 +2169,13 @@ async fn dial_target(
         .as_ref()
         .and_then(|spec| spec.paths[index].outbound_bind.as_ref())
         .or(rule.spec.outbound_bind.as_ref());
-    let stream = network::connect_tcp(bind, address).await?;
+    let stream = network::connect_tcp(bind, address, rule.spec.mptcp_outbound()).await?;
+    let mptcp = rule.mptcp.track(
+        &stream,
+        rule.spec.mptcp_outbound(),
+        &rule.spec.id,
+        "outbound",
+    )?;
     stream.set_nodelay(true)?;
     let local = stream.local_addr()?;
     let header_first = rule.spec.targets[index]
@@ -2167,6 +2188,7 @@ async fn dial_target(
         DialedStream::Ready(rule.tls.connect(index, stream).await?)
     };
     Ok(Dialed {
+        mptcp,
         stream,
         local,
         address,
@@ -2215,7 +2237,7 @@ async fn activate_target(
         )
         .await?;
     }
-    Ok((stream, dialed.route))
+    Ok((transport::hold(stream, dialed.mptcp), dialed.route))
 }
 
 async fn open_tcp_target(
@@ -2542,10 +2564,22 @@ async fn connect_destination(
                 continue;
             }
             let route = rule.routes.reserve(inlet, address)?;
-            match network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await {
+            match network::connect_tcp(
+                rule.spec.outbound_bind.as_ref(),
+                address,
+                rule.spec.mptcp_outbound(),
+            )
+            .await
+            {
                 Ok(stream) => {
                     stream.set_nodelay(true)?;
-                    return Ok(transport::hold(Box::new(stream), route));
+                    let mptcp = rule.mptcp.track(
+                        &stream,
+                        rule.spec.mptcp_outbound(),
+                        &rule.spec.id,
+                        "outbound",
+                    )?;
+                    return Ok(transport::hold(Box::new(stream), (route, mptcp)));
                 }
                 Err(error) => last = Some(error),
             }
@@ -2571,11 +2605,23 @@ async fn connect_http_connect_destination(
                 continue;
             }
             let route = rule.routes.reserve(inlet, address)?;
-            match network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await {
+            match network::connect_tcp(
+                rule.spec.outbound_bind.as_ref(),
+                address,
+                rule.spec.mptcp_outbound(),
+            )
+            .await
+            {
                 Ok(stream) => {
                     stream.set_nodelay(true)?;
                     configure_http2_socket(&stream, rule)?;
-                    return Ok(transport::hold(Box::new(stream), route));
+                    let mptcp = rule.mptcp.track(
+                        &stream,
+                        rule.spec.mptcp_outbound(),
+                        &rule.spec.id,
+                        "outbound",
+                    )?;
+                    return Ok(transport::hold(Box::new(stream), (route, mptcp)));
                 }
                 Err(error) => last = Some(error),
             }
@@ -2808,10 +2854,22 @@ async fn connect_socks5_destination(
                 continue;
             }
             let route = rule.routes.reserve(inlet, address)?;
-            match network::connect_tcp(rule.spec.outbound_bind.as_ref(), address).await {
+            match network::connect_tcp(
+                rule.spec.outbound_bind.as_ref(),
+                address,
+                rule.spec.mptcp_outbound(),
+            )
+            .await
+            {
                 Ok(stream) => {
                     stream.set_nodelay(true)?;
-                    return Ok(transport::hold(Box::new(stream), route));
+                    let mptcp = rule.mptcp.track(
+                        &stream,
+                        rule.spec.mptcp_outbound(),
+                        &rule.spec.id,
+                        "outbound",
+                    )?;
+                    return Ok(transport::hold(Box::new(stream), (route, mptcp)));
                 }
                 Err(error) => last = Some(error),
             }
@@ -2931,6 +2989,9 @@ async fn tcp_session(
     tasks: TaskTracker,
 ) -> Result<()> {
     client.set_nodelay(true)?;
+    let mptcp = rule
+        .mptcp
+        .track(&client, rule.spec.mptcp_inbound(), &rule.spec.id, "inbound")?;
     configure_http2_socket(&client, &rule)?;
     let peer = client.peer_addr()?;
     let original = ConnectionInfo {
@@ -2993,7 +3054,7 @@ async fn tcp_session(
     } else {
         client
     };
-    let client = transport::hold(client, guard);
+    let client = transport::hold(client, (guard, mptcp));
     if let Some(config) = rule.spec.inbound_http2_connect.clone() {
         let dial_rule = rule.clone();
         let dial_stats = stats.clone();
@@ -3114,16 +3175,14 @@ async fn tcp_session(
         let (destination, bound) = match request {
             socks5::Request::Connect(destination) => (Some(destination), None),
             socks5::Request::Bind(requested) => {
-                let listener = match TcpListener::bind(SocketAddr::new(
-                    local_bind_ip(info.destination.ip()),
-                    0,
-                ))
-                .await
-                {
+                let listener = match network::tcp_listener(
+                    SocketAddr::new(local_bind_ip(info.destination.ip()), 0),
+                    rule.spec.mptcp_outbound(),
+                ) {
                     Ok(listener) => listener,
                     Err(error) => {
                         let _ = socks5::reply(&mut client, 5).await;
-                        return Err(error.into());
+                        return Err(error);
                     }
                 };
                 let bind_address = listener.local_addr()?;
@@ -3147,9 +3206,21 @@ async fn tcp_session(
                     }
                     tracing::debug!(peer = %bound_peer, "SOCKS5 BIND peer rejected by policy");
                 };
+                let mptcp = match rule.mptcp.track(
+                    &accepted.0,
+                    rule.spec.mptcp_outbound(),
+                    &rule.spec.id,
+                    "bind-peer",
+                ) {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        let _ = socks5::reply(&mut client, 5).await;
+                        return Err(error);
+                    }
+                };
                 accepted.0.set_nodelay(true)?;
                 socks5::bind_reply(&mut client, accepted.1).await?;
-                (None, Some(Box::new(accepted.0) as BoxStream))
+                (None, Some(transport::hold(Box::new(accepted.0), mptcp)))
             }
             socks5::Request::UdpAssociate => {
                 if rule.spec.protocol != Protocol::Both {

@@ -158,7 +158,7 @@ function resetSecondFactor() { const factor = $('#second-factor-field'), code = 
 document.querySelectorAll('[data-logout]').forEach(b => { b.onclick = async () => { try { await api('/auth/logout', { method: 'POST' }); } finally { loggedOut(); } }; });
 $('#refresh').onclick = () => refresh().catch(e => notify(e.message, true));
 document.querySelectorAll('[data-view]').forEach(n => n.addEventListener('click', () => navigate(n.dataset.view)));
-async function enter() { $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden'); $('#identity').textContent = `${state.actor.username} · ${roleNames[state.actor.role]}`; document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin')); await refresh(); }
+async function enter() { $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden'); $('#identity').textContent = `${state.actor.username} · ${roleNames[state.actor.role]}`; document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin')); document.querySelectorAll('.tenant-admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role === 'viewer')); await refresh(); }
 async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); try { await refresh(); } catch (e) { notify(e.message, true); } }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
@@ -475,8 +475,12 @@ function nodeDiagnostics(node) {
   if (!meter) body.append(empty('尚无计量诊断', '节点需要支持计量诊断的版本，并完成一次状态上报。'));
   else {
     body.append(table(['诊断阶段', '已完成采样数', '平均 / ms', '最大 / ms'], [timingRow('本地计量批次', meter.admission_batches), timingRow('额度等待片段', meter.budget_wait)]));
-    body.append(table(['项目', '最近采样'], [['计量请求（包含重试）', meter.admission_requests], ['计量批次失败', meter.failed_batches], ['正在等待额度的方向 / 会话', meter.budget_waiting], ['额度等待超时', meter.budget_timeouts], ['累计额度等待 / 秒', (meter.budget_wait.total_us / 1000000).toFixed(3)], ['活跃 TCP / UDP / 探测', `${stats.active_tcp} / ${stats.active_udp} / ${stats.active_probes || 0}`], ['HTTP/2 活跃隧道', stats.active_http2_streams || 0]]));
+    body.append(table(['项目', '最近采样'], [['计量请求（包含重试）', meter.admission_requests], ['计量批次失败', meter.failed_batches], ['正在等待额度的方向 / 会话', meter.budget_waiting], ['额度等待超时', meter.budget_timeouts], ['累计额度等待 / 秒', (meter.budget_wait.total_us / 1000000).toFixed(3)], ['活跃 TCP / UDP / 探测', `${stats.active_tcp} / ${stats.active_udp} / ${stats.active_probes || 0}`], ['HTTP/2 活跃隧道', stats.active_http2_streams || 0], ['MPTCP 观测中的连接', stats.mptcp?.active_sockets || 0], ['MPTCP 协商 / TCP 回退 / 无法确定（累计）', `${stats.mptcp?.negotiated_total || 0} / ${stats.mptcp?.fallback_total || 0} / ${stats.mptcp?.unknown_total || 0}`]]));
     body.append(el('p', '本地计量耗时包括线程池调度、数据库锁等待与事务执行，不是纯磁盘时间。额度等待按每次休眠片段计数，包含被取消的片段；并发等待时间可重叠相加。统计从进程启动累计，不作为用量或额度依据。', 'fine'));
+  }
+  if (stats.mptcp) {
+    body.append(el('h3', '内核 MPTCP 连接'), table(['规则', '方向', '本地 / 对端', '协商', '实际子流数'], stats.mptcp.connections.map(c => [c.rule_id, c.direction, `${c.local} → ${c.peer}`, c.info.negotiated === null ? '未知' : c.info.negotiated ? 'MPTCP' : 'TCP 回退', c.info.total_subflows ?? '内核未提供'])));
+    body.append(el('p', '最多观测 128 个活跃 socket；子流数取自内核，不等于独立线路数。每次节点上报重新采样。', 'fine'));
   }
   if (stats.multipath) {
     const mp = stats.multipath;
@@ -588,6 +592,21 @@ function editNodeRate(baseConfig) {
   modal('节点总限速', form);
 }
 async function saveRules(rules, baseConfig) { const expected_revision = baseConfig.revision; await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision, rules } }); $('#dialog').close(); notify('配置已发布。请在节点总览确认实际应用修订号。'); await renderRules(); }
+function mptcpConfig(inbound, outbound, protocol) {
+  const allowed = ['off', 'prefer', 'require'];
+  if (!allowed.includes(inbound) || !allowed.includes(outbound)) throw new Error('无效的 MPTCP 策略');
+  if (inbound === 'off' && outbound === 'off') return null;
+  if (protocol === 'udp') throw new Error('MPTCP 只适用于 TCP，不能用于纯 UDP 规则');
+  return { inbound, outbound };
+}
+function mptcpEditor(value) {
+  const box = el('details'); box.append(el('summary', 'Linux MPTCP'));
+  const options = [['off', '普通 TCP'], ['prefer', '优先 MPTCP · 允许 TCP 回退'], ['require', '必须协商 MPTCP · 否则拒绝']];
+  const inbound = select(box, 'mptcp_inbound', '入口传输', options, value?.inbound || 'off');
+  const outbound = select(box, 'mptcp_outbound', '出口传输', options, value?.outbound || 'off');
+  box.append(el('p', 'MPTCP 需要 Linux 内核与对端支持。额外路径由节点网络配置决定；协商成功不代表已聚合多条线路。更改入口模式前请先停用并发布规则。', 'fine'));
+  return { box, read: protocol => mptcpConfig(inbound.value, outbound.value, protocol) };
+}
 async function editRule(existing) {
   const baseConfig = state.config; const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || {};
   field(grid, 'name', '规则名称', r.name || '').maxLength = 120;
@@ -601,6 +620,7 @@ async function editRule(existing) {
   const socks5 = socks5Editor(r.inbound_socks5); form.append(socks5.box);
   const httpConnect = httpConnectEditor(r.inbound_http_connect); form.append(httpConnect.box);
   const http2Connect = http2ConnectEditor(r.inbound_http2_connect); form.append(http2Connect.box);
+  const mptcp = mptcpEditor(r.mptcp); form.append(mptcp.box);
   const routed = el('div'); form.append(routed);
   const readHealth = healthEditor(routed, r.health_check, protocolControl);
   const multipath = multipathEditor(routed, r);
@@ -658,6 +678,7 @@ async function editRule(existing) {
     else if (socks) rule.inbound_socks5 = socks;
     else if (http) rule.inbound_http_connect = http;
     else if (h2) rule.inbound_http2_connect = h2;
+    const kernelMultipath = mptcp.read(rule.protocol); if (kernelMultipath) rule.mptcp = kernelMultipath;
     else { rule.health_check = readHealth(); Object.assign(rule, multipath.read(readTargets.multipathPaths())); }
     rule.advertise = String(data.get('advertise')).trim() || null;
     rule.listen_end_port = number(data, 'listen_end_port'); rule.port_mapping = data.get('port_mapping');
@@ -1523,11 +1544,11 @@ function createApiToken() {
 }
 function newUser() { const form = el('form'); field(form, 'username', '用户名').maxLength = 80; const p = field(form, 'password', '初始密码（至少 12 个字节）', '', 'password'); p.minLength = 12; p.autocomplete = 'new-password'; const roles = [['viewer', '只读用户'], ['tenant_admin', '租户管理员']]; if (state.actor.role === 'system_admin') roles.push(['system_admin', '系统管理员']); select(form, 'role', '角色', roles, 'viewer'); submit(form, '创建用户', async data => { await api('/users', { method: 'POST', body: Object.fromEntries(data) }); $('#dialog').close(); await renderUsers(); }); modal('添加用户', form); }
 async function renderAudit() { const rows = await api('/audit'); const p = panel('操作审计', '记录配置发布、节点注册、身份及会话操作。最近 200 条。'); p.append(table(['时间', '操作者', '操作', '对象', '详情'], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
-const alertKinds = { webhook: 'Webhook', telegram: 'Telegram', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' };
-const alertFields = { webhook: [['url', 'Webhook 地址'], ['secret', '签名密钥（可选，HMAC-SHA256）', true]], telegram: [['bot_token', 'Bot Token'], ['chat_id', 'Chat ID']], wecom: [['url', '群机器人 Webhook 地址']], feishu: [['url', '自定义机器人 Webhook 地址'], ['secret', '签名校验密钥（可选）', true]], dingtalk: [['url', '自定义机器人 Webhook 地址'], ['secret', '加签密钥（可选）', true]] };
+const alertKinds = { smtp: 'Email / SMTP', webhook: 'Webhook', telegram: 'Telegram', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' };
+const alertFields = { smtp: [], webhook: [['url', 'Webhook 地址'], ['secret', '签名密钥（可选，HMAC-SHA256）', true]], telegram: [['bot_token', 'Bot Token'], ['chat_id', 'Chat ID']], wecom: [['url', '群机器人 Webhook 地址']], feishu: [['url', '自定义机器人 Webhook 地址'], ['secret', '签名校验密钥（可选）', true]], dingtalk: [['url', '自定义机器人 Webhook 地址'], ['secret', '加签密钥（可选）', true]] };
 const severityNames = { warning: '警告及以上', critical: '仅严重' };
 async function renderAlerts() {
-  const data = await api('/alerts'), now = Date.now(), { settings, channels, incidents } = data;
+  const data = await api('/alerts'), now = Date.now(), { settings, channels, incidents, can_manage } = data;
   const until = settings.maintenance_until_ms, maintaining = until && until > now;
   const grid = el('div', undefined, 'alert-grid');
   const status = panel('通知状态', maintaining ? `维护模式至 ${timestamp(until)}。期间不发送新告警，结束时仍未恢复的问题会补发。` : '目标不可用、节点拒绝配置和节点离线会通知已启用的通道。同时出现的问题合并为一条消息；同一问题 5 分钟内反复出现只算一次。');
@@ -1535,11 +1556,11 @@ async function renderAlerts() {
   for (const [label, value, color] of [['当前告警', incidents.open.length, incidents.open.length ? 'red' : 'green'], ['启用通道', channels.filter(c => c.enabled).length, channels.some(c => c.enabled) ? 'green' : 'orange'], ['发送失败', incidents.deliveries.filter(d => d.status === 'failed').length, incidents.deliveries.some(d => d.status === 'failed') ? 'red' : '']]) { const item = el('div', undefined, `alert-stat ${color}`); item.append(el('div', String(value), 'metric-value'), el('div', label, 'metric-label')); strip.append(item); }
   const actions = el('div', undefined, 'alert-actions');
   const maintain = ms => api('/alerts/settings', { method: 'PUT', body: { maintenance_until_ms: ms } }).then(renderAlerts);
-  actions.append(maintaining ? button('结束维护', () => maintain(null), 'primary') : badge('正常通知', 'green'), button('维护 1 小时', () => maintain(Date.now() + 3600_000)), button('维护 4 小时', () => maintain(Date.now() + 4 * 3600_000)));
+  if (can_manage) actions.append(maintaining ? button('结束维护', () => maintain(null), 'primary') : badge('正常通知', 'green'), button('维护 1 小时', () => maintain(Date.now() + 3600_000)), button('维护 4 小时', () => maintain(Date.now() + 4 * 3600_000)));
   strip.append(actions); status.append(strip); grid.append(status);
-  const list = panel('通知通道', '地址、令牌和密钥保存后不再显示。编辑时留空表示保留原值。最多 20 个。', button('＋ 添加通道', () => editAlertChannel(), 'primary'));
-  if (!channels.length) list.append(empty('还没有通知通道', '添加一个 Webhook、Telegram、企业微信、飞书或钉钉机器人，然后发送测试消息确认可以收到。', button('＋ 添加通道', () => editAlertChannel(), 'primary')));
-  else list.append(table(['名称', '类型', '发送到', '级别', '状态', '操作'], channels.map(c => { const ops = el('div', undefined, 'row-actions'); ops.append(button('测试', async () => { notify(`正在向 ${c.name} 发送测试消息…`); try { await api(`/alerts/channels/${c.id}/test`, { method: 'POST' }); notify(`测试消息已发送到 ${c.name}，请确认已收到。`); } finally { await renderAlerts(); } }, 'table-action'), button('编辑', () => editAlertChannel(c), 'table-action'), button('删除', async () => { if (!confirm(`删除通知通道“${c.name}”？`)) return; await api(`/alerts/channels/${c.id}`, { method: 'DELETE' }); await renderAlerts(); }, 'table-action danger')); return [namedCell(c.name, c.secret_set ? '已设置密钥' : '未设置密钥'), alertKinds[c.kind], el('span', c.destination, 'mono'), severityNames[c.min_severity], badge(c.enabled ? '已启用' : '已停用', c.enabled ? 'green' : ''), ops]; })));
+  const list = panel('通知通道', can_manage ? '可向全局或指定租户发送通知。密钥保存后不再显示。最多 20 个通道。' : '仅显示本租户专用通道和事件。通道由系统管理员配置。', can_manage ? button('＋ 添加通道', () => editAlertChannel(), 'primary') : null);
+  if (!channels.length) list.append(empty('还没有通知通道', '系统管理员可添加 Email、Webhook 或聊天机器人通道。', can_manage ? button('＋ 添加通道', () => editAlertChannel(), 'primary') : null));
+  else list.append(table(['名称', '租户范围', '类型', '发送到', '级别', '状态', '操作'], channels.map(c => { const ops = el('div', undefined, 'row-actions'); if (can_manage) ops.append(button('测试', async () => { notify(`正在向 ${c.name} 发送测试消息…`); try { await api(`/alerts/channels/${c.id}/test`, { method: 'POST' }); notify(`测试消息已发送到 ${c.name}，请确认已收到。`); } finally { await renderAlerts(); } }, 'table-action'), button('编辑', () => editAlertChannel(c), 'table-action'), button('删除', async () => { if (!confirm(`删除通知通道“${c.name}”？`)) return; await api(`/alerts/channels/${c.id}`, { method: 'DELETE' }); await renderAlerts(); }, 'table-action danger')); return [namedCell(c.name, c.secret_set ? '已设置密钥' : '未设置密钥'), c.tenant_id || '全部租户', alertKinds[c.kind], el('span', c.destination, 'mono'), severityNames[c.min_severity], badge(c.enabled ? '已启用' : '已停用', c.enabled ? 'green' : ''), ops]; })));
   grid.append(list);
   const levels = { warning: ['警告', 'orange'], critical: ['严重', 'red'] };
   const incidentRows = (items, resolved) => items.map(i => [resolved ? `${timestamp(i.resolved_at_ms)} · ${ago(i.resolved_at_ms, now)}` : `${timestamp(i.opened_at_ms)} · ${ago(i.opened_at_ms, now)}`, i.node_name, badge(...(levels[i.severity] || [i.severity])), el('span', i.summary, 'wrap'), i.repeats ? `${i.repeats} 次` : '—', resolved ? (i.last_notice_ms ? '已通知恢复' : '未通知') : i.notified ? badge('已通知', 'green') : badge(maintaining ? '维护中暂缓' : '等待发送', 'orange')]);
@@ -1547,29 +1568,51 @@ async function renderAlerts() {
   open.append(incidents.open.length ? table(['开始', '节点', '级别', '内容', '反复', '通知'], incidentRows(incidents.open, false)) : empty('一切正常', '没有未恢复的告警。'));
   grid.append(open);
   if (incidents.resolved.length) { const done = panel('最近恢复', '最近 200 条，保存在控制器内存中。'); done.append(table(['恢复', '节点', '级别', '内容', '反复', '通知'], incidentRows(incidents.resolved.slice(0, 50), true))); grid.append(done); }
-  const statusNames = { sent: ['已送达', 'green'], failed: ['失败', 'red'], retrying: ['重试中', 'orange'], pending: ['发送中', ''] }, noticeNames = { opened: '告警', resolved: '恢复', test: '测试' };
+  const statusNames = { cancelled: ['已取消', ''], sent: ['已送达', 'green'], failed: ['失败', 'red'], retrying: ['重试中', 'orange'], pending: ['发送中', ''] }, noticeNames = { opened: '告警', resolved: '恢复', test: '测试' };
   const log = panel('发送记录', '失败会在 10 秒、1 分钟、5 分钟后重试。最近 200 条。');
   log.append(incidents.deliveries.length ? table(['时间', '通道', '类型', '结果', '尝试', '错误'], incidents.deliveries.slice(0, 100).map(d => [timestamp(d.created_at_ms), d.channel_name, d.incidents > 1 ? `${noticeNames[d.notice]} · 合并 ${d.incidents} 条` : noticeNames[d.notice], badge(...statusNames[d.status]), String(d.attempts), d.error ? Object.assign(el('span', d.error, 'clip mono'), { title: d.error }) : '—'])) : empty('还没有发送记录', '发送测试消息或出现告警后会显示在这里。'));
   grid.append(log);
   if (state.view === 'alerts') $('#content').replaceChildren(grid);
 }
+function smtpConfig(data) {
+  const value = key => String(data.get(key) || '').trim();
+  const port = Number(value('port')), security = value('security');
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('SMTP 端口必须为 1–65535');
+  if (!['starttls', 'implicit_tls', 'local_relay'].includes(security)) throw new Error('无效的 SMTP 安全模式');
+  return { host: value('host'), port, security, from: value('from'), to: value('to').split(/[\n,]/).map(v => v.trim()).filter(Boolean), username: value('username'), password: String(data.get('password') || ''), ca_pem: value('ca_pem') };
+}
 function editAlertChannel(existing) {
   const form = el('form'), kind = existing?.kind || 'webhook';
   field(form, 'name', '名称（如“值班群”）', existing?.name).maxLength = 80;
+  field(form, 'tenant_id', '租户 ID（留空表示全部租户）', existing?.tenant_id || '', 'text', false);
   const kindSelect = select(form, 'kind', '类型', Object.entries(alertKinds), kind);
   select(form, 'min_severity', '通知级别', [['warning', '警告及以上（目标不可用、配置拒绝、节点离线）'], ['critical', '仅严重（配置拒绝、节点离线）']], existing?.min_severity || 'warning');
   const enabled = el('label', '启用', 'inline-check'), check = el('input'); check.type = 'checkbox'; check.name = 'enabled'; check.checked = existing?.enabled ?? true; enabled.prepend(check); form.append(enabled);
   const box = el('div', undefined, 'alert-fields'); form.append(box);
-  const fillFields = () => { box.replaceChildren(); const keep = existing && kindSelect.value === existing.kind; for (const [name, label, optional] of alertFields[kindSelect.value]) { const input = field(box, name, label, '', name === 'url' ? 'url' : 'text', !optional && !keep); input.autocomplete = 'off'; if (keep) input.placeholder = '留空则保留原值'; } if (kindSelect.value === 'webhook') box.append(el('p', '以 JSON POST {"text","sent_at_ms"}。设置密钥后请求头带 X-Relay-Signature: sha256=<正文的 HMAC 十六进制>。', 'fine')); };
+  const fillFields = () => { box.replaceChildren(); const keep = existing && kindSelect.value === existing.kind;
+    if (kindSelect.value === 'smtp') {
+      const smtp = keep ? existing.smtp || {} : {};
+      field(box, 'host', 'SMTP 主机', smtp.host || '');
+      const port = field(box, 'port', 'SMTP 端口', smtp.port || 587, 'number'); port.min = 1; port.max = 65535;
+      select(box, 'security', '连接保护', [['starttls', '必须升级 STARTTLS'], ['implicit_tls', '直接 TLS'], ['local_relay', '本机邮件中继 · 仅回环 IP']], smtp.security || 'starttls');
+      field(box, 'from', '发件地址', smtp.from || '');
+      textarea(box, 'to', '收件地址，每行一个（最多 20 个）', (smtp.to || []).join('\n'), true);
+      field(box, 'username', 'SMTP 用户名（不认证时留空）', smtp.username || '', 'text', false);
+      const password = field(box, 'password', 'SMTP 密码', '', 'password', false); password.autocomplete = 'new-password';
+      textarea(box, 'ca_pem', '私有 CA 证书 PEM（可选；不填则使用公开信任根）', smtp.ca_pem || '');
+      box.append(el('p', '留空密码仅在主机、端口、用户名和安全模式均未改变时保留原密码。更改这些设置后请重新输入。连接要求证书验证，本机明文中继禁止认证。', 'fine'));
+      return;
+    }
+    for (const [name, label, optional] of alertFields[kindSelect.value]) { const input = field(box, name, label, '', name === 'url' ? 'url' : 'text', !optional && !keep); input.autocomplete = 'off'; if (keep) input.placeholder = '留空则保留原值'; } if (kindSelect.value === 'webhook') box.append(el('p', '以 JSON POST {"text","sent_at_ms"}。设置密钥后请求头带 X-Relay-Signature: sha256=<正文的 HMAC 十六进制>。', 'fine')); };
   kindSelect.onchange = fillFields; fillFields();
   submit(form, existing ? '保存' : '添加通道', async data => {
-    const target = { kind: data.get('kind') }; for (const [name] of alertFields[target.kind]) target[name] = String(data.get(name) || '').trim();
-    const body = { name: String(data.get('name')).trim(), enabled: data.get('enabled') === 'on', min_severity: data.get('min_severity'), target };
+    const target = { kind: data.get('kind') }; if (target.kind === 'smtp') target.config = smtpConfig(data); for (const [name] of alertFields[target.kind]) target[name] = String(data.get(name) || '').trim();
+    const body = { tenant_id: String(data.get('tenant_id') || '').trim() || null, name: String(data.get('name')).trim(), enabled: data.get('enabled') === 'on', min_severity: data.get('min_severity'), target };
     await api(existing ? `/alerts/channels/${existing.id}` : '/alerts/channels', { method: existing ? 'PUT' : 'POST', body }); $('#dialog').close(); notify(existing ? '通知通道已保存。' : '通知通道已添加。建议点击“测试”确认可以收到。'); await renderAlerts();
   });
   modal(existing ? `编辑通知通道 · ${existing.name}` : '添加通知通道', form);
 }
-async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', tickets: '支持工单', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-coupons': '优惠码', 'commerce-gifts': '礼品码', 'http-connect': 'HTTP CONNECT 入站', 'http2-connect-managed': 'HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer', 'destination-acl': '目的地 ACL', 'config-templates': '规则模板', 'mptcp-diagnostics': 'MPTCP 能力观测', 'nat-pmp': 'NAT-PMP 端口映射', 'pcp': 'PCP 端口映射', 'upnp': 'UPnP 端口映射', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', 'smtp-alerts': 'Email / SMTP 告警（TLS / STARTTLS）', 'tenant-alerts': '按租户隔离通知与事件', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', tickets: '支持工单', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-coupons': '优惠码', 'commerce-gifts': '礼品码', 'http-connect': 'HTTP CONNECT 入站', 'http2-connect-managed': 'HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer', 'destination-acl': '目的地 ACL', 'config-templates': '规则模板', 'mptcp-diagnostics': 'MPTCP 能力观测', 'mptcp-rule-transport': 'MPTCP 规则传输与连接观测', 'nat-pmp': 'NAT-PMP 端口映射', 'pcp': 'PCP 端口映射', 'upnp': 'UPnP 端口映射', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

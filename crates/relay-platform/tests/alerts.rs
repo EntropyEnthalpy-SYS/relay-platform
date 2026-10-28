@@ -110,7 +110,7 @@ async fn target_outages_notify_once_per_incident_through_signed_webhooks() {
     let get = client.get(api("alerts"));
     assert_eq!(
         status(get.bearer_auth(&operator_session).send().await.unwrap()),
-        403
+        200
     );
     let post = client.post(api("alerts/channels")).json(&channel);
     assert_eq!(

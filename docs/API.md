@@ -38,9 +38,9 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/control/metrics` | 仅系统管理员；返回本次控制器运行的节点同步统计 |
 | GET | `/metrics` | 认证的 Prometheus 文本：构建信息、恢复日志、预算额度、规则累计用量、HTTP 请求分类与延迟直方图、反向 mux 进程可用性/控制/流/字节、节点在线、应用/期望修订、配置同步、最后同步、活动 TCP/UDP、接纳/拒绝/失败/丢弃/预热计数、转发字节、应用错误、系统资源、计量/额度恢复、目标健康，以及多路径会话/路径/负载/失败计数。独立部署的 mux 指标由 `reverse-mux-server --metrics-listen` 提供；控制器中的 `relay_reverse_mux_process_available 0` 表示遥测不在该进程 |
 | GET | `/telemetry` | 可见节点最近 24 小时的逐次回报采样和事件，供总览页使用；见下文“0.19.0 遥测” |
-| GET | `/alerts` | 仅系统管理员；告警设置、通道（不含地址和密钥）、当前与最近恢复的告警、发送记录；见下文“0.19.0 告警通知” |
+| GET | `/alerts` | 系统管理员读取全部；租户管理员读取本租户通道、事件和发送记录；返回 `can_manage` |
 | PUT | `/alerts/settings` | `{maintenance_until_ms}`；仅系统管理员，登录会话 |
-| POST | `/alerts/channels` | `{name,enabled,min_severity,target}`；仅系统管理员，登录会话 |
+| POST | `/alerts/channels` | `{name,enabled,min_severity,target,tenant_id?}`；仅系统管理员，登录会话 |
 | PUT / DELETE | `/alerts/channels/{id}` | 修改或删除通道；修改时留空的地址、令牌和密钥保留原值 |
 | POST | `/alerts/channels/{id}/test` | 立即发送一条测试消息，失败返回 502 和原因 |
 | GET | `/capabilities` | 实现能力与待实现能力目录，不代表完整发布验收 |
@@ -470,3 +470,9 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 ## 0.113.0 managed HTTP/2 CONNECT
 
 `Rule.inbound_http2_connect` enables the managed HTTP/2 path, requires `protocol="tcp"` and `targets=[]`, and supports Basic credentials, `bearer_token_sha256`, `max_concurrent_streams`, `allow_private_destinations` and optional `socket_buffer_bytes`. See [HTTP2.md](HTTP2.md) for defaults, bounds, TLS/ALPN, credential rotation, metering and client constraints. Statistics add `active_http2_streams`; Prometheus adds `relay_node_active_http2_streams`. Upgrade controllers first.
+
+## 0.114.0 additions
+
+Rules accept optional `mptcp: {inbound: "off|prefer|require", outbound: "off|prefer|require"}`. Live transport observations appear under `stats.mptcp`; see [MPTCP.md](MPTCP.md) for fallback semantics and the bound on observed sockets. Changing an active listener mode requires disabling and applying that rule first. SOCKS5 BIND peer sockets use the outbound policy.
+
+SMTP targets use `{kind: "smtp", config: {...}}`. Channels accept optional `tenant_id`, and `GET /alerts` now permits tenant administrators with scoped results and `can_manage: false`. Mutations remain system-administrator session operations. SMTP passwords and full SMTP editing details are not exposed to tenant administrators. See [ALERTS.md](ALERTS.md).

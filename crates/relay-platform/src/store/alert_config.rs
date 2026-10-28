@@ -31,6 +31,7 @@ fn require_admin(actor: &Actor) -> Result<()> {
 
 /// A node as the alert worker sees it.
 pub struct AlertNode {
+    pub tenant_id: String,
     pub id: String,
     pub name: String,
     pub last_seen_ms: Option<i64>,
@@ -51,17 +52,20 @@ impl Store {
     }
     pub fn alert_nodes(&self) -> Result<Vec<AlertNode>> {
         let conn = self.0.lock().unwrap();
-        let mut q =
-            conn.prepare("SELECT id,name,last_seen_ms,token_hash IS NOT NULL FROM nodes")?;
-        let rows: Vec<(String, String, Option<i64>, bool)> = q
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        let mut q = conn
+            .prepare("SELECT id,name,last_seen_ms,token_hash IS NOT NULL,tenant_id FROM nodes")?;
+        let rows: Vec<(String, String, Option<i64>, bool, String)> = q
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
             .collect::<rusqlite::Result<_>>()?;
         let now = now_ms();
         rows.into_iter()
-            .map(|(id, name, last_seen_ms, enrolled)| {
+            .map(|(id, name, last_seen_ms, enrolled, tenant_id)| {
                 let active = node_profiles::read(&conn, &id)?.settings.lifecycle(now)
                     == crate::node::NodeLifecycle::Active;
                 Ok(AlertNode {
+                    tenant_id,
                     watched: enrolled && active,
                     id,
                     name,
@@ -71,14 +75,69 @@ impl Store {
             .collect()
     }
     pub fn alert_overview(&self, actor: &Actor) -> Result<serde_json::Value> {
-        require_admin(actor)?;
-        let (settings, channels) = self.alert_config()?;
-        let views: Vec<ChannelView> = channels.iter().map(Channel::view).collect();
-        Ok(serde_json::json!({
-            "settings": settings,
-            "channels": views,
-            "incidents": self.5.snapshot(),
-        }))
+        if actor.role == Role::Viewer {
+            return reject(403, "tenant administrator required");
+        }
+        let conn = self.0.lock().unwrap();
+        let settings: Settings = read(&conn, SETTINGS)?;
+        let channels: Vec<Channel> = read(&conn, CHANNELS)?;
+        let admin = actor.role == Role::SystemAdmin;
+        let views: Vec<ChannelView> = channels
+            .iter()
+            .filter(|c| admin || c.tenant_id.as_deref() == Some(&actor.tenant_id))
+            .map(|c| {
+                let mut v = c.view();
+                if !admin {
+                    v.smtp = None;
+                }
+                v
+            })
+            .collect();
+        let mut incidents = self.5.snapshot();
+        if !admin {
+            let mut q = conn.prepare("SELECT id FROM nodes WHERE tenant_id=?1")?;
+            let nodes: std::collections::HashSet<String> = q
+                .query_map([&actor.tenant_id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let permitted = |i: &crate::alerts::Incident| {
+                i.tenant_id == actor.tenant_id && nodes.contains(&i.node_id)
+            };
+            incidents.open.retain(permitted);
+            incidents.resolved.retain(permitted);
+            incidents.deliveries.retain(|d| {
+                d.tenant_id.as_deref() == Some(&actor.tenant_id)
+                    && views.iter().any(|c| c.id == d.channel_id)
+            });
+        }
+        Ok(
+            serde_json::json!({"settings": settings, "channels": views, "incidents": incidents, "can_manage": admin}),
+        )
+    }
+    /// Rechecked before every asynchronous attempt, including retries.
+    pub fn alert_delivery_permitted(
+        &self,
+        channel: &Channel,
+        ownership: &[(String, String)],
+    ) -> Result<bool> {
+        let conn = self.0.lock().unwrap();
+        let channels: Vec<Channel> = read(&conn, CHANNELS)?;
+        if !channel.enabled || !channels.iter().any(|c| c == channel) {
+            return Ok(false);
+        }
+        for (node, tenant) in ownership {
+            if channel.tenant_id.as_ref().is_some_and(|t| t != tenant) {
+                return Ok(false);
+            }
+            let current: Option<String> = conn
+                .query_row("SELECT tenant_id FROM nodes WHERE id=?1", [node], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            if current.as_ref() != Some(tenant) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
     pub fn set_alert_settings(&self, actor: &Actor, settings: Settings) -> Result<()> {
         require_admin(actor)?;
@@ -105,6 +164,16 @@ impl Store {
         require_admin(actor)?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        if let Some(tenant) = &channel.tenant_id {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tenants WHERE id=?1)",
+                [tenant],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return reject(400, "alert tenant not found");
+            }
+        }
         let mut channels: Vec<Channel> = read(&tx, CHANNELS)?;
         match id {
             Some(id) => {

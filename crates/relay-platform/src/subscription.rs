@@ -464,6 +464,7 @@ mod tests {
 
     fn rule() -> Rule {
         Rule {
+            mptcp: None,
             inbound_multipath: None,
             outbound_multipath: None,
             health_check: None,

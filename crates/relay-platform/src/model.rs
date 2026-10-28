@@ -301,6 +301,8 @@ pub fn canonical_address(address: SocketAddr) -> SocketAddr {
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mptcp: Option<crate::mptcp::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_multipath: Option<crate::multipath::ServerConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outbound_multipath: Option<crate::multipath::ClientConfig>,
@@ -385,6 +387,12 @@ pub struct Rule {
 }
 
 impl Rule {
+    pub fn mptcp_inbound(&self) -> crate::mptcp::Mode {
+        self.mptcp.unwrap_or_default().inbound
+    }
+    pub fn mptcp_outbound(&self) -> crate::mptcp::Mode {
+        self.mptcp.unwrap_or_default().outbound
+    }
     pub fn listen_addresses(&self) -> impl Iterator<Item = SocketAddr> + '_ {
         (self.listen.port()..=self.listen_end_port.unwrap_or(self.listen.port())).map(|port| {
             let mut address = self.listen;
@@ -415,6 +423,9 @@ impl Rule {
         self.inbound_tls.is_some() || self.targets.iter().any(|t| t.tls.is_some())
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(policy) = self.mptcp {
+            policy.validate(self.protocol.tcp())?;
+        }
         crate::multipath::validate_rule(self)?;
         crate::destination_acl::DestinationPolicy::parse_with_ports(
             &self.allow_destinations,
@@ -881,6 +892,8 @@ pub struct UsageAck {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineStats {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mptcp: Option<crate::mptcp::Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_recovery: Option<crate::budget::BudgetRecoveryStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

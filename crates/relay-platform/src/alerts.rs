@@ -52,6 +52,9 @@ impl Settings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Target {
+    Smtp {
+        config: crate::email::Config,
+    },
     /// JSON POST; with a secret, `X-Relay-Signature: sha256=<hex HMAC of the body>`.
     Webhook {
         url: String,
@@ -80,6 +83,9 @@ pub enum Target {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Channel {
+    /// None routes incidents from all tenants. Only a system administrator may set this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
     #[serde(default)]
     pub id: String,
     pub name: String,
@@ -93,6 +99,9 @@ pub struct Channel {
 /// What the API shows: destinations without tokens, URLs or secrets.
 #[derive(Serialize)]
 pub struct ChannelView {
+    pub tenant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smtp: Option<crate::email::Config>,
     pub id: String,
     pub name: String,
     pub enabled: bool,
@@ -110,6 +119,11 @@ impl Channel {
                 .unwrap_or_else(|| "…".into())
         };
         let (kind, destination, secret_set) = match &self.target {
+            Target::Smtp { config } => (
+                "smtp",
+                format!("{}:{} → {}", config.host, config.port, config.to.join(", ")),
+                !config.password.is_empty(),
+            ),
             Target::Webhook { url, secret } => ("webhook", host(url), !secret.is_empty()),
             Target::Telegram { chat_id, .. } => ("telegram", format!("chat {chat_id}"), true),
             Target::Wecom { url } => ("wecom", host(url), false),
@@ -117,6 +131,11 @@ impl Channel {
             Target::Dingtalk { url, secret } => ("dingtalk", host(url), !secret.is_empty()),
         };
         ChannelView {
+            tenant_id: self.tenant_id.clone(),
+            smtp: match &self.target {
+                Target::Smtp { config } => Some(config.public()),
+                _ => None,
+            },
             id: self.id.clone(),
             name: self.name.clone(),
             enabled: self.enabled,
@@ -146,6 +165,7 @@ impl Channel {
             Ok(())
         };
         match &self.target {
+            Target::Smtp { config } => config.validate()?,
             Target::Webhook { url: u, secret }
             | Target::Feishu { url: u, secret }
             | Target::Dingtalk { url: u, secret } => {
@@ -185,6 +205,15 @@ impl Channel {
             }
         };
         match (&mut self.target, &saved.target) {
+            (Target::Smtp { config }, Target::Smtp { config: old }) => {
+                if config.host == old.host
+                    && config.port == old.port
+                    && config.username == old.username
+                    && config.security == old.security
+                {
+                    keep(&mut config.password, &old.password);
+                }
+            }
             (Target::Webhook { url, secret }, Target::Webhook { url: u, secret: s })
             | (Target::Feishu { url, secret }, Target::Feishu { url: u, secret: s })
             | (Target::Dingtalk { url, secret }, Target::Dingtalk { url: u, secret: s }) => {
@@ -209,6 +238,7 @@ impl Channel {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Incident {
+    pub tenant_id: String,
     pub key: String,
     pub node_id: String,
     pub node_name: String,
@@ -233,6 +263,7 @@ pub enum Notice {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Delivery {
+    pub tenant_id: Option<String>,
     pub id: u64,
     pub channel_id: String,
     pub channel_name: String,
@@ -291,7 +322,19 @@ impl Alerts {
         }
     }
 
-    fn apply(&self, change: Change, names: &HashMap<String, String>, now: i64) {
+    /// Remove stale ownership before ingesting new events or exposing a snapshot.
+    fn retain_owned(&self, owners: &HashMap<String, (String, String)>) {
+        let mut state = self.0.lock().unwrap();
+        let permitted = |i: &Incident| {
+            owners
+                .get(&i.node_id)
+                .is_some_and(|(_, tenant)| tenant == &i.tenant_id)
+        };
+        state.open.retain(|_, i| permitted(i));
+        state.resolved.retain(permitted);
+    }
+
+    fn apply(&self, change: Change, names: &HashMap<String, (String, String)>, now: i64) {
         let mut state = self.0.lock().unwrap();
         match change {
             Change::Open {
@@ -300,6 +343,9 @@ impl Alerts {
                 severity,
                 summary,
             } => {
+                let Some((name, tenant)) = names.get(&node_id) else {
+                    return;
+                };
                 if let Some(incident) = state.open.get_mut(&key) {
                     incident.summary = summary;
                     return;
@@ -317,10 +363,8 @@ impl Alerts {
                         incident
                     }
                     None => Incident {
-                        node_name: names
-                            .get(&node_id)
-                            .cloned()
-                            .unwrap_or_else(|| node_id.clone()),
+                        node_name: name.clone(),
+                        tenant_id: tenant.clone(),
                         key: key.clone(),
                         node_id,
                         severity,
@@ -385,6 +429,7 @@ impl Alerts {
         state.next_delivery += 1;
         let id = state.next_delivery;
         state.deliveries.push_back(Delivery {
+            tenant_id: channel.tenant_id.clone(),
             id,
             channel_id: channel.id.clone(),
             channel_name: channel.name.clone(),
@@ -445,8 +490,9 @@ pub async fn run(store: Store, tick: Duration, stop: CancellationToken) {
         let alerts = store.alerts();
         let names: HashMap<_, _> = nodes
             .iter()
-            .map(|n| (n.id.clone(), n.name.clone()))
+            .map(|n| (n.id.clone(), (n.name.clone(), n.tenant_id.clone())))
             .collect();
+        alerts.retain_owned(&names);
         let after = alerts.0.lock().unwrap().last_event;
         for event in store.telemetry_events_after(after) {
             alerts.0.lock().unwrap().last_event = event.id;
@@ -489,7 +535,13 @@ pub async fn run(store: Store, tick: Duration, stop: CancellationToken) {
         for channel in channels.iter().filter(|c| c.enabled) {
             let batch: Vec<_> = due
                 .iter()
-                .filter(|(_, incident)| incident.severity >= channel.min_severity)
+                .filter(|(_, incident)| {
+                    incident.severity >= channel.min_severity
+                        && channel
+                            .tenant_id
+                            .as_ref()
+                            .is_none_or(|t| t == &incident.tenant_id)
+                })
                 .cloned()
                 .collect();
             let Some((_, first)) = batch.first() else {
@@ -502,10 +554,14 @@ pub async fn run(store: Store, tick: Duration, stop: CancellationToken) {
             };
             let id = alerts.record(channel, &first.key, batch.len(), notice);
             let message = grouped(&batch);
+            let ownership: Vec<_> = batch
+                .iter()
+                .map(|(_, i)| (i.node_id.clone(), i.tenant_id.clone()))
+                .collect();
             let (client, channel, store) = (client.clone(), channel.clone(), store.clone());
-            tokio::spawn(
-                async move { deliver(&client, &channel, &message, &store.alerts(), id).await },
-            );
+            tokio::spawn(async move {
+                deliver(&client, &channel, &message, &store, &ownership, id).await
+            });
         }
     }
 }
@@ -611,11 +667,26 @@ pub async fn deliver(
     client: &reqwest::Client,
     channel: &Channel,
     message: &str,
-    alerts: &Alerts,
+    store: &Store,
+    ownership: &[(String, String)],
     id: u64,
 ) -> Result<()> {
+    let alerts = store.alerts();
     let mut attempts = 0;
     loop {
+        let (db, saved, nodes) = (store.clone(), channel.clone(), ownership.to_vec());
+        let permitted =
+            tokio::task::spawn_blocking(move || db.alert_delivery_permitted(&saved, &nodes))
+                .await??;
+        if !permitted {
+            alerts.update(
+                id,
+                attempts,
+                "cancelled",
+                Some("channel or node ownership changed".into()),
+            );
+            return Ok(());
+        }
         attempts += 1;
         let error = match send(client, channel, message).await {
             Ok(()) => {
@@ -648,6 +719,9 @@ pub async fn test(channel: &Channel, alerts: &Alerts) -> Result<()> {
 }
 
 async fn send(client: &reqwest::Client, channel: &Channel, message: &str) -> Result<()> {
+    if let Target::Smtp { config } = &channel.target {
+        return crate::email::send(config, "Relay platform alert", message).await;
+    }
     let (url, body, headers) = request(&channel.target, message, now_ms())?;
     let mut builder = client.post(url).header("content-type", "application/json");
     for (name, value) in headers {
@@ -669,7 +743,7 @@ async fn send(client: &reqwest::Client, channel: &Channel, message: &str) -> Res
                 reply["errcode"].as_i64().is_some_and(|code| code != 0)
             }
             Target::Feishu { .. } => reply["code"].as_i64().is_some_and(|code| code != 0),
-            Target::Webhook { .. } => false,
+            Target::Webhook { .. } | Target::Smtp { .. } => false,
         };
         ensure!(
             !failed,
@@ -688,6 +762,7 @@ pub fn request(target: &Target, message: &str, now: i64) -> Result<Request> {
         ring::hmac::sign(&ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key), data)
     };
     Ok(match target {
+        Target::Smtp { .. } => anyhow::bail!("SMTP channels do not use HTTP requests"),
         Target::Webhook { url, secret } => {
             let body = serde_json::json!({"text": message, "sent_at_ms": now}).to_string();
             let headers = if secret.is_empty() {
@@ -856,7 +931,7 @@ mod tests {
                 severity: Severity::Warning,
                 summary: "down".into(),
             },
-            &HashMap::from([("n".into(), "edge-01".into())]),
+            &HashMap::from([("n".into(), ("edge-01".into(), "default".into()))]),
             at,
         );
     }
@@ -943,6 +1018,7 @@ mod tests {
     #[test]
     fn grouped_messages_list_new_and_critical_problems_first() {
         let incident = |node: &str, severity| Incident {
+            tenant_id: "default".into(),
             key: node.into(),
             node_id: node.into(),
             node_name: node.into(),
@@ -978,6 +1054,7 @@ mod tests {
     #[test]
     fn edits_keep_saved_secrets_left_blank() {
         let saved = Channel {
+            tenant_id: None,
             id: "c".into(),
             name: "ops".into(),
             enabled: true,

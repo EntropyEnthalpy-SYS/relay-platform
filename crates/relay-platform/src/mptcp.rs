@@ -2,6 +2,9 @@
 //! working multipath data path: it probes the kernel, reports the configured
 //! interfaces/routes and exposes whether MPTCP sockets can be created.
 use serde::Serialize;
+mod socket;
+pub use socket::{Config, Connection, Mode, Snapshot, SocketInfo, inspect};
+pub(crate) use socket::{Guard, Tracker, stream_socket};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Interface {

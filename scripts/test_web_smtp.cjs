@@ -1,0 +1,12 @@
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const source = fs.readFileSync(process.argv[2] || 'web/app.js', 'utf8');
+const start = source.indexOf('function smtpConfig('), end = source.indexOf('\nfunction editAlertChannel(', start);
+const context = {}; vm.createContext(context); vm.runInContext(source.slice(start, end) + '\nthis.read = smtpConfig;', context);
+const data = new Map(Object.entries({ host: ' smtp.example ', port: '465', security: 'implicit_tls', from: 'sender@example.test', to: 'one@example.test, two@example.test\nthree@example.test', username: ' user ', password: ' secret with spaces ', ca_pem: '' }));
+const value = context.read(data);
+assert.equal(value.host, 'smtp.example'); assert.equal(value.port, 465);
+assert.equal(value.to.length, 3); assert.equal(value.username, 'user');
+assert.equal(value.password, ' secret with spaces ');
+data.set('port', '0'); assert.throws(() => context.read(data));
+data.set('port', '587'); data.set('security', 'opportunistic'); assert.throws(() => context.read(data));
+console.log('SMTP editor parses recipients and ports, preserves password bytes and rejects insecure unknown modes');

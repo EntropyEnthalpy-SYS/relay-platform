@@ -1606,6 +1606,45 @@ async fn prometheus_metrics(
             node.stats.active_http2_streams
         ));
     }
+    for (name, help, counter) in [
+        (
+            "mptcp_active_sockets",
+            "Active sockets with an explicit MPTCP policy.",
+            false,
+        ),
+        (
+            "mptcp_negotiated_total",
+            "Sockets confirmed to negotiate MPTCP at setup.",
+            true,
+        ),
+        (
+            "mptcp_fallback_total",
+            "Sockets observed using TCP under a preferred MPTCP policy.",
+            true,
+        ),
+        (
+            "mptcp_required_rejections_total",
+            "Sockets rejected because required MPTCP could not be confirmed.",
+            true,
+        ),
+    ] {
+        body.push_str(&format!(
+            "# HELP relay_node_{name} {help}\n# TYPE relay_node_{name} {}\n",
+            if counter { "counter" } else { "gauge" }
+        ));
+        for node in &nodes {
+            let value = node.stats.mptcp.as_ref().map_or(0, |m| match name {
+                "mptcp_active_sockets" => m.active_sockets,
+                "mptcp_negotiated_total" => m.negotiated_total,
+                "mptcp_fallback_total" => m.fallback_total,
+                _ => m.required_rejections,
+            });
+            body.push_str(&format!(
+                "relay_node_{name}{{node=\"{}\"}} {value}\n",
+                metric_label(&node.id)
+            ));
+        }
+    }
     body.push_str("# HELP relay_node_active_tcp Active TCP connections.\n# TYPE relay_node_active_tcp gauge\n");
     for node in &nodes {
         body.push_str(&format!(
@@ -3233,7 +3272,7 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","destination-acl","config-templates","mptcp-diagnostics","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
