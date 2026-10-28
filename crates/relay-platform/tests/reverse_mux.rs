@@ -585,3 +585,85 @@ async fn healthy_bulk_transfer_and_half_close_keep_all_bytes() {
     client.abort();
     server.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn silent_plain_control_does_not_block_the_accept() {
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server = tokio::spawn(reverse_mux::serve_mux(
+        control,
+        public,
+        "plain-silent-token".into(),
+    ));
+    let silent = TcpStream::connect(control_addr).await.unwrap();
+    let mut legitimate = TcpStream::connect(control_addr).await.unwrap();
+    legitimate
+        .write_all(b"REVERSE-MUX plain-silent-token\n")
+        .await
+        .unwrap();
+    let mut reply = [0u8; 6];
+    timeout(Duration::from_secs(2), legitimate.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"READY\n");
+    drop(silent);
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn silent_public_tls_handshake_does_not_block_neighbors() {
+    let certs = tls::Certificates::new();
+    let acceptor = reverse_mux::tls_acceptor(
+        &certs.root.join("server/cert.pem"),
+        &certs.root.join("server/key.pem"),
+    )
+    .unwrap();
+    let (connector, name) =
+        reverse_mux::tls_connector(&certs.root.join("root/ca.pem"), "relay.test").unwrap();
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public.local_addr().unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = target.accept().await.unwrap();
+        let mut buffer = [0u8; 64];
+        let size = stream.read(&mut buffer).await.unwrap();
+        stream.write_all(&buffer[..size]).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let server = tokio::spawn(reverse_mux::serve_mux_public_tls(
+        control,
+        public,
+        "public-silent-token".into(),
+        acceptor,
+        8,
+        300,
+        vec![],
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux(
+        control_addr,
+        target_addr.to_string(),
+        "public-silent-token".into(),
+    ));
+    let silent = TcpStream::connect(public_addr).await.unwrap();
+    let tcp = TcpStream::connect(public_addr).await.unwrap();
+    let mut exposed = connector.connect(name, tcp).await.unwrap();
+    exposed.write_all(b"neighbor").await.unwrap();
+    let mut reply = [0u8; 8];
+    timeout(Duration::from_secs(2), exposed.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"neighbor");
+    drop(silent);
+    timeout(Duration::from_secs(3), echo)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    client.abort();
+}

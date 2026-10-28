@@ -1,5 +1,20 @@
 # 本地验证记录
 
+0.98.0 开发版在 macOS 27.0.1 arm64 通过 **431 项自动化测试（402 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 432 项。日志见 [verification-0.98.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.98.0.json](validation-evidence-0.98.0.json)。
+
+## 0.98.0 mux 握手隔离
+
+| 检查 | 结果 |
+| --- | --- |
+| 明文控制 | 静默连接不阻塞合法 READY |
+| 公网 TLS | 静默握手不阻塞邻居公网流 |
+| 上限 | 每控制 64 个待认证/待握手 |
+| 限制 | 非全局连接上限；真实网络未验收 |
+
+## 0.97.0 历史基线
+
+0.97.0 开发版在 macOS 27.0.1 arm64 通过 **429 项自动化测试（400 项 Rust、29 项 Python）**；R96-01..04 的 rollout/mux 修复及 0.96 基线回归通过，日志见 0.97 交付包。
+
 0.96.0 开发版在 macOS 27.0.1 arm64 通过 **418 项自动化测试（389 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 419 项。日志见 [verification-0.96.0.txt](verification-0.96.0.txt)，逐项清单见 [validation-evidence-0.96.0.json](validation-evidence-0.96.0.json)。
 
 ## 0.96.0 独立审查 R95 修复

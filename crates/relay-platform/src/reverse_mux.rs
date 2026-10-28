@@ -81,6 +81,7 @@ impl StreamFlow {
     }
 }
 type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
+type Responses = Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>;
 
 struct ActiveControl;
 impl Drop for ActiveControl {
@@ -90,11 +91,25 @@ impl Drop for ActiveControl {
 }
 struct ActiveStream(Arc<AtomicU32>);
 impl ActiveStream {
-    fn new(local: Arc<AtomicU32>) -> Self {
-        local.fetch_add(1, Ordering::Relaxed);
+    fn try_new(local: Arc<AtomicU32>, max_streams: usize) -> Option<Self> {
+        let mut current = local.load(Ordering::Relaxed);
+        loop {
+            if current >= max_streams as u32 {
+                return None;
+            }
+            match local.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
         ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
         TOTAL_STREAMS.fetch_add(1, Ordering::Relaxed);
-        Self(local)
+        Some(Self(local))
     }
 }
 impl Drop for ActiveStream {
@@ -209,46 +224,35 @@ async fn serve_mux_plain_public(
         "reverse mux idle timeout must be 1..=86400 seconds"
     );
     let public = Arc::new(public);
+    let auth_slots = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
     loop {
-        let (mut control_stream, peer) = control.accept().await?;
+        let (control_stream, peer) = control.accept().await?;
         control_stream.set_nodelay(true).ok();
-        let authorized = match tokio::time::timeout(AUTH_TIMEOUT, read_line(&mut control_stream))
-            .await
-            .ok()
-            .and_then(Result::ok)
-        {
-            Some(line) => line
-                .strip_prefix("REVERSE-MUX ")
-                .is_some_and(|provided| token_matches(&token, provided)),
-            None => false,
+        let permit = match auth_slots.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                tracing::warn!(%peer, "reverse mux plain authentication capacity is full");
+                continue;
+            }
         };
-        if !authorized {
-            let _ = control_stream.write_all(b"DENY\n").await;
-            tracing::warn!(%peer, "reverse mux authentication failed");
-            continue;
-        }
-        if control_stream.write_all(b"READY\n").await.is_err() {
-            continue;
-        }
-        tracing::info!(%peer, "reverse mux client connected");
         let public = public.clone();
         let public_acceptor = public_acceptor.clone();
         let allow_public = allow_public.clone();
         let token = token.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_authorized_control(
+            authenticate_control_and_spawn(
                 control_stream,
+                permit,
+                "plain",
+                peer,
+                token,
                 public,
                 public_acceptor,
-                token,
+                allow_public,
                 max_streams,
                 idle_timeout_secs,
-                allow_public,
             )
-            .await
-            {
-                tracing::warn!(%error, "reverse mux control ended");
-            }
+            .await;
         });
     }
 }
@@ -306,8 +310,9 @@ async fn serve_control(
         responses.clone(),
         cancel.clone(),
     ));
-    let next_id = AtomicU32::new(1);
     let active_streams = Arc::new(AtomicU32::new(0));
+    let next_id = Arc::new(AtomicU32::new(1));
+    let public_slots = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
     let result: Result<()> = loop {
         let (mut exposed, peer) = tokio::select! {
             accepted = public.accept() => match accepted { Ok(pair) => pair, Err(error) => break Err(error.into()) },
@@ -322,84 +327,145 @@ async fn serve_control(
             let _ = exposed.shutdown().await;
             continue;
         }
-        if active_streams.load(Ordering::Relaxed) >= max_streams as u32 {
-            let _ = exposed.shutdown().await;
-            continue;
-        }
-        let exposed: PublicStream = if let Some(acceptor) = &public_acceptor {
-            match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(exposed)).await {
-                Ok(Ok(stream)) => Box::new(stream),
-                Ok(Err(error)) => {
-                    tracing::warn!(%peer, %error, "reverse mux public TLS handshake failed");
-                    continue;
-                }
-                Err(_) => {
-                    tracing::warn!(%peer, "reverse mux public TLS handshake timed out");
-                    continue;
-                }
-            }
-        } else {
-            Box::new(exposed)
-        };
-        let id = next_id.fetch_add(1, Ordering::Relaxed);
-        let active = ActiveStream::new(active_streams.clone());
-        let stream_cancel = cancel.child_token();
-        let flow = StreamFlow::new(false);
-        let (data_tx, data_rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
-        let (response_tx, response_rx) = oneshot::channel();
-        sessions.lock().await.insert(
-            id,
-            StreamInbox {
-                sender: data_tx,
-                cancel: stream_cancel.clone(),
-                flow: flow.clone(),
-            },
-        );
-        responses.lock().await.insert(id, response_tx);
-        if let Err(error) = write_frame(&writer, OPEN, id, FLOW_CONTROL_V1).await {
-            sessions.lock().await.remove(&id);
-            responses.lock().await.remove(&id);
-            break Err(error.into());
-        }
-        let opened = tokio::select! {
-            response = tokio::time::timeout(OPEN_TIMEOUT, response_rx) =>
-                response.ok().and_then(Result::ok).unwrap_or(false),
-            _ = stream_cancel.cancelled() => false,
-        };
-        if !opened {
-            sessions.lock().await.remove(&id);
-            responses.lock().await.remove(&id);
-            stream_cancel.cancel();
-            let _ = write_frame(&writer, RESET, id, &[]).await;
-            tracing::warn!(%peer, "reverse mux client did not open the target");
-            continue;
-        }
         let writer = writer.clone();
         let sessions = sessions.clone();
-        tokio::spawn(async move {
-            let _active = active;
-            let result = bridge_io(
-                id,
-                exposed,
-                data_rx,
-                &writer,
-                &stream_cancel,
-                &flow,
-                Some(Duration::from_secs(idle_timeout_secs)),
-                true,
-            )
-            .await;
-            sessions.lock().await.remove(&id);
-            stream_cancel.cancel();
-            if let Err(error) = result {
-                let _ = write_frame(&writer, RESET, id, &[]).await;
-                tracing::debug!(%error, "reverse mux public bridge ended");
-            }
-        });
+        let responses = responses.clone();
+        let active_streams = active_streams.clone();
+        let next_id = next_id.clone();
+        let cancel = cancel.clone();
+        if let Some(acceptor) = &public_acceptor {
+            let permit = match public_slots.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    tracing::warn!(%peer, "reverse mux public TLS handshake capacity is full");
+                    let _ = exposed.shutdown().await;
+                    continue;
+                }
+            };
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let exposed = tokio::select! {
+                    result = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(exposed)) => match result {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(error)) => {
+                            tracing::warn!(%peer, %error, "reverse mux public TLS handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!(%peer, "reverse mux public TLS handshake timed out");
+                            return;
+                        }
+                    },
+                    _ = cancel.cancelled() => return,
+                };
+                drop(permit);
+                open_public_stream(
+                    Box::new(exposed),
+                    peer,
+                    writer,
+                    sessions,
+                    responses,
+                    active_streams,
+                    next_id,
+                    max_streams,
+                    idle_timeout_secs,
+                    cancel,
+                )
+                .await;
+            });
+        } else {
+            tokio::spawn(open_public_stream(
+                Box::new(exposed),
+                peer,
+                writer,
+                sessions,
+                responses,
+                active_streams,
+                next_id,
+                max_streams,
+                idle_timeout_secs,
+                cancel,
+            ));
+        }
     };
     cancel.cancel();
     let _ = read_task.await;
     result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_public_stream(
+    mut exposed: PublicStream,
+    peer: SocketAddr,
+    writer: Writer,
+    sessions: Sessions,
+    responses: Responses,
+    active_streams: Arc<AtomicU32>,
+    next_id: Arc<AtomicU32>,
+    max_streams: usize,
+    idle_timeout_secs: u64,
+    cancel: CancellationToken,
+) {
+    let Some(active) = ActiveStream::try_new(active_streams.clone(), max_streams) else {
+        let _ = exposed.shutdown().await;
+        return;
+    };
+    let id = next_id.fetch_add(1, Ordering::Relaxed);
+    let stream_cancel = cancel.child_token();
+    let flow = StreamFlow::new(false);
+    let (data_tx, data_rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
+    let (response_tx, response_rx) = oneshot::channel();
+    sessions.lock().await.insert(
+        id,
+        StreamInbox {
+            sender: data_tx,
+            cancel: stream_cancel.clone(),
+            flow: flow.clone(),
+        },
+    );
+    responses.lock().await.insert(id, response_tx);
+    if write_frame(&writer, OPEN, id, FLOW_CONTROL_V1)
+        .await
+        .is_err()
+    {
+        sessions.lock().await.remove(&id);
+        responses.lock().await.remove(&id);
+        cancel.cancel();
+        return;
+    }
+    let opened = tokio::select! {
+        response = tokio::time::timeout(OPEN_TIMEOUT, response_rx) =>
+            response.ok().and_then(Result::ok).unwrap_or(false),
+        _ = stream_cancel.cancelled() => false,
+    };
+    if !opened {
+        sessions.lock().await.remove(&id);
+        responses.lock().await.remove(&id);
+        stream_cancel.cancel();
+        let _ = write_frame(&writer, RESET, id, &[]).await;
+        tracing::warn!(%peer, "reverse mux client did not open the target");
+        return;
+    }
+    tokio::spawn(async move {
+        let _active = active;
+        let result = bridge_io(
+            id,
+            exposed,
+            data_rx,
+            &writer,
+            &stream_cancel,
+            &flow,
+            Some(Duration::from_secs(idle_timeout_secs)),
+            true,
+        )
+        .await;
+        sessions.lock().await.remove(&id);
+        stream_cancel.cancel();
+        if let Err(error) = result {
+            let _ = write_frame(&writer, RESET, id, &[]).await;
+            tracing::debug!(%error, "reverse mux public bridge ended");
+        }
+    });
 }
 
 // Each stream has independent reader/writer tasks within this future. A blocked
@@ -678,6 +744,7 @@ fn tls_connector_inner(
 async fn authenticate_control_and_spawn<S>(
     mut control_stream: S,
     permit: OwnedSemaphorePermit,
+    transport: &'static str,
     peer: SocketAddr,
     token: String,
     public: Arc<TcpListener>,
@@ -700,7 +767,7 @@ async fn authenticate_control_and_spawn<S>(
     };
     if !authorized {
         let _ = tokio::time::timeout(AUTH_TIMEOUT, control_stream.write_all(b"DENY\n")).await;
-        tracing::warn!(%peer, "reverse mux TLS authentication failed");
+        tracing::warn!(%peer, transport, "reverse mux control authentication failed");
         return;
     }
     if !matches!(
@@ -710,7 +777,7 @@ async fn authenticate_control_and_spawn<S>(
         return;
     }
     drop(permit);
-    tracing::info!(%peer, "reverse mux TLS client connected");
+    tracing::info!(%peer, transport, "reverse mux control connected");
     if let Err(error) = serve_authorized_control(
         control_stream,
         public,
@@ -722,7 +789,7 @@ async fn authenticate_control_and_spawn<S>(
     )
     .await
     {
-        tracing::warn!(%error, "reverse mux TLS control ended");
+        tracing::warn!(%error, transport, "reverse mux control ended");
     }
 }
 
@@ -803,6 +870,7 @@ pub async fn serve_mux_tls_public(
             authenticate_control_and_spawn(
                 control_stream,
                 permit,
+                "TLS",
                 peer,
                 token,
                 public,
