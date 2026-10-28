@@ -1,8 +1,18 @@
 # 本地验证记录
 
-0.101.0 开发版在 macOS 27.0.1 arm64 通过 **434 项自动化测试（405 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 435 项。日志见 [verification-0.101.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.101.0.json](validation-evidence-0.98.0.json)。
+0.102.0 开发版在 macOS 27.0.1 arm64 通过 **435 项自动化测试（406 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 436 项。日志见 [verification-0.102.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.102.0.json](validation-evidence-0.98.0.json)。
 
-## 0.101.0 单流双向字节上限
+## 0.102.0 限制指标与字节上限端到端
+
+| 检查 | 结果 |
+| --- | --- |
+| 控制拒绝计数 | `relay_reverse_mux_control_limit_rejections_total` |
+| 流拒绝计数 | `relay_reverse_mux_stream_limit_rejections_total` |
+| 字节重置计数 | `relay_reverse_mux_stream_byte_limit_resets_total` |
+| 端到端 | 上限 1 时首个字节到达后端，第二个字节重置当前流 |
+| 限制 | 进程累计，不持久化 |
+
+## 0.101.0 单流双向字节上限（历史）
 
 | 检查 | 结果 |
 | --- | --- |

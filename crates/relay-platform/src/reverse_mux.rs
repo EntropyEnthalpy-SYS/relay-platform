@@ -190,6 +190,9 @@ static TOTAL_CONTROLS: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_STREAMS: AtomicU32 = AtomicU32::new(0);
 static TOTAL_STREAMS: AtomicU64 = AtomicU64::new(0);
 static PUBLIC_TO_TARGET_BYTES: AtomicU64 = AtomicU64::new(0);
+static CONTROL_LIMIT_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+static STREAM_LIMIT_REJECTIONS: AtomicU64 = AtomicU64::new(0);
+static STREAM_BYTE_LIMIT_RESETS: AtomicU64 = AtomicU64::new(0);
 static TARGET_TO_PUBLIC_BYTES: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug)]
@@ -200,6 +203,9 @@ pub struct Stats {
     pub total_streams: u64,
     pub public_to_target_bytes: u64,
     pub target_to_public_bytes: u64,
+    pub control_limit_rejections: u64,
+    pub stream_limit_rejections: u64,
+    pub stream_byte_limit_resets: u64,
 }
 
 pub fn set_max_controls(max_controls: u32) {
@@ -234,6 +240,9 @@ pub fn stats() -> Stats {
         total_streams: TOTAL_STREAMS.load(Ordering::Relaxed),
         public_to_target_bytes: PUBLIC_TO_TARGET_BYTES.load(Ordering::Relaxed),
         target_to_public_bytes: TARGET_TO_PUBLIC_BYTES.load(Ordering::Relaxed),
+        control_limit_rejections: CONTROL_LIMIT_REJECTIONS.load(Ordering::Relaxed),
+        stream_limit_rejections: STREAM_LIMIT_REJECTIONS.load(Ordering::Relaxed),
+        stream_byte_limit_resets: STREAM_BYTE_LIMIT_RESETS.load(Ordering::Relaxed),
     }
 }
 
@@ -496,6 +505,7 @@ async fn open_public_stream(
     cancel: CancellationToken,
 ) {
     let Some(active) = ActiveStream::try_new(active_streams.clone(), max_streams) else {
+        STREAM_LIMIT_REJECTIONS.fetch_add(1, Ordering::Relaxed);
         let _ = exposed.shutdown().await;
         return;
     };
@@ -596,6 +606,7 @@ where
                     return Ok::<_, anyhow::Error>(());
                 }
                 if !flow.consume(size) {
+                    STREAM_BYTE_LIMIT_RESETS.fetch_add(1, Ordering::Relaxed);
                     bail!("reverse mux stream byte limit reached");
                 }
                 // Finish an in-progress control frame even when this stream is
@@ -623,6 +634,7 @@ where
                 let io = async {
                     match kind {
                         DATA if !flow.consume(payload.len()) => {
+                            STREAM_BYTE_LIMIT_RESETS.fetch_add(1, Ordering::Relaxed);
                             Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reverse mux stream byte limit reached"))
                         }
                         DATA => output.write_all(&payload).await,
@@ -866,6 +878,7 @@ async fn authenticate_control_and_spawn<S>(
         return;
     }
     let Some(active) = ActiveControl::try_new() else {
+        CONTROL_LIMIT_REJECTIONS.fetch_add(1, Ordering::Relaxed);
         let _ = tokio::time::timeout(AUTH_TIMEOUT, control_stream.write_all(b"DENY\n")).await;
         tracing::warn!(%peer, transport, "reverse mux active control limit reached");
         return;
@@ -1216,13 +1229,16 @@ async fn read_frame(reader: &mut ControlRead) -> Result<Option<Frame>> {
 pub fn metrics_text() -> String {
     let stats = stats();
     format!(
-        "# HELP relay_reverse_mux_process_available 1 when metrics come from the tunnel process.\n# TYPE relay_reverse_mux_process_available gauge\nrelay_reverse_mux_process_available 1\n# HELP relay_reverse_mux_controls Authorized reverse mux controls.\n# TYPE relay_reverse_mux_controls gauge\nrelay_reverse_mux_controls {}\nrelay_reverse_mux_controls_total {}\n# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\nrelay_reverse_mux_streams {}\nrelay_reverse_mux_streams_total {}\n# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\nrelay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\nrelay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n",
+        "# HELP relay_reverse_mux_process_available 1 when metrics come from the tunnel process.\n# TYPE relay_reverse_mux_process_available gauge\nrelay_reverse_mux_process_available 1\n# HELP relay_reverse_mux_controls Authorized reverse mux controls.\n# TYPE relay_reverse_mux_controls gauge\nrelay_reverse_mux_controls {}\nrelay_reverse_mux_controls_total {}\n# HELP relay_reverse_mux_streams Public mux streams.\n# TYPE relay_reverse_mux_streams gauge\nrelay_reverse_mux_streams {}\nrelay_reverse_mux_streams_total {}\n# HELP relay_reverse_mux_bytes Bytes forwarded by the mux server.\n# TYPE relay_reverse_mux_bytes counter\nrelay_reverse_mux_bytes{{direction=\"public_to_target\"}} {}\nrelay_reverse_mux_bytes{{direction=\"target_to_public\"}} {}\n# HELP relay_reverse_mux_control_limit_rejections_total Controls denied by --max-controls.\n# TYPE relay_reverse_mux_control_limit_rejections_total counter\nrelay_reverse_mux_control_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_limit_rejections_total Public streams refused by --max-streams or --max-total-streams.\n# TYPE relay_reverse_mux_stream_limit_rejections_total counter\nrelay_reverse_mux_stream_limit_rejections_total {}\n# HELP relay_reverse_mux_stream_byte_limit_resets_total Streams reset by --max-stream-bytes.\n# TYPE relay_reverse_mux_stream_byte_limit_resets_total counter\nrelay_reverse_mux_stream_byte_limit_resets_total {}\n",
         stats.active_controls,
         stats.total_controls,
         stats.active_streams,
         stats.total_streams,
         stats.public_to_target_bytes,
         stats.target_to_public_bytes,
+        stats.control_limit_rejections,
+        stats.stream_limit_rejections,
+        stats.stream_byte_limit_resets,
     )
 }
 

@@ -413,6 +413,9 @@ fn mux_metrics_identify_the_tunnel_process() {
     let text = reverse_mux::metrics_text();
     assert!(text.contains("relay_reverse_mux_process_available 1"));
     assert!(text.contains("relay_reverse_mux_bytes{direction=\"public_to_target\"} "));
+    assert!(text.contains("relay_reverse_mux_control_limit_rejections_total "));
+    assert!(text.contains("relay_reverse_mux_stream_limit_rejections_total "));
+    assert!(text.contains("relay_reverse_mux_stream_byte_limit_resets_total "));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
@@ -799,6 +802,84 @@ fn max_total_streams_rejects_a_second_public_stream() {
     let read = second.read(&mut end).unwrap();
     assert_eq!(read, 0);
     drop(first);
+    server.kill().ok();
+    client.kill().ok();
+    server.wait().ok();
+    client.wait().ok();
+}
+
+#[test]
+fn max_stream_bytes_resets_only_the_over_limit_stream() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener as StdListener, TcpStream as StdStream};
+    use std::process::{Command, Stdio};
+    use std::time::Duration as StdDuration;
+    let control = StdListener::bind("127.0.0.1:0").unwrap();
+    let control_port = control.local_addr().unwrap().port();
+    drop(control);
+    let public = StdListener::bind("127.0.0.1:0").unwrap();
+    let public_port = public.local_addr().unwrap().port();
+    drop(public);
+    let target = StdListener::bind("127.0.0.1:0").unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let temp = tempfile::tempdir().unwrap();
+    let token = temp.path().join("token");
+    std::fs::write(&token, "byte-limit-token\n").unwrap();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args([
+            "reverse-mux-server",
+            "--control-listen",
+            &format!("127.0.0.1:{control_port}"),
+            "--public-listen",
+            &format!("127.0.0.1:{public_port}"),
+            "--token-file",
+            token.to_str().unwrap(),
+            "--max-stream-bytes",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut client = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args([
+            "reverse-mux-client",
+            "--server",
+            &format!("127.0.0.1:{control_port}"),
+            "--target",
+            &format!("127.0.0.1:{target_port}"),
+            "--token-file",
+            token.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut public_stream = None;
+    for _ in 0..100 {
+        if let Ok(stream) = StdStream::connect(("127.0.0.1", public_port)) {
+            public_stream = Some(stream);
+            break;
+        }
+        std::thread::sleep(StdDuration::from_millis(20));
+    }
+    let mut public_stream = public_stream.expect("public listener did not open");
+    let (mut backend, _) = target.accept().unwrap();
+    backend
+        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .unwrap();
+    public_stream.write_all(b"a").unwrap();
+    let mut first = [0u8; 1];
+    backend.read_exact(&mut first).unwrap();
+    assert_eq!(&first, b"a");
+    public_stream.write_all(b"b").unwrap();
+    let mut end = [0u8; 1];
+    assert_eq!(backend.read(&mut end).unwrap(), 0);
+    public_stream
+        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .unwrap();
+    let _ = public_stream.read(&mut end);
+    drop(public_stream);
     server.kill().ok();
     client.kill().ok();
     server.wait().ok();
