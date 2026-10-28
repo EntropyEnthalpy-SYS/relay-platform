@@ -1132,10 +1132,11 @@ async fn udp_socks5_mode_reaches_two_targets() {
         300,
         vec![],
     ));
-    let client = tokio::spawn(reverse_mux::client_mux_udp_socks5(
+    let client = tokio::spawn(reverse_mux::client_mux_udp_socks5_with_policy(
         control_addr,
         "127.0.0.1:9".into(),
         "udp-socks-token".into(),
+        true,
     ));
     tokio::time::sleep(Duration::from_millis(100)).await;
     let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -1158,6 +1159,46 @@ async fn udp_socks5_mode_reaches_two_targets() {
     }
     timeout(Duration::from_secs(3), one).await.unwrap().unwrap();
     timeout(Duration::from_secs(3), two).await.unwrap().unwrap();
+    server.abort();
+    client.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn udp_socks5_default_rejects_private_targets() {
+    use relay_platform::shadowsocks::Destination;
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let public_udp_addr = public_udp.local_addr().unwrap();
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let server = tokio::spawn(reverse_mux::serve_mux_plain_udp(
+        control,
+        public,
+        "udp-private-token".into(),
+        std::sync::Arc::new(public_udp),
+        8,
+        300,
+        vec![],
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux_udp_socks5(
+        control_addr,
+        "127.0.0.1:9".into(),
+        "udp-private-token".into(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    probe.connect(public_udp_addr).await.unwrap();
+    let request =
+        relay_platform::socks5::encode_udp_datagram(&Destination::Ip(target_addr), b"blocked");
+    probe.send(&request).await.unwrap();
+    let mut buffer = [0u8; 16];
+    assert!(
+        timeout(Duration::from_millis(500), target.recv_from(&mut buffer))
+            .await
+            .is_err()
+    );
     server.abort();
     client.abort();
 }

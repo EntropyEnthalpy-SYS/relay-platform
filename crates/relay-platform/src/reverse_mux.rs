@@ -114,12 +114,12 @@ impl StreamFlow {
 }
 type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
 type Responses = Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>;
-type UdpSessions = Arc<Mutex<HashMap<u32, (Arc<UdpSocket>, CancellationToken, bool)>>>;
+type UdpSessions = Arc<Mutex<HashMap<u32, (Arc<UdpSocket>, CancellationToken, bool, bool)>>>;
 
 #[derive(Clone, Debug)]
 enum UdpMode {
     Fixed(String),
-    Socks5,
+    Socks5 { allow_private: bool },
 }
 
 struct ActiveControl;
@@ -1295,13 +1295,26 @@ pub async fn client_mux_tls_udp_socks5(
     connector: TlsConnector,
     server_name: ServerName<'static>,
 ) -> Result<()> {
+    client_mux_tls_udp_socks5_with_policy(server, target, token, connector, server_name, false)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn client_mux_tls_udp_socks5_with_policy(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    connector: TlsConnector,
+    server_name: ServerName<'static>,
+    allow_private: bool,
+) -> Result<()> {
     client_mux_tls_udp_mode(
         server,
         target,
         token,
         connector,
         server_name,
-        Some(UdpMode::Socks5),
+        Some(UdpMode::Socks5 { allow_private }),
     )
     .await
 }
@@ -1374,7 +1387,22 @@ pub async fn client_mux_udp_socks5(
     target: String,
     token: String,
 ) -> Result<()> {
-    client_mux_udp_mode(server, target, token, Some(UdpMode::Socks5)).await
+    client_mux_udp_socks5_with_policy(server, target, token, false).await
+}
+
+pub async fn client_mux_udp_socks5_with_policy(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    allow_private: bool,
+) -> Result<()> {
+    client_mux_udp_mode(
+        server,
+        target,
+        token,
+        Some(UdpMode::Socks5 { allow_private }),
+    )
+    .await
 }
 
 async fn client_mux_udp_mode(
@@ -1513,14 +1541,19 @@ async fn client_read_loop(
                     .lock()
                     .await
                     .get(&id)
-                    .map(|entry| (entry.0.clone(), entry.2));
-                if let Some((socket, socks5)) = session {
+                    .map(|entry| (entry.0.clone(), entry.2, entry.3));
+                if let Some((socket, socks5, allow_private)) = session {
                     if socks5 {
                         match crate::socks5::parse_udp_datagram(&payload) {
                             Ok(datagram) => {
-                                let _ = socket
-                                    .send_to(&datagram.payload, datagram.destination.to_string())
-                                    .await;
+                                if let Some(destination) =
+                                    udp_socks5_destination(datagram.destination, allow_private)
+                                        .await
+                                {
+                                    let _ = socket
+                                        .send_to(&datagram.payload, destination.to_string())
+                                        .await;
+                                }
                             }
                             Err(error) => {
                                 tracing::debug!(%error, "reverse mux UDP SOCKS5 datagram rejected");
@@ -1532,7 +1565,7 @@ async fn client_read_loop(
                 }
             }
             Ok(Some((kind @ (FIN | RESET), id, _))) => {
-                if let Some((_, stream_cancel, _)) = udp_sessions.lock().await.remove(&id) {
+                if let Some((_, stream_cancel, _, _)) = udp_sessions.lock().await.remove(&id) {
                     stream_cancel.cancel();
                 }
                 dispatch_frame(&sessions, id, kind, vec![]).await;
@@ -1544,6 +1577,25 @@ async fn client_read_loop(
                 cancel.cancel();
                 return;
             }
+        }
+    }
+}
+
+async fn udp_socks5_destination(
+    destination: crate::shadowsocks::Destination,
+    allow_private: bool,
+) -> Option<crate::shadowsocks::Destination> {
+    use crate::shadowsocks::Destination;
+    match destination {
+        Destination::Ip(address) => (allow_private || crate::shadowsocks::public(address.ip()))
+            .then_some(Destination::Ip(address)),
+        Destination::Domain(name, port) if allow_private => Some(Destination::Domain(name, port)),
+        Destination::Domain(name, port) => {
+            let addresses = tokio::net::lookup_host((name.as_str(), port)).await.ok()?;
+            addresses
+                .filter(|address| crate::shadowsocks::public(address.ip()))
+                .map(Destination::Ip)
+                .next()
         }
     }
 }
@@ -1566,7 +1618,10 @@ async fn client_open_udp(
             return;
         }
     };
-    let socks5 = matches!(mode, UdpMode::Socks5);
+    let (socks5, allow_private) = match &mode {
+        UdpMode::Fixed(_) => (false, false),
+        UdpMode::Socks5 { allow_private } => (true, *allow_private),
+    };
     if let UdpMode::Fixed(target) = &mode
         && !matches!(
             tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(target)).await,
@@ -1578,11 +1633,15 @@ async fn client_open_udp(
     }
     let session_cancel = cancel.child_token();
     let socket = Arc::new(socket);
-    if let Some((_, previous, _)) = sessions
-        .lock()
-        .await
-        .insert(id, (socket.clone(), session_cancel.clone(), socks5))
-    {
+    if let Some((_, previous, _, _)) = sessions.lock().await.insert(
+        id,
+        (
+            socket.clone(),
+            session_cancel.clone(),
+            socks5,
+            allow_private,
+        ),
+    ) {
         previous.cancel();
     }
     tokio::spawn(client_udp_read(id, socket, writer, session_cancel, socks5));
