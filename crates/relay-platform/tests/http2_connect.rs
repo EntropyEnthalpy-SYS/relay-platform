@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+#[path = "common/tls.rs"]
+mod tls;
 use http_body_util::Empty;
 use hyper::{Request, body::Bytes, client::conn::http2::handshake};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -117,6 +120,69 @@ async fn h2c_connect_enforces_basic_auth() {
         .unwrap()
         .unwrap();
     assert_eq!(&reply, b"auth");
+    timeout(Duration::from_secs(2), echo)
+        .await
+        .unwrap()
+        .unwrap();
+    proxy.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn h2_connect_over_tls_tunnels_to_a_private_target() {
+    let certs = tls::Certificates::new();
+    let acceptor = http2_connect::tls_acceptor_h2(
+        &certs.root.join("server/cert.pem"),
+        &certs.root.join("server/key.pem"),
+        None,
+    )
+    .unwrap();
+    let (connector, name) =
+        http2_connect::tls_connector_h2(&certs.root.join("root/ca.pem"), "relay.test").unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = target.accept().await.unwrap();
+        let mut buffer = [0u8; 64];
+        let size = stream.read(&mut buffer).await.unwrap();
+        stream.write_all(&buffer[..size]).await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    let proxy = tokio::spawn(http2_connect::serve_tls(
+        listener,
+        http_connect::ServerConfig {
+            username: None,
+            password: None,
+            allow_private_destinations: true,
+        },
+        acceptor,
+    ));
+    let tcp = TcpStream::connect(proxy_addr).await.unwrap();
+    let tls = connector.connect(name, tcp).await.unwrap();
+    let (mut sender, connection) = handshake(TokioExecutor::new(), TokioIo::new(tls))
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let request = Request::builder()
+        .method(hyper::Method::CONNECT)
+        .uri(format!("http://{target_addr}"))
+        .body(Empty::<Bytes>::new())
+        .unwrap();
+    let mut response = sender.send_request(request).await.unwrap();
+    assert_eq!(response.status(), hyper::StatusCode::OK);
+    let upgraded = timeout(Duration::from_secs(2), hyper::upgrade::on(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tunnel = TokioIo::new(upgraded);
+    tunnel.write_all(b"h2-tls").await.unwrap();
+    let mut reply = [0u8; 6];
+    timeout(Duration::from_secs(2), tunnel.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"h2-tls");
     timeout(Duration::from_secs(2), echo)
         .await
         .unwrap()

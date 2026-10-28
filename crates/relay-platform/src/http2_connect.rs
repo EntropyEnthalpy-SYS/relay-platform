@@ -5,7 +5,7 @@
 //! speaks HTTP/2 frames instead of HTTP/1.1. It is intentionally separate from
 //! the rule engine until rule-level metering and ACL integration is added.
 use crate::{http_connect, shadowsocks::Destination};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use http_body_util::Empty;
 use hyper::{
@@ -15,11 +15,18 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{
-    io::copy_bidirectional,
+    io::{AsyncRead, AsyncWrite, copy_bidirectional},
     net::{TcpListener, TcpStream},
     time::timeout,
+};
+use tokio_rustls::{
+    TlsAcceptor,
+    rustls::{
+        RootCertStore, ServerConfig,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    },
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,6 +37,7 @@ pub async fn serve(listener: TcpListener, config: http_connect::ServerConfig) ->
     let server = Arc::new(config);
     loop {
         let (stream, peer) = listener.accept().await?;
+        stream.set_nodelay(true).ok();
         let server = server.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_connection(stream, server, peer).await {
@@ -39,12 +47,44 @@ pub async fn serve(listener: TcpListener, config: http_connect::ServerConfig) ->
     }
 }
 
-async fn serve_connection(
-    stream: TcpStream,
+pub async fn serve_tls(
+    listener: TcpListener,
+    config: http_connect::ServerConfig,
+    acceptor: TlsAcceptor,
+) -> Result<()> {
+    http_connect::validate(&config)?;
+    let server = Arc::new(config);
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let server = server.clone();
+        tokio::spawn(async move {
+            let stream = match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    tracing::debug!(%peer, %error, "HTTP/2 TLS handshake failed");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!(%peer, "HTTP/2 TLS handshake timed out");
+                    return;
+                }
+            };
+            if let Err(error) = serve_connection(stream, server, peer).await {
+                tracing::debug!(%peer, %error, "HTTP/2 CONNECT connection ended");
+            }
+        });
+    }
+}
+
+async fn serve_connection<S>(
+    stream: S,
     server: Arc<http_connect::ServerConfig>,
     peer: SocketAddr,
-) -> Result<()> {
-    stream.set_nodelay(true).ok();
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+{
     let service = service_fn(move |request| {
         let server = server.clone();
         async move { handle(request, server, peer).await }
@@ -57,6 +97,63 @@ async fn serve_connection(
     .await
     .context("HTTP/2 CONNECT handshake timed out")??;
     Ok(())
+}
+
+pub fn tls_acceptor_h2(
+    cert_path: &Path,
+    key_path: &Path,
+    client_ca_path: Option<&Path>,
+) -> Result<TlsAcceptor> {
+    let certs = CertificateDer::pem_slice_iter(&std::fs::read(cert_path)?)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(!certs.is_empty(), "TLS certificate file is empty");
+    let key = PrivateKeyDer::from_pem_slice(&std::fs::read(key_path)?)
+        .context("cannot parse TLS private key")?;
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let builder = ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()?;
+    let builder = if let Some(ca_path) = client_ca_path {
+        let mut roots = RootCertStore::empty();
+        for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca_path)?) {
+            roots.add(cert?)?;
+        }
+        ensure!(!roots.is_empty(), "TLS client CA file has no certificates");
+        let verifier = tokio_rustls::rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            provider,
+        )
+        .build()?;
+        builder.with_client_cert_verifier(verifier)
+    } else {
+        builder.with_no_client_auth()
+    };
+    let mut config = builder.with_single_cert(certs, key)?;
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(TlsAcceptor::from(Arc::new(config)))
+}
+
+pub fn tls_connector_h2(
+    ca_path: &Path,
+    server_name: &str,
+) -> Result<(
+    tokio_rustls::TlsConnector,
+    tokio_rustls::rustls::pki_types::ServerName<'static>,
+)> {
+    let mut roots = RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(&std::fs::read(ca_path)?) {
+        roots.add(cert?)?;
+    }
+    ensure!(!roots.is_empty(), "TLS CA file has no certificates");
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let mut config = tokio_rustls::rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok((
+        tokio_rustls::TlsConnector::from(Arc::new(config)),
+        tokio_rustls::rustls::pki_types::ServerName::try_from(server_name.to_owned())?,
+    ))
 }
 
 async fn handle(

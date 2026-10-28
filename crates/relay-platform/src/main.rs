@@ -184,6 +184,12 @@ enum Command {
         /// Allow private/loopback CONNECT destinations.
         #[arg(long)]
         allow_private: bool,
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
+        #[arg(long)]
+        tls_client_ca: Option<PathBuf>,
     },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
@@ -774,17 +780,27 @@ async fn main() -> Result<()> {
             username,
             password,
             allow_private,
+            tls_cert,
+            tls_key,
+            tls_client_ca,
         } => {
             let listener = tokio::net::TcpListener::bind(listen).await?;
-            relay_platform::http2_connect::serve(
-                listener,
-                relay_platform::http_connect::ServerConfig {
-                    username,
-                    password,
-                    allow_private_destinations: allow_private,
-                },
-            )
-            .await?;
+            let config = relay_platform::http_connect::ServerConfig {
+                username,
+                password,
+                allow_private_destinations: allow_private,
+            };
+            match (tls_cert, tls_key, tls_client_ca) {
+                (Some(cert), Some(key), ca) => {
+                    let acceptor =
+                        relay_platform::http2_connect::tls_acceptor_h2(&cert, &key, ca.as_deref())?;
+                    relay_platform::http2_connect::serve_tls(listener, config, acceptor).await?;
+                }
+                (None, None, None) => {
+                    relay_platform::http2_connect::serve(listener, config).await?;
+                }
+                _ => anyhow::bail!("--tls-cert and --tls-key must be supplied together"),
+            }
         }
         Command::UpnpSubscribe {
             description_url,
