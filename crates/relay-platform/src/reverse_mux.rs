@@ -10,7 +10,7 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex as StdMutex,
         atomic::AtomicU64,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
@@ -56,6 +56,9 @@ const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_QUEUE_CAPACITY: usize = 32;
+const MAX_CLIENT_UDP_SESSIONS: usize = 1024;
+const MAX_UDP_REPLY_PEERS: usize = 256;
+const UDP_REPLY_PEER_TTL: Duration = Duration::from_secs(60);
 
 trait PublicIo: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> PublicIo for T {}
@@ -116,20 +119,28 @@ impl StreamFlow {
 }
 type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
 type Responses = Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>;
-type UdpSessions = Arc<
-    Mutex<
-        HashMap<
-            u32,
-            (
-                Arc<UdpSocket>,
-                CancellationToken,
-                bool,
-                bool,
-                Arc<Vec<IpNet>>,
-            ),
-        >,
-    >,
->;
+type UdpSessions = Arc<Mutex<HashMap<u32, UdpInbox>>>;
+#[derive(Clone)]
+struct UdpInbox {
+    sender: mpsc::Sender<Vec<u8>>,
+    cancel: CancellationToken,
+}
+
+#[derive(Default)]
+struct UdpReplyPeers(HashMap<SocketAddr, std::time::Instant>);
+impl UdpReplyPeers {
+    fn admit(&mut self, peer: SocketAddr, now: std::time::Instant) -> bool {
+        self.0.retain(|_, expires| *expires > now);
+        if self.0.len() >= MAX_UDP_REPLY_PEERS && !self.0.contains_key(&peer) {
+            return false;
+        }
+        self.0.insert(peer, now + UDP_REPLY_PEER_TTL);
+        true
+    }
+    fn permits(&self, peer: SocketAddr, now: std::time::Instant) -> bool {
+        self.0.get(&peer).is_some_and(|expires| *expires > now)
+    }
+}
 
 #[derive(Clone, Debug)]
 enum UdpMode {
@@ -505,6 +516,27 @@ struct UdpPeer {
     tokens: f64,
     token_at: std::time::Instant,
 }
+#[derive(Default)]
+struct UdpPeers {
+    peers: HashMap<SocketAddr, UdpPeer>,
+    addresses: HashMap<u32, SocketAddr>,
+}
+impl UdpPeers {
+    fn remove(&mut self, id: u32) {
+        if let Some(peer) = self.addresses.remove(&id)
+            && self.peers.get(&peer).is_some_and(|entry| entry.id == id)
+        {
+            self.peers.remove(&peer);
+        }
+    }
+}
+type ServerUdpSessions = Arc<StdMutex<UdpPeers>>;
+struct UdpCleanup(ServerUdpSessions);
+impl Drop for UdpCleanup {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = UdpPeers::default();
+    }
+}
 impl UdpPeer {
     fn allow(&mut self, now: std::time::Instant, rate: u64) -> bool {
         if rate == 0 {
@@ -532,14 +564,19 @@ async fn serve_udp(
     cancel: CancellationToken,
     next_id: Arc<AtomicU32>,
     mut down: mpsc::Receiver<(u32, Vec<u8>)>,
+    sessions: ServerUdpSessions,
 ) {
-    let mut peers: HashMap<SocketAddr, UdpPeer> = HashMap::new();
-    let mut addresses: HashMap<u32, SocketAddr> = HashMap::new();
+    enum Outgoing {
+        Forward { id: u32, open: bool },
+        Reset(u32),
+    }
+    let _cleanup = UdpCleanup(sessions.clone());
     let mut buffer = vec![0u8; 65_535];
     let idle = Duration::from_secs(UDP_IDLE_SECS.load(Ordering::Relaxed));
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
+            _ = cancel.cancelled() => break,
             received = socket.recv_from(&mut buffer) => {
                 let (size, peer) = match received {
                     Ok(value) => value,
@@ -552,88 +589,94 @@ async fn serve_udp(
                 if size == 0 || (!allow_public.is_empty() && !allow_public.iter().any(|network| network.contains(&peer.ip()))) {
                     continue;
                 }
-                let id = if let Some(existing) = peers.get_mut(&peer) {
-                    existing.last = std::time::Instant::now();
-                    existing.id
-                } else {
-                    let Some(active) = ActiveStream::try_new(active_streams.clone(), max_streams) else {
-                        STREAM_LIMIT_REJECTIONS.fetch_add(1, Ordering::Relaxed);
-                        continue;
+                // Only short state updates hold this lock. In particular, a
+                // FAIL/FIN/RESET can release the permit while a write is pending.
+                let outgoing = {
+                    let mut state = sessions.lock().unwrap();
+                    let now = std::time::Instant::now();
+                    let (id, open) = if let Some(existing) = state.peers.get_mut(&peer) {
+                        existing.last = now;
+                        (existing.id, false)
+                    } else {
+                        let Some(active) = ActiveStream::try_new(active_streams.clone(), max_streams) else {
+                            STREAM_LIMIT_REJECTIONS.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        };
+                        let id = next_id.fetch_add(1, Ordering::Relaxed);
+                        // Register before OPEN: even an immediate FAIL must find
+                        // and remove the association and its admission guard.
+                        state.peers.insert(peer, UdpPeer {
+                            id,
+                            _active: active,
+                            last: now,
+                            bytes: 0,
+                            tokens: UDP_RATE_PPS.load(Ordering::Relaxed) as f64,
+                            token_at: now,
+                        });
+                        state.addresses.insert(id, peer);
+                        (id, true)
                     };
-                    let id = next_id.fetch_add(1, Ordering::Relaxed);
-                    if write_frame(&writer, OPEN, id, UDP_FEATURE).await.is_err() {
-                        cancel.cancel();
-                        break;
+                    let entry = state.peers.get_mut(&peer).expect("registered above");
+                    if !entry.allow(now, UDP_RATE_PPS.load(Ordering::Relaxed)) {
+                        UDP_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
+                        continue;
                     }
-                    peers.insert(peer, UdpPeer {
-                        id,
-                        _active: active,
-                        last: std::time::Instant::now(),
-                        bytes: 0,
-                        tokens: UDP_RATE_PPS.load(Ordering::Relaxed) as f64,
-                        token_at: std::time::Instant::now(),
-                    });
-                    addresses.insert(id, peer);
-                    id
-                };
-                let rate = UDP_RATE_PPS.load(Ordering::Relaxed);
-                let rate_ok = peers
-                    .get_mut(&peer)
-                    .is_none_or(|entry| entry.allow(std::time::Instant::now(), rate));
-                if !rate_ok {
-                    UDP_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
-                let exceeds = limit != 0
-                    && peers
-                        .get(&peer)
-                        .is_some_and(|entry| entry.bytes.saturating_add(size as u64) > limit);
-                if exceeds {
-                    if let Some(entry) = peers.remove(&peer) {
-                        addresses.remove(&entry.id);
+                    let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
+                    if limit != 0 && entry.bytes.saturating_add(size as u64) > limit {
+                        state.remove(id);
                         STREAM_BYTE_LIMIT_RESETS.fetch_add(1, Ordering::Relaxed);
-                        let _ = write_frame(&writer, RESET, entry.id, &[]).await;
+                        Outgoing::Reset(id)
+                    } else {
+                        entry.bytes = entry.bytes.saturating_add(size as u64);
+                        Outgoing::Forward { id, open }
                     }
-                    continue;
+                };
+                match outgoing {
+                    Outgoing::Reset(id) => { let _ = write_frame(&writer, RESET, id, &[]).await; }
+                    Outgoing::Forward { id, open } => {
+                        if open && write_frame(&writer, OPEN, id, UDP_FEATURE).await.is_err() {
+                            cancel.cancel();
+                            break;
+                        }
+                        if !sessions.lock().unwrap().addresses.contains_key(&id) {
+                            continue;
+                        }
+                        if write_frame(&writer, DATAGRAM, id, &buffer[..size]).await.is_err() {
+                            cancel.cancel();
+                            break;
+                        }
+                        PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, Ordering::Relaxed);
+                    }
                 }
-                if let Some(entry) = peers.get_mut(&peer) {
-                    entry.bytes = entry.bytes.saturating_add(size as u64);
-                }
-                if write_frame(&writer, DATAGRAM, id, &buffer[..size]).await.is_err() {
-                    cancel.cancel();
-                    break;
-                }
-                PUBLIC_TO_TARGET_BYTES.fetch_add(size as u64, Ordering::Relaxed);
             }
             message = down.recv() => {
                 let Some((id, payload)) = message else { break };
-                let Some(peer) = addresses.get(&id).copied() else { continue };
-                let rate = UDP_RATE_PPS.load(Ordering::Relaxed);
-                let rate_ok = peers
-                    .get_mut(&peer)
-                    .is_none_or(|entry| entry.allow(std::time::Instant::now(), rate));
-                if !rate_ok {
-                    UDP_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-                let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
-                let exceeds = limit != 0
-                    && peers
-                        .get(&peer)
-                        .is_some_and(|entry| entry.bytes.saturating_add(payload.len() as u64) > limit);
-                if exceeds {
-                    if let Some(entry) = peers.remove(&peer) {
-                        addresses.remove(&entry.id);
-                        STREAM_BYTE_LIMIT_RESETS.fetch_add(1, Ordering::Relaxed);
-                        let _ = write_frame(&writer, RESET, entry.id, &[]).await;
+                let (peer, exceeds) = {
+                    let mut state = sessions.lock().unwrap();
+                    let Some(peer) = state.addresses.get(&id).copied() else { continue };
+                    let entry = state.peers.get_mut(&peer).expect("address has a peer");
+                    if !entry.allow(std::time::Instant::now(), UDP_RATE_PPS.load(Ordering::Relaxed)) {
+                        UDP_RATE_LIMITED.fetch_add(1, Ordering::Relaxed);
+                        continue;
                     }
+                    let limit = MAX_STREAM_BYTES.load(Ordering::Relaxed);
+                    let exceeds = limit != 0 && entry.bytes.saturating_add(payload.len() as u64) > limit;
+                    if exceeds {
+                        state.remove(id);
+                        STREAM_BYTE_LIMIT_RESETS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    (peer, exceeds)
+                };
+                if exceeds {
+                    let _ = write_frame(&writer, RESET, id, &[]).await;
                     continue;
                 }
                 match socket.send_to(&payload, peer).await {
                     Ok(size) => {
                         TARGET_TO_PUBLIC_BYTES.fetch_add(size as u64, Ordering::Relaxed);
-                        if let Some(entry) = peers.get_mut(&peer) {
+                        if let Some(entry) = sessions.lock().unwrap().peers.get_mut(&peer)
+                            && entry.id == id
+                        {
                             entry.last = std::time::Instant::now();
                             entry.bytes = entry.bytes.saturating_add(size as u64);
                         }
@@ -642,19 +685,18 @@ async fn serve_udp(
                 }
             }
             _ = sweep.tick() => {
-                let now = std::time::Instant::now();
-                let expired: Vec<SocketAddr> = peers.iter()
-                    .filter(|(_, entry)| now.duration_since(entry.last) >= idle)
-                    .map(|(peer, _)| *peer)
-                    .collect();
-                for peer in expired {
-                    if let Some(entry) = peers.remove(&peer) {
-                        addresses.remove(&entry.id);
-                        let _ = write_frame(&writer, FIN, entry.id, &[]).await;
-                    }
-                }
+                let expired = {
+                    let mut state = sessions.lock().unwrap();
+                    let now = std::time::Instant::now();
+                    let expired: Vec<u32> = state.peers.values()
+                        .filter(|entry| now.duration_since(entry.last) >= idle)
+                        .map(|entry| entry.id)
+                        .collect();
+                    for id in &expired { state.remove(*id); }
+                    expired
+                };
+                for id in expired { let _ = write_frame(&writer, FIN, id, &[]).await; }
             }
-            _ = cancel.cancelled() => break,
         }
     }
 }
@@ -679,6 +721,7 @@ async fn serve_control(
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
     let responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let udp_sessions = Arc::new(StdMutex::new(UdpPeers::default()));
     let (udp_down_tx, udp_down_rx) = if udp.is_some() {
         let (tx, rx) = mpsc::channel(UDP_QUEUE_CAPACITY.load(Ordering::Relaxed) as usize);
         (Some(tx), Some(rx))
@@ -690,6 +733,7 @@ async fn serve_control(
         sessions.clone(),
         responses.clone(),
         udp_down_tx,
+        udp_sessions.clone(),
         cancel.clone(),
     ));
     let active_streams = Arc::new(AtomicU32::new(0));
@@ -704,6 +748,7 @@ async fn serve_control(
             cancel.clone(),
             next_id.clone(),
             down,
+            udp_sessions,
         ));
     }
     let public_slots = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
@@ -1019,6 +1064,7 @@ async fn read_frames(
     sessions: Sessions,
     responses: Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>,
     udp_down: Option<mpsc::Sender<(u32, Vec<u8>)>>,
+    udp_sessions: ServerUdpSessions,
     cancel: CancellationToken,
 ) {
     loop {
@@ -1027,28 +1073,37 @@ async fn read_frames(
             _ = cancel.cancelled() => return,
         };
         match frame {
-            Ok(Some((kind, id, payload))) => match kind {
-                OK | FAIL => {
-                    if kind == OK
-                        && payload == FLOW_CONTROL_V1
-                        && let Some(inbox) = sessions.lock().await.get(&id)
-                    {
-                        inbox.flow.enabled.store(true, Ordering::Relaxed);
-                    }
-                    if let Some(response) = responses.lock().await.remove(&id) {
-                        let _ = response.send(kind == OK);
-                    }
+            Ok(Some((kind, id, payload))) => {
+                if matches!(kind, FAIL | FIN | RESET) {
+                    // Lifecycle signals bypass the bounded datagram queue; a
+                    // full queue cannot discard a close or retain its permit.
+                    udp_sessions.lock().unwrap().remove(id);
                 }
-                DATA | FIN | RESET | WINDOW => dispatch_frame(&sessions, id, kind, payload).await,
-                DATAGRAM => {
-                    if let Some(sender) = &udp_down
-                        && sender.try_send((id, payload)).is_err()
-                    {
-                        UDP_DROPPED.fetch_add(1, Ordering::Relaxed);
+                match kind {
+                    OK | FAIL => {
+                        if kind == OK
+                            && payload == FLOW_CONTROL_V1
+                            && let Some(inbox) = sessions.lock().await.get(&id)
+                        {
+                            inbox.flow.enabled.store(true, Ordering::Relaxed);
+                        }
+                        if let Some(response) = responses.lock().await.remove(&id) {
+                            let _ = response.send(kind == OK);
+                        }
                     }
+                    DATA | FIN | RESET | WINDOW => {
+                        dispatch_frame(&sessions, id, kind, payload).await
+                    }
+                    DATAGRAM => {
+                        if let Some(sender) = &udp_down
+                            && sender.try_send((id, payload)).is_err()
+                        {
+                            UDP_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             _ => {
                 cancel.cancel();
                 return;
@@ -1577,14 +1632,29 @@ async fn client_read_loop(
         match frame {
             Ok(Some((OPEN, id, payload))) => {
                 if payload == UDP_FEATURE {
-                    client_open_udp(
+                    let (sender, receiver) = mpsc::channel(STREAM_QUEUE_CAPACITY);
+                    let inbox = UdpInbox {
+                        sender,
+                        cancel: cancel.child_token(),
+                    };
+                    {
+                        let mut entries = udp_sessions.lock().await;
+                        // A server can admit at most 1024 streams per control.
+                        // Reject duplicate IDs and excess OPENs before spawning.
+                        if entries.contains_key(&id) || entries.len() >= MAX_CLIENT_UDP_SESSIONS {
+                            cancel.cancel();
+                            return;
+                        }
+                        entries.insert(id, inbox.clone());
+                    }
+                    tokio::spawn(client_udp_worker(
                         id,
                         udp_mode.clone(),
+                        receiver,
+                        inbox,
                         writer.clone(),
                         udp_sessions.clone(),
-                        cancel.clone(),
-                    )
-                    .await;
+                    ));
                     continue;
                 }
                 let stream_cancel = cancel.child_token();
@@ -1648,39 +1718,16 @@ async fn client_read_loop(
                 });
             }
             Ok(Some((DATAGRAM, id, payload))) => {
-                let session = udp_sessions
-                    .lock()
-                    .await
-                    .get(&id)
-                    .map(|entry| (entry.0.clone(), entry.2, entry.3, entry.4.clone()));
-                if let Some((socket, socks5, allow_private, allow)) = session {
-                    if socks5 {
-                        match crate::socks5::parse_udp_datagram(&payload) {
-                            Ok(datagram) => {
-                                if let Some(destination) = udp_socks5_destination(
-                                    datagram.destination,
-                                    allow_private,
-                                    &allow,
-                                )
-                                .await
-                                {
-                                    let _ = socket
-                                        .send_to(&datagram.payload, destination.to_string())
-                                        .await;
-                                }
-                            }
-                            Err(error) => {
-                                tracing::debug!(%error, "reverse mux UDP SOCKS5 datagram rejected");
-                            }
-                        }
-                    } else {
-                        let _ = socket.send(&payload).await;
-                    }
+                let inbox = udp_sessions.lock().await.get(&id).cloned();
+                if let Some(inbox) = inbox
+                    && inbox.sender.try_send(payload).is_err()
+                {
+                    UDP_DROPPED.fetch_add(1, Ordering::Relaxed);
                 }
             }
             Ok(Some((kind @ (FIN | RESET), id, _))) => {
-                if let Some((_, stream_cancel, _, _, _)) = udp_sessions.lock().await.remove(&id) {
-                    stream_cancel.cancel();
+                if let Some(inbox) = udp_sessions.lock().await.remove(&id) {
+                    inbox.cancel.cancel();
                 }
                 dispatch_frame(&sessions, id, kind, vec![]).await;
             }
@@ -1699,123 +1746,147 @@ async fn udp_socks5_destination(
     destination: crate::shadowsocks::Destination,
     allow_private: bool,
     allow: &[IpNet],
-) -> Option<crate::shadowsocks::Destination> {
+) -> Option<SocketAddr> {
     use crate::shadowsocks::Destination;
     fn allowed(address: &SocketAddr, allow_private: bool, allow: &[IpNet]) -> bool {
         (allow_private || crate::shadowsocks::public(address.ip()))
             && (allow.is_empty() || allow.iter().any(|network| network.contains(&address.ip())))
     }
     match destination {
-        Destination::Ip(address) => {
-            allowed(&address, allow_private, allow).then_some(Destination::Ip(address))
-        }
-        Destination::Domain(name, port) if allow_private && allow.is_empty() => {
-            Some(Destination::Domain(name, port))
-        }
+        Destination::Ip(address) => allowed(&address, allow_private, allow).then_some(address),
         Destination::Domain(name, port) => {
-            let addresses = tokio::net::lookup_host((name.as_str(), port)).await.ok()?;
-            addresses
-                .filter(|address| allowed(address, allow_private, allow))
-                .map(Destination::Ip)
-                .next()
+            // Resolve once and send to that exact authorized endpoint. This also
+            // records the actual source endpoint permitted to reply.
+            let mut addresses = tokio::net::lookup_host((name.as_str(), port)).await.ok()?;
+            addresses.find(|address| allowed(address, allow_private, allow))
         }
     }
 }
 
-async fn client_open_udp(
+async fn client_udp_worker(
     id: u32,
     mode: Option<UdpMode>,
+    receiver: mpsc::Receiver<Vec<u8>>,
+    inbox: UdpInbox,
     writer: Writer,
     sessions: UdpSessions,
-    cancel: CancellationToken,
 ) {
-    let Some(mode) = mode else {
-        let _ = write_frame(&writer, FAIL, id, &[]).await;
-        return;
+    let result = tokio::select! {
+        biased;
+        _ = inbox.cancel.cancelled() => Ok(()),
+        result = client_udp_session(id, mode, receiver, &writer) => result,
     };
-    let socket = match tokio::time::timeout(CONNECT_TIMEOUT, UdpSocket::bind("0.0.0.0:0")).await {
-        Ok(Ok(socket)) => socket,
-        _ => {
-            let _ = write_frame(&writer, FAIL, id, &[]).await;
-            return;
+    if let Err(error) = result {
+        tracing::debug!(%error, id, "reverse mux UDP association failed");
+        tokio::select! {
+            biased;
+            _ = inbox.cancel.cancelled() => {},
+            _ = write_frame(&writer, FAIL, id, &[]) => {},
         }
-    };
-    let (socks5, allow_private, allow) = match &mode {
-        UdpMode::Fixed(_) => (false, false, Vec::new()),
-        UdpMode::Socks5 {
-            allow_private,
-            allow,
-        } => (true, *allow_private, allow.clone()),
-    };
-    if let UdpMode::Fixed(target) = &mode
-        && !matches!(
-            tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(target)).await,
-            Ok(Ok(()))
-        )
+    }
+    let mut entries = sessions.lock().await;
+    if entries
+        .get(&id)
+        .is_some_and(|entry| entry.sender.same_channel(&inbox.sender))
     {
-        let _ = write_frame(&writer, FAIL, id, &[]).await;
-        return;
+        entries.remove(&id);
     }
-    let session_cancel = cancel.child_token();
-    let socket = Arc::new(socket);
-    if let Some((_, previous, _, _, _)) = sessions.lock().await.insert(
-        id,
-        (
-            socket.clone(),
-            session_cancel.clone(),
-            socks5,
-            allow_private,
-            Arc::new(allow),
-        ),
-    ) {
-        previous.cancel();
+    inbox.cancel.cancel();
+}
+
+async fn client_udp_session(
+    id: u32,
+    mode: Option<UdpMode>,
+    receiver: mpsc::Receiver<Vec<u8>>,
+    writer: &Writer,
+) -> Result<()> {
+    let mode = mode.context("UDP mode is not enabled on this client")?;
+    let socket = tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        if let UdpMode::Fixed(target) = &mode {
+            socket.connect(target).await?;
+        }
+        Ok::<_, std::io::Error>(Arc::new(socket))
+    })
+    .await
+    .context("UDP target setup timed out")??;
+    let peers = match mode {
+        UdpMode::Socks5 { .. } => Some(Arc::new(StdMutex::new(UdpReplyPeers::default()))),
+        UdpMode::Fixed(_) => None,
+    };
+    // Upload resolution/send work and download forwarding are separate futures,
+    // all owned by one cancellable worker. Neither runs in the frame reader.
+    tokio::select! {
+        result = client_udp_send(socket.clone(), mode, receiver, peers.clone()) => result,
+        result = client_udp_read(id, socket, writer, peers) => result,
     }
-    tokio::spawn(client_udp_read(id, socket, writer, session_cancel, socks5));
+}
+
+async fn client_udp_send(
+    socket: Arc<UdpSocket>,
+    mode: UdpMode,
+    mut receiver: mpsc::Receiver<Vec<u8>>,
+    peers: Option<Arc<StdMutex<UdpReplyPeers>>>,
+) -> Result<()> {
+    while let Some(payload) = receiver.recv().await {
+        let sent = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            if let UdpMode::Socks5 {
+                allow_private,
+                allow,
+            } = &mode
+            {
+                let datagram = crate::socks5::parse_udp_datagram(&payload).ok()?;
+                let destination =
+                    udp_socks5_destination(datagram.destination, *allow_private, allow).await?;
+                // Admit before sending so an immediate target reply is accepted.
+                // The set is bounded and refreshed only by authorized requests.
+                if !peers
+                    .as_ref()?
+                    .lock()
+                    .unwrap()
+                    .admit(destination, std::time::Instant::now())
+                {
+                    return None;
+                }
+                socket.send_to(&datagram.payload, destination).await.ok()
+            } else {
+                socket.send(&payload).await.ok()
+            }
+        })
+        .await;
+        if !matches!(sent, Ok(Some(_))) {
+            UDP_DROPPED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    Ok(())
 }
 
 async fn client_udp_read(
     id: u32,
     socket: Arc<UdpSocket>,
-    writer: Writer,
-    cancel: CancellationToken,
-    socks5: bool,
-) {
+    writer: &Writer,
+    peers: Option<Arc<StdMutex<UdpReplyPeers>>>,
+) -> Result<()> {
     let mut buffer = vec![0u8; 65_535];
     loop {
-        let (size, peer) = if socks5 {
-            tokio::select! {
-                result = socket.recv_from(&mut buffer) => match result {
-                    Ok((size, peer)) => (size, Some(peer)),
-                    Err(_) => return,
-                },
-                _ = cancel.cancelled() => return,
+        if let Some(peers) = &peers {
+            let (size, peer) = socket.recv_from(&mut buffer).await?;
+            if !peers
+                .lock()
+                .unwrap()
+                .permits(peer, std::time::Instant::now())
+            {
+                UDP_DROPPED.fetch_add(1, Ordering::Relaxed);
+                continue;
             }
-        } else {
-            let size = tokio::select! {
-                result = socket.recv(&mut buffer) => match result {
-                    Ok(size) => size,
-                    Err(_) => return,
-                },
-                _ = cancel.cancelled() => return,
-            };
-            (size, None::<SocketAddr>)
-        };
-        if size == 0 {
-            continue;
-        }
-        if socks5 {
             let packet = crate::socks5::encode_udp_datagram(
-                &crate::shadowsocks::Destination::Ip(peer.unwrap()),
+                &crate::shadowsocks::Destination::Ip(peer),
                 &buffer[..size],
             );
-            if write_frame(&writer, DATAGRAM, id, &packet).await.is_err() {
-                return;
-            }
-        } else if write_frame(&writer, DATAGRAM, id, &buffer[..size])
-            .await
-            .is_err()
-        {
-            return;
+            write_frame(writer, DATAGRAM, id, &packet).await?;
+        } else {
+            let size = socket.recv(&mut buffer).await?;
+            write_frame(writer, DATAGRAM, id, &buffer[..size]).await?;
         }
     }
 }
@@ -1927,6 +1998,214 @@ async fn read_line<S: AsyncRead + Unpin>(stream: &mut S) -> Result<String> {
 #[cfg(test)]
 mod regression_tests {
     use super::*;
+
+    #[test]
+    fn udp_reply_permissions_are_endpoint_specific_bounded_and_expire() {
+        let now = std::time::Instant::now();
+        let mut peers = UdpReplyPeers::default();
+        for index in 0..MAX_UDP_REPLY_PEERS {
+            assert!(peers.admit(SocketAddr::from(([127, 0, 0, 1], 1000 + index as u16)), now));
+        }
+        let first = SocketAddr::from(([127, 0, 0, 1], 1000));
+        let extra = SocketAddr::from(([127, 0, 0, 1], 5000));
+        assert!(peers.permits(first, now));
+        assert!(!peers.permits(extra, now));
+        assert!(!peers.admit(extra, now));
+        assert!(peers.admit(first, now));
+        assert_eq!(peers.0.len(), MAX_UDP_REPLY_PEERS);
+        assert!(!peers.permits(first, now + UDP_REPLY_PEER_TTL));
+        assert!(peers.admit(extra, now + UDP_REPLY_PEER_TTL));
+        assert_eq!(peers.0.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn udp_failure_and_close_release_permits_even_with_a_full_reply_queue() {
+        let (incoming, peer) = tokio::io::duplex(8192);
+        let cancel = CancellationToken::new();
+        let writer = Arc::new(ControlWriter {
+            stream: Mutex::new(Box::new(peer)),
+            cancel: cancel.clone(),
+        });
+        let entries: ServerUdpSessions = Arc::default();
+        let active = Arc::new(AtomicU32::new(0));
+        let (tx, _rx) = mpsc::channel(1);
+        tx.try_send((99, vec![1])).unwrap();
+        let task = tokio::spawn(read_frames(
+            Box::new(incoming),
+            Arc::default(),
+            Arc::default(),
+            Some(tx),
+            entries.clone(),
+            cancel.clone(),
+        ));
+        for (index, kind) in [FAIL, FIN, RESET].into_iter().enumerate() {
+            let id = index as u32 + 1;
+            let address = SocketAddr::from(([127, 0, 0, 1], 5000));
+            let permit = ActiveStream::try_new(active.clone(), 1).unwrap();
+            {
+                let mut state = entries.lock().unwrap();
+                state.addresses.insert(id, address);
+                state.peers.insert(
+                    address,
+                    UdpPeer {
+                        id,
+                        _active: permit,
+                        last: std::time::Instant::now(),
+                        bytes: 0,
+                        tokens: 0.0,
+                        token_at: std::time::Instant::now(),
+                    },
+                );
+            }
+            write_frame(&writer, DATAGRAM, id, b"full-queue")
+                .await
+                .unwrap();
+            write_frame(&writer, kind, id, &[]).await.unwrap();
+            tokio::time::timeout(Duration::from_millis(200), async {
+                while active.load(Ordering::Relaxed) != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let state = entries.lock().unwrap();
+            assert!(state.addresses.is_empty());
+            assert!(state.peers.is_empty());
+        }
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[test]
+    fn udp_full_queue_and_pending_dns_do_not_block_neighbors_or_reset() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = tcp.local_addr().unwrap();
+            let echo = tokio::spawn(async move {
+                let (mut stream, _) = tcp.accept().await.unwrap();
+                let mut bytes = [0u8; 3];
+                stream.read_exact(&mut bytes).await.unwrap();
+                stream.write_all(&bytes).await.unwrap();
+            });
+            let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let destination = udp.local_addr().unwrap();
+            let (control, peer) = tokio::io::duplex(65_536);
+            let (reader, writer) = tokio::io::split(control);
+            let (responses, sender) = tokio::io::split(peer);
+            let mut responses: ControlRead = Box::new(responses);
+            let cancel = CancellationToken::new();
+            let writer = Arc::new(ControlWriter {
+                stream: Mutex::new(Box::new(writer)),
+                cancel: cancel.clone(),
+            });
+            let sender = Arc::new(ControlWriter {
+                stream: Mutex::new(Box::new(sender)),
+                cancel: cancel.clone(),
+            });
+            let client = tokio::spawn(client_read_loop(
+                Box::new(reader),
+                target.to_string(),
+                Some(UdpMode::Socks5 {
+                    allow_private: true,
+                    allow: vec![],
+                }),
+                writer,
+                Arc::default(),
+                cancel.clone(),
+            ));
+            let (release, held) = std::sync::mpsc::channel();
+            let (started, ready) = oneshot::channel();
+            let blocking = tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                let _ = held.recv_timeout(Duration::from_secs(10));
+            });
+            ready.await.unwrap();
+            let before_drops = stats().udp_dropped;
+            write_frame(&sender, OPEN, 1, UDP_FEATURE).await.unwrap();
+            let packet = crate::socks5::encode_udp_datagram(
+                &crate::shadowsocks::Destination::Domain("localhost".into(), destination.port()),
+                b"cancelled",
+            );
+            for _ in 0..(STREAM_QUEUE_CAPACITY + 10) {
+                write_frame(&sender, DATAGRAM, 1, &packet).await.unwrap();
+            }
+            write_frame(&sender, OPEN, 2, UDP_FEATURE).await.unwrap();
+            let packet = crate::socks5::encode_udp_datagram(
+                &crate::shadowsocks::Destination::Ip(destination),
+                b"neighbor",
+            );
+            write_frame(&sender, DATAGRAM, 2, &packet).await.unwrap();
+            let mut buffer = [0u8; 64];
+            let (size, remote) =
+                tokio::time::timeout(Duration::from_secs(1), udp.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buffer[..size], b"neighbor");
+            udp.send_to(&buffer[..size], remote).await.unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut responses))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!((frame.0, frame.1), (DATAGRAM, 2));
+            assert!(stats().udp_dropped > before_drops);
+            write_frame(&sender, OPEN, 3, FLOW_CONTROL_V1)
+                .await
+                .unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut responses))
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!((frame.0, frame.1), (OK, 3));
+            write_frame(&sender, DATA, 3, b"tcp").await.unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let (kind, id, payload) = read_frame(&mut responses).await.unwrap().unwrap();
+                    if kind == DATA && id == 3 {
+                        assert_eq!(payload, b"tcp");
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            write_frame(&sender, RESET, 1, &[]).await.unwrap();
+            // The second association is a barrier: receiving this request proves
+            // that the shared reader dispatched RESET before releasing DNS.
+            let barrier = crate::socks5::encode_udp_datagram(
+                &crate::shadowsocks::Destination::Ip(destination),
+                b"barrier",
+            );
+            write_frame(&sender, DATAGRAM, 2, &barrier).await.unwrap();
+            let (size, _) =
+                tokio::time::timeout(Duration::from_secs(1), udp.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(&buffer[..size], b"barrier");
+            release.send(()).unwrap();
+            blocking.await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), udp.recv_from(&mut buffer))
+                    .await
+                    .is_err()
+            );
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(1), client)
+                .await
+                .unwrap()
+                .unwrap();
+            echo.await.unwrap();
+        });
+    }
 
     #[test]
     fn stream_byte_limit_counts_both_directions() {

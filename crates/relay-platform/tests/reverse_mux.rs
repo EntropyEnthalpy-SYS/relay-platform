@@ -1245,3 +1245,62 @@ async fn udp_socks5_allowlist_rejects_an_unlisted_target() {
     server.abort();
     client.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn udp_target_setup_failure_releases_capacity_for_tcp() {
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_addr = public.local_addr().unwrap();
+    let udp = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let udp_addr = udp.local_addr().unwrap();
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let echo = tokio::spawn(async move {
+        let (mut stream, _) = target.accept().await.unwrap();
+        let mut bytes = [0u8; 2];
+        stream.read_exact(&mut bytes).await.unwrap();
+        stream.write_all(&bytes).await.unwrap();
+    });
+    let server = tokio::spawn(reverse_mux::serve_mux_plain_udp(
+        control,
+        public,
+        "setup-failure".into(),
+        udp,
+        1,
+        60,
+        vec![],
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux_udp(
+        control_addr,
+        target_addr.to_string(),
+        "setup-failure".into(),
+        Some("invalid socket address".into()),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let before = reverse_mux::stats().total_streams;
+    let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    probe.send_to(b"failed-setup", udp_addr).await.unwrap();
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let stats = reverse_mux::stats();
+            if stats.total_streams > before && stats.active_streams == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut tcp = TcpStream::connect(public_addr).await.unwrap();
+    tcp.write_all(b"ok").await.unwrap();
+    let mut reply = [0u8; 2];
+    timeout(Duration::from_secs(1), tcp.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"ok");
+    echo.await.unwrap();
+    server.abort();
+    client.abort();
+}

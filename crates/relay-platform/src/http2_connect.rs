@@ -17,7 +17,7 @@ use hyper::{
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncRead, AsyncWrite, copy_bidirectional},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, copy_bidirectional},
     net::{TcpListener, TcpStream},
     time::timeout,
 };
@@ -78,25 +78,52 @@ pub async fn serve_tls(
 }
 
 async fn serve_connection<S>(
-    stream: S,
+    mut stream: S,
     server: Arc<http_connect::ServerConfig>,
     peer: SocketAddr,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
+    // Bound the client's actual preface, including its initial SETTINGS, rather
+    // than the connection future (which also owns every established tunnel).
+    let preface = timeout(HANDSHAKE_TIMEOUT, read_preface(&mut stream))
+        .await
+        .context("HTTP/2 CONNECT handshake timed out")??;
+    let (reader, writer) = tokio::io::split(stream);
+    let stream = tokio::io::join(std::io::Cursor::new(preface).chain(reader), writer);
     let service = service_fn(move |request| {
         let server = server.clone();
         async move { handle(request, server, peer).await }
     });
-    timeout(
-        HANDSHAKE_TIMEOUT,
-        hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-            .serve_connection(TokioIo::new(stream), service),
-    )
-    .await
-    .context("HTTP/2 CONNECT handshake timed out")??;
+    hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+        .serve_connection(TokioIo::new(stream), service)
+        .await?;
     Ok(())
+}
+
+async fn read_preface<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Vec<u8>> {
+    const MAGIC: &[u8; 24] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    let mut preface = vec![0; MAGIC.len() + 9];
+    stream.read_exact(&mut preface[..MAGIC.len()]).await?;
+    ensure!(&preface[..MAGIC.len()] == MAGIC, "invalid HTTP/2 preface");
+    stream.read_exact(&mut preface[MAGIC.len()..]).await?;
+    let header = &preface[MAGIC.len()..];
+    let length = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+    ensure!(
+        header[3] == 4
+            && header[4] & 1 == 0
+            && u32::from_be_bytes(header[5..9].try_into()?) & 0x7fff_ffff == 0
+            && length <= 16_384
+            && length.is_multiple_of(6),
+        "invalid initial HTTP/2 SETTINGS frame"
+    );
+    let offset = preface.len();
+    preface.resize(offset + length, 0);
+    stream.read_exact(&mut preface[offset..]).await?;
+    // Hyper still validates SETTINGS values and the rest of the protocol. Replay
+    // the exact bytes so its connection state sees an ordinary client handshake.
+    Ok(preface)
 }
 
 pub fn tls_acceptor_h2(
@@ -174,13 +201,20 @@ async fn handle(
         Ok(destination) => destination,
         Err(_) => return Ok(reply(StatusCode::BAD_REQUEST)),
     };
-    let target = match resolve_target(&destination, server.allow_private_destinations).await {
-        Some(target) => target,
-        None => return Ok(reply(StatusCode::FORBIDDEN)),
-    };
-    let upstream = match timeout(CONNECT_TIMEOUT, TcpStream::connect(target)).await {
-        Ok(Ok(stream)) => stream,
-        _ => return Ok(reply(StatusCode::BAD_GATEWAY)),
+    let (target, upstream) = match timeout(CONNECT_TIMEOUT, async {
+        let target = resolve_target(&destination, server.allow_private_destinations)
+            .await
+            .ok_or(StatusCode::FORBIDDEN)?;
+        let upstream = TcpStream::connect(target)
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        Ok::<_, StatusCode>((target, upstream))
+    })
+    .await
+    {
+        Ok(Ok(connected)) => connected,
+        Ok(Err(status)) => return Ok(reply(status)),
+        Err(_) => return Ok(reply(StatusCode::BAD_GATEWAY)),
     };
     upstream.set_nodelay(true).ok();
     let upgrade = hyper::upgrade::on(&mut request);

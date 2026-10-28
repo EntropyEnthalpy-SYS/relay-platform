@@ -116,3 +116,24 @@ relay reverse-mux-client ... --tls-ca ca.pem --tls-server-name relay.example
 - Metrics expose `relay_reverse_mux_control_limit_rejections_total`, `relay_reverse_mux_stream_limit_rejections_total`, `relay_reverse_mux_stream_byte_limit_resets_total`, and `relay_reverse_mux_udp_dropped_total`, and `relay_reverse_mux_udp_rate_limited_total`.
 - The TLS server permits at most 64 simultaneous pending TLS/token authentications. TLS and authentication each have a 10-second deadline. The permit is released after READY, before serving the authenticated control. This is not a 64-established-control limit. Plaintext control authentication uses the same isolated pending-auth pattern. Each authorized control also permits at most 64 pending public TLS handshakes; public accept continues while they run. Active stream/control metrics use drop guards for cleanup.
 - Regression coverage includes an 8 MiB upload followed by an 8 MiB EOF-triggered reply, slow readers with an unrelated echo stream, cancellation in both roles, partial-frame abandonment, 80 simultaneously authenticated TLS controls, and the 64-pending-authentication bound. These are loopback correctness tests, not WAN throughput or endurance certification.
+
+## 0.112.0 UDP isolation and lifecycle
+
+The mux client dispatches each UDP association through a bounded queue of 32
+pending datagrams and an independent cancellable worker. Slow DNS, target setup
+and datagram sends do not run in the shared control-frame reader. Setup and each
+resolution/send operation have a five-second deadline. Overflow and rejected
+replies increment the drop counter in the client process; the server's metrics
+remain local to that server process.
+
+SOCKS5-mode reply sources must match an admitted destination IP and port on the
+same association. The client resolves once before checking the destination
+policy and sending. Reply permissions are limited to 256 endpoints per
+association and expire 60 seconds after the last admitted outgoing request.
+When all entries are live, requests for additional endpoints are dropped.
+
+FAIL, FIN and RESET immediately remove the server's UDP peer/id records and
+release their admission permit. Lifecycle signals bypass the return-datagram
+queue, so queue pressure cannot discard a close. The `udp-v1` framing does not
+require a new acknowledgment; existing peers can still exchange datagrams.
+Upgrade both peers for all R111 fixes. Client UDP destination sockets remain IPv4.
