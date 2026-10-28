@@ -114,7 +114,13 @@ impl StreamFlow {
 }
 type Sessions = Arc<Mutex<HashMap<u32, StreamInbox>>>;
 type Responses = Arc<Mutex<HashMap<u32, oneshot::Sender<bool>>>>;
-type UdpSessions = Arc<Mutex<HashMap<u32, (Arc<UdpSocket>, CancellationToken)>>>;
+type UdpSessions = Arc<Mutex<HashMap<u32, (Arc<UdpSocket>, CancellationToken, bool)>>>;
+
+#[derive(Clone, Debug)]
+enum UdpMode {
+    Fixed(String),
+    Socks5,
+}
 
 struct ActiveControl;
 impl ActiveControl {
@@ -1257,6 +1263,43 @@ pub async fn client_mux_tls_udp(
     server_name: ServerName<'static>,
     udp_target: Option<String>,
 ) -> Result<()> {
+    client_mux_tls_udp_mode(
+        server,
+        target,
+        token,
+        connector,
+        server_name,
+        udp_target.map(UdpMode::Fixed),
+    )
+    .await
+}
+
+pub async fn client_mux_tls_udp_socks5(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    connector: TlsConnector,
+    server_name: ServerName<'static>,
+) -> Result<()> {
+    client_mux_tls_udp_mode(
+        server,
+        target,
+        token,
+        connector,
+        server_name,
+        Some(UdpMode::Socks5),
+    )
+    .await
+}
+
+async fn client_mux_tls_udp_mode(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    connector: TlsConnector,
+    server_name: ServerName<'static>,
+    udp_mode: Option<UdpMode>,
+) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
         "reverse token must be 1..256 bytes"
@@ -1289,7 +1332,7 @@ pub async fn client_mux_tls_udp(
     let read_task = tokio::spawn(client_read_loop(
         Box::new(reader),
         target,
-        udp_target,
+        udp_mode,
         writer,
         sessions,
         cancel.clone(),
@@ -1308,6 +1351,23 @@ pub async fn client_mux_udp(
     target: String,
     token: String,
     udp_target: Option<String>,
+) -> Result<()> {
+    client_mux_udp_mode(server, target, token, udp_target.map(UdpMode::Fixed)).await
+}
+
+pub async fn client_mux_udp_socks5(
+    server: SocketAddr,
+    target: String,
+    token: String,
+) -> Result<()> {
+    client_mux_udp_mode(server, target, token, Some(UdpMode::Socks5)).await
+}
+
+async fn client_mux_udp_mode(
+    server: SocketAddr,
+    target: String,
+    token: String,
+    udp_mode: Option<UdpMode>,
 ) -> Result<()> {
     ensure!(
         !token.is_empty() && token.len() <= 256,
@@ -1337,7 +1397,7 @@ pub async fn client_mux_udp(
     let read_task = tokio::spawn(client_read_loop(
         Box::new(reader),
         target,
-        udp_target,
+        udp_mode,
         writer.clone(),
         sessions.clone(),
         cancel.clone(),
@@ -1350,7 +1410,7 @@ pub async fn client_mux_udp(
 async fn client_read_loop(
     mut reader: ControlRead,
     target: String,
-    udp_target: Option<String>,
+    udp_mode: Option<UdpMode>,
     writer: Writer,
     sessions: Sessions,
     cancel: CancellationToken,
@@ -1366,7 +1426,7 @@ async fn client_read_loop(
                 if payload == UDP_FEATURE {
                     client_open_udp(
                         id,
-                        udp_target.clone(),
+                        udp_mode.clone(),
                         writer.clone(),
                         udp_sessions.clone(),
                         cancel.clone(),
@@ -1435,17 +1495,30 @@ async fn client_read_loop(
                 });
             }
             Ok(Some((DATAGRAM, id, payload))) => {
-                let socket = udp_sessions
+                let session = udp_sessions
                     .lock()
                     .await
                     .get(&id)
-                    .map(|entry| entry.0.clone());
-                if let Some(socket) = socket {
-                    let _ = socket.send(&payload).await;
+                    .map(|entry| (entry.0.clone(), entry.2));
+                if let Some((socket, socks5)) = session {
+                    if socks5 {
+                        match crate::socks5::parse_udp_datagram(&payload) {
+                            Ok(datagram) => {
+                                let _ = socket
+                                    .send_to(&datagram.payload, datagram.destination.to_string())
+                                    .await;
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "reverse mux UDP SOCKS5 datagram rejected");
+                            }
+                        }
+                    } else {
+                        let _ = socket.send(&payload).await;
+                    }
                 }
             }
             Ok(Some((kind @ (FIN | RESET), id, _))) => {
-                if let Some((_, stream_cancel)) = udp_sessions.lock().await.remove(&id) {
+                if let Some((_, stream_cancel, _)) = udp_sessions.lock().await.remove(&id) {
                     stream_cancel.cancel();
                 }
                 dispatch_frame(&sessions, id, kind, vec![]).await;
@@ -1463,12 +1536,12 @@ async fn client_read_loop(
 
 async fn client_open_udp(
     id: u32,
-    target: Option<String>,
+    mode: Option<UdpMode>,
     writer: Writer,
     sessions: UdpSessions,
     cancel: CancellationToken,
 ) {
-    let Some(target) = target else {
+    let Some(mode) = mode else {
         let _ = write_frame(&writer, FAIL, id, &[]).await;
         return;
     };
@@ -1479,23 +1552,26 @@ async fn client_open_udp(
             return;
         }
     };
-    if !matches!(
-        tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(&target)).await,
-        Ok(Ok(()))
-    ) {
+    let socks5 = matches!(mode, UdpMode::Socks5);
+    if let UdpMode::Fixed(target) = &mode
+        && !matches!(
+            tokio::time::timeout(CONNECT_TIMEOUT, socket.connect(target)).await,
+            Ok(Ok(()))
+        )
+    {
         let _ = write_frame(&writer, FAIL, id, &[]).await;
         return;
     }
     let session_cancel = cancel.child_token();
     let socket = Arc::new(socket);
-    if let Some((_, previous)) = sessions
+    if let Some((_, previous, _)) = sessions
         .lock()
         .await
-        .insert(id, (socket.clone(), session_cancel.clone()))
+        .insert(id, (socket.clone(), session_cancel.clone(), socks5))
     {
         previous.cancel();
     }
-    tokio::spawn(client_udp_read(id, socket, writer, session_cancel));
+    tokio::spawn(client_udp_read(id, socket, writer, session_cancel, socks5));
 }
 
 async fn client_udp_read(
@@ -1503,20 +1579,40 @@ async fn client_udp_read(
     socket: Arc<UdpSocket>,
     writer: Writer,
     cancel: CancellationToken,
+    socks5: bool,
 ) {
     let mut buffer = vec![0u8; 65_535];
     loop {
-        let size = tokio::select! {
-            result = socket.recv(&mut buffer) => match result {
-                Ok(size) => size,
-                Err(_) => return,
-            },
-            _ = cancel.cancelled() => return,
+        let (size, peer) = if socks5 {
+            tokio::select! {
+                result = socket.recv_from(&mut buffer) => match result {
+                    Ok((size, peer)) => (size, Some(peer)),
+                    Err(_) => return,
+                },
+                _ = cancel.cancelled() => return,
+            }
+        } else {
+            let size = tokio::select! {
+                result = socket.recv(&mut buffer) => match result {
+                    Ok(size) => size,
+                    Err(_) => return,
+                },
+                _ = cancel.cancelled() => return,
+            };
+            (size, None::<SocketAddr>)
         };
         if size == 0 {
             continue;
         }
-        if write_frame(&writer, DATAGRAM, id, &buffer[..size])
+        if socks5 {
+            let packet = crate::socks5::encode_udp_datagram(
+                &crate::shadowsocks::Destination::Ip(peer.unwrap()),
+                &buffer[..size],
+            );
+            if write_frame(&writer, DATAGRAM, id, &packet).await.is_err() {
+                return;
+            }
+        } else if write_frame(&writer, DATAGRAM, id, &buffer[..size])
             .await
             .is_err()
         {

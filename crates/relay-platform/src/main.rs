@@ -154,6 +154,9 @@ enum Command {
         /// Optional UDP target for UDP datagrams arriving on the server's --udp-listen.
         #[arg(long)]
         udp_target: Option<String>,
+        /// Treat public UDP datagrams as SOCKS5 UDP requests (multi-target mode).
+        #[arg(long)]
+        udp_socks5: bool,
     },
     /// Subscribe to an IGD event URL; the callback server is external.
     UpnpSubscribe {
@@ -642,10 +645,14 @@ async fn main() -> Result<()> {
             tls_client_cert,
             tls_client_key,
             udp_target,
+            udp_socks5,
         } => {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
+            if udp_socks5 && udp_target.is_some() {
+                anyhow::bail!("--udp-socks5 and --udp-target cannot be combined");
+            }
             let tls = match (tls_ca, tls_server_name, tls_client_cert, tls_client_key) {
                 (Some(ca), Some(name), Some(cert), Some(key)) => {
                     Some(relay_platform::reverse_mux::tls_connector_with_identity(
@@ -663,24 +670,44 @@ async fn main() -> Result<()> {
             loop {
                 let result = match &tls {
                     Some((connector, name)) => {
-                        relay_platform::reverse_mux::client_mux_tls_udp(
-                            server,
-                            target.clone(),
-                            token.clone(),
-                            connector.clone(),
-                            name.clone(),
-                            udp_target.clone(),
-                        )
-                        .await
+                        if udp_socks5 {
+                            relay_platform::reverse_mux::client_mux_tls_udp_socks5(
+                                server,
+                                target.clone(),
+                                token.clone(),
+                                connector.clone(),
+                                name.clone(),
+                            )
+                            .await
+                        } else {
+                            relay_platform::reverse_mux::client_mux_tls_udp(
+                                server,
+                                target.clone(),
+                                token.clone(),
+                                connector.clone(),
+                                name.clone(),
+                                udp_target.clone(),
+                            )
+                            .await
+                        }
                     }
                     None => {
-                        relay_platform::reverse_mux::client_mux_udp(
-                            server,
-                            target.clone(),
-                            token.clone(),
-                            udp_target.clone(),
-                        )
-                        .await
+                        if udp_socks5 {
+                            relay_platform::reverse_mux::client_mux_udp_socks5(
+                                server,
+                                target.clone(),
+                                token.clone(),
+                            )
+                            .await
+                        } else {
+                            relay_platform::reverse_mux::client_mux_udp(
+                                server,
+                                target.clone(),
+                                token.clone(),
+                                udp_target.clone(),
+                            )
+                            .await
+                        }
                     }
                 };
                 if let Err(error) = result {

@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.104.0 开发版在 macOS 27.0.1 arm64 通过 **438 项自动化测试（409 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 439 项。日志见 [verification-0.104.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.104.0.json](validation-evidence-0.98.0.json)。
+0.105.0 开发版在 macOS 27.0.1 arm64 通过 **439 项自动化测试（410 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 440 项。日志见 [verification-0.105.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.105.0.json](validation-evidence-0.98.0.json)。
 
-## 0.104.0 公网 TLS mTLS
+## 0.105.0 SOCKS5 UDP 多目标
+
+| 检查 | 结果 |
+| --- | --- |
+| 客户端模式 | `--udp-socks5` 与 `--udp-target` 互斥 |
+| 目标 | SOCKS5 UDP 头解析，支持多目标 |
+| 回复 | 按实际源地址包装 |
+| 限制 | FRAG 非零拒绝；仍要求单控制 |
+
+## 0.104.0 公网 TLS mTLS（历史）
 
 | 检查 | 结果 |
 | --- | --- |

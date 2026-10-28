@@ -1099,3 +1099,64 @@ async fn public_tls_mtls_requires_a_client_identity() {
     server.abort();
     client.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn udp_socks5_mode_reaches_two_targets() {
+    use relay_platform::shadowsocks::Destination;
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_addr = control.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let public_udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let public_udp_addr = public_udp.local_addr().unwrap();
+    let first = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let first_addr = first.local_addr().unwrap();
+    let second = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let second_addr = second.local_addr().unwrap();
+    let one = tokio::spawn(async move {
+        let mut buffer = [0u8; 64];
+        let (size, peer) = first.recv_from(&mut buffer).await.unwrap();
+        first.send_to(&buffer[..size], peer).await.unwrap();
+    });
+    let two = tokio::spawn(async move {
+        let mut buffer = [0u8; 64];
+        let (size, peer) = second.recv_from(&mut buffer).await.unwrap();
+        second.send_to(&buffer[..size], peer).await.unwrap();
+    });
+    let server = tokio::spawn(reverse_mux::serve_mux_plain_udp(
+        control,
+        public,
+        "udp-socks-token".into(),
+        std::sync::Arc::new(public_udp),
+        8,
+        300,
+        vec![],
+    ));
+    let client = tokio::spawn(reverse_mux::client_mux_udp_socks5(
+        control_addr,
+        "127.0.0.1:9".into(),
+        "udp-socks-token".into(),
+    ));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    probe.connect(public_udp_addr).await.unwrap();
+    for (target, payload) in [
+        (first_addr, b"one".as_slice()),
+        (second_addr, b"two".as_slice()),
+    ] {
+        let request =
+            relay_platform::socks5::encode_udp_datagram(&Destination::Ip(target), payload);
+        probe.send(&request).await.unwrap();
+        let mut reply = [0u8; 128];
+        let size = timeout(Duration::from_secs(3), probe.recv(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        let parsed = relay_platform::socks5::parse_udp_datagram(&reply[..size]).unwrap();
+        assert_eq!(parsed.destination, Destination::Ip(target));
+        assert_eq!(parsed.payload, payload);
+    }
+    timeout(Duration::from_secs(3), one).await.unwrap().unwrap();
+    timeout(Duration::from_secs(3), two).await.unwrap().unwrap();
+    server.abort();
+    client.abort();
+}
