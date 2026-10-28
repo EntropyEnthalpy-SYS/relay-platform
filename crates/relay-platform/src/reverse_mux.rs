@@ -111,32 +111,43 @@ impl Drop for ActiveControl {
         ACTIVE_CONTROLS.fetch_sub(1, Ordering::Relaxed);
     }
 }
-struct ActiveStream(Arc<AtomicU32>);
+struct ActiveStream {
+    local: Arc<AtomicU32>,
+}
 impl ActiveStream {
-    fn try_new(local: Arc<AtomicU32>, max_streams: usize) -> Option<Self> {
-        let mut current = local.load(Ordering::Relaxed);
+    fn reserve(counter: &AtomicU32, limit: u32) -> bool {
+        let mut current = counter.load(Ordering::Relaxed);
         loop {
-            if current >= max_streams as u32 {
-                return None;
+            if current >= limit {
+                return false;
             }
-            match local.compare_exchange_weak(
+            match counter.compare_exchange_weak(
                 current,
                 current + 1,
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => break,
+                Ok(_) => return true,
                 Err(observed) => current = observed,
             }
         }
-        ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+    }
+    fn try_new(local: Arc<AtomicU32>, max_streams: usize) -> Option<Self> {
+        let global_limit = MAX_TOTAL_STREAMS.load(Ordering::Relaxed);
+        if !Self::reserve(&ACTIVE_STREAMS, global_limit) {
+            return None;
+        }
+        if !Self::reserve(&local, max_streams as u32) {
+            ACTIVE_STREAMS.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
         TOTAL_STREAMS.fetch_add(1, Ordering::Relaxed);
-        Some(Self(local))
+        Some(Self { local })
     }
 }
 impl Drop for ActiveStream {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        self.local.fetch_sub(1, Ordering::Relaxed);
         ACTIVE_STREAMS.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -144,6 +155,7 @@ type Frame = (u8, u32, Vec<u8>);
 
 static ACTIVE_CONTROLS: AtomicU32 = AtomicU32::new(0);
 static MAX_CONTROLS: AtomicU32 = AtomicU32::new(1024);
+static MAX_TOTAL_STREAMS: AtomicU32 = AtomicU32::new(4096);
 static TOTAL_CONTROLS: AtomicU64 = AtomicU64::new(0);
 static ACTIVE_STREAMS: AtomicU32 = AtomicU32::new(0);
 static TOTAL_STREAMS: AtomicU64 = AtomicU64::new(0);
@@ -166,6 +178,14 @@ pub fn set_max_controls(max_controls: u32) {
 
 pub fn max_controls() -> u32 {
     MAX_CONTROLS.load(Ordering::Relaxed)
+}
+
+pub fn set_max_total_streams(max_total_streams: u32) {
+    MAX_TOTAL_STREAMS.store(max_total_streams.clamp(1, 1_000_000), Ordering::Relaxed);
+}
+
+pub fn max_total_streams() -> u32 {
+    MAX_TOTAL_STREAMS.load(Ordering::Relaxed)
 }
 
 pub fn stats() -> Stats {

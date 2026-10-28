@@ -726,3 +726,81 @@ fn max_controls_rejects_an_extra_established_control() {
     child.kill().ok();
     child.wait().ok();
 }
+
+#[test]
+fn max_total_streams_rejects_a_second_public_stream() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener as StdListener, TcpStream as StdStream};
+    use std::process::{Command, Stdio};
+    use std::time::Duration as StdDuration;
+    let control = StdListener::bind("127.0.0.1:0").unwrap();
+    let control_port = control.local_addr().unwrap().port();
+    drop(control);
+    let public = StdListener::bind("127.0.0.1:0").unwrap();
+    let public_port = public.local_addr().unwrap().port();
+    drop(public);
+    let target = StdListener::bind("127.0.0.1:0").unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let temp = tempfile::tempdir().unwrap();
+    let token = temp.path().join("token");
+    std::fs::write(&token, "stream-limit-token\n").unwrap();
+    let mut server = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args([
+            "reverse-mux-server",
+            "--control-listen",
+            &format!("127.0.0.1:{control_port}"),
+            "--public-listen",
+            &format!("127.0.0.1:{public_port}"),
+            "--token-file",
+            token.to_str().unwrap(),
+            "--max-total-streams",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut client = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args([
+            "reverse-mux-client",
+            "--server",
+            &format!("127.0.0.1:{control_port}"),
+            "--target",
+            &format!("127.0.0.1:{target_port}"),
+            "--token-file",
+            token.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut first = None;
+    for _ in 0..100 {
+        if let Ok(stream) = StdStream::connect(("127.0.0.1", public_port)) {
+            first = Some(stream);
+            break;
+        }
+        std::thread::sleep(StdDuration::from_millis(20));
+    }
+    let mut first = first.expect("public listener did not open");
+    let (mut backend, _) = target.accept().unwrap();
+    backend
+        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .unwrap();
+    first.write_all(b"one").unwrap();
+    let mut received = [0u8; 3];
+    backend.read_exact(&mut received).unwrap();
+    assert_eq!(&received, b"one");
+    let mut second = StdStream::connect(("127.0.0.1", public_port)).unwrap();
+    second
+        .set_read_timeout(Some(StdDuration::from_secs(3)))
+        .unwrap();
+    let mut end = [0u8; 1];
+    let read = second.read(&mut end).unwrap();
+    assert_eq!(read, 0);
+    drop(first);
+    server.kill().ok();
+    client.kill().ok();
+    server.wait().ok();
+    client.wait().ok();
+}

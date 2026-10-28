@@ -1,8 +1,17 @@
 # 本地验证记录
 
-0.99.0 开发版在 macOS 27.0.1 arm64 通过 **432 项自动化测试（403 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 433 项。日志见 [verification-0.99.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.99.0.json](validation-evidence-0.98.0.json)。
+0.100.0 开发版在 macOS 27.0.1 arm64 通过 **433 项自动化测试（404 项 Rust、29 项 Python）**、Rust 格式检查、Clippy（警告视为错误）、JavaScript/Python 语法检查、编辑器/视图结构回归与 Release 构建；另有一项崩溃子进程入口由父测试显式调用。Linux 上还多一项条件单元测试，合计 434 项。日志见 [verification-0.100.0.txt](verification-0.98.0.txt)，逐项清单见 [validation-evidence-0.100.0.json](validation-evidence-0.98.0.json)。
 
-## 0.99.0 控制连接上限
+## 0.100.0 进程级公网流上限
+
+| 检查 | 结果 |
+| --- | --- |
+| 参数 | `--max-total-streams 1..1000000`，默认 4096 |
+| 超限 | 新公网连接在 OPEN 前关闭 |
+| 范围 | 单进程所有控制 |
+| 限制 | 非跨进程配额 |
+
+## 0.99.0 控制连接上限（历史）
 
 | 检查 | 结果 |
 | --- | --- |
