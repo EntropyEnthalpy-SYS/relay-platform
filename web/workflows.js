@@ -145,7 +145,7 @@ export function forwardingPathDiagram(snapshot, input) {
 export function buildForwardingPath(snapshot, input, nextId) {
   const fail = code => { throw new Error(code); };
   const { hops, owner, name, protocol, mode, transport = 'plain' } = input;
-  if (!Array.isArray(hops) || hops.length < 2 || hops.length > 16) fail('path_hops');
+  if (!Array.isArray(hops) || hops.length < 1 || hops.length > 16) fail('path_hops');
   if (new Set(hops.map(h => h.node_id)).size !== hops.length) fail('path_duplicate');
   if (!String(name || '').trim()) fail('path_name');
   if (!['forward', 'ss'].includes(mode) || !['tcp', 'udp', 'both'].includes(protocol)) fail('path_mode');

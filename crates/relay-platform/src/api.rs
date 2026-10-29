@@ -330,6 +330,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/topology", get(topology))
         .route("/api/v1/telemetry", get(telemetry))
         .route("/api/v1/configurations/preview", post(preview_batch))
+        .route(
+            "/api/v1/configurations/allocate-endpoints",
+            post(allocate_endpoints),
+        )
         .route("/api/v1/configurations/publish", post(publish_batch))
         .route("/api/v1/users", get(users).post(create_user))
         .route(
@@ -831,6 +835,15 @@ async fn telemetry(
 ) -> ApiResult<serde_json::Value> {
     Ok(Json(
         database(state.store, move |db| db.telemetry(&actor)).await?,
+    ))
+}
+async fn allocate_endpoints(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::node::EndpointRequest>,
+) -> ApiResult<crate::node::EndpointAllocation> {
+    Ok(Json(
+        database(state.store, move |db| db.allocate_endpoints(&actor, input)).await?,
     ))
 }
 async fn preview_batch(

@@ -4,7 +4,7 @@ export const pageInfo = localize({
   overview: ['工作空间', 'NETWORK OVERVIEW', '从一处了解节点、转发链路与实时运行状态。', 'observability', 'dashboard monitor 总览 监控'],
   nodes: ['工作空间', 'NODES & INFRASTRUCTURE', '连接你的服务器，管理每个节点的身份、配置与生命周期。', 'quickstart', 'server agent 服务器 注册'],
   rules: ['工作空间', 'NODE RULES', '管理一台 VPS 上的监听端口、代理服务和转发目标。', 'rules', 'proxy gateway vless reality tuic hysteria2 socks http2 代理 网关'],
-  templates: ['工作空间', 'SETUP TEMPLATES', '从常见场景开始，选择 VPS、填写地址，再检查并发布。', 'rules', 'template 模板 端口'],
+  templates: ['工作空间', 'SETUP TEMPLATES', '从常见场景开始，选择 VPS，自动填写地址与端口，再预览发布。', 'rules', 'template 模板 端口'],
   topology: ['工作空间', 'FORWARDING PATHS', '从客户端到最终目标查看完整路径；每一跳对应一条节点规则。', 'rules', 'chain route network 链路 聚合'],
   health: ['观测与资源', 'TARGET HEALTH', '跟踪真实目标的探测结果，定位不可用的线路。', 'observability', 'latency failover 健康 延迟'],
   usage: ['观测与资源', 'TRAFFIC LEDGER', '按规则与周期查看已上报的流量，核对用量记录。', 'resources', 'traffic bandwidth 计量 流量'],
@@ -30,14 +30,14 @@ export const guideArticles = localize([
   { id: 'quickstart', title: '连接你的第一个节点', subtitle: '从一台服务器开始，建立可观测的转发路径。', icon: 'server', read: '3 分钟', target: 'nodes', steps: [
     ['注册节点', '在「节点管理」创建节点，确认所属租户与用途，获取一次性注册令牌。令牌仅用于注册，请保存在受限权限的文件中。'],
     ['启动 Agent', '按照节点注册对话框中的部署信息，在服务器启动 Agent。控制服务地址、令牌文件与状态目录须对应同一个节点；等待控制在线。'],
-    ['创建并检查规则', '进入「模板库」选择单 VPS 转发、单 VPS SS、多跳转发或多跳 SS。按向导选择节点、填写地址，校验后再发布。'],
+    ['创建并检查规则', '进入「模板库」选择单 VPS 或多跳转发 / SS。选择 VPS 后地址和端口自动填好；缺少地址时仅需保存一次，再预览发布。'],
     ['验证完整链路', '使用真实客户端连接入口，核对目标响应和流量账本。控制在线只表示 Agent 可联系面板，不能代替业务连接测试。'],
   ], note: '小规格机器先从少量规则与连接开始。最低配置取决于协议、并发与流量，不能用空载内存推算满载容量。' },
   { id: 'rules', title: '规则、协议与多跳链路', subtitle: '先定义入口与目标，再按需要添加协议和策略。', icon: 'arrows', read: '4 分钟', target: 'rules', steps: [
     ['选择规则类型', '「节点规则」管理一台 VPS 的服务；「转发路径」从入口展示整条连接；「模板库」提供四种常见场景的起点。三者使用同一份规则配置。'],
     ['配置受管协议', 'VLESS、Reality、Hysteria2、TUIC、AnyTLS、Trojan 与 VMess 按对应表单配置。节点需要已部署支持的协议引擎；公网监听与本机桥接监听是不同端点。'],
     ['保护与限制', '按需要配置来源 / 目的地 ACL、配额、有效期、会话上限与限速。TLS 证书编号对应节点本地证书；Reality 私钥应保留在可信配置中。'],
-    ['组织多跳与发布', '点击“创建转发路径”，按顺序选择入口、中转和出口 VPS。选择 Shadowsocks 时只在最后一跳创建 SS 服务；预览并发布后，在转发路径页用“入口客户端链接”导入客户端。检查所有节点的应用回执，再验证真实流量。'],
+    ['组织多跳与发布', '点击“创建转发路径”，选择入口与出口，按需添加中转；地址和端口自动分配。SS 仅在出口运行。点击“预览发布内容”检查图示后确认发布。等所有节点应用后，用“入口客户端链接”导入客户端并验证流量。'],
   ], note: 'MPTCP 的 Require 模式需要两端内核和网络支持。自有多路径聚合与 Linux MPTCP 是不同机制，不能用其中一种的结果替代另一种验收。' },
   { id: 'observability', title: '读懂监控与告警', subtitle: '把控制连通、目标探测和业务验证分开判断。', icon: 'activity', read: '3 分钟', target: 'health', steps: [
     ['查看总览', '吞吐曲线取自节点上报的采样；多跳流量逐跳计入。活跃会话合并 TCP 连接与 UDP 会话，没有近期回报时显示为空缺。'],

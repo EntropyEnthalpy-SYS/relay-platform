@@ -1,10 +1,10 @@
 # Relay panel tutorial — adding VPS nodes and forwarding traffic
 
-Applies to the 0.122.0 source release. Node enrollment, rule placement, the Agent CLI and deployment commands were reviewed on 2026-10-29. For SS client configuration and remaining WAN limits, read the [0.121.0 UDP and listener-readiness notes](RELEASE_0.121.0_EN.md) and [SS compatibility guide](SS_COMPATIBILITY_0.119.0_EN.md). Check each installed Agent's version before upgrading.
+Applies to the 0.123.0 source release. Node enrollment, rule placement, the Agent CLI and deployment commands were reviewed on 2026-10-29. For SS client configuration and remaining WAN limits, read the [0.121.0 UDP and listener-readiness notes](RELEASE_0.121.0_EN.md) and [SS compatibility guide](SS_COMPATIBILITY_0.119.0_EN.md). Check each installed Agent's version before upgrading.
 
 Use **Templates / 模板库** to start a common setup. **Node rules / 节点规则** manages one VPS's listeners and services. **Forwarding paths / 转发路径** groups those rules into complete entry-to-destination diagrams; it is another view of the same configuration. Creating a multi-hop path creates one rule on each participating VPS.
 
-The library includes four built-in templates: single-VPS port forwarding, single-VPS Shadowsocks, multi-hop port forwarding, and multi-hop Shadowsocks. **My saved rule templates** contains configurations you saved yourself; it can be empty while the four built-ins remain available. New rules use **Review before publishing**, and multi-hop setups use **Validate & preview path**. Nothing is published until you explicitly choose **Publish these changes**. See the [workflow guide](RELEASE_0.122.0_EN.md) and [diagram guide](FORWARDING_DIAGRAM_0.120.0_EN.md).
+The library includes four built-in templates: single-VPS port forwarding, single-VPS Shadowsocks, multi-hop port forwarding, and multi-hop Shadowsocks. **My saved rule templates** contains configurations you saved yourself; it can be empty while the four built-ins remain available. All four built-ins use the same guided form: choose VPSs, accept automatic addresses and ports, then click **Preview changes**. Manual ports and source limits are under **Advanced**. Nothing is published until you explicitly choose **Publish these changes**. See the [workflow guide](RELEASE_0.123.0_EN.md) and [diagram guide](FORWARDING_DIAGRAM_0.120.0_EN.md).
 
 ## 1. Understand the three roles
 
@@ -44,8 +44,9 @@ These are **new-node instructions**. If an Agent is already installed, retain it
 2. Open **Nodes / 节点管理**.
 3. Click **+ Enroll node / + 注册节点**.
 4. Enter a useful name, such as `Singapore-entry-01`. Type, group, and tags are inventory labels; they do not configure routes.
-5. Select the runtime protection policy.
-6. Click **Create node / 创建节点** and save the **node ID** and **one-time enrollment token** from the resulting dialog.
+5. Under **Connection defaults for new rules**, enter the VPS's reachable IP or hostname without a port. This is saved once and reused. The default automatic port range is 20000–29999; open **Port range / NAT / listen IP** to change it. NAT requires a continuous range already mapped by your provider.
+6. Select the runtime protection policy.
+7. Click **Create node / 创建节点** and save the **node ID** and **one-time enrollment token** from the resulting dialog.
 
 | Policy | Behavior and trade-off |
 | --- | --- |
@@ -56,10 +57,10 @@ The policy is fixed at node creation. The enrollment token is displayed once. Sa
 
 ## 4. Install and start the Agent
 
-Use a root Bash shell on the new VPS. In this example, `/root/relay-onboarding-0.122.0` already contains:
+Use a root Bash shell on the new VPS. In this example, `/root/relay-onboarding-0.123.0` already contains:
 
 ```text
-relay-linux-0.122.0.tar.gz
+relay-linux-0.123.0.tar.gz
 signing-public.pem
 scripts/relay_deploy.py
 scripts/deployment/...
@@ -70,7 +71,7 @@ Install the runtime tooling if necessary:
 ```sh
 apt-get update
 apt-get install --yes python3 openssl ca-certificates curl
-cd /root/relay-onboarding-0.122.0
+cd /root/relay-onboarding-0.123.0
 umask 077
 ```
 
@@ -98,12 +99,12 @@ Then verify, inspect, install, start, and enable the service:
 
 ```sh
 python3 scripts/relay_deploy.py verify \
-  --bundle relay-linux-0.122.0.tar.gz \
+  --bundle relay-linux-0.123.0.tar.gz \
   --trusted-key signing-public.pem
 
 python3 scripts/relay_deploy.py preflight \
   --role agent --config agent.json \
-  --bundle relay-linux-0.122.0.tar.gz \
+  --bundle relay-linux-0.123.0.tar.gz \
   --trusted-key signing-public.pem
 ```
 
@@ -112,7 +113,7 @@ Continue only after preflight reports `ready: true`. Resolve any reported error 
 ```sh
 python3 scripts/relay_deploy.py install \
   --role agent --config agent.json \
-  --bundle relay-linux-0.122.0.tar.gz \
+  --bundle relay-linux-0.123.0.tar.gz \
   --trusted-key signing-public.pem \
   --enrollment-token-file enrollment.secret
 
@@ -147,30 +148,21 @@ Keep this terminal open during the test. In the panel, open **Templates / 模板
 
 | Field | Value for this test |
 | --- | --- |
-| Run on node / VPS | Select the newly enrolled forwarding VPS |
-| Rule purpose | Port forwarding |
-| Rule name | `HTTP-forward-test` |
-| Protocol | `TCP` |
-| Listen address | `0.0.0.0:18081` |
-| Target address | `127.0.0.1:18080` |
-| Target weight | `1` |
-| Target allocation | Weighted round robin; one target makes balancing irrelevant |
-| Client / previous-hop address | `ENTRY_VPS_IP:18081` (the real reachable IP or hostname) |
-| End port | Leave blank under advanced options |
-| Quota / rate | Leave blank initially |
-| Enable rule | Checked |
+| Path name | `HTTP-forward-test` |
+| Exit service | Forward to fixed targets |
+| Service VPS | Select the newly enrolled VPS |
+| Destination | `127.0.0.1:18080` |
+| Advanced: protocol, owner and tunnels | Select TCP for this HTTP-only example |
 
-The template selects ordinary forwarding. Set the transport to TCP for this HTTP test. Optional balancing, limits, port ranges, TLS, MPTCP and other tuning are in expandable sections; their defaults are sufficient for this test.
+The reachable address is reused from the node's connection defaults. The panel suggests a port that is unused by saved rules in that range. If the address is missing, fill **Reachable VPS address** on the VPS card once and click **Save VPS address and allocate ports**. A node name or the controller's hostname is never used as a guessed VPS address.
 
-In the source ACL, you can allow only your computer's public IPv4 address as `YOUR_PUBLIC_IP/32`. An empty allow list permits all sources not explicitly denied. The source address must be the address the VPS actually sees.
+For the exact `18081` port used by the commands below, open the VPS card's **Advanced: ports, source limits and VPS address**, check **Set addresses and ports manually for this path**, and enter `0.0.0.0:18081` for the listener and `ENTRY_VPS_IP:18081` for the reachable endpoint. Otherwise keep automatic allocation and substitute the displayed port in those commands.
 
-Click **Review before publishing / 检查并预览发布**. Check the diagram shows your chosen VPS and `127.0.0.1:18080` as its target, then click **Publish these changes / 发布这些变更**. On **Forwarding paths**, verify:
+You can restrict this demo to your computer's public IPv4 address using `YOUR_PUBLIC_IP/32` in **Allowed source CIDRs**. A blank list permits all sources not explicitly denied.
 
-- The Agent is connected.
-- **Desired revision equals applied revision.**
-- There is no configuration application error.
+Click **Preview changes / 预览发布内容**. Check the selected VPS, its proposed endpoint, and `127.0.0.1:18080` as the final target. Then click **Publish these changes / 发布这些变更**. On **Forwarding paths**, confirm the Agent is connected, its desired and applied revisions match, and there is no application error.
 
-The built-in template suggests `0.0.0.0:9000`; this example uses `0.0.0.0:18081`. The listener belongs to the selected VPS. Clients connect to its actual IP or hostname, never to `0.0.0.0`.
+Previewing does not reserve ports. Publication checks configuration revisions and graph conflicts. An unrelated process can still occupy a proposed port; the Agent's application result confirms whether the listener opened. The panel does not alter firewall rules or provider NAT mappings.
 
 ## 6. Open the port and verify the actual path
 
@@ -207,9 +199,9 @@ curl --fail --max-time 5 http://TARGET_VPS_IP:8080/
 
 If this fails, fix the destination's service bind address, routing, and firewall before changing the forwarding rule. `127.0.0.1` refers to the machine running the Agent, not another VPS. A service on the second VPS bound only to its own loopback address is not directly reachable from the first VPS.
 
-Edit the rule's target to `TARGET_VPS_IP:8080`, keep its listener at `0.0.0.0:18081`, and click **Publish changes / 发布修改**. Wait for the new applied revision, then repeat the external request to `http://ENTRY_VPS_IP:18081/`.
+Rules created by the guide have a declared reachable endpoint. Before changing their route, disable the affected path and wait for its Agents to apply the stop and for all active sessions to reach zero. Then edit the target to `TARGET_VPS_IP:8080`, preserve the listener, review the change, and publish. Re-enable the path, wait for matching revisions, and repeat the request to `http://ENTRY_VPS_IP:18081/`.
 
-Ordinary target edits affect new connections; existing TCP connections can continue using the old target. Test with a new connection. Forwarding preserves the application's bytes, including HTTP Host headers and TLS handshakes; it does not automatically rewrite hostnames or create matching certificates.
+Always test the new route with a new connection after the stopped edit and re-enable sequence. Forwarding preserves the application's bytes, including HTTP Host headers and TLS handshakes; it does not automatically rewrite hostnames or create matching certificates.
 
 ## 8. Other common configurations
 
@@ -226,9 +218,9 @@ For two relay hops, enroll both Agents, then choose **Templates → Multi-hop po
 Client --> Agent A --> Agent B --> Destination
 ```
 
-Choose A as the entry and B as the exit, then enter each VPS's local listener and reachable address. Set the final destination, review the diagram, and publish. The wizard creates both rules and their next-hop reference together. Use **Add hop** to add an intermediate VPS, and the move buttons to set the order. A wildcard address such as `0.0.0.0` cannot be a reachable remote endpoint. Both nodes must apply their configurations, and the inter-node port must be reachable.
+Choose A as the entry and B as the exit. Addresses and ports fill automatically from saved node defaults or an unambiguous existing rule. Set the final destination, review the diagram, and publish. The wizard creates both rules and their next-hop reference together. **+ Add relay VPS (optional)** inserts a VPS before the selected exit. Only relays have move/remove controls. Selecting a VPS already in the path swaps the two positions, so even a two-VPS path can exchange entry and exit. A wildcard address such as `0.0.0.0` cannot be a reachable remote endpoint. Both nodes must apply their configurations, and the inter-node port must be reachable.
 
-For `Client → A → B → C (SS) → Internet`, choose **Multi-hop Shadowsocks**, set the three VPSs in that order, and choose the SS method and key. Only C receives an SS service; A and B forward encrypted traffic. After publishing, use **Entry client link** on the path card. The link uses A's reachable address and C's SS credentials. The SS service is built into the Agent. Managed protocols such as VLESS or Hysteria2 still require their supported engine on the service VPS.
+For `Client → A → B → C (SS) → Internet`, choose **Multi-hop Shadowsocks**, select A as entry and C as exit, then add B as a relay. Addresses and ports are automatic. An SS 2022 AES-256-GCM key is generated; expand the SS section only to change its settings. Only C receives an SS service; A and B forward encrypted traffic. After publishing, use **Entry client link** on the path card. The link uses A's reachable address and C's SS credentials. The SS service is built into the Agent. Managed protocols such as VLESS or Hysteria2 still require their supported engine on the service VPS.
 
 To reuse rules that already exist, edit A's target and choose **Existing next-hop rule (optional)**. The downstream rule must have a reachable address. See [TOPOLOGY.md](TOPOLOGY.md) for the preview, publish, and stop-before-rerouting workflow.
 
@@ -278,10 +270,10 @@ The following uses a root Bash shell on a Debian/Ubuntu build machine and a fres
 apt-get update
 apt-get install --yes git curl ca-certificates build-essential pkg-config clang libclang-dev openssl python3
 
-git clone --branch v0.122.0 --depth 1 \
+git clone --branch v0.123.0 --depth 1 \
   https://github.com/EntropyEnthalpy-SYS/relay-platform.git \
-  /root/relay-build-0.122.0
-cd /root/relay-build-0.122.0
+  /root/relay-build-0.123.0
+cd /root/relay-build-0.123.0
 ```
 
 If Rustup is absent, install it using the [official Rust installation instructions](https://rust-lang.org/tools/install/), then open a new shell or load its environment. Select the same Rust version used by project CI and build:
@@ -292,15 +284,15 @@ rustup toolchain install 1.99.1 --profile minimal
 cargo +1.99.1 build --locked --release --bin relay --jobs 2
 ./target/release/relay build-info
 
-install -d -m 700 /root/relay-release-0.122.0
+install -d -m 700 /root/relay-release-0.123.0
 python3 scripts/relay_deploy.py keygen \
-  --directory /root/relay-release-0.122.0/signing
+  --directory /root/relay-release-0.123.0/signing
 
 python3 scripts/relay_deploy.py pack \
   --binary target/release/relay \
-  --signing-key /root/relay-release-0.122.0/signing/signing-private.pem \
+  --signing-key /root/relay-release-0.123.0/signing/signing-private.pem \
   --source-revision "$(git rev-parse HEAD)" \
-  --output /root/relay-release-0.122.0/relay-linux-0.122.0.tar.gz
+  --output /root/relay-release-0.123.0/relay-linux-0.123.0.tar.gz
 ```
 
 The signing directory is created once for this example; retain its private key privately for release management. The private key is not needed on the Agent VPS.
@@ -308,14 +300,14 @@ The signing directory is created once for this example; retain its private key p
 From the build machine, replace `ENTRY_VPS_IP` and copy only the bundle, public key, and scripts over your trusted SSH connection:
 
 ```sh
-ssh root@ENTRY_VPS_IP 'install -d -m 700 /root/relay-onboarding-0.122.0'
+ssh root@ENTRY_VPS_IP 'install -d -m 700 /root/relay-onboarding-0.123.0'
 
-scp /root/relay-release-0.122.0/relay-linux-0.122.0.tar.gz \
-  /root/relay-release-0.122.0/signing/signing-public.pem \
-  root@ENTRY_VPS_IP:/root/relay-onboarding-0.122.0/
+scp /root/relay-release-0.123.0/relay-linux-0.123.0.tar.gz \
+  /root/relay-release-0.123.0/signing/signing-public.pem \
+  root@ENTRY_VPS_IP:/root/relay-onboarding-0.123.0/
 
-scp -r /root/relay-build-0.122.0/scripts \
-  root@ENTRY_VPS_IP:/root/relay-onboarding-0.122.0/
+scp -r /root/relay-build-0.123.0/scripts \
+  root@ENTRY_VPS_IP:/root/relay-onboarding-0.123.0/
 ```
 
 If building on the Agent VPS itself, use ordinary local copies of the same three items into the onboarding directory instead of SCP. Then continue with enrollment and installation above.

@@ -14,6 +14,7 @@ node scripts/test_web_workflows.cjs
 node scripts/test_web_dialogs.cjs
 for RELAY_TEST_LANGUAGE in zh-CN en; do
     export RELAY_TEST_LANGUAGE
+    node scripts/test_web_path_setup.cjs
     node scripts/test_web_console.cjs
     node scripts/test_web_editor.cjs web/app.js
     node scripts/test_web_http2.cjs web/app.js

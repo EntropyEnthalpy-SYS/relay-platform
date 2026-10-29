@@ -583,7 +583,31 @@ const costPeriodNames = localize({ monthly: '每月', yearly: '每年', one_time
 function costAmount(micros) { const value = BigInt(micros), fraction = (value % 1000000n).toString().padStart(6, '0').replace(/0+$/, ''); return (value / 1000000n).toString() + (fraction ? '.' + fraction : ''); }
 function costLabel(cost) { return cost ? `${cost.currency} ${costAmount(cost.amount_micros)} · ${costPeriodNames[cost.period]}` : translate('未记录'); }
 function localDateTime(value) { if (!value) return ''; const d = new Date(value), pad = (n, size = 2) => String(n).padStart(size, '0'); return `${pad(d.getFullYear(), 4)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`; }
+function forwardingDefaultsEditor(parent, value = {}, prefix = 'forwarding') {
+  const box = el('div', undefined, 'forwarding-defaults');
+  const host = field(box, `${prefix}-host`, translate('VPS 可达地址（IP 或域名，不含端口）'), value?.host || '', 'text', false);
+  host.placeholder = 'vps.example.com'; host.maxLength = 253;
+  const advanced = el('details'); advanced.append(el('summary', translate('端口范围 / NAT / 监听 IP')));
+  const grid = el('div', undefined, 'form-grid'); advanced.append(grid);
+  const listen = field(grid, `${prefix}-listen`, translate('监听 IP（留空自动选择）'), value?.listen_ip || '', 'text', false);
+  const start = field(grid, `${prefix}-start`, translate('自动分配起始端口'), value?.port_start ?? 20000, 'number');
+  const end = field(grid, `${prefix}-end`, translate('自动分配结束端口'), value?.port_end ?? 29999, 'number');
+  const publicStart = field(grid, `${prefix}-public`, translate('NAT 公网起始端口（留空与监听端口相同）'), value?.public_port_start ?? '', 'number', false);
+  for (const input of [start, end, publicStart]) { input.min = input === publicStart ? 1 : 1024; input.max = 65535; }
+  advanced.append(el('p', translate('NAT 仅适用于已由服务商映射的连续端口段；面板不会创建 NAT 或开放防火墙。'), 'fine'));
+  box.append(advanced); parent.append(box);
+  const optional = () => { start.required = end.required = !!host.value.trim(); }; host.addEventListener('input', optional); optional();
+  return { box, host, read() {
+    if (!host.value.trim()) return null;
+    const low = Number(start.value), high = Number(end.value), mapped = publicStart.value.trim() ? Number(publicStart.value) : null;
+    if (!Number.isInteger(low) || low < 1024 || !Number.isInteger(high) || high < low || high > 65535 || (mapped !== null && (!Number.isInteger(mapped) || mapped < 1 || mapped + high - low > 65535))) throw new Error(translate('请检查自动分配端口范围和 NAT 映射范围。'));
+    return { host: host.value.trim(), listen_ip: listen.value.trim() || null, port_start: low, port_end: high, public_port_start: mapped };
+  } };
+}
 function nodeSettingsEditor(form, settings = {}, strict = () => true) {
+  form.append(el('h3', translate('新规则的连接默认值')));
+  const forwarding = forwardingDefaultsEditor(form, settings.forwarding);
+  form.append(el('p', translate('地址填写一次，新规则自动复用并分配端口。修改默认值不会改动已发布规则。'), 'fine'));
   const kinds = el('fieldset', undefined, 'target-editor'); kinds.append(el('legend', translate('节点类型（用途标注，可多选）')));
   for (const [value, label] of Object.entries(nodeKindNames)) { const item = el('label', label, 'inline-check'), input = el('input'); input.type = 'checkbox'; input.name = 'node_kind'; input.value = value; input.checked = (settings.kinds || []).includes(value); item.prepend(input); kinds.append(item); } form.append(kinds);
   field(form, 'node_group', translate('分组'), settings.group || '', 'text', false).maxLength = 64;
@@ -602,7 +626,7 @@ function nodeSettingsEditor(form, settings = {}, strict = () => true) {
     if (amount) { if (!/^\d+(\.\d{1,6})?$/.test(amount)) throw new Error(translate('成本必须为非负十进制数，最多 6 位小数')); const [whole, fraction = ''] = amount.split('.'), micros = BigInt(whole) * 1000000n + BigInt(fraction.padEnd(6, '0')); if (micros > 9000000000000000n) throw new Error(translate('成本超出可记录范围')); cost = { currency: String(data.get('cost_currency')).trim().toUpperCase(), amount_micros: Number(micros), period: data.get('cost_period') }; }
     let expires = null;
     if (strict() && expiry.value) { expires = expiry.value === originalExpiryText ? settings.expires_at_ms : new Date(expiry.value).getTime(); if (!Number.isSafeInteger(expires) || expires <= 0) throw new Error(translate('请输入有效的到期时间')); }
-    return { kinds: data.getAll('node_kind'), group: String(data.get('node_group') || '').trim() || null, tags: String(data.get('node_tags') || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean), notes: String(data.get('node_notes') || ''), cost, enabled: strict() ? enabled.value === 'true' : true, expires_at_ms: expires };
+    return { forwarding: forwarding.read(), kinds: data.getAll('node_kind'), group: String(data.get('node_group') || '').trim() || null, tags: String(data.get('node_tags') || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean), notes: String(data.get('node_notes') || ''), cost, enabled: strict() ? enabled.value === 'true' : true, expires_at_ms: expires };
   } };
 }
 function editNode(node) {
@@ -674,7 +698,7 @@ function setupCards(pathOnly = false) {
 }
 function chooseSetup(pathOnly = false) {
   const body = el('div');
-  body.append(el('p', translate('先选择要实现的连接方式。下一步选择 VPS 和地址，检查路径后再发布。'), 'workflow-callout'), setupCards(pathOnly));
+  body.append(el('p', translate('先选择连接方式，再选择 VPS。地址和端口自动填写，检查路径后再发布。'), 'workflow-callout'), setupCards(pathOnly));
   if (!pathOnly) body.append(button(translate('其他协议 / 高级规则'), () => startSetup('advanced')));
   modal(translate('你想建立什么连接？'), body);
 }
@@ -685,12 +709,10 @@ async function startSetup(id) {
     const body = empty(translate('先连接所需的 VPS'), recipe?.path ? translate('多跳模板需要至少两个节点。注册 VPS 并启动 Agent 后，再选择入口和出口。') : translate('先注册一台 VPS 并启动 Agent，再用模板创建服务。'), button(translate('前往节点管理'), () => { $('#dialog').close(); return navigate('nodes'); }, 'primary'));
     modal(translate('准备节点'), body); return;
   }
-  if (recipe?.path) return newTopologyChain(snapshot, { mode: recipe.mode, protocol: 'both', name: recipe.title });
+  if (recipe) return newTopologyChain(snapshot, { mode: recipe.mode, protocol: 'both', name: recipe.title, single: !recipe.path, entryNode: state.selectedNode });
   const node = snapshot.nodes.find(n => n.id === state.selectedNode) || snapshot.nodes.find(n => n.tenant_id === state.actor.tenant_id) || snapshot.nodes[0];
   state.selectedNode = node.id; state.config = snapshot.configs.find(config => config.node_id === node.id);
-  const seed = recipe ? { name: recipe.title, protocol: 'both', listen: '0.0.0.0:9000', targets: [{ address: '', weight: 1 }],
-    ...(recipe.mode === 'ss' ? { inbound_shadowsocks: { method: '2022-blake3-aes-256-gcm', password: shadowsocksKey('2022-blake3-aes-256-gcm'), udp_over_tcp: true } } : {}) } : {};
-  return editRule(null, seed);
+  return editRule(null, {});
 }
 
 async function renderRules() {
@@ -1130,7 +1152,7 @@ const ticketStatuses = localize({ open: '待处理', pending: '处理中', close
 const ticketPriorities = localize({ low: '低', normal: '普通', high: '高' });
 async function renderTemplates() {
   const [templates, nodes] = await Promise.all([api('/templates'), api('/nodes')]); state.nodes = nodes;
-  const starters = panel(translate('选择一个起点'), translate('内置模板会打开配置向导。填写实际 VPS、端口和目标后，先预览再发布。'));
+  const starters = panel(translate('选择一个起点'), translate('内置模板会打开配置向导。选择 VPS 后自动分配地址和端口，检查目标与路径后再发布。'));
   starters.append(setupCards());
   const p = panel(translate('我的规则模板'), translate('从节点规则保存的可复用配置。应用时生成新的规则身份与计量周期，并校验端口和引用。'), null);
   if (!templates.length) p.append(empty(translate('还没有自定义模板'), translate('上方内置模板可以直接使用。配置好规则后，点击“存为模板”即可在这里复用。')));
@@ -2108,98 +2130,173 @@ async function changeTopologyComponent(snapshot, seed, enabled) {
   await previewTopology(snapshot, { updates });
 }
 async function newTopologyChain(snapshot, preset = {}) {
-  if (snapshot.nodes.length < 2) { notify(translate('创建路径需要至少两个节点。请先注册并在对应 VPS 安装 Agent。'), true); return; }
+  const minimum = preset.single ? 1 : 2;
+  const title = preset.single ? translate('创建规则 · 单台 VPS') : translate('创建转发路径 · 入口 → 中转 → 出口');
+  if (snapshot.nodes.length < minimum) { notify(translate('请先注册路径所需的 VPS 并安装 Agent。'), true); return; }
   const users = await api('/users');
-  const form = el('form'), rows = [], holder = el('div'), header = el('div', undefined, 'form-grid path-config-header');
-  form.append(el('h3', translate('1. 选择路径类型'), 'setup-step'));
+  const form = el('form'), rows = [], holder = el('div', undefined, 'path-picker'), header = el('div', undefined, 'form-grid');
+  form.append(el('p', translate('选择 VPS，面板自动填写地址并分配端口。先预览整条路径，再确认发布。'), 'workflow-callout'));
   field(header, 'name', translate('链路名称'), preset.name || '').maxLength = 80;
-  const ownerField = select(header, 'owner', translate('规则所有者（须与所有节点同一租户）'), users.map(user => [user.id, `${user.username} · ${user.tenant_id}`]), state.actor.id);
   const mode = select(header, 'exit_service', translate('出口服务'), localize([['forward', '转发到固定目标'], ['ss', '在出口 VPS 创建 Shadowsocks']]), preset.mode || 'forward');
-  const protocol = select(header, 'protocol', translate('传输协议（TCP / UDP）'), [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], preset.protocol || 'tcp');
-  const transport = select(header, 'transport', translate('节点间传输'), [['plain', translate('原生 TCP / UDP')], ['ws', translate('WS 流隧道 · 仅 TCP')], ['wss', translate('WSS 双向证书 · 仅 TCP')]], 'plain');
-  form.append(header);
-  const pathView = forwardingPathView();
-  const placement = el('p', '', 'workflow-callout'); form.append(placement);
+  form.append(header, el('h3', preset.single ? translate('1. 选择服务 VPS') : translate('1. 选择入口、中转和出口'), 'setup-step'), holder);
+  const status = el('p', '', 'fine'); status.setAttribute('role', 'status');
+  const addRelay = button(translate('＋ 添加中转 VPS（可选）'), () => { add(rows.length - 1); draw(); schedule(); });
+  form.append(addRelay, status);
+  const targetBox = el('div');
+  const targets = textarea(targetBox, 'targets', translate('最终目标（IP 或域名:端口，每行一个）'), '', true); targets.placeholder = 'destination.example.com:443';
+  form.append(el('h3', translate('2. 设置出口服务'), 'setup-step'), targetBox);
+  const ss = shadowsocksEditor(null); ss.setEnabled(mode.value === 'ss'); ss.box.open = false;
+  const ssNote = el('p', preset.single ? translate('已自动生成 SS 密钥。客户端直接连接所选 VPS 上的 SS 服务。') : translate('已自动生成 SS 密钥。只有出口 VPS 运行 SS；客户端连接入口，前面的 VPS 仅转发加密流量。'), 'fine');
+  form.append(ssNote, ss.box);
+  const advanced = el('details'); advanced.append(el('summary', translate('高级选项：协议、所有者与隧道')));
+  const tuning = el('div', undefined, 'form-grid'); advanced.append(tuning);
+  const ownerField = select(tuning, 'owner', translate('规则所有者（须与所有节点同一租户）'), users.map(user => [user.id, `${user.username} · ${user.tenant_id}`]), state.actor.id);
+  const protocol = select(tuning, 'protocol', translate('传输协议（TCP / UDP）'), [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], preset.protocol || 'both');
+  const transport = select(tuning, 'transport', translate('节点间传输'), [['plain', translate('原生 TCP / UDP')], ['ws', translate('WS 流隧道 · 仅 TCP')], ['wss', translate('WSS 双向证书 · 仅 TCP')]], 'plain');
   const secure = el('div', undefined, 'form-grid');
   const identity = field(secure, 'server_identity', translate('中转 / 出口的服务器证书编号'), 'server');
   const authority = field(secure, 'ca_identity', translate('各节点的信任 CA 编号'), 'root');
   const clientIdentity = field(secure, 'client_identity', translate('入口 / 中转的客户端证书编号'), 'client');
-  const wsFields = el('div'); const wsPath = field(wsFields, 'ws_path', translate('WebSocket 路径'), '/relay'); wsPath.maxLength = 1024;
-  form.append(secure, wsFields, el('h3', translate('2. 按顺序选择 VPS 和端口'), 'setup-step'), holder);
-  let serial = 0;
+  const wsFields = el('div'), wsPath = field(wsFields, 'ws_path', translate('WebSocket 路径'), '/relay'); wsPath.maxLength = 1024;
+  advanced.append(secure, wsFields); form.append(advanced);
+  const pathView = forwardingPathView(), placement = el('p', '', 'fine');
+  let serial = 0, requestSerial = 0, timer;
+  const errorNames = localize({ address_required: '请先保存此 VPS 的可达地址。', ports_exhausted: '自动分配范围内没有可用端口；请调整节点端口范围。', port_in_use: '手动指定的端口已被配置占用，请更换。' });
+  const selectedNode = row => snapshot.nodes.find(node => node.id === row.node.value);
+  const hopInputs = () => rows.map(row => ({ node_id: row.node.value, listen: row.listen.value.trim(), advertise: row.advertise.value.trim(), tls_name: row.tlsName.value.trim(), allow_sources: row.sources.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean) }));
+  function resetSetup(row, defaults) {
+    row.setup.replaceChildren(el('p', translate('此 VPS 的地址填写一次，以后自动复用。请使用客户端或上一跳可以访问的 IP 或域名。'), 'fine'));
+    row.defaults = forwardingDefaultsEditor(row.setup, defaults || selectedNode(row).profile?.settings?.forwarding, `defaults-${row.index}`);
+    const save = button(translate('保存 VPS 地址并自动分配'), async () => {
+      save.disabled = true;
+      try {
+        const node = selectedNode(row), value = row.defaults.read();
+        if (!value) throw new Error(errorNames.address_required);
+        const profile = await api(`/nodes/${node.id}/profile`, { method: 'PUT', body: { expected_revision: node.profile.revision, name: node.name, settings: { ...node.profile.settings, forwarding: value } } });
+        // Profile responses are versioned separately from forwarding rules.
+        node.profile = profile.profile;
+        row.editAddress = false; await allocate();
+      } catch (error) {
+        row.issue.textContent = error.message;
+      } finally { save.disabled = false; }
+    });
+    row.setup.append(save);
+  }
   function draw() {
     holder.replaceChildren();
     rows.forEach((row, index) => {
-      row.legend.textContent = index === 0 ? translate('入口 VPS · 客户端连接这里') : index === rows.length - 1 ? translate('出口 VPS · 最后一跳') : msg`中转 VPS · 第 ${index + 1} 跳`;
-      row.up.disabled = index === 0; row.down.disabled = index === rows.length - 1; row.remove.disabled = rows.length <= 2;
+      const middle = index > 0 && index < rows.length - 1;
+      row.legend.textContent = rows.length === 1 ? translate('服务 VPS · 入口与出口') : index === 0 ? translate('入口 VPS · 客户端连接这里') : index === rows.length - 1 ? translate('出口 VPS · 最后一跳') : msg`中转 VPS · 第 ${index + 1} 跳`;
+      row.controls.classList.toggle('hidden', !middle);
+      row.up.disabled = index <= 1; row.down.disabled = index >= rows.length - 2;
       holder.append(row.card);
     });
     show();
   }
-  function add() {
-    if (rows.length >= 16) return;
+  function add(position = rows.length) {
+    if (rows.length >= Math.min(16, snapshot.nodes.length)) return;
     const index = serial++, card = el('fieldset', undefined, 'path-hop'), legend = el('legend'); card.append(legend);
-    const fields = el('div', undefined, 'form-grid'); card.append(fields);
-    const node = select(fields, `node-${index}`, translate('运行节点 / VPS'), snapshot.nodes.map(n => [n.id, n.name]), snapshot.nodes.find(n => !rows.some(r => r.node.value === n.id))?.id || snapshot.nodes[0].id);
-    const listen = field(fields, `listen-${index}`, translate('本机监听地址'), `0.0.0.0:${19001 + index}`);
-    const advertise = field(fields, `advertise-${index}`, translate('客户端或上一跳连接的地址')); advertise.placeholder = `vps.example.com:${19001 + index}`;
-    const tlsName = field(fields, `tls_name-${index}`, translate('此节点证书中的服务名'), '', 'text', false);
-    const sources = textarea(card, `sources-${index}`, translate('此跳允许来源 CIDR（留空不限）'));
-    const note = el('p', '', 'fine'); card.append(note);
-    const row = { card, legend, node, listen, advertise, tlsName, sources, note };
-    const controls = el('div', undefined, 'toolbar');
-    row.up = button(translate('上移'), () => { const i = rows.indexOf(row); if (i > 0) [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); });
-    row.down = button(translate('下移'), () => { const i = rows.indexOf(row); if (i < rows.length - 1) [rows[i], rows[i + 1]] = [rows[i + 1], rows[i]]; draw(); });
-    row.remove = button(translate('移除此跳'), () => { if (rows.length > 2) rows.splice(rows.indexOf(row), 1); draw(); });
-    controls.append(row.up, row.down, row.remove); card.append(controls);
-    node.addEventListener('change', show); listen.addEventListener('input', show); advertise.addEventListener('input', show);
-    rows.push(row);
+    const preferred = rows.length === 0 ? snapshot.nodes.find(n => n.id === preset.entryNode) : null;
+    const node = select(card, `node-${index}`, translate('运行节点 / VPS'), snapshot.nodes.map(n => [n.id, n.name]), preferred?.id || snapshot.nodes.find(n => !rows.some(r => r.node.value === n.id))?.id);
+    const endpoint = el('p', '', 'endpoint-summary mono'), issue = el('p', '', 'error'), setup = el('div', undefined, 'address-setup');
+    const options = el('details'); options.append(el('summary', translate('高级：手动端口、来源限制与节点地址')));
+    const manual = checkbox(options, `manual-${index}`, translate('为这条路径手动指定地址和端口'));
+    const fields = el('div', undefined, 'form-grid');
+    const listen = field(fields, `listen-${index}`, translate('本机监听地址'), '', 'text', false);
+    const advertise = field(fields, `advertise-${index}`, translate('客户端或上一跳连接的地址'), '', 'text', false);
+    options.append(fields);
+    const tlsName = field(options, `tls_name-${index}`, translate('此节点证书中的服务名'), '', 'text', false);
+    const sources = textarea(options, `sources-${index}`, translate('此跳允许来源 CIDR（留空不限）'));
+    const note = el('p', '', 'fine'); options.append(note);
+    const row = { index, card, legend, node, endpoint, issue, setup, options, manual, fields, listen, advertise, tlsName, sources, note, result: null, editAddress: false, previousNode: node.value };
+    options.append(button(translate('修改此 VPS 的连接默认值'), () => { row.editAddress = !row.editAddress; show(); }));
+    const controls = el('div', undefined, 'toolbar'); row.controls = controls;
+    row.up = button(translate('上移'), () => { const i = rows.indexOf(row); if (i > 1) [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]]; draw(); schedule(); });
+    row.down = button(translate('下移'), () => { const i = rows.indexOf(row); if (i > 0 && i < rows.length - 2) [rows[i], rows[i + 1]] = [rows[i + 1], rows[i]]; draw(); schedule(); });
+    row.remove = button(translate('移除此跳'), () => { const i = rows.indexOf(row); if (i > 0 && i < rows.length - 1) rows.splice(i, 1); draw(); schedule(); });
+    controls.append(row.up, row.down, row.remove); card.append(endpoint, issue, setup, options, controls);
+    node.addEventListener('change', () => {
+      // Swapping lets a two-node path change its entry without a third VPS.
+      const other = rows.find(item => item !== row && item.node.value === row.node.value);
+      if (other) other.node.value = row.previousNode;
+      for (const changed of other ? [row, other] : [row]) {
+        changed.previousNode = changed.node.value; changed.manual.checked = false;
+        changed.listen.value = changed.advertise.value = ''; changed.result = null; changed.editAddress = false; resetSetup(changed);
+      }
+      draw(); schedule();
+    });
+    manual.addEventListener('change', () => { show(); schedule(); });
+    for (const input of [listen, advertise]) input.addEventListener('input', () => { show(); schedule(); });
+    rows.splice(position, 0, row); resetSetup(row);
   }
-  const appendHop = button(translate('＋ 添加一跳'), () => { add(); draw(); }); form.append(appendHop);
-  const targetBox = el('div'); const targets = textarea(targetBox, 'targets', translate('出口最终目标（每行一个；多个目标为加权相同的候选）'), '', true); form.append(targetBox);
-  const ss = shadowsocksEditor(null); form.append(ss.box);
-  ss.setEnabled(mode.value === 'ss');
+  function schedule() {
+    ++requestSerial; clearTimeout(timer); status.textContent = translate('正在自动填写地址并分配端口…');
+    timer = setTimeout(() => allocate().catch(error => { status.textContent = error.message; }), 200);
+  }
+  async function allocate(strict = false) {
+    clearTimeout(timer); const sequence = ++requestSerial;
+    const hops = rows.map(row => ({ node_id: row.node.value, ...(row.manual.checked ? { listen: row.listen.value.trim(), advertise: row.advertise.value.trim() } : {}) }));
+    if (new Set(hops.map(h => h.node_id)).size !== hops.length) throw new Error(translate('每一跳请选择不同的 VPS。'));
+    let allocation;
+    try { allocation = await api('/configurations/allocate-endpoints', { method: 'POST', body: { hops } }); }
+    catch (error) { if (sequence !== requestSerial && !strict) return null; throw error; }
+    if (sequence !== requestSerial) { if (strict) throw new Error(translate('选择已变化，请重新预览。')); return null; }
+    rows.forEach((row, index) => {
+      row.result = allocation.endpoints[index];
+      if (!row.manual.checked) { row.listen.value = row.result.listen || ''; row.advertise.value = row.result.advertise || ''; }
+      if (row.result.defaults && !row.defaults.host.value) resetSetup(row, row.result.defaults);
+    });
+    const failed = allocation.endpoints.find(endpoint => endpoint.error);
+    status.textContent = failed ? translate('请补全标出的 VPS 设置后继续。') : translate('地址和端口已自动填好。下一步预览并检查发布内容。');
+    show();
+    if (failed && strict) throw new Error(errorNames[failed.error] || failed.error);
+    return allocation;
+  }
   function show() {
     const proxy = mode.value === 'ss';
-    if (proxy) transport.value = 'plain'; transport.disabled = proxy;
+    if (proxy || rows.length === 1) transport.value = 'plain'; transport.disabled = proxy || rows.length === 1;
     const ws = transport.value !== 'plain', tls = transport.value === 'wss';
     if (ws) protocol.value = 'tcp'; protocol.disabled = ws;
     sectionVisible(secure, tls); sectionVisible(wsFields, ws); sectionVisible(targetBox, !proxy); targets.required = !proxy;
-    sectionVisible(ss.box, proxy); ss.box.open = proxy;
-    appendHop.disabled = rows.length >= 16;
-    const names = rows.map(row => snapshot.nodes.find(n => n.id === row.node.value)?.name || '—');
-    placement.textContent = proxy ? msg`路径：${names.join(' → ')}。SS 仅运行于最后的 ${names.at(-1)}；前面的 VPS 转发加密流量。所有 VPS 都需要 Agent，SS 已内置。` : msg`路径：${names.join(' → ')} → 固定目标。每个 VPS 创建一条转发规则；不会安装额外代理服务。`;
+    sectionVisible(ss.box, proxy); ssNote.classList.toggle('hidden', !proxy);
+    addRelay.classList.toggle('hidden', !!preset.single); addRelay.disabled = rows.length >= Math.min(16, snapshot.nodes.length);
+    const names = rows.map(row => selectedNode(row)?.name || '—');
+    placement.textContent = proxy && preset.single ? msg`路径：客户端 → ${names[0]}（SS）→ 客户端请求的目的地。` : proxy ? msg`路径：${names.join(' → ')}。SS 仅运行于最后的 ${names.at(-1)}；前面的 VPS 转发加密流量。所有 VPS 都需要 Agent，SS 已内置。` : msg`路径：${names.join(' → ')} → 固定目标。每个 VPS 创建一条转发规则；不会安装额外代理服务。`;
     rows.forEach((row, index) => {
+      row.listen.readOnly = row.advertise.readOnly = !row.manual.checked;
+      row.listen.required = row.advertise.required = row.manual.checked;
+      row.fields.classList.toggle('hidden', !row.manual.checked);
       row.tlsName.disabled = !tls || index === 0; row.tlsName.required = tls && index > 0; row.tlsName.parentElement.classList.toggle('hidden', !tls || index === 0);
-      const node = snapshot.nodes.find(n => n.id === row.node.value);
-      row.note.textContent = (index === 0 ? translate('入口来源为客户端地址。') : translate('中转或出口通常看到上一跳地址；请勿直接复制客户端来源白名单。')) + ' ' + (node.enrolled ? translate('已注册 Agent；发布后检查应用回执。') : translate('尚未连接 Agent；发布只保存配置，不会自动 SSH 安装。')) + (splitEndpoint(row.listen.value)?.loopback ? ' ' + translate('回环监听仅用于同机测试，跨 VPS 需要可达监听地址。') : '');
+      if (tls && index > 0) row.options.open = true;
+      row.endpoint.textContent = row.advertise.value ? msg`连接 ${row.advertise.value} · 监听 ${row.listen.value}` : translate('等待自动分配地址和端口');
+      row.issue.textContent = errorNames[row.result?.error] || '';
+      sectionVisible(row.setup, row.editAddress || (!row.manual.checked && row.result?.error === 'address_required'));
+      const node = selectedNode(row);
+      row.note.textContent = (index === 0 ? translate('入口来源为客户端地址。') : translate('中转或出口通常看到上一跳地址；请勿直接复制客户端来源白名单。')) + ' ' + (node.enrolled ? translate('已注册 Agent；发布后检查应用回执。') : translate('尚未连接 Agent；发布只保存配置，不会自动 SSH 安装。'));
     });
-    pathView.update(forwardingPathDiagram(snapshot, { hops: rows.map(row => ({ node_id: row.node.value, listen: row.listen.value, advertise: row.advertise.value })),
-      mode: mode.value, protocol: protocol.value, transport: transport.value, owner: users.find(u => u.id === ownerField.value),
-      uot: proxy && ss.read()?.udp_over_tcp, targets: targets.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean).map(address => ({ address, weight: 1 })),
-    }));
+    pathView.update(forwardingPathDiagram(snapshot, { hops: hopInputs(), mode: mode.value, protocol: protocol.value, transport: transport.value, owner: users.find(u => u.id === ownerField.value), uot: proxy && ss.read()?.udp_over_tcp, targets: targets.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean).map(address => ({ address, weight: 1 })) }));
   }
   mode.addEventListener('change', () => { sectionVisible(ss.box, true); ss.setEnabled(mode.value === 'ss'); if (mode.value === 'ss') protocol.value = 'both'; show(); });
-  transport.addEventListener('change', show);
-  protocol.addEventListener('change', show); ownerField.addEventListener('change', show); targets.addEventListener('input', show); ss.box.addEventListener('change', show);
-  add(); add(); draw();
-  form.append(el('h3', translate('3. 检查整条路径'), 'setup-step'), pathView.box);
-  form.append(el('p', translate('先校验并预览，再发布到各节点。发布不会开放防火墙；每跳独立计量。SS 路径分享链接使用入口地址和出口密钥。其他受管协议仍需先在出口节点配置服务及引擎。'), 'fine'));
-  submit(form, translate('校验并预览链路'), async data => {
-    const messages = localize({ path_hops: '路径需要 2–16 跳。', path_duplicate: '每一跳请选择不同的 VPS。', path_name: '请填写路径名称。', path_mode: '请选择有效的路径类型和传输协议。', path_transport: 'WS / WSS 仅支持 TCP；SS 向导使用原生转发。', path_ss: '请为出口选择 Shadowsocks 加密方式。', path_targets: '请填写至少一个最终目标。', path_tenant: '所有节点与规则所有者必须属于同一租户。', path_listen: '请为每一跳填写有效的监听地址和端口。', path_advertise: '请填写每一跳实际可达的 IP 或域名和端口，不能使用通配地址。', path_config: '节点配置缺失，请刷新后重试。' });
-    let input;
+  for (const input of [transport, protocol, ownerField, ss.box]) input.addEventListener('change', show);
+  targets.addEventListener('input', show);
+  add(); if (!preset.single) add(); draw();
+  form.append(el('h3', translate('3. 预览路径'), 'setup-step'), placement, pathView.box);
+  form.append(el('p', translate('端口按已保存配置避让，预览不会占用端口。发布时再次检查修订和冲突；实际监听由 Agent 应用后确认，防火墙需允许所示端口。'), 'fine'));
+  submit(form, translate('预览发布内容'), async data => {
+    form.inert = true;
     try {
-      input = buildForwardingPath(snapshot, {
-        name: String(data.get('name')), owner: users.find(u => u.id === ownerField.value), mode: mode.value,
-        protocol: protocol.value, transport: transport.value, ws_path: wsPath.value.trim(), server_identity: identity.value.trim(), ca_identity: authority.value.trim(), client_identity: clientIdentity.value.trim(),
-        shadowsocks: mode.value === 'ss' ? ss.read() : null,
-        targets: targets.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean).map(address => ({ address, weight: 1 })),
-        hops: rows.map(row => ({ node_id: row.node.value, listen: row.listen.value, advertise: row.advertise.value, tls_name: row.tlsName.value.trim(), allow_sources: row.sources.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean) })),
-      }, () => crypto.randomUUID());
-    } catch (error) { throw new Error(messages[error.message] || error.message); }
-    await previewTopology(snapshot, input, placement.textContent, () => modal(translate('创建转发路径 · 入口 → 中转 → 出口'), form), [{ node_id: input.updates[0].node_id, rule_id: input.updates[0].rules.at(-1).id }]);
+      const allocation = await allocate(true);
+      const current = { ...snapshot, configs: snapshot.configs.map(config => allocation.configs.find(fresh => fresh.node_id === config.node_id) || config) };
+      const messages = localize({ path_hops: '路径需要 1–16 跳。', path_duplicate: '每一跳请选择不同的 VPS。', path_name: '请填写路径名称。', path_mode: '请选择有效的路径类型和传输协议。', path_transport: 'WS / WSS 仅支持 TCP；SS 向导使用原生转发。', path_ss: '请为出口选择 Shadowsocks 加密方式。', path_targets: '请填写至少一个最终目标。', path_tenant: '所有节点与规则所有者必须属于同一租户。', path_listen: '请为每一跳填写有效的监听地址和端口。', path_advertise: '请填写每一跳实际可达的 IP 或域名和端口，不能使用通配地址。', path_config: '节点配置缺失，请刷新后重试。' });
+      let input;
+      try {
+        input = buildForwardingPath(current, { name: String(data.get('name')), owner: users.find(u => u.id === ownerField.value), mode: mode.value, protocol: protocol.value, transport: transport.value, ws_path: wsPath.value.trim(), server_identity: identity.value.trim(), ca_identity: authority.value.trim(), client_identity: clientIdentity.value.trim(), shadowsocks: mode.value === 'ss' ? ss.read() : null, targets: targets.value.split(/\r?\n/).map(v => v.trim()).filter(Boolean).map(address => ({ address, weight: 1 })), hops: hopInputs() }, () => crypto.randomUUID());
+      } catch (error) { throw new Error(messages[error.message] || error.message); }
+      await previewTopology(current, input, placement.textContent, () => { modal(title, form); schedule(); }, [{ node_id: input.updates[0].node_id, rule_id: input.updates[0].rules.at(-1).id }]);
+    } finally { form.inert = false; }
   });
-  modal(translate('创建转发路径 · 入口 → 中转 → 出口'), form);
+  modal(title, form);
+  await allocate().catch(error => { status.textContent = error.message; });
 }
 
 function editTopologyBatch(snapshot) {

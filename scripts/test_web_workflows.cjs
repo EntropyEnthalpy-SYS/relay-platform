@@ -32,7 +32,7 @@ const protectedEntry = copy(topology); protectedEntry.configs[0].rules.at(-1).in
 assert.equal(shadowsocksPath(protectedEntry, root), null, 'ordinary SS link cannot represent an extra entry TLS layer');
 for (const [change, error] of [
   [{ hops: [input.hops[0], input.hops[0]] }, /path_duplicate/],
-  [{ hops: [input.hops[0]] }, /path_hops/],
+  [{ hops: [] }, /path_hops/],
   [{ owner: { id: 'wrong', tenant_id: 'other' } }, /path_tenant/],
   [{ hops: input.hops.map(h => ({ ...h, advertise: '0.0.0.0:8080' })) }, /path_advertise/],
   [{ shadowsocks: null }, /path_ss/],
@@ -53,6 +53,11 @@ assert.equal(applicationState({ ...node, apply_error: 'port busy' }, 10000), 're
 assert.equal(applicationState(node, 50000), 'offline');
 assert.equal(applicationState({ ...node, enrolled: false }, 10000), 'not_enrolled');
 console.log('Workflow contracts passed: three-hop SS placement, per-hop sources, preserved rules/revisions, truthful status, entry exports, ambiguous path rejection, tenant checks and native WSS compatibility');
+const single = copy(build({ ...input, hops: [input.hops[0]] }));
+assert.equal(single.updates.length, 1);
+assert.equal(single.updates[0].rules.at(-1).inbound_shadowsocks.password, key);
+assert.equal(single.updates[0].rules.at(-1).targets.length, 0);
+assert.equal(single.updates[0].rules[0].id, 'existing-node-1');
 
 const compatible = copy(shadowsocksClientProfile({ ...input.shadowsocks, udp_over_tcp: true }, path.endpoint, 'Phone route'));
 assert.equal(compatible.outbounds[0].server, 'vps1.example');

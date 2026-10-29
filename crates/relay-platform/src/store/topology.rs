@@ -2,7 +2,7 @@ use super::*;
 use crate::topology::{self, BatchResult, ConfigBatch, ConfigChange, ConfigUpdate, RuleChange};
 use std::collections::{BTreeMap, BTreeSet};
 
-fn all_configs(conn: &Connection) -> Result<BTreeMap<String, NodeConfig>> {
+pub(super) fn all_configs(conn: &Connection) -> Result<BTreeMap<String, NodeConfig>> {
     let mut query = conn.prepare("SELECT c.config_json FROM config_history c JOIN nodes n ON n.id=c.node_id AND n.desired_revision=c.revision ORDER BY n.id")?;
     let values = query.query_map([], |row| row.get::<_, String>(0))?;
     let mut configs = BTreeMap::new();
@@ -277,7 +277,12 @@ impl Store {
         let conn = self.0.lock().unwrap();
         let all = all_configs(&conn)?;
         let mut q = conn.prepare("SELECT id,name,tenant_id,desired_revision,applied_revision,last_seen_ms,apply_error,stats_json,token_hash IS NOT NULL FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY id")?;
-        let nodes = q.query_map(params![actor.role.as_str(),actor.tenant_id],|r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"tenant_id":r.get::<_,String>(2)?,"desired_revision":r.get::<_,u64>(3)?,"applied_revision":r.get::<_,u64>(4)?,"last_seen_ms":r.get::<_,Option<i64>>(5)?,"apply_error":r.get::<_,Option<String>>(6)?,"stats":serde_json::from_str::<EngineStats>(&r.get::<_,String>(7)?).unwrap_or_default(),"enrolled":r.get::<_,bool>(8)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut nodes = q.query_map(params![actor.role.as_str(),actor.tenant_id],|r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"tenant_id":r.get::<_,String>(2)?,"desired_revision":r.get::<_,u64>(3)?,"applied_revision":r.get::<_,u64>(4)?,"last_seen_ms":r.get::<_,Option<i64>>(5)?,"apply_error":r.get::<_,Option<String>>(6)?,"stats":serde_json::from_str::<EngineStats>(&r.get::<_,String>(7)?).unwrap_or_default(),"enrolled":r.get::<_,bool>(8)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for node in &mut nodes {
+            let profile = node_profiles::read(&conn, node["id"].as_str().unwrap())?;
+            node["lifecycle"] = serde_json::to_value(profile.settings.lifecycle(now_ms()))?;
+            node["profile"] = serde_json::to_value(profile)?;
+        }
         let configs: Vec<_> = nodes
             .iter()
             .map(|node| all[node["id"].as_str().unwrap()].clone())

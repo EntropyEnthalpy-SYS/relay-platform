@@ -3,6 +3,123 @@ use crate::store::reject;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+/// Operator-confirmed defaults for new rules, never a rewrite of existing routes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ForwardingDefaults {
+    pub host: String,
+    pub listen_ip: Option<IpAddr>,
+    pub port_start: u16,
+    pub port_end: u16,
+    /// A contiguous provider NAT mapping; omitted means identical public ports.
+    pub public_port_start: Option<u16>,
+}
+impl Default for ForwardingDefaults {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            listen_ip: None,
+            port_start: 20000,
+            port_end: 29999,
+            public_port_start: None,
+        }
+    }
+}
+impl ForwardingDefaults {
+    pub fn canonical_host(&self) -> String {
+        let host = self.host.trim_start_matches('[').trim_end_matches(']');
+        host.parse::<IpAddr>().map_or_else(
+            |_| host.trim_end_matches('.').to_ascii_lowercase(),
+            |ip| crate::model::canonical_ip(ip).to_string(),
+        )
+    }
+    pub fn endpoint(&self, port: u16) -> String {
+        let host = self.canonical_host();
+        if host.contains(':') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        }
+    }
+    pub fn bind_ip(&self) -> IpAddr {
+        self.listen_ip
+            .unwrap_or_else(|| match self.canonical_host().parse::<IpAddr>() {
+                Ok(ip) if ip.is_loopback() => ip,
+                Ok(IpAddr::V6(_)) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+                _ if self.canonical_host() == "localhost" => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            })
+    }
+    pub fn public_port(&self, port: u16) -> u16 {
+        self.public_port_start.unwrap_or(self.port_start) + (port - self.port_start)
+    }
+    pub fn validate(&self) -> Result<()> {
+        if self.host.is_empty()
+            || self.host != self.host.trim()
+            || (self.host.contains(['[', ']'])
+                && !(self.host.starts_with('[')
+                    && self.host.ends_with(']')
+                    && self.host[1..self.host.len() - 1]
+                        .parse::<Ipv6Addr>()
+                        .is_ok()))
+            || crate::model::validate_target(&self.endpoint(1)).is_err()
+            || self.canonical_host().parse::<IpAddr>().is_ok_and(|ip| {
+                ip.is_unspecified() || ip.is_multicast() || ip == Ipv4Addr::BROADCAST
+            })
+            || self.listen_ip.is_some_and(|ip| {
+                let ip = crate::model::canonical_ip(ip);
+                ip.is_multicast() || ip == Ipv4Addr::BROADCAST
+            })
+        {
+            return reject(
+                400,
+                "forwarding address requires a reachable IP or hostname without a port, URL or credentials",
+            );
+        }
+        if self.port_start < 1024
+            || self.port_end < self.port_start
+            || self.public_port_start == Some(0)
+            || u32::from(self.public_port_start.unwrap_or(self.port_start))
+                + u32::from(self.port_end - self.port_start)
+                > u32::from(u16::MAX)
+        {
+            return reject(400, "invalid forwarding port range or public NAT mapping");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointHop {
+    pub node_id: String,
+    #[serde(default)]
+    pub listen: Option<SocketAddr>,
+    #[serde(default)]
+    pub advertise: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointRequest {
+    pub hops: Vec<EndpointHop>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AllocatedEndpoint {
+    pub node_id: String,
+    pub listen: Option<SocketAddr>,
+    pub advertise: Option<String>,
+    pub source: String,
+    pub defaults: Option<ForwardingDefaults>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EndpointAllocation {
+    pub endpoints: Vec<AllocatedEndpoint>,
+    /// The exact configurations used for allocation; publish with these revisions.
+    pub configs: Vec<crate::model::NodeConfig>,
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +148,8 @@ pub struct NodeCost {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct NodeSettings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forwarding: Option<ForwardingDefaults>,
     pub kinds: Vec<NodeKind>,
     pub group: Option<String>,
     pub tags: Vec<String>,
@@ -42,6 +161,7 @@ pub struct NodeSettings {
 impl Default for NodeSettings {
     fn default() -> Self {
         Self {
+            forwarding: None,
             kinds: vec![],
             group: None,
             tags: vec![],
@@ -69,6 +189,9 @@ pub fn validate_name(name: &str) -> Result<()> {
 }
 impl NodeSettings {
     pub fn validate(&self) -> Result<()> {
+        if let Some(forwarding) = &self.forwarding {
+            forwarding.validate()?;
+        }
         if self.kinds.len() > 5
             || self
                 .kinds

@@ -20,6 +20,7 @@ mod budgets;
 mod commerce;
 mod credentials;
 mod dns;
+mod endpoint_allocation;
 mod health;
 mod leases;
 mod node_profiles;

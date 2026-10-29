@@ -23,6 +23,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | POST | `/nodes/{id}/rollback` | `{revision,expected_revision}`；把历史规则作为新修订发布，账本不回滚 |
 | POST | `/nodes/{id}/drain` | `{draining}`；把所有 `via` 指向该节点的上游目标设为（或取消）维护排空，在一个批次中发布有变化的上游节点；没有上游指向它时返回 409，已是目标状态时返回空结果 |
 | GET | `/topology` | 当前可见节点、配置、声明边、根规则及应用状态 |
+| POST | `/configurations/allocate-endpoints` | `{hops:[{node_id,listen?,advertise?}]}`；只读分配建议端点，返回 `endpoints,configs`；需写权限及 `nodes:write` token scope |
 | POST | `/configurations/preview` | `{updates:[{node_id,expected_revision,rules}]}`；只读校验并返回候选配置及完整差异，需要写权限 |
 | POST | `/configurations/publish` | 同预览请求；1..64 个节点的期望配置在同一事务中提交 |
 | GET / POST | `/users` | 列出用户；`{username,password,role,tenant_id?}` 创建用户 |
@@ -499,3 +500,12 @@ Subscriptions add format `sing_box`. Both `sing_box` and `clash` (mihomo/Clash M
 CLI `reverse-mux-server --ready-file <新文件路径>` 在监听绑定和参数校验完成后生成权限 0600 的 JSON，报告实际地址、PID、版本和 `listeners_bound` 状态。支持 `:0`，避免先探测空闲端口再关闭造成的竞争；已有文件不会覆盖。消费者须等待完整 JSON 并核对存活 PID，业务连通仍须另测。详见 [0.121.0 guide](RELEASE_0.121.0_EN.md)。
 
 随源码提供的 SS 客户端还修复了 SS2022 并发首包响应的 request-salt 竞争，避免有效 UoT 响应在首次写入尚未返回时被误拒绝。补丁包含三种 2022 算法的确定性回归测试。
+
+
+## Automatic endpoint proposals (0.123.0)
+
+Node `profile.settings.forwarding` optionally stores `{host, listen_ip?, port_start, port_end, public_port_start?}`. `host` is an IP or DNS name without a port; bracketed IPv6 is accepted. Automatic local ports default to 20000–29999 and must be at least 1024. `public_port_start` describes a pre-existing continuous provider NAT mapping; it never configures NAT. Omit it for identical public/local ports. Profiles are changed through the existing revision-checked node profile API and do not change published rules. `GET /topology` now includes each node's `profile` and `lifecycle`.
+
+`POST /configurations/allocate-endpoints` accepts 1–16 distinct nodes in path order. All nodes must be writable and belong to the same tenant. Omit `listen` and `advertise` together for automatic assignment; supply both for a manual override. The response contains one endpoint proposal per hop, including `source` (`profile`, `existing_rule`, or `manual`), `defaults`, and `error` (`null`, `address_required`, `ports_exhausted`, or `port_in_use`). Missing node addresses are never guessed from node names or the controller hostname. An unambiguous existing rule endpoint may supply defaults; a single existing NAT mapping does not establish a mapped range.
+
+Allocation conservatively avoids configured listeners, disabled rules, ranges, gateway ports/bridges, and public endpoints, including earlier proposals in the same request. Manual proposals are considered before automatic ones. It does not inspect arbitrary processes on the remote VPS or reserve ports. It returns the exact selected `configs` used for the calculation: build additive updates from these rules and revisions, validate with `/configurations/preview`, then publish the reviewed batch. A competing configuration publication invalidates a stale revision; reallocate and preview again. Aliased hostnames or Agents sharing a machine require correctly configured, non-overlapping ranges. Agent application and a traffic test are still necessary to confirm reachability.
