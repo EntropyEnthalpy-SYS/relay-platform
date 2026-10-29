@@ -1,6 +1,14 @@
-# Relay workspace UI — 0.116.0
+# Relay workspace UI — 0.117.0
 
-This release redesigns the existing console. The data plane, billing behavior, permissions and protocol configuration remain those of 0.115.0; the broader non-payment roadmap is still in development.
+This release adds English and Simplified Chinese to the console introduced in 0.116.0. The data plane, billing behavior, permissions and protocol configuration are unchanged; the broader non-payment roadmap is still in development.
+
+## Language switch
+
+Use **English** or **中文** in the upper-right corner of the sign-in page or the console header. The button names the language it will switch to. The interface updates in place and preserves the session, current route, node selection and theme. The browser saves the choice under `relay-language`; Chinese remains the default. If browser storage is blocked, switching still works for the current page.
+
+The catalog covers navigation, page descriptions, tables, editors, client-side validation, notifications and all seven handbook chapters. Dates use the selected locale and retain the browser's local timezone. Search accepts both English and Chinese keywords in either interface language. User-provided names, notes, addresses, configuration values and raw backend diagnostics retain their original content. Language selection makes no configuration writes.
+
+Messages are local, plain text with indexed interpolation; values are never treated as translated text or HTML. `web/i18n.js` manages the preference, static shell bindings and lazy label dictionaries; `web/i18n-en.js` holds the English catalog. There is no external translation service or added frontend runtime dependency.
 
 ## Design and navigation
 
@@ -23,7 +31,7 @@ The handbook is embedded in the binary. It does not require a GitBook account, e
 
 ## Implementation and operation
 
-`web/index.html` defines the shell; `web/style.css` supplies both themes and breakpoints. `web/console-ui.js` owns the route metadata, local search, guide content and shell interactions. `web/app.js` retains the existing API clients, data renderers and forms. All four files are compiled into the Rust controller; rebuild the binary to deploy UI changes. There is no npm install/build step and no new frontend runtime dependency.
+`web/index.html` defines the shell; `web/style.css` supplies both themes and breakpoints. `web/console-ui.js` owns the route metadata, local search, guide content and shell interactions. `web/app.js` retains the existing API clients, data renderers and forms. All six web files, including the language modules, are compiled into the Rust controller; rebuild the binary to deploy UI changes. There is no npm install/build step and no new frontend runtime dependency.
 
 Search indexes only static page/guide content. It does not search or upload node records, credentials or configuration. The new module is served under the existing same-origin Content Security Policy. Session tokens remain in session storage; sign-out clears search results and visible console content.
 
@@ -33,4 +41,4 @@ The overview displays reported telemetry, with an explicit waiting state when th
 
 The companion verification package records the actual automated and browser checks for this release. Browser acceptance uses an isolated loopback controller and three local agents with a TCP echo chain. Screenshots show this lab, not production traffic or a hardware-performance benchmark. Responsive checks emulate viewport sizes; they do not establish physical iOS/Android or cross-browser acceptance.
 
-No test VPS was redeployed for this UI task. New Linux capacity, WAN, protocol-client and endurance claims require their own runs; the historical 0.115.0 results remain in that release's verification package.
+No test VPS was redeployed for this language-switch task. This UI update does not resolve the controller memory-limit and slow-reader findings from the 0.116.0 VPS acceptance run. New capacity and endurance claims require their own runs.

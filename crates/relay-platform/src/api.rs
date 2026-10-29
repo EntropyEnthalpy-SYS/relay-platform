@@ -547,6 +547,24 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route(
+            "/assets/i18n.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/i18n.js"),
+                )
+            }),
+        )
+        .route(
+            "/assets/i18n-en.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/i18n-en.js"),
+                )
+            }),
+        )
+        .route(
             "/assets/style.css",
             get(|| async {
                 (

@@ -13,6 +13,7 @@ async function serialize(existing) {
   let form, handler, saved, healthReads = 0, targetReads = 0;
   const node = { id: 'node', tenant_id: 'tenant' };
   const context = {
+    ...require('./web_i18n_helpers.cjs').loadI18n(),
     TextEncoder, Uint8Array, Uint32Array, btoa, crypto: require('node:crypto').webcrypto,
     document: { createTextNode: text => text },
     state: { config: { node_id: 'node', revision: 3, rules: [existing] }, nodes: [node], actor: { id: 'owner' } },
@@ -56,7 +57,7 @@ async function serialize(existing) {
   result=await serialize(reality);
   assert.equal(JSON.stringify(result.saved.protocol_gateway),JSON.stringify(reality.protocol_gateway));
   const conflict={...reality,inbound_socks5:{username:'test',password:'secret'}};
-  await assert.rejects(serialize(conflict),/只能启用一种/);
+  await assert.rejects(serialize(conflict),/只能启用一种|Only one proxy inbound/);
   const invalid={...reality,protocol:'udp'}; await assert.rejects(serialize(invalid),/TCP/);
   console.log('Rule submission preserves MPTCP + health, six typed gateways, Reality secrets, public/bridge addresses and rejects incompatible modes');
 })().catch(error => { console.error(error); process.exitCode=1; });

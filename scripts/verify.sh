@@ -6,13 +6,19 @@ cargo clippy --locked --all-targets -- -D warnings
 RUST_TEST_THREADS=1 cargo test --locked --all-targets
 node --check web/app.js
 node --check web/console-ui.js
-node scripts/test_web_console.cjs
-node scripts/test_web_editor.cjs web/app.js
-node scripts/test_web_http2.cjs web/app.js
-node scripts/test_web_mptcp.cjs web/app.js
-node scripts/test_web_gateways.cjs web/app.js
-node scripts/test_web_smtp.cjs web/app.js
-node scripts/test_web_views.cjs web/index.html web/app.js
+node --check web/i18n.js
+node --check web/i18n-en.js
+node scripts/test_web_i18n.cjs
+for RELAY_TEST_LANGUAGE in zh-CN en; do
+    export RELAY_TEST_LANGUAGE
+    node scripts/test_web_console.cjs
+    node scripts/test_web_editor.cjs web/app.js
+    node scripts/test_web_http2.cjs web/app.js
+    node scripts/test_web_mptcp.cjs web/app.js
+    node scripts/test_web_gateways.cjs web/app.js
+    node scripts/test_web_smtp.cjs web/app.js
+    node scripts/test_web_views.cjs web/index.html web/app.js
+done
 python3 -m py_compile scripts/*.py
 python3 -m py_compile scripts/deployment/*.py scripts/tests/*.py
 # Deployment tests exercise distributable artifacts. Linux debug binaries can

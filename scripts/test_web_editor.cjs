@@ -22,6 +22,7 @@ function control(kind, value) {
 
 function serialize(target, drainValue) {
   const context = {
+    ...require('./web_i18n_helpers.cjs').loadI18n(),
     el() { return control('div'); },
     field(_parent, name, _label, value) { return control('field', value); },
     select(_parent, name, _label, _options, value) {

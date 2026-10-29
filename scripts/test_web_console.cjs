@@ -1,9 +1,9 @@
 // Exercise navigation/search authorization and deep links without a browser dependency.
-const fs = require('node:fs'), assert = require('node:assert/strict');
+const assert = require('node:assert/strict');
 (async () => {
-  const source = fs.readFileSync('web/console-ui.js', 'utf8');
-  const { pageInfo, canVisit, parseRoute, searchEntries, guideArticles } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
-  const app = fs.readFileSync('web/app.js', 'utf8'), titles = Object.fromEntries([...app.match(/const titles = \{([^}]*)\};/)[1].matchAll(/(\w+): '([^']+)'/g)].map(m => [m[1], m[2]]));
+  const { loadConsole, loadTitles } = require('./web_i18n_helpers.cjs');
+  const { pageInfo, canVisit, parseRoute, searchEntries, guideArticles } = loadConsole();
+  const titles = loadTitles();
   assert.deepEqual(Object.keys(titles).sort(), Object.keys(pageInfo).sort());
   const admin = { role: 'system_admin' }, tenant = { role: 'tenant_admin' }, viewer = { role: 'viewer' };
   assert.equal(searchEntries('', null, titles).length, 0, 'signed-out search must contain no results');
@@ -15,7 +15,7 @@ const fs = require('node:fs'), assert = require('node:assert/strict');
   for (const view of Object.keys(pageInfo)) { assert.equal(canVisit(view, admin), true); assert.equal(parseRoute('#' + view).view, view); }
   for (const hash of ['', '#unknown', '#constructor', '#__proto__', '#<script>']) assert.equal(parseRoute(hash).view, 'overview');
   for (const article of guideArticles) {
-    assert.deepEqual(parseRoute('#guide/' + article.id), { view: 'guide', topic: article.id });
+    assert.deepEqual(JSON.parse(JSON.stringify(parseRoute('#guide/' + article.id))), { view: 'guide', topic: article.id });
     assert.ok(Object.hasOwn(pageInfo, article.target));
     assert.ok(searchEntries(article.title, viewer, titles).some(r => r.topic === article.id));
   }

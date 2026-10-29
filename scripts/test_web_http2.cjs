@@ -1,7 +1,7 @@
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
 const source = fs.readFileSync(process.argv[2] || 'web/app.js', 'utf8');
 const start = source.indexOf('function http2ConnectConfig('), end = source.indexOf('\nfunction http2ConnectEditor(', start);
-const context = {}; vm.createContext(context); vm.runInContext(source.slice(start,end) + '\nthis.read = http2ConnectConfig;', context);
+const context = require('./web_i18n_helpers.cjs').loadI18n(); vm.createContext(context); vm.runInContext(source.slice(start,end) + '\nthis.read = http2ConnectConfig;', context);
 const digest = 'ab'.repeat(32);
 const parsed = context.read(' user ', 'pass', digest.toUpperCase(), 'yes', '32');
 assert.equal(parsed.username, 'user'); assert.equal(parsed.password, 'pass'); assert.equal(parsed.bearer_token_sha256[0], digest);

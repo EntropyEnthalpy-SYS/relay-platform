@@ -268,7 +268,7 @@ main { margin-left: 248px; width: calc(100% - 248px); padding: 100px 36px 22px; 
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px; border-bottom: 1px solid var(--line); }
 .panel-head p { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); }
 .panel-head > button { white-space: nowrap; flex-shrink: 0; }
-.panel-head > div + div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; }
+.panel-head > div + div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; flex-shrink: 0; min-width: 0; max-width: 100%; }
 .panel-body { padding: 22px; }
 .panel > p.fine { margin: 0; padding: 14px 22px 18px; }
 .node-panel > .panel-head { align-items: flex-start; flex-wrap: wrap; }
@@ -541,7 +541,13 @@ input, select, textarea { border-radius: 6px; }
 .guide-toc .fine { font-size: 10px; margin-top: 20px; }
 
 /* Login uses the same visual language, with a static, inexpensive network map. */
-.login-screen { grid-template-columns: minmax(400px, 46%) 1fr; background: var(--bg); }
+.login-screen { position: relative; grid-template-columns: minmax(400px, 46%) 1fr; background: var(--bg); }
+.language-toggle { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; gap: 7px; min-height: 36px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text-2); font-size: 11px; white-space: nowrap; cursor: pointer; }
+.language-toggle:hover { background: var(--accent-soft); color: var(--accent); border-color: var(--line-strong); }
+.language-symbol { font-size: 10px; color: var(--muted); }
+.login-language-toggle { position: absolute; top: 22px; right: 24px; z-index: 1; }
+html[lang="en"] .nav-button { line-height: 1.5; }
+html[lang="en"] .nav-label { letter-spacing: .02em; }
 .login-card { width: min(420px, calc(100% - 64px)); padding: 50px 20px; }
 .login-brand { margin-bottom: 70px; font-size: 33px; }
 .login-brand .brand-mark { width: 40px; height: 44px; font-size: 29px; }
@@ -618,6 +624,9 @@ input, select, textarea { border-radius: 6px; }
   .search-trigger { flex: 0 0 36px; height: 36px; width: 36px; padding: 0; justify-content: center; border-color: transparent; background: transparent; }
   .search-trigger > span:not([data-icon]), .search-trigger kbd { display: none; }
   .topbar-actions { gap: 0; }
+  .language-toggle { min-height: 40px; padding: 7px 9px; margin-right: 3px; }
+  .topbar .language-symbol { display: none; }
+  .login-language-toggle { top: 18px; right: 18px; }
   main { padding: 86px 16px 20px; }
   .page-breadcrumb { font-size: 10px; gap: 7px; margin-bottom: 24px; }
   .page-header { flex-direction: column; align-items: flex-start; gap: 17px; }

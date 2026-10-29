@@ -1,5 +1,6 @@
+import { t as translate, msg, localize, searchAliases } from '/assets/i18n.js';
 // The console shell is dependency-free and searches only its local page/guide index.
-export const pageInfo = {
+export const pageInfo = localize({
   overview: ['工作空间', 'NETWORK OVERVIEW', '从一处了解节点、转发链路与实时运行状态。', 'observability', 'dashboard monitor 总览 监控'],
   nodes: ['工作空间', 'NODES & INFRASTRUCTURE', '连接你的服务器，管理每个节点的身份、配置与生命周期。', 'quickstart', 'server agent 服务器 注册'],
   rules: ['工作空间', 'FORWARDING RULES', '从入口到目标，为每条连接安排清晰的路径。', 'rules', 'proxy gateway vless reality tuic hysteria2 socks http2 代理 网关'],
@@ -20,12 +21,12 @@ export const pageInfo = {
   recovery: ['管理与帮助', 'RECOVERY & CONTINUITY', '检查恢复日志、备份与额度对账，保留系统的连续记录。', 'operations', 'backup restore 备份 恢复'],
   capabilities: ['管理与帮助', 'DELIVERY STATUS', '区分已实现的能力与仍在开发、等待验收的部分。', 'operations', 'features roadmap 功能 进度'],
   guide: ['管理与帮助', 'THE RELAY HANDBOOK', '从第一次连接到日常运维，在操作旁边找到答案。', 'quickstart', 'docs documentation help 文档 指南 帮助'],
-};
+});
 const adminViews = new Set(['templates', 'dns', 'audit', 'recovery']);
 export function canVisit(view, actor) {
   return !!actor && Object.hasOwn(pageInfo, view) && (!adminViews.has(view) || actor.role === 'system_admin') && (view !== 'alerts' || actor.role !== 'viewer');
 }
-export const guideArticles = [
+export const guideArticles = localize([
   { id: 'quickstart', title: '连接你的第一个节点', subtitle: '从一台服务器开始，建立可观测的转发路径。', icon: 'server', read: '3 分钟', target: 'nodes', steps: [
     ['注册节点', '在「节点管理」创建节点，确认所属租户与用途，获取一次性注册令牌。令牌仅用于注册，请保存在受限权限的文件中。'],
     ['启动 Agent', '按照节点注册对话框中的部署信息，在服务器启动 Agent。控制服务地址、令牌文件与状态目录须对应同一个节点；等待控制在线。'],
@@ -68,15 +69,15 @@ export const guideArticles = [
     ['按真实场景验收', '依次验证单节点、跨节点、真实客户端、故障恢复与持续负载。记录系统、架构、内存、带宽和协议，避免不同条件下直接比较性能。'],
     ['查看功能进度', '「功能进度」列出当前实现状态。支付开发不在本轮范围；证书生命周期、部分组网能力和其他待验收目标仍需按交付清单推进。'],
   ], note: '本界面是持续开发版本。使用指南说明现有操作流程，不代表全部目标功能或所有部署环境已完成验收。' },
-];
+]);
 export function parseRoute(hash) {
   const [view, topic] = String(hash).replace(/^#/, '').split('/');
   return { view: Object.hasOwn(pageInfo, view) ? view : 'overview', topic: guideArticles.some(a => a.id === topic) ? topic : 'quickstart' };
 }
 export function searchEntries(query, actor, titles) {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  const entries = Object.entries(pageInfo).filter(([view]) => canVisit(view, actor)).map(([view, info]) => ({ view, title: titles[view], subtitle: info[0], keywords: `${info[1]} ${info[2]} ${info[4]}`, icon: view === 'guide' ? 'book' : 'arrow' }));
-  if (actor) entries.push(...guideArticles.map(a => ({ view: 'guide', topic: a.id, title: a.title, subtitle: '使用指南', keywords: [a.subtitle, a.note, ...a.steps.flat()].join(' '), icon: 'book' })));
+  const entries = Object.entries(pageInfo).filter(([view]) => canVisit(view, actor)).map(([view, info]) => ({ view, title: titles[view], subtitle: info[0], keywords: [titles[view], info[1], info[2], info[4]].map(searchAliases).join(' '), icon: view === 'guide' ? 'book' : 'arrow' }));
+  if (actor) entries.push(...guideArticles.map(a => ({ view: 'guide', topic: a.id, title: a.title, subtitle: translate('使用指南'), keywords: [a.title, a.subtitle, a.note, ...a.steps.flat()].map(searchAliases).join(' '), icon: 'book' })));
   return entries.filter(e => terms.every(t => `${e.title} ${e.keywords} ${e.subtitle}`.toLocaleLowerCase().includes(t))).sort((a, b) => Number(b.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())) - Number(a.title.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
 }
 
@@ -110,7 +111,7 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
   let drawerOpen = false, previousFocus = null, results = [], selected = 0;
   function drawer(open, restoreFocus = false) {
     drawerOpen = open && media.matches; document.body.classList.toggle('nav-open', drawerOpen);
-    toggle.setAttribute('aria-expanded', String(drawerOpen)); toggle.setAttribute('aria-label', drawerOpen ? '关闭导航' : '打开导航');
+    toggle.setAttribute('aria-expanded', String(drawerOpen)); toggle.setAttribute('aria-label', drawerOpen ? translate('关闭导航') : translate('打开导航'));
     sidebar.inert = media.matches && !drawerOpen; $('#nav-backdrop').hidden = !drawerOpen;
     $('#main-content').inert = drawerOpen;
     if (drawerOpen) sidebar.querySelector('.nav-button.active:not(.hidden)')?.focus();
@@ -132,8 +133,8 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
   function drawResults() {
     results = searchEntries(input.value, getActor(), titles); list.replaceChildren();
     results.forEach((r, i) => { const row = el('div', undefined, 'command-result'); row.id = `command-result-${i}`; row.setAttribute('role', 'option'); const text = el('div'); text.append(el('strong', r.title), el('span', r.subtitle)); row.append(icon(r.icon), text, el('span', '↵', 'result-enter')); row.addEventListener('click', () => openResult(i)); list.append(row); });
-    if (!results.length) { const empty = el('div', undefined, 'search-empty'); empty.setAttribute('role', 'presentation'); empty.append(el('strong', '没有找到匹配内容'), el('p', '试试“节点”、Reality、限速或订阅。')); list.append(empty); }
-    $('#command-status').textContent = `${results.length} 个结果`; selectResult(0);
+    if (!results.length) { const empty = el('div', undefined, 'search-empty'); empty.setAttribute('role', 'presentation'); empty.append(el('strong', translate('没有找到匹配内容')), el('p', translate('试试“节点”、Reality、限速或订阅。'))); list.append(empty); }
+    $('#command-status').textContent = msg`${results.length} 个结果`; selectResult(0);
   }
   function closeSearch(restore = true) { dialog.close(); input.value = ''; results = []; list.replaceChildren(); input.removeAttribute('aria-activedescendant'); if (restore && previousFocus?.isConnected) previousFocus.focus(); }
   function openSearch() { if (!getActor() || $('#dialog').open || dialog.open) return; previousFocus = document.activeElement; drawer(false); dialog.showModal(); input.value = ''; drawResults(); input.focus(); }
@@ -158,7 +159,7 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
     article.steps.forEach(([title, text], i) => { const section = el('section'); section.id = `${compact ? "help" : "guide"}-step-${i}`; section.tabIndex = -1; section.append(el('span', String(i + 1).padStart(2, '0'), 'step-number')); const content = el('div'); content.append(el('h2', title), el('p', text)); section.append(content); steps.append(section); });
     const note = el('aside', undefined, 'guide-callout'); note.append(icon('book'), el('p', article.note));
     body.append(steps, note);
-    if (canVisit(article.target, getActor())) body.append(button(`前往${titles[article.target]} →`, () => { $('#dialog').close(); return navigate(article.target); }, 'primary'));
+    if (canVisit(article.target, getActor())) body.append(button(msg`前往${titles[article.target]} →`, () => { $('#dialog').close(); return navigate(article.target); }, 'primary'));
     return body;
   }
   $('#context-help').onclick = () => { const article = guideArticles.find(a => a.id === (getView() === 'guide' ? parseRoute(location.hash).topic : pageInfo[getView()][3])); modal(article.title, articleBody(article, true)); };
@@ -170,15 +171,15 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
   }
   function renderGuide(container) {
     const topic = parseRoute(location.hash).topic, article = guideArticles.find(a => a.id === topic);
-    const layout = el('div', undefined, 'guide-layout'), contents = el('nav', undefined, 'guide-contents'); contents.setAttribute('aria-label', '指南章节'); contents.append(el('p', 'EXPLORE THE HANDBOOK', 'nav-label'));
+    const layout = el('div', undefined, 'guide-layout'), contents = el('nav', undefined, 'guide-contents'); contents.setAttribute('aria-label', translate('指南章节')); contents.append(el('p', 'EXPLORE THE HANDBOOK', 'nav-label'));
     guideArticles.forEach(a => { const b = button(a.title, () => navigate('guide', { topic: a.id }), 'guide-link'); b.prepend(icon(a.icon)); if (a.id === topic) { b.classList.add('active'); b.setAttribute('aria-current', 'page'); } contents.append(b); });
     const paper = el('article', undefined, 'guide-paper'), heading = el('div', undefined, 'guide-heading');
-    heading.append(el('span', `操作指南 / ${article.read}`, 'guide-read'), el('h2', article.title), el('p', article.subtitle, 'guide-lead'));
+    heading.append(el('span', msg`操作指南 / ${article.read}`, 'guide-read'), el('h2', article.title), el('p', article.subtitle, 'guide-lead'));
     paper.append(heading, articleBody(article));
-    const next = guideArticles[(guideArticles.indexOf(article) + 1) % guideArticles.length], onward = button(`继续阅读：${next.title} →`, () => navigate('guide', { topic: next.id }), 'guide-next'); paper.append(onward);
-    const toc = el('nav', undefined, 'guide-toc'); toc.setAttribute('aria-label', '本文目录'); toc.append(el('p', '本文目录', 'nav-label'));
+    const next = guideArticles[(guideArticles.indexOf(article) + 1) % guideArticles.length], onward = button(msg`继续阅读：${next.title} →`, () => navigate('guide', { topic: next.id }), 'guide-next'); paper.append(onward);
+    const toc = el('nav', undefined, 'guide-toc'); toc.setAttribute('aria-label', translate('本文目录')); toc.append(el('p', translate('本文目录'), 'nav-label'));
     article.steps.forEach(([title], i) => toc.append(button(title, () => { const section = paper.querySelector(`#guide-step-${i}`); section.scrollIntoView({ block: 'start', behavior: 'instant' }); section.focus({ preventScroll: true }); }, 'toc-link')));
-    toc.append(el('p', '指南随源码提供，离线可读。', 'fine')); layout.append(contents, paper, toc); container.replaceChildren(layout);
+    toc.append(el('p', translate('指南随源码提供，离线可读。'), 'fine')); layout.append(contents, paper, toc); container.replaceChildren(layout);
   }
   return { sync, renderGuide, reset() { closeSearch(false); drawer(false); } };
 }

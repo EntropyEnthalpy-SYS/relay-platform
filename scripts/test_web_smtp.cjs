@@ -1,7 +1,7 @@
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
 const source = fs.readFileSync(process.argv[2] || 'web/app.js', 'utf8');
 const start = source.indexOf('function smtpConfig('), end = source.indexOf('\nfunction editAlertChannel(', start);
-const context = {}; vm.createContext(context); vm.runInContext(source.slice(start, end) + '\nthis.read = smtpConfig;', context);
+const context = require('./web_i18n_helpers.cjs').loadI18n(); vm.createContext(context); vm.runInContext(source.slice(start, end) + '\nthis.read = smtpConfig;', context);
 const data = new Map(Object.entries({ host: ' smtp.example ', port: '465', security: 'implicit_tls', from: 'sender@example.test', to: 'one@example.test, two@example.test\nthree@example.test', username: ' user ', password: ' secret with spaces ', ca_pem: '' }));
 const value = context.read(data);
 assert.equal(value.host, 'smtp.example'); assert.equal(value.port, 465);

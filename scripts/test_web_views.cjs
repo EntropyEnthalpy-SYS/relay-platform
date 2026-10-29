@@ -6,7 +6,7 @@ const source = fs.readFileSync(process.argv[3] || 'web/app.js', 'utf8');
 const views = [...html.matchAll(/data-view="([^"]+)"/g)].map(match => match[1]);
 assert.ok(views.length >= 10, 'sidebar views not found');
 assert.equal(new Set(views).size, views.length, 'duplicate data-view entries');
-const block = source.match(/const titles = \{([^}]*)\};/);
+const block = source.match(/const titles = localize\(\{([^}]*)\}\);/);
 assert.ok(block, 'titles map not found');
 const titles = block[1].split(',').map(entry => entry.split(':')[0].trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
 for (const view of views) assert.ok(titles.includes(view), `missing title for view ${view}`);
