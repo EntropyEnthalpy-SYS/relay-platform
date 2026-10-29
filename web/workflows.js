@@ -41,6 +41,79 @@ export function applicationState(node, now = Date.now()) {
   return 'applied';
 }
 
+// A bounded, credential-free view of declared routing, never a reachability test.
+// A target with no `via` is opaque: matching an address does not prove another VPS.
+export function forwardingDiagram(snapshot, root, draft = null) {
+  const rules = new Map((snapshot.configs || []).flatMap(c => c.rules.map(r => [`${c.node_id}/${r.id}`, r])));
+  if (draft) rules.set(`${root.node_id}/${root.rule_id}`, draft);
+  const issues = [], nodes = new Map((snapshot.nodes || []).map(n => [n.id, n]));
+  const issue = (code, name) => { if (!issues.some(i => i.code === code && i.name === name)) issues.push({ code, name }); };
+  let count = 0;
+  function walk(ref, ancestors = new Set(), depth = 0) {
+    const key = `${ref.node_id}/${ref.rule_id}`, rule = rules.get(key), node = nodes.get(ref.node_id);
+    const name = node?.name || ref.node_id;
+    if (ancestors.has(key)) { issue('cycle', name); return { kind: 'unresolved', name, reason: 'cycle' }; }
+    if (depth >= 16 || ++count > 64) { issue('truncated', name); return { kind: 'unresolved', name, reason: 'truncated' }; }
+    if (!rule || !node) { issue('missing', name); return { kind: 'unresolved', name, reason: 'missing' }; }
+    const service = serviceKind(rule), listen = rule.protocol_gateway?.listen || rule.listen || '';
+    const endpoint = rule.advertise || listen, parsedListen = splitEndpoint(listen), parsedEndpoint = splitEndpoint(endpoint);
+    if (!parsedListen) issue('listen', name);
+    if (!parsedEndpoint || parsedEndpoint.wildcard) issue('address', name);
+    if (parsedListen?.loopback || parsedEndpoint?.loopback) issue('loopback', name);
+    if (rule.enabled === false) issue('disabled', name);
+    if (!node.enrolled) issue('agent', name);
+    if (service === 'gateway') issue('engine', name);
+    if (rule.listen_end_port || rule.port_mapping === 'offset') issue('range', name);
+    if (rule.inbound_shadowsocks?.udp_over_tcp && (rule.protocol === 'udp' || [...ancestors].some(k => rules.get(k)?.protocol === 'udp'))) issue('uot_tcp', name);
+    const path = new Set([...ancestors, key]), targets = service === 'forward' ? rule.targets || [] : [];
+    if (service === 'forward' && !targets.length) issue('targets', name);
+    const children = targets.slice(0, 32).map(target => {
+      const address = target.address || '', parsed = splitEndpoint(address);
+      if (!parsed || parsed.wildcard) issue('target', name);
+      const next = target.via && rules.get(`${target.via.node_id}/${target.via.rule_id}`);
+      if (next) {
+        const required = rule.protocol === 'both' ? ['tcp', 'udp'] : [rule.protocol];
+        if (required.some(p => next.protocol !== 'both' && next.protocol !== p)) issue('protocol', name);
+        if (next.tenant_id && rule.tenant_id && next.tenant_id !== rule.tenant_id) issue('tenant', name);
+        if (address !== next.advertise && !next.inbound_multipath) issue('mismatch', name);
+      }
+      return {
+        address, protocol: rule.protocol,
+        transport: target.websocket ? (target.tls ? 'WSS' : 'WS') : target.tls ? 'TLS' : '',
+        weight: target.weight ?? 1, priority: target.priority ?? 0, draining: !!target.draining,
+        next: target.via ? walk(target.via, path, depth + 1) : { kind: 'target', address },
+      };
+    });
+    if (targets.length > 32) issue('truncated', name);
+    return { kind: 'node', name, node_id: ref.node_id, rule_id: ref.rule_id, ruleName: rule.name || '',
+      service, listen, endpoint: parsedEndpoint && !parsedEndpoint.wildcard ? endpoint : '', protocol: rule.protocol, children,
+      inboundTransport: rule.inbound_websocket ? (rule.inbound_tls ? 'WSS' : 'WS') : rule.inbound_tls ? 'TLS' : '',
+      role: depth === 0 ? (children.some(c => c.next.kind !== 'target') ? 'entry' : 'single') : children.some(c => c.next.kind !== 'target') ? 'relay' : 'exit',
+      aggregate: !!rule.outbound_multipath, uot: !!rule.inbound_shadowsocks?.udp_over_tcp,
+    };
+  }
+  return { root: walk(root), issues };
+}
+
+// Incomplete wizard inputs stay drawable. These ephemeral rules are never published.
+export function forwardingPathDiagram(snapshot, input) {
+  const hops = input.hops || [];
+  const configs = hops.map((hop, index) => ({ node_id: hop.node_id, rules: [{
+    id: `diagram-${index}`, listen: hop.listen, advertise: hop.advertise,
+    tenant_id: snapshot.nodes.find(n => n.id === hop.node_id)?.tenant_id,
+    protocol: input.protocol, enabled: true,
+    ...(index === hops.length - 1 && input.mode === 'ss' ? { inbound_shadowsocks: { udp_over_tcp: !!input.uot } } : {}),
+    targets: index === hops.length - 1 ? (input.mode === 'ss' ? [] : input.targets || []) : [{
+      address: hops[index + 1].advertise, via: { node_id: hops[index + 1].node_id, rule_id: `diagram-${index + 1}` },
+      ...(input.transport !== 'plain' ? { websocket: {} } : {}), ...(input.transport === 'wss' ? { tls: {} } : {}),
+    }],
+  }] }));
+  const model = forwardingDiagram({ ...snapshot, configs }, { node_id: hops[0]?.node_id || '', rule_id: 'diagram-0' });
+  if (new Set(hops.map(h => h.node_id)).size !== hops.length) model.issues.push({ code: 'duplicate', name: '' });
+  if (input.owner && hops.some(h => snapshot.nodes.find(n => n.id === h.node_id)?.tenant_id !== input.owner.tenant_id)) model.issues.push({ code: 'tenant', name: '' });
+  return model;
+}
+
 // Returns a batch suitable for /configurations/preview. No network or state writes.
 export function buildForwardingPath(snapshot, input, nextId) {
   const fail = code => { throw new Error(code); };

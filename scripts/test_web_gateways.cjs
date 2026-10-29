@@ -6,6 +6,7 @@ const code = source.slice(source.indexOf('function gatewayConfig('), source.inde
 class Element {
   constructor(tag = 'div') { this.tag = tag; this.children = []; this.value = ''; this.checked = false; this.disabled = false; this.dataset = {}; this.classList = { toggle() {} }; }
   append(...items) { for (const item of items) { if (typeof item === 'object') item.parentElement = this; this.children.push(item); } }
+  prepend(...items) { this.children.unshift(...items); }
   addEventListener() {} setAttribute() {}
   querySelectorAll() { return this.children.filter(c => typeof c === 'object').flatMap(c => [...(['input','select','textarea'].includes(c.tag) ? [c] : []), ...c.querySelectorAll()]); }
 }
@@ -17,6 +18,8 @@ async function serialize(existing) {
     ...require('./web_i18n_helpers.cjs').loadWorkflows(),
     TextEncoder, Uint8Array, Uint32Array, btoa, crypto: require('node:crypto').webcrypto,
     document: { createTextNode: text => text },
+    FormData: class { constructor(element) { this.values = new Map(element.querySelectorAll().filter(c => c.name && !c.disabled && (c.type !== 'checkbox' || c.checked)).map(c => [c.name, c.type === 'checkbox' ? 'on' : c.value])); } get(key) { return this.values.get(key) ?? null; } },
+    forwardingPathView: () => ({ box: new Element(), update() {} }),
     state: { config: { node_id: 'node', revision: 3, rules: [existing] }, nodes: [node], actor: { id: 'owner' } },
     api: async () => ({ configs: [], nodes: [] }), el: tag => new Element(tag),
     field(parent, name, _label, value = '', type = 'text') { const label = new Element('label'), input = new Element('input'); Object.assign(input, { name, value: String(value ?? ''), type }); label.append(input); parent.append(label); return input; },
@@ -25,7 +28,7 @@ async function serialize(existing) {
     button: () => new Element('button'),
     healthEditor: (_form, spec) => () => { healthReads++; return spec; },
     multipathEditor: () => ({ mode: {}, read: () => ({}) }),
-    targetEditor: (_form, targets) => { const read = () => { targetReads++; return targets; }; read.multipathPaths = () => []; return read; },
+    targetEditor: (_form, targets) => { const read = () => { targetReads++; return targets; }; read.multipathPaths = () => []; read.preview = () => targets; read.onchange = () => {}; return read; },
     websocketEditor: (_name, spec) => ({ box: new Element(), read: () => spec }),
     submit: (value, _label, callback) => { form = value; handler = callback; }, modal() {},
     saveRules: async rules => { saved = rules[0]; },

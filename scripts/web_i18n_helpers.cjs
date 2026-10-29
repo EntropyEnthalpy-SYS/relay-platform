@@ -16,6 +16,6 @@ function loadTitles(i18n = loadI18n()) {
 }
 function loadWorkflows() {
   const source = fs.readFileSync('web/workflows.js', 'utf8').replace(/^export /gm, '');
-  return vm.runInNewContext(source + '\n;({ serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile })');
+  return vm.runInNewContext(source + '\n;({ serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram })');
 }
 module.exports = { loadI18n, loadConsole, loadTitles, loadWorkflows, english };

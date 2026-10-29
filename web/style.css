@@ -2,6 +2,54 @@
 .workflow-callout { padding: 14px 18px; border-left: 3px solid var(--accent); border-radius: 6px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
 .path-hop { min-width: 0; margin: 18px 0; }
 .path-hop .toolbar { justify-content: flex-end; margin-top: 12px; }
+
+/* The live path is a routing explanation, never an animated health indicator. */
+dialog:has(.forwarding-diagram) { width: min(1120px, calc(100% - 32px)); }
+dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+.forwarding-diagram { min-width: 0; margin: 20px 0; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.flow-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.flow-heading h3 { font-size: 14px; margin: 0; }
+.flow-figure { margin: 0; }
+.flow-track { display: flex; align-items: center; overflow: auto; padding: 24px 18px; background: var(--surface-2); background-image: radial-gradient(var(--line-strong) .65px, transparent .65px); background-size: 14px 14px; }
+.flow-route, .flow-branch { display: flex; align-items: center; flex: 0 0 auto; }
+.flow-card { display: flex; flex-direction: column; align-items: flex-start; flex: 0 0 160px; width: 160px; padding: 12px; gap: 7px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); overflow-wrap: anywhere; }
+.flow-card > strong { font-size: 13px; line-height: 1.5; }
+.flow-card .fine { margin: 0; font-size: 11px; line-height: 1.6; }
+.flow-role { font-size: 10px; color: var(--muted); letter-spacing: .04em; }
+.flow-service { border-color: var(--accent); box-shadow: inset 0 3px 0 var(--accent); }
+.flow-service-label { font-size: 11px; color: var(--accent); }
+.flow-terminal { flex-basis: 120px; width: 120px; border-style: dashed; }
+.flow-addresses { margin: 2px 0; font-size: 10px; line-height: 1.5; width: 100%; }
+.flow-addresses dt { color: var(--muted); margin-top: 6px; }
+.flow-addresses dd { margin: 2px 0; font-size: 11px; }
+.flow-edge { flex: 0 0 52px; width: 52px; padding: 0 4px; text-align: center; font-size: 9px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+.flow-arrow { display: block; font-size: 25px; line-height: 1.2; color: var(--accent); }
+.flow-branches { display: flex; flex-direction: column; gap: 12px; }
+.flow-branch-label { margin: 0 0 0 52px; font-size: 11px; color: var(--muted); }
+.flow-figure figcaption { font-size: 11px; color: var(--muted); padding: 12px 18px; border-top: 1px solid var(--line); line-height: 1.6; }
+.flow-checks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 0; padding: 14px 18px; list-style: none; border-top: 1px solid var(--line); counter-reset: flow-check; }
+.flow-checks li { font-size: 11px; line-height: 1.65; color: var(--muted); }
+.flow-checks strong { display: block; color: var(--text-2); margin-bottom: 4px; font-weight: 600; }
+.flow-checks strong::before { counter-increment: flow-check; content: counter(flow-check) ". "; color: var(--accent); }
+.forwarding-diagram > details { margin: 0; border: 0; border-top: 1px solid var(--line); border-radius: 0; background: var(--surface); font-size: 12px; line-height: 1.65; padding: 0 18px; }
+.forwarding-diagram > details p { margin: 0 0 14px; }
+.flow-warnings summary { color: var(--amber); }
+.flow-warnings ul { margin: 0 0 14px; padding-left: 20px; color: var(--text-2); }
+.flow-warnings li + li { margin-top: 5px; }
+@media (min-width: 900px) {
+  .path-config-header { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 18px; }
+  .path-config-header label { margin: 10px 0; }
+}
+@media (max-width: 650px) {
+  .flow-track, .flow-route, .flow-branch { flex-direction: column; align-items: stretch; }
+  .flow-track { padding: 16px; }
+  .flow-card, .flow-terminal { width: 100%; flex: 0 0 auto; }
+  .flow-edge { width: 100%; flex: 0 0 auto; padding: 7px; }
+  .flow-arrow { transform: rotate(90deg); }
+  .flow-branch-label { margin: 14px 0 0; }
+  .flow-branches { gap: 8px; }
+  .flow-checks { grid-template-columns: 1fr; gap: 10px; }
+}
 :root {
   color-scheme: light;
   --bg: #fbfaf7; --grid: rgba(75, 64, 50, .045);
