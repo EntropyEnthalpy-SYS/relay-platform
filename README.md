@@ -10,6 +10,8 @@
 
 English: [complete non-payment target checklist](docs/NONPAYMENT_TARGETS_EN.md) and [0.115.0 verification and hardware report](docs/RELEASE_0.115.0.md). The older release notes below describe historical states; use the current report for supported combinations and measured limits.
 
+GitHub 开发、自动测试、版本发布与更新流程见 [GitHub workflow guide (English)](docs/GITHUB_WORKFLOW_EN.md)。推送源码后会运行 Linux 回归检查；VPS 升级按部署文档单独执行。
+
 0.113.0 将 HTTP/2 CONNECT 接入规则引擎、计量/配额、ACL、限速、模板和面板，支持 Bearer 摘要、mTLS、共享并发上限及可选 TCP 缓冲预算。使用说明见 [HTTP2.md](docs/HTTP2.md)；本次验收与硬件测量见 [RELEASE_0.113.0.md](docs/RELEASE_0.113.0.md)。完整产品仍在开发中。
 
 0.40.0 增加 MPTCP 内核能力/接口/路由/端点观测（`relay mptcp-info` 与管理员诊断 API）；仅观测，不是数据面实现，见 [MPTCP.md](docs/MPTCP.md)。

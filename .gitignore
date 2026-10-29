@@ -7,6 +7,11 @@
 *.secret
 signing-private.pem
 .env
+.env.*
+!.env.example
+*.private.pem
+id_ed25519
+id_rsa
 .DS_Store
 __pycache__/
 *.pyc
