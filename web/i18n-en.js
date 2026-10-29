@@ -1887,5 +1887,12 @@ export default {
   "出口服务正在下方的图示编辑器中编辑。": "Exit service settings are open in the diagram editor below.",
   "编辑选中的路径节点": "Edit selected path hop",
   "完成此跳编辑": "Done editing this hop",
-  "正在图中编辑 · 查看设置": "Editing in diagram · View settings"
+  "正在图中编辑 · 查看设置": "Editing in diagram · View settings",
+  "总览显示模式": "Overview display mode",
+  "监控模式": "Monitoring",
+  "工作空间模式": "Workspace",
+  "同一份实时数据 · 仅切换显示布局": "Same live data · Display layout only",
+  "等待实时数据": "Waiting for live data",
+  "示例或未注册节点没有实时测量值。注册并启动 Agent 后显示吞吐与资源；发布启用的规则后显示转发连线。": "Example or unenrolled nodes have no live measurements. Enroll and start an Agent for throughput and resource data; publish enabled rules to display forwarding links.",
+  "尚无启用的转发规则；这里只显示节点，不代表已建立转发路径。": "No enabled forwarding rules yet. These nodes are shown without an established forwarding path."
 };

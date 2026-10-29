@@ -1,8 +1,10 @@
 # Relay panel tutorial — adding VPS nodes and forwarding traffic
 
-Applies to the 0.124.0 source release. Node enrollment, rule placement, the Agent CLI and deployment commands were reviewed on 2026-10-29. For SS client configuration and remaining WAN limits, read the [0.121.0 UDP and listener-readiness notes](RELEASE_0.121.0_EN.md) and [SS compatibility guide](SS_COMPATIBILITY_0.119.0_EN.md). Check each installed Agent's version before upgrading.
+Applies to the 0.125.0 source release. Node enrollment, rule placement, the Agent CLI and deployment commands were reviewed on 2026-10-29. For SS client configuration and remaining WAN limits, read the [0.121.0 UDP and listener-readiness notes](RELEASE_0.121.0_EN.md) and [SS compatibility guide](SS_COMPATIBILITY_0.119.0_EN.md). Check each installed Agent's version before upgrading.
 
 Use **Templates / 模板库** to start a common setup. **Node rules / 节点规则** manages one VPS's listeners and services. **Forwarding paths / 转发路径** groups those rules into complete entry-to-destination diagrams; it is another view of the same configuration. Creating a multi-hop path creates one rule on each participating VPS.
+
+Open **Overview → Monitoring** for the large charts, forwarding graph, event list and node resource table. **Workspace** uses the compact layout. The theme button independently selects light or dark colors. Empty metrics on example nodes mean there are no Agent reports; they are not live VPS measurements. See the [monitoring guide](RELEASE_0.125.0_EN.md).
 
 The library includes four built-in templates: single-VPS port forwarding, single-VPS Shadowsocks, multi-hop port forwarding, and multi-hop Shadowsocks. **My saved rule templates** contains configurations you saved yourself; it can be empty while the four built-ins remain available. All four built-ins use the same guided form: choose VPSs, accept automatic addresses and ports, then click **Preview changes**. Manual ports and source limits are under **Advanced**. Nothing is published until you explicitly choose **Publish these changes**. Click any VPS card in the draft diagram to edit that hop below the diagram. The selected exit also exposes destination or SS settings. **Done editing this hop** keeps your changes. Clicking a card during review returns to the draft; preview it again before publishing. On the saved path page, click a VPS card to open its exact node rule. See the [diagram editing guide](RELEASE_0.124.0_EN.md) and [workflow guide](RELEASE_0.123.0_EN.md) and [diagram guide](FORWARDING_DIAGRAM_0.120.0_EN.md).
 
@@ -57,10 +59,10 @@ The policy is fixed at node creation. The enrollment token is displayed once. Sa
 
 ## 4. Install and start the Agent
 
-Use a root Bash shell on the new VPS. In this example, `/root/relay-onboarding-0.124.0` already contains:
+Use a root Bash shell on the new VPS. In this example, `/root/relay-onboarding-0.125.0` already contains:
 
 ```text
-relay-linux-0.124.0.tar.gz
+relay-linux-0.125.0.tar.gz
 signing-public.pem
 scripts/relay_deploy.py
 scripts/deployment/...
@@ -71,7 +73,7 @@ Install the runtime tooling if necessary:
 ```sh
 apt-get update
 apt-get install --yes python3 openssl ca-certificates curl
-cd /root/relay-onboarding-0.124.0
+cd /root/relay-onboarding-0.125.0
 umask 077
 ```
 
@@ -99,12 +101,12 @@ Then verify, inspect, install, start, and enable the service:
 
 ```sh
 python3 scripts/relay_deploy.py verify \
-  --bundle relay-linux-0.124.0.tar.gz \
+  --bundle relay-linux-0.125.0.tar.gz \
   --trusted-key signing-public.pem
 
 python3 scripts/relay_deploy.py preflight \
   --role agent --config agent.json \
-  --bundle relay-linux-0.124.0.tar.gz \
+  --bundle relay-linux-0.125.0.tar.gz \
   --trusted-key signing-public.pem
 ```
 
@@ -113,7 +115,7 @@ Continue only after preflight reports `ready: true`. Resolve any reported error 
 ```sh
 python3 scripts/relay_deploy.py install \
   --role agent --config agent.json \
-  --bundle relay-linux-0.124.0.tar.gz \
+  --bundle relay-linux-0.125.0.tar.gz \
   --trusted-key signing-public.pem \
   --enrollment-token-file enrollment.secret
 
@@ -270,10 +272,10 @@ The following uses a root Bash shell on a Debian/Ubuntu build machine and a fres
 apt-get update
 apt-get install --yes git curl ca-certificates build-essential pkg-config clang libclang-dev openssl python3
 
-git clone --branch v0.124.0 --depth 1 \
+git clone --branch v0.125.0 --depth 1 \
   https://github.com/EntropyEnthalpy-SYS/relay-platform.git \
-  /root/relay-build-0.124.0
-cd /root/relay-build-0.124.0
+  /root/relay-build-0.125.0
+cd /root/relay-build-0.125.0
 ```
 
 If Rustup is absent, install it using the [official Rust installation instructions](https://rust-lang.org/tools/install/), then open a new shell or load its environment. Select the same Rust version used by project CI and build:
@@ -284,15 +286,15 @@ rustup toolchain install 1.99.1 --profile minimal
 cargo +1.99.1 build --locked --release --bin relay --jobs 2
 ./target/release/relay build-info
 
-install -d -m 700 /root/relay-release-0.124.0
+install -d -m 700 /root/relay-release-0.125.0
 python3 scripts/relay_deploy.py keygen \
-  --directory /root/relay-release-0.124.0/signing
+  --directory /root/relay-release-0.125.0/signing
 
 python3 scripts/relay_deploy.py pack \
   --binary target/release/relay \
-  --signing-key /root/relay-release-0.124.0/signing/signing-private.pem \
+  --signing-key /root/relay-release-0.125.0/signing/signing-private.pem \
   --source-revision "$(git rev-parse HEAD)" \
-  --output /root/relay-release-0.124.0/relay-linux-0.124.0.tar.gz
+  --output /root/relay-release-0.125.0/relay-linux-0.125.0.tar.gz
 ```
 
 The signing directory is created once for this example; retain its private key privately for release management. The private key is not needed on the Agent VPS.
@@ -300,14 +302,14 @@ The signing directory is created once for this example; retain its private key p
 From the build machine, replace `ENTRY_VPS_IP` and copy only the bundle, public key, and scripts over your trusted SSH connection:
 
 ```sh
-ssh root@ENTRY_VPS_IP 'install -d -m 700 /root/relay-onboarding-0.124.0'
+ssh root@ENTRY_VPS_IP 'install -d -m 700 /root/relay-onboarding-0.125.0'
 
-scp /root/relay-release-0.124.0/relay-linux-0.124.0.tar.gz \
-  /root/relay-release-0.124.0/signing/signing-public.pem \
-  root@ENTRY_VPS_IP:/root/relay-onboarding-0.124.0/
+scp /root/relay-release-0.125.0/relay-linux-0.125.0.tar.gz \
+  /root/relay-release-0.125.0/signing/signing-public.pem \
+  root@ENTRY_VPS_IP:/root/relay-onboarding-0.125.0/
 
-scp -r /root/relay-build-0.124.0/scripts \
-  root@ENTRY_VPS_IP:/root/relay-onboarding-0.124.0/
+scp -r /root/relay-build-0.125.0/scripts \
+  root@ENTRY_VPS_IP:/root/relay-onboarding-0.125.0/
 ```
 
 If building on the Agent VPS itself, use ordinary local copies of the same three items into the onboarding directory instead of SCP. Then continue with enrollment and installation above.

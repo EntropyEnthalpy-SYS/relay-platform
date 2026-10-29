@@ -489,7 +489,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); backdrop-filter: blur(4px); }
 .legend i.up { background: var(--green); }
 .legend i.partial { background: var(--amber); }
 .legend i.down { background: var(--red); }
-.chain-wrap { flex: 1; display: flex; align-items: center; padding: 12px 16px 18px; overflow-x: auto; background: radial-gradient(ellipse at 50% 45%, var(--accent-soft), transparent 68%); }
+.chain-wrap { flex: 1; display: flex; flex-direction: column; align-items: stretch; padding: 12px 16px 18px; overflow-x: auto; background: radial-gradient(ellipse at 50% 45%, var(--accent-soft), transparent 68%); }
+.chain-notice { margin: 6px 0 12px; font-size: 12px; color: var(--muted); line-height: 1.7; }
 .chain { flex: 1; width: 100%; min-width: 640px; height: auto; font-family: var(--sans); }
 .edge { fill: none; stroke: var(--line-strong); stroke-width: 1.8; }
 .edge.up { stroke: var(--green); stroke-dasharray: 6 5; animation: flow 1.2s linear infinite; }
@@ -791,3 +792,68 @@ html[lang="en"] .nav-label { letter-spacing: .02em; }
   .dialog-actions { margin-left: -20px; margin-right: -20px; padding-left: 20px; padding-right: 20px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
+/* Monitoring restores the spacious operations overview; both layouts use the
+   same telemetry, declared paths and navigation. Theme remains independent. */
+.overview-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin: 0 0 22px; }
+.overview-controls > span { color: var(--muted); font-size: 11px; }
+.overview-layout-picker { display: inline-flex; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
+.overview-layout-picker button { min-height: 36px; padding: 7px 15px; border: 1px solid transparent; border-radius: 6px; background: transparent; font-size: 12px; font-weight: 550; color: var(--muted); }
+.overview-layout-picker button[aria-pressed="true"] { background: var(--surface); color: var(--text); border-color: var(--line-strong); box-shadow: 0 1px 3px #0000000a; }
+.overview-layout-picker button:hover { color: var(--text); }
+.overview-waiting { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 20px; margin-bottom: 22px; border: 1px solid var(--line); border-left: 3px solid var(--blue); border-radius: 9px; background: var(--surface); }
+.overview-waiting strong { font-size: 13px; }
+.overview-waiting p { margin: 5px 0 0; font-size: 12px; color: var(--text-2); max-width: 70em; }
+.overview-waiting button { flex-shrink: 0; }
+.overview-grid > .panel { min-width: 0; }
+body[data-overview-layout="monitoring"] { color: var(--text); background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size: 48px 48px; }
+:root[data-theme="dark"] body[data-overview-layout="monitoring"] {
+  --bg: #080f19; --grid: #20324725;
+  --surface: #0c1724; --surface-2: #111e2e; --surface-3: #1a2b3e;
+  --line: #203044; --line-strong: #354d65;
+  --text: #e1eaf5; --text-2: #b4c4d6; --muted: #91a4bb;
+  --accent: #26d398; --accent-hover: #51e1b0; --accent-ink: #05241b; --accent-soft: #0e302c;
+  --green: #26d398; --green-soft: #102f2a; --blue: #54a6ff; --violet: #ac8dff;
+  --amber: #ffbd49; --amber-soft: #342a17; --red: #ff6570; --red-soft: #351e29;
+}
+body[data-overview-layout="monitoring"] main { max-width: none; }
+body[data-overview-layout="monitoring"] .kpis { gap: 18px; margin-bottom: 24px; }
+body[data-overview-layout="monitoring"] .kpi { container-type: inline-size; min-height: 186px; padding: 23px 24px 18px; border-radius: 12px; gap: 18px; }
+body[data-overview-layout="monitoring"] .kpi .metric-label { font-size: 12px; }
+body[data-overview-layout="monitoring"] .kpi .metric-label::before { display: none; }
+body[data-overview-layout="monitoring"] .kpi .metric-value { font: 650 clamp(18px, 14cqw, 42px) / 1.2 var(--mono); margin-top: 14px; letter-spacing: -.04em; }
+body[data-overview-layout="monitoring"] .kpi:first-child .metric-value { color: var(--green); }
+body[data-overview-layout="monitoring"] .kpi .metric-foot { font-size: 11px; }
+body[data-overview-layout="monitoring"] .kpi > .spark { height: 46px; }
+body[data-overview-layout="monitoring"] .spark.accent { --spark: var(--green); }
+body[data-overview-layout="monitoring"] .overview-grid { grid-template-columns: minmax(0, 1fr); gap: 24px; margin-bottom: 24px; }
+body[data-overview-layout="monitoring"] .panel { border-radius: 12px; }
+body[data-overview-layout="monitoring"] .panel-head { padding: 22px 24px; }
+body[data-overview-layout="monitoring"] .panel-head h2 { font-size: 16px; }
+body[data-overview-layout="monitoring"] .panel-head p { font-size: 12px; }
+body[data-overview-layout="monitoring"] .chain-wrap { min-height: 300px; padding: 22px 24px; background: radial-gradient(ellipse at 50% 50%, var(--accent-soft), transparent 70%); }
+body[data-overview-layout="monitoring"] .chain-node rect { fill: var(--surface-2); }
+body[data-overview-layout="monitoring"] .chain-node .name { font-size: 14px; }
+body[data-overview-layout="monitoring"] .chain-node .sub { font-size: 12px; }
+body[data-overview-layout="monitoring"] .incidents { display: block; }
+body[data-overview-layout="monitoring"] .incident { padding: 16px 24px; }
+body[data-overview-layout="monitoring"] .incident-message { font-size: 13px; -webkit-line-clamp: unset; }
+body[data-overview-layout="monitoring"] .incident time { font-size: 11px; }
+body[data-overview-layout="monitoring"] .incident-empty { min-height: 80px; font-size: 13px; }
+body[data-overview-layout="monitoring"] th { font-size: 11px; padding: 14px 20px; }
+body[data-overview-layout="monitoring"] td { font-size: 13px; padding: 19px 20px; }
+@media (max-width: 1100px) {
+  body[data-overview-layout="monitoring"] .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .overview-controls { gap: 9px; }
+  .overview-layout-picker { width: 100%; }
+  .overview-layout-picker button { flex: 1; min-height: 42px; }
+  .overview-waiting { flex-direction: column; align-items: flex-start; padding: 16px; }
+  body[data-overview-layout="monitoring"] .kpis { gap: 10px; }
+  body[data-overview-layout="monitoring"] .kpi { min-height: 170px; padding: 16px 13px; gap: 12px; }
+  body[data-overview-layout="monitoring"] .kpi .metric-value { font-size: clamp(18px, 14cqw, 32px); }
+  body[data-overview-layout="monitoring"] .panel-head { padding: 18px 16px; flex-wrap: wrap; }
+  body[data-overview-layout="monitoring"] .chain-wrap { padding: 16px; }
+  body[data-overview-layout="monitoring"] .incident { padding: 15px 16px; gap: 8px; }
+}

@@ -13,6 +13,23 @@ const applyTheme = theme => { const root = document.documentElement; root.classL
 let savedTheme; try { savedTheme = localStorage.getItem('relay-theme'); } catch { /* Use the default. */ }
 applyTheme(savedTheme === 'dark' ? 'dark' : 'light');
 $('#theme').onclick = () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+// The monitoring layout and color theme are independent browser preferences.
+function readOverviewLayout() {
+  try { return localStorage.getItem('relay-overview-layout') === 'workspace' ? 'workspace' : 'monitoring'; }
+  catch { return 'monitoring'; }
+}
+let overviewLayout = readOverviewLayout();
+function applyOverviewLayout(layout = overviewLayout, persist = false) {
+  overviewLayout = layout === 'workspace' ? 'workspace' : 'monitoring';
+  const visible = !!state.actor && state.view === 'overview';
+  if (visible) document.body.dataset.overviewLayout = overviewLayout;
+  else delete document.body.dataset.overviewLayout;
+  $('#overview-controls').classList.toggle('hidden', !visible);
+  for (const mode of ['monitoring', 'workspace']) $('#overview-' + mode).setAttribute('aria-pressed', String(overviewLayout === mode));
+  if (persist) { try { localStorage.setItem('relay-overview-layout', overviewLayout); } catch { /* Switching still works without storage. */ } }
+}
+for (const mode of ['monitoring', 'workspace']) $('#overview-' + mode).onclick = () => { applyOverviewLayout(mode, true); refresh().catch(e => notify(e.message, true)); };
+applyOverviewLayout();
 function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
 function notify(message, failure = false) { const n = $('#notification'); n.textContent = message; n.classList.remove('hidden'); n.classList.toggle('failure', failure); }
 function button(text, handler, cls = 'subtle') { const n = el('button', text, cls); n.type = 'button'; n.addEventListener('click', () => Promise.resolve().then(handler).catch(e => notify(e.message, true))); return n; }
@@ -34,7 +51,7 @@ setupLanguageSwitcher(() => {
   refresh().catch(error => notify(error.message, true));
 });
 const consoleUI = createConsoleUI({ navigate, getActor: () => state.actor, getView: () => state.view, el, button, modal, titles });
-function loggedOut() { consoleUI.reset(); state.view = 'overview'; state.token = null; state.actor = null; state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); resetSecondFactor(); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); state.config = null; state.selectedNode = null; $('#content').replaceChildren(); $('#identity').textContent = ''; $('#status-pill').textContent = ''; document.title = translate('Relay · 独立转发平台'); window.scrollTo({ top: 0 }); $('#login-form [name=username]').focus(); }
+function loggedOut() { consoleUI.reset(); state.view = 'overview'; state.token = null; state.actor = null; applyOverviewLayout(); state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); resetSecondFactor(); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); state.config = null; state.selectedNode = null; $('#content').replaceChildren(); $('#identity').textContent = ''; $('#status-pill').textContent = ''; document.title = translate('Relay · 独立转发平台'); window.scrollTo({ top: 0 }); $('#login-form [name=username]').focus(); }
 function modal(title, content) { $('#dialog-title').textContent = title; $('#dialog-body').replaceChildren(content); $('#dialog').showModal(); $('#dialog').scrollTop = 0; }
 // Native prompt/confirm is unavailable in some embedded browsers. Keep all
 // decisions in accessible panel dialogs, including a safe cancel/escape path.
@@ -227,7 +244,7 @@ async function navigate(view, options = {}) {
   const topic = parseRoute(`#guide/${options.topic || 'quickstart'}`).topic;
   const hash = `#${view}${view === 'guide' ? '/' + topic : ''}`;
   if (location.hash !== hash) window.history[options.history === false ? 'replaceState' : 'pushState'](null, '', hash);
-  state.view = view; $('#notification').classList.add('hidden');
+  state.view = view; applyOverviewLayout(); $('#notification').classList.add('hidden');
   document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view));
   $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview');
   consoleUI.sync(view); $('#content').replaceChildren(el('p', translate('正在加载…'), 'loading-state')); window.scrollTo({ top: 0 });
@@ -236,10 +253,10 @@ async function navigate(view, options = {}) {
 }
 async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
-  if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(); state.busy = true; $('#refresh').disabled = true;
+  if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(), requestedOverviewLayout = overviewLayout; state.busy = true; $('#refresh').disabled = true;
   try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
   catch (error) { if (state.actor && state.view === requestedView && location.hash === requestedHash && $('#content .loading-state')) $('#content').replaceChildren(empty(translate('页面暂时无法加载'), error.message, button(translate('重新加载'), () => { $('#notification').classList.add('hidden'); return refresh(); }, 'primary'))); throw error; }
-  finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (getLanguage() !== requestedLanguage || state.view !== requestedView || location.hash !== requestedHash || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
+  finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (getLanguage() !== requestedLanguage || state.view !== requestedView || location.hash !== requestedHash || (state.view === 'overview' && requestedOverviewLayout !== overviewLayout) || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
 // Overview: per-node samples from /telemetry over the last 15 minutes, drawn as
@@ -315,7 +332,7 @@ async function renderOverview() {
   const kpis = el('div', undefined, 'kpis');
   kpis.append(
     kpi(translate('实时吞吐'), live.length ? bits(live.reduce((s, r) => s + (r.rate ?? 0), 0)) : '—', msg`多跳流量逐跳计入 · 峰值 ${bits(peak)}`, spark(rate, 'accent')),
-    kpi(translate('活跃会话'), String(live.reduce((s, r) => s + r.latest.active_sessions, 0)), translate('TCP 连接 + UDP 会话'), spark(sessions, 'blue')),
+    kpi(translate('活跃会话'), live.length ? String(live.reduce((s, r) => s + r.latest.active_sessions, 0)) : '—', translate('TCP 连接 + UDP 会话'), spark(sessions, 'blue')),
     kpi(translate('探测往返中位数'), millis(median(live.map(r => r.latest.probe_latency_us))), translate('节点到目标的探测，不含客户端一段'), spark(latency, 'violet')),
     kpi(translate('节点在线'), `${live.length} / ${enrolled.length}`, probed ? msg`目标可用 ${healthy} / ${probed}` : translate('尚无目标探测'), fleet));
   const events = telemetry.events.slice().reverse(), attention = rows.filter(r => r.status[2] === 'down' || r.status[2] === 'partial').length;
@@ -331,6 +348,11 @@ async function renderOverview() {
   events.slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', eventMessage(e), 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
   incidents.append(list);
   const middle = el('div', undefined, 'overview-grid'); middle.append(graphPanel, incidents);
+  const waiting = el('div', undefined, 'overview-waiting');
+  if (!live.length) {
+    const copy = el('div'); copy.append(el('strong', translate('等待实时数据')), el('p', translate('示例或未注册节点没有实时测量值。注册并启动 Agent 后显示吞吐与资源；发布启用的规则后显示转发连线。')));
+    waiting.append(copy, button(translate('前往节点管理'), () => navigate('nodes')));
+  }
   const search = el('input'); search.type = 'search'; search.placeholder = translate('按名称、ID 或分组筛选'); search.value = state.overviewFilter || ''; search.setAttribute('aria-label', translate('筛选节点'));
   const nodePanel = panel(translate('中转节点'), msg`${enrolled.length} 个已注册 · 采样来自每次节点回报`, search);
   const t = table([translate('节点'), translate('状态'), translate('探测往返'), translate('吞吐（15 分钟）'), 'CPU', translate('内存'), translate('会话'), translate('配置修订'), translate('最近回报'), ''], rows.map(r => {
@@ -346,7 +368,7 @@ async function renderOverview() {
   const filter = () => { state.overviewFilter = search.value; const q = search.value.trim().toLowerCase(); trs.forEach((tr, i) => tr.classList.toggle('hidden', !!q && !keys[i].includes(q))); };
   search.addEventListener('input', filter); filter();
   nodePanel.append(rows.length ? t : empty(translate('还没有节点'), translate('注册节点并启动 Agent 后，这里会显示实时吞吐、资源和事件。'), button(translate('前往节点管理'), () => navigate('nodes'))));
-  if (state.view === 'overview') $('#content').replaceChildren(kpis, middle, nodePanel);
+  if (state.view === 'overview') $('#content').replaceChildren(...(!live.length ? [waiting] : []), kpis, middle, nodePanel);
 }
 function legend() { const n = el('div', undefined, 'legend'); for (const [text, cls] of [[translate('正常'), 'up'], [translate('部分可用'), 'partial'], [translate('不可用'), 'down'], [translate('未探测'), 'unknown']]) { const item = el('span'); item.append(el('i', undefined, cls), text); n.append(item); } return n; }
 function eventTable(events, byId, now) {
@@ -369,16 +391,16 @@ function chainGraph(topology, byId) {
     rule.targets.forEach((target, i) => { if (target.via) referenced.add(`${target.via.node_id}/${target.via.rule_id}`); addEdge(config.node_id, target.via ? target.via.node_id : 'sink', health.get(`${config.node_id}/${rule.id}/${i}`) || []); });
   }
   for (const config of topology.configs || []) if (config.rules.some(rule => rule.enabled && !referenced.has(`${config.node_id}/${rule.id}`))) addEdge('client', config.node_id, []);
-  const ids = topology.nodes.filter(n => n.enrolled || ruleCount.has(n.id)).map(n => n.id), depth = new Map();
+  const ids = topology.nodes.map(n => n.id), depth = new Map();
   const depthOf = (id, seen = new Set()) => { if (depth.has(id)) return depth.get(id); if (seen.has(id)) return 1; seen.add(id); const parents = [...edges.values()].filter(e => e.to === id && e.from !== 'client').map(e => depthOf(e.from, seen)); const d = parents.length ? Math.max(...parents) + 1 : 1; depth.set(id, d); return d; };
   ids.forEach(id => depthOf(id));
   const last = Math.max(1, ...depth.values()) + 1, columns = Array.from({ length: last + 1 }, () => []);
   ids.forEach(id => columns[depth.get(id)].push(id)); if ([...edges.values()].some(e => e.from === 'client')) columns[0].push('client'); if ([...edges.values()].some(e => e.to === 'sink')) columns[last].push('sink');
   // Lay out at the panel's current pixel size so text stays at its CSS size; the viewBox rescales between refreshes.
-  const beside = window.innerWidth > 1390, W = Math.max(640, ($('#content').clientWidth || 1100) - (beside ? 316 : 0) - 36);
+  const monitoring = overviewLayout === 'monitoring', beside = !monitoring && window.innerWidth > 1390, W = Math.max(640, ($('#content').clientWidth || 1100) - (beside ? 316 : 0) - 36);
   // Client and target terminals are narrow; node columns share the width between them.
   const tw = 80, left = 12 + (columns[0].length ? tw + 40 : 0), right = W - 12 - (columns[last].length ? tw + 40 : 0), step = (right - left) / (last - 1);
-  const bw = Math.max(112, Math.min(176, step - 44)), bh = 52, gap = 84, H = Math.max(190, Math.max(...columns.map(c => c.length)) * gap + 60), pos = new Map(), labels = [];
+  const bw = Math.max(112, Math.min(monitoring ? 210 : 176, step - 44)), bh = monitoring ? 64 : 52, gap = monitoring ? 100 : 84, H = Math.max(monitoring ? 270 : 190, Math.max(...columns.map(c => c.length)) * gap + 60), pos = new Map(), labels = [];
   columns.forEach((column, c) => column.forEach((id, r) => pos.set(id, [c === 0 ? 12 : c === last ? W - 12 - tw : left + (c - 1) * step + (step - bw) / 2, (H - column.length * gap) / 2 + r * gap + (gap - bh) / 2, c === 0 || c === last ? tw : bw])));
   const box = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'group', 'aria-label': translate('转发链路图') }, 'chain');
   // A link is up only if every probed target is, and down only if none is; unprobed targets do not count.
@@ -407,7 +429,9 @@ function chainGraph(topology, byId) {
     box.append(g);
   }
   box.append(...labels);
-  const wrap = el('div', undefined, 'chain-wrap'); wrap.append(box);
+  const wrap = el('div', undefined, 'chain-wrap');
+  if (ids.length && !edges.size) wrap.append(el('p', translate('尚无启用的转发规则；这里只显示节点，不代表已建立转发路径。'), 'chain-notice'));
+  wrap.append(box);
   if (!ids.length) return empty(translate('还没有节点'), translate('注册节点并配置规则后显示转发链路。'));
   return wrap;
 }
