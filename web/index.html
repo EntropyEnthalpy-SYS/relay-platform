@@ -1,74 +1,83 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Relay · 独立转发平台</title>
+  <meta name="color-scheme" content="light dark"><title>Relay · 独立转发平台</title>
   <link rel="stylesheet" href="/assets/style.css"><script type="module" src="/assets/app.js"></script>
 </head>
 <body>
 <div id="login-screen" class="login-screen">
   <form id="login-form" class="login-card">
-    <span class="brand-mark">R</span><p class="eyebrow">RELAY PLATFORM</p>
-    <h1>自己的网络，<br>自己的控制台。</h1>
-    <p class="muted">使用控制服务初始化时生成的管理员凭据登录。</p>
+    <a class="brand login-brand" href="/"><span class="brand-mark">R</span><span>Relay<span class="brand-sub">YOUR NETWORK, CONNECTED.</span></span></a>
+    <p class="eyebrow">WELCOME TO YOUR WORKSPACE</p><h1>让网络有序，<br>让管理从容。</h1>
+    <p class="muted">登录控制台，连接你的节点、规则与每一条线路。</p>
     <label>用户名<input name="username" value="admin" autocomplete="username" required maxlength="80"></label>
     <label>密码<input name="password" type="password" autocomplete="current-password" required maxlength="1024"></label>
     <label id="second-factor-field" class="hidden">两步验证码<input name="second_factor" inputmode="numeric" autocomplete="one-time-code" maxlength="32" placeholder="身份验证器中的 6 位数字，或一个恢复码"></label>
-    <button type="submit" class="primary">登录控制台 <span aria-hidden="true">→</span></button>
+    <button type="submit" class="primary">进入工作空间 <span aria-hidden="true">→</span></button>
     <p id="login-error" class="error" role="alert"></p>
-    <p class="fine">首次密码位于控制节点的 <code>admin-password.secret</code>，不会写入运行日志。</p>
+    <p class="fine">首次密码位于控制节点的 <code>admin-password.secret</code>。</p>
   </form>
   <div class="login-art" aria-hidden="true">
+    <div class="login-note"><span class="eyebrow">A QUIETER WAY TO MANAGE NETWORKS</span><p>Your network.<br><em>In focus.</em></p><span>连接、观测、理解。在同一个工作空间。</span></div>
     <div class="route-card">
-      <div class="route-head"><span class="dots"><i></i><i></i><i></i></span><span>relay · 自托管转发网络</span><span class="route-state">控制面</span></div>
-      <div class="route">
-        <div class="hop end"><b></b><span>客户端</span></div>
-        <div class="hop"><b>ENTRY</b><span>入口节点</span></div>
-        <div class="hop"><b>EXIT</b><span>落地节点</span></div>
-        <div class="hop end"><b></b><span>目标服务</span></div>
-      </div>
-      <div class="route-log">
-        <div><em>publish</em> 配置提交后立即推送到节点</div>
-        <div><em>failover</em> 目标失败时在同一次连接内改用后备</div>
-        <div><em>ledger</em> 每个字节按规则与周期记账</div>
-      </div>
-    </div>
-    <span class="network-label">CONTROL / FORWARD / OBSERVE</span>
+      <div class="route-head"><span class="dots"><i></i><i></i><i></i></span><span>relay / network map</span><span class="route-state">链路示意</span></div>
+      <div class="route"><div class="hop end"><b></b><span>客户端</span></div><div class="hop"><b>ENTRY</b><span>入口节点</span></div><div class="hop"><b>EXIT</b><span>落地节点</span></div><div class="hop end"><b></b><span>目标服务</span></div></div>
+      <div class="route-log"><div><em>01</em> 配置下发与修订管理</div><div><em>02</em> 节点状态与目标健康</div><div><em>03</em> 流量计量与共享额度</div></div>
+    </div><span class="network-label">SELF-HOSTED · BUILT WITH RUST</span>
   </div>
 </div>
 <div id="application" class="application hidden">
-  <aside class="sidebar">
-    <a class="brand" href="/"><span class="brand-mark small">R</span><span>Relay<span class="brand-sub">独立转发平台</span></span></a>
-    <span class="nav-label">工作空间</span>
+  <a href="#main-content" class="skip-link">跳到主要内容</a>
+  <div class="topbar">
+    <div class="topbar-brand"><button id="menu-toggle" class="icon-control mobile-only" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button><a class="brand" href="#overview"><span class="brand-mark small">R</span><span>Relay<span class="brand-sub">NETWORK WORKSPACE</span></span></a></div>
+    <div class="topbar-tabs" aria-label="工作空间入口"><button id="console-tab" class="topbar-tab active">控制台</button><button id="guide-tab" class="topbar-tab">使用指南 <span aria-hidden="true">↗</span></button></div>
+    <button id="command-open" class="search-trigger" aria-label="搜索页面与指南"><span data-icon="search"></span><span>搜索页面与指南…</span><kbd>⌘ K</kbd></button>
+    <div class="topbar-actions"><span class="build-badge">DEV 0.116</span><button id="theme" class="icon-control" type="button" aria-label="切换深色或浅色主题" title="切换深色或浅色主题" data-icon="sun"></button><span id="identity" class="identity"></span></div>
+  </div>
+  <button id="nav-backdrop" class="nav-backdrop" aria-label="关闭导航" tabindex="-1" hidden></button>
+  <aside id="sidebar" class="sidebar" aria-label="工作空间导航">
+    <div class="workspace-label"><span class="workspace-icon" data-icon="layers"></span><div><strong>我的工作空间</strong><span>Self-hosted infrastructure</span></div></div>
     <nav aria-label="主导航">
-      <button data-view="overview" class="nav-button active"><span>◧</span>运行总览</button>
-      <button data-view="nodes" class="nav-button"><span>◉</span>节点管理</button>
-      <button data-view="rules" class="nav-button"><span>⇄</span>转发规则</button>
-      <button data-view="templates" class="nav-button admin-only"><span>▤</span>规则模板</button>
-      <button data-view="topology" class="nav-button"><span>⇢</span>多跳拓扑</button>
-      <button data-view="health" class="nav-button"><span>⌁</span>目标健康</button>
-      <button data-view="budgets" class="nav-button"><span>◎</span>共享额度</button>
-      <button data-view="usage" class="nav-button"><span>▥</span>流量账本</button>
-      <button data-view="subscriptions" class="nav-button"><span>⊞</span>客户端订阅</button>
-      <button data-view="dns" class="nav-button admin-only"><span>◎</span>DNS 管理</button>
-      <button data-view="announcements" class="nav-button"><span>✦</span>公告</button>
-      <button data-view="commerce" class="nav-button"><span>¤</span>钱包与订单</button>
-      <button data-view="tickets" class="nav-button"><span>?</span>工单</button>
-      <button data-view="users" class="nav-button"><span>♧</span>用户与权限</button>
-      <button data-view="account" class="nav-button"><span>◈</span>账户安全</button>
-      <button data-view="audit" class="nav-button admin-only"><span>≡</span>操作审计</button>
-      <button data-view="alerts" class="nav-button tenant-admin-only"><span>◬</span>告警通知</button>
-      <button data-view="recovery" class="nav-button admin-only"><span>↺</span>恢复保护</button>
-      <button data-view="capabilities" class="nav-button"><span>◇</span>功能进度</button>
+      <div class="nav-group"><p class="nav-label">工作空间 <span>01</span></p>
+        <button data-view="overview" class="nav-button active"><span data-icon="overview"></span>运行总览</button>
+        <button data-view="nodes" class="nav-button"><span data-icon="server"></span>节点管理</button>
+        <button data-view="rules" class="nav-button"><span data-icon="arrows"></span>转发规则</button>
+        <button data-view="templates" class="nav-button admin-only"><span data-icon="layers"></span>规则模板</button>
+        <button data-view="topology" class="nav-button"><span data-icon="network"></span>多跳拓扑</button>
+      </div>
+      <div class="nav-group"><p class="nav-label">观测与资源 <span>02</span></p>
+        <button data-view="health" class="nav-button"><span data-icon="activity"></span>目标健康</button>
+        <button data-view="usage" class="nav-button"><span data-icon="chart"></span>流量账本</button>
+        <button data-view="budgets" class="nav-button"><span data-icon="gauge"></span>共享额度</button>
+        <button data-view="alerts" class="nav-button tenant-admin-only"><span data-icon="bell"></span>告警通知</button>
+      </div>
+      <div class="nav-group"><p class="nav-label">服务与协作 <span>03</span></p>
+        <button data-view="subscriptions" class="nav-button"><span data-icon="link"></span>客户端订阅</button>
+        <button data-view="dns" class="nav-button admin-only"><span data-icon="globe"></span>DNS 管理</button>
+        <button data-view="announcements" class="nav-button"><span data-icon="flag"></span>公告</button>
+        <button data-view="tickets" class="nav-button"><span data-icon="message"></span>工单</button>
+        <button data-view="commerce" class="nav-button"><span data-icon="wallet"></span>钱包与订单</button>
+      </div>
+      <div class="nav-group"><p class="nav-label">管理与帮助 <span>04</span></p>
+        <button data-view="users" class="nav-button"><span data-icon="users"></span>用户与权限</button>
+        <button data-view="account" class="nav-button"><span data-icon="shield"></span>账户安全</button>
+        <button data-view="audit" class="nav-button admin-only"><span data-icon="list"></span>操作审计</button>
+        <button data-view="recovery" class="nav-button admin-only"><span data-icon="restore"></span>恢复保护</button>
+        <button data-view="capabilities" class="nav-button"><span data-icon="check"></span>功能进度</button>
+        <button data-view="guide" class="nav-button"><span data-icon="book"></span>使用指南</button>
+      </div>
     </nav>
-    <div class="sidebar-bottom"><span class="version">DEVELOPMENT 0.115</span><p>完整范围持续开发中<br>数据来自实际节点回报</p><button id="logout" data-logout class="subtle">退出登录</button></div>
+    <div class="sidebar-bottom"><div><span class="version">独立部署 · 持续开发</span><span class="fine">你的网络，由你掌握。</span></div><button id="logout" data-logout class="icon-control" aria-label="退出登录" title="退出登录" data-icon="logout"></button></div>
   </aside>
-  <main>
-    <header><div><p class="eyebrow">YOUR INFRASTRUCTURE</p><h1 id="view-title">运行总览</h1></div><div class="header-right"><span id="status-pill" class="status-pill" role="status"></span><span id="identity" class="identity"></span><button id="theme" class="subtle" type="button" aria-label="切换深色或浅色主题" title="切换深色或浅色主题">◐</button><button id="refresh" class="subtle">刷新数据 ↻</button><button data-logout class="subtle mobile-only">退出</button></div></header>
-    <div id="notification" class="notification hidden" role="status"></div>
-    <div id="content"></div>
-    <footer>控制在线仅表示 Agent 可以联系控制服务，业务可用性须另行探测。<span id="refreshed"></span></footer>
+  <main id="main-content" tabindex="-1">
+    <div class="page-breadcrumb"><span data-icon="home"></span><span>Relay</span><span aria-hidden="true">/</span><span id="breadcrumb-group">概览</span><span aria-hidden="true">/</span><span id="breadcrumb-current">运行总览</span></div>
+    <header class="page-header"><div><p id="page-kicker" class="eyebrow">NETWORK OVERVIEW</p><h1 id="view-title">运行总览</h1><p id="view-description" class="view-description"></p></div><div class="header-right"><button id="context-help" class="subtle" type="button"><span data-icon="book"></span>页面指南</button><button id="refresh" class="subtle" type="button"><span data-icon="refresh"></span>刷新</button></div></header>
+    <div class="page-meta"><span id="status-pill" class="status-pill" role="status"></span><span class="data-note"><span class="live-dot"></span>当前工作空间<span class="meta-separator">/</span><span id="refreshed">等待数据</span></span></div>
+    <div id="notification" class="notification hidden" role="status"></div><div id="content"></div>
+    <footer><span>Relay / 你的网络工作空间</span><span>控制在线仅表示 Agent 可联系控制服务，业务可用性须另行探测。</span></footer>
   </main>
 </div>
-<dialog id="dialog"><div class="dialog-head"><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-button" aria-label="关闭对话框">×</button></div><div id="dialog-body"></div></dialog>
+<dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-head"><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-button" aria-label="关闭对话框">×</button></div><div id="dialog-body"></div></dialog>
+<dialog id="command-dialog" class="command-dialog" aria-labelledby="command-title"><h2 id="command-title" class="sr-only">搜索页面与指南</h2><div class="command-input-row"><span data-icon="search"></span><input id="command-input" type="search" placeholder="搜索页面、功能或操作指南…" aria-label="搜索页面与指南" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="command-results" aria-autocomplete="list"><button id="command-close" class="command-escape" aria-label="关闭搜索">Esc</button></div><div id="command-results" role="listbox" aria-label="搜索结果"></div><p id="command-status" class="sr-only" role="status"></p><div class="command-footer"><span><kbd>↑</kbd> <kbd>↓</kbd> 选择 <kbd>↵</kbd> 打开</span><span>页面与指南 · 本地搜索</span></div></dialog>
 </body></html>

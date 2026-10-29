@@ -1,13 +1,14 @@
+import { createConsoleUI, canVisit, parseRoute } from '/assets/console-ui.js';
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
-const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度' };
+const titles = { overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度', guide: '使用指南' };
 const roleNames = { system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' };
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = { read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' };
-// Dark is the stylesheet default; a saved choice of light overrides it.
+// Paper is the default; preserve an explicitly saved light or dark choice.
 // Switch without per-element color fades, which briefly mix the two themes.
-const applyTheme = theme => { const root = document.documentElement; root.classList.add('theme-switching'); root.dataset.theme = theme; localStorage.setItem('relay-theme', theme); requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching'))); };
-if (localStorage.getItem('relay-theme') === 'light') applyTheme('light');
+const applyTheme = theme => { const root = document.documentElement; root.classList.add('theme-switching'); root.dataset.theme = theme; $('#theme').setAttribute('aria-pressed', String(theme === 'dark')); localStorage.setItem('relay-theme', theme); requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching'))); };
+applyTheme(localStorage.getItem('relay-theme') === 'dark' ? 'dark' : 'light');
 $('#theme').onclick = () => applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
 function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
 function notify(message, failure = false) { const n = $('#notification'); n.textContent = message; n.classList.remove('hidden'); n.classList.toggle('failure', failure); }
@@ -21,7 +22,8 @@ async function api(path, options = {}) {
   const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = { error: text || `HTTP ${response.status}` }; }
   if (!response.ok) { if (response.status === 401 && path !== '/auth/login') loggedOut(); throw Object.assign(new Error(result.error || `请求失败 HTTP ${response.status}`), { detail: result }); } return result;
 }
-function loggedOut() { state.token = null; state.actor = null; state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); resetSecondFactor(); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); }
+const consoleUI = createConsoleUI({ navigate, getActor: () => state.actor, getView: () => state.view, el, button, modal, titles });
+function loggedOut() { consoleUI.reset(); state.view = 'overview'; state.token = null; state.actor = null; state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); resetSecondFactor(); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); state.config = null; state.selectedNode = null; $('#content').replaceChildren(); $('#identity').textContent = ''; $('#status-pill').textContent = ''; document.title = 'Relay · 独立转发平台'; window.scrollTo({ top: 0 }); $('#login-form [name=username]').focus(); }
 function modal(title, content) { $('#dialog-title').textContent = title; $('#dialog-body').replaceChildren(content); $('#dialog').showModal(); }
 $('#dialog-close').onclick = () => { $('#dialog').close(); $('#dialog-body').replaceChildren(); };
 // The close event is queued; a follow-up modal may already have reopened the dialog with new content.
@@ -158,12 +160,32 @@ function resetSecondFactor() { const factor = $('#second-factor-field'), code = 
 document.querySelectorAll('[data-logout]').forEach(b => { b.onclick = async () => { try { await api('/auth/logout', { method: 'POST' }); } finally { loggedOut(); } }; });
 $('#refresh').onclick = () => refresh().catch(e => notify(e.message, true));
 document.querySelectorAll('[data-view]').forEach(n => n.addEventListener('click', () => navigate(n.dataset.view)));
-async function enter() { $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden'); $('#identity').textContent = `${state.actor.username} · ${roleNames[state.actor.role]}`; document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin')); document.querySelectorAll('.tenant-admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role === 'viewer')); await refresh(); }
-async function navigate(view) { state.view = view; $('#notification').classList.add('hidden'); document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view)); $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); try { await refresh(); } catch (e) { notify(e.message, true); } }
+async function enter() {
+  $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden');
+  $('#identity').textContent = `${state.actor.username} · ${roleNames[state.actor.role]}`;
+  document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin'));
+  document.querySelectorAll('.tenant-admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role === 'viewer'));
+  const route = parseRoute(location.hash); await navigate(route.view, { topic: route.topic, history: false });
+}
+async function navigate(view, options = {}) {
+  if (!state.actor) return;
+  if (!canVisit(view, state.actor)) view = 'overview';
+  const topic = parseRoute(`#guide/${options.topic || 'quickstart'}`).topic;
+  const hash = `#${view}${view === 'guide' ? '/' + topic : ''}`;
+  if (location.hash !== hash) window.history[options.history === false ? 'replaceState' : 'pushState'](null, '', hash);
+  state.view = view; $('#notification').classList.add('hidden');
+  document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view));
+  $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview');
+  consoleUI.sync(view); $('#content').replaceChildren(el('p', '正在加载…', 'loading-state')); window.scrollTo({ top: 0 });
+  $('#main-content').focus({ preventScroll: true });
+  try { await refresh(); } catch (e) { notify(e.message, true); }
+}
+async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
-  if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
-  finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
+  if (!state.actor || state.busy) return; const requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash; state.busy = true; $('#refresh').disabled = true;
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`; }
+  catch (error) { if (state.actor && state.view === requestedView && location.hash === requestedHash && $('#content .loading-state')) $('#content').replaceChildren(empty('页面暂时无法加载', error.message, button('重新加载', () => { $('#notification').classList.add('hidden'); return refresh(); }, 'primary'))); throw error; }
+  finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.view !== requestedView || location.hash !== requestedHash || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
 
 // Overview: per-node samples from /telemetry over the last 15 minutes, drawn as
@@ -243,7 +265,8 @@ async function renderOverview() {
     kpi('节点在线', `${live.length} / ${enrolled.length}`, probed ? `目标可用 ${healthy} / ${probed}` : '尚无目标探测', fleet));
   const events = telemetry.events.slice().reverse(), attention = rows.filter(r => r.status[2] === 'down' || r.status[2] === 'partial').length;
   const pill = $('#status-pill'); pill.className = `status-pill ${rows.some(r => r.status[2] === 'down') ? 'red' : attention ? 'orange' : 'green'}`;
-  pill.textContent = attention ? `${attention} 个节点需要关注` : `运行正常 · ${enrolled.length} 个节点`;
+  pill.textContent = !enrolled.length ? '等待节点注册' : !live.length ? '等待节点回报' : attention ? `${attention} 个节点需要关注` : `控制在线 · ${live.length} 个节点`;
+  if (!live.length) pill.className = 'status-pill neutral';
   const graphPanel = panel('转发链路', '按规则声明的下一跳绘制；连线颜色为该段目标的最新探测结果，点击节点查看规则。', legend());
   graphPanel.classList.add('graph-panel'); graphPanel.append(chainGraph(topology, byId));
   const incidents = panel('事件', `最近 24 小时 · 共 ${events.length} 条`, events.length ? button('全部事件', () => modal('全部事件', eventTable(events, byId, now)), 'table-action') : undefined);
@@ -296,12 +319,12 @@ function chainGraph(topology, byId) {
   const last = Math.max(1, ...depth.values()) + 1, columns = Array.from({ length: last + 1 }, () => []);
   ids.forEach(id => columns[depth.get(id)].push(id)); if ([...edges.values()].some(e => e.from === 'client')) columns[0].push('client'); if ([...edges.values()].some(e => e.to === 'sink')) columns[last].push('sink');
   // Lay out at the panel's current pixel size so text stays at its CSS size; the viewBox rescales between refreshes.
-  const beside = window.innerWidth > 1600, W = Math.max(640, ($('#content').clientWidth || 1100) - (beside ? 376 : 0) - 36);
+  const beside = window.innerWidth > 1390, W = Math.max(640, ($('#content').clientWidth || 1100) - (beside ? 316 : 0) - 36);
   // Client and target terminals are narrow; node columns share the width between them.
   const tw = 80, left = 12 + (columns[0].length ? tw + 40 : 0), right = W - 12 - (columns[last].length ? tw + 40 : 0), step = (right - left) / (last - 1);
-  const bw = Math.max(112, Math.min(176, step - 44)), bh = 52, gap = 84, H = Math.max(beside ? 400 : 300, Math.max(...columns.map(c => c.length)) * gap + 60), pos = new Map(), labels = [];
+  const bw = Math.max(112, Math.min(176, step - 44)), bh = 52, gap = 84, H = Math.max(190, Math.max(...columns.map(c => c.length)) * gap + 60), pos = new Map(), labels = [];
   columns.forEach((column, c) => column.forEach((id, r) => pos.set(id, [c === 0 ? 12 : c === last ? W - 12 - tw : left + (c - 1) * step + (step - bw) / 2, (H - column.length * gap) / 2 + r * gap + (gap - bh) / 2, c === 0 || c === last ? tw : bw])));
-  const box = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': '转发链路图' }, 'chain');
+  const box = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'group', 'aria-label': '转发链路图' }, 'chain');
   // A link is up only if every probed target is, and down only if none is; unprobed targets do not count.
   const summary = states => { const known = states.filter(s => s !== 'unknown'); return !known.length ? 'unknown' : known.every(s => s === 'up') ? 'up' : known.every(s => s === 'down') ? 'down' : 'partial'; };
   for (const e of edges.values()) {
@@ -1689,7 +1712,7 @@ function editAlertChannel(existing) {
 async function renderCapabilities() { const c = await api('/capabilities'); const names = { tcp: 'TCP 转发', udp: 'UDP 转发', ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': '域名目标', 'port-ranges': '端口段与偏移映射', 'outbound-binding': '业务出口 IP / 网卡绑定', 'dns-ttl-cache': '目标 DNS TTL 缓存', 'node-local-loop-protection': '节点内监听环路检查', 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': 'UDP 通配监听真实目标地址', 'weighted-round-robin': '加权轮询', 'source-hash': '来源 IP 哈希', 'least-connections': '最少连接', 'source-cidr-acl': '来源网段 ACL', 'per-rule-quota': '规则共享配额', 'per-rule-bandwidth': '规则共享速率', 'durable-usage': '持久化流量账本', 'config-revisions': '版本与回滚', 'tenant-isolation': '租户隔离', 'session-revocation': '会话撤销', 'tls-data-transport': 'TLS 数据传输', 'mutual-tls': 'TLS 双向证书认证', 'backup-reconciliation': '旧备份用量对账', websocket: 'WebSocket 流隧道（v1）', 'secure-websocket': 'WSS 与双向证书验证', 'declared-multi-node-topology': '跨节点多跳引用与环路检查', 'atomic-config-batch': '多节点配置预览与事务发布', 'target-health-checks': '目标探测与故障恢复', 'priority-capacity-selection': '优先级与目标容量选路', 'lowest-latency-selection': '按探测耗时自动选择最快目标', 'node-telemetry': '节点资源、吞吐与事件历史', 'connection-prewarm': '中转间预热连接', 'alert-notifications': '告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）', 'smtp-alerts': 'Email / SMTP 告警（TLS / STARTTLS）', 'tenant-alerts': '按租户隔离通知与事件', mptcp: 'MPTCP', 'node-execution-leases': '节点执行租约', 'node-inventory-lifecycle': '节点资料、批量编辑与暂停到期', 'durable-budget-run-recovery': '原状态额度恢复与预留诊断', 'multipath-aggregation': '单连接多路径聚合（自有 v1）', 'global-user-budgets': '跨节点用户总额度', 'hierarchical-budgets': '租户 / 节点分层额度', 'budget-reservation-return': '空闲预留归还', 'controller-recovery-log': '控制器恢复日志', 'budget-disaster-recovery': '预算完整灾难恢复', 'global-rate-limits': '跨节点总限速', wireguard: 'WireGuard 组网', 'nat-traversal': 'NAT 穿透', commerce: '套餐与交易', tickets: '支持工单', 'commerce-wallet': '钱包与资金流水', 'commerce-orders': '订单与退款', 'commerce-payments': '支付网关与回调验签', 'commerce-coupons': '优惠码', 'commerce-gifts': '礼品码', 'http-connect': 'HTTP CONNECT 入站', 'http2-connect-managed': 'HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer', 'protocol-gateways': '受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess', 'protocol-client-exports': 'sing-box / mihomo 协议订阅', 'destination-acl': '目的地 ACL', 'config-templates': '规则模板', 'mptcp-diagnostics': 'MPTCP 能力观测', 'mptcp-rule-transport': 'MPTCP 规则传输与连接观测', 'nat-pmp': 'NAT-PMP 端口映射', 'pcp': 'PCP 端口映射', 'upnp': 'UPnP 端口映射', 'commerce-entitlements': '套餐权益执行', 'client-subscriptions': '客户端订阅', announcements: '公告', 'dns-records': 'DNS 托管记录与 DDNS', 'dns-health-removal': 'DNS 健康摘除', 'dns-authoritative-pool': '独立权威 DNS 池', 'dns-management': 'DNS 管理', federation: '跨面板共享', 'postgresql-ha': 'PostgreSQL 与控制面高可用' }; const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [['已接入开发版本', c.available, '可用', 'green'], ['后续完整范围', c.pending, '待实现', '']]) { const p = panel(title, '最终验收以源码中的完整清单和测试证据为准。'), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(status, color)); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
-setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !$('#dialog').open && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
+setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
 if (state.token) { api('/session').then(user => { state.actor = user; return enter(); }).catch(e => { loggedOut(); $('#login-error').textContent = e.message; }); }
 
 const budgetScopeNames = { user: '用户', tenant: '租户', node: '节点' };

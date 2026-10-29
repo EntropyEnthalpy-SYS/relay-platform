@@ -835,7 +835,28 @@ async fn http_auth_role_and_schema_enforcement() {
             .unwrap()
             .contains("script-src 'self'")
     );
-    assert!(html.text().await.unwrap().contains("自己的控制台"));
+    let page = html.text().await.unwrap();
+    assert!(page.contains("id=\"login-form\""));
+    assert!(page.contains("id=\"command-dialog\""));
+    for asset in ["app.js", "console-ui.js"] {
+        let response = client
+            .get(format!("{origin}/assets/{asset}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/javascript; charset=utf-8"
+        );
+        assert!(
+            response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("script-src 'self'")
+        );
+        assert!(!response.text().await.unwrap().is_empty());
+    }
     stop_server(s).await;
 }
 

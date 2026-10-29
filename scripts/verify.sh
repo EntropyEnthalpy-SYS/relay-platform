@@ -5,6 +5,8 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 RUST_TEST_THREADS=1 cargo test --locked --all-targets
 node --check web/app.js
+node --check web/console-ui.js
+node scripts/test_web_console.cjs
 node scripts/test_web_editor.cjs web/app.js
 node scripts/test_web_http2.cjs web/app.js
 node scripts/test_web_mptcp.cjs web/app.js
