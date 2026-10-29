@@ -183,12 +183,54 @@ pub(crate) fn outbound_udp(bind: Option<&OutboundBind>, ipv4: bool) -> Result<Ud
     if !ipv4 {
         socket.set_only_v6(true)?;
     }
+    configure_udp(&socket, ipv4)?;
     if let Some(bind) = bind {
         bind_interface(&socket, bind, ipv4)?;
     }
     socket.bind(&source_address(bind, ipv4)?.into())?;
     socket.set_nonblocking(true)?;
     Ok(UdpSocket::from_std(socket.into())?)
+}
+
+fn configure_udp(socket: &Socket, ipv4: bool) -> Result<()> {
+    // Keep bursts bounded without inheriting very small VPS image defaults.
+    // Linux accounts this capacity as datagrams arrive, not as an idle allocation.
+    const RECEIVE_CAPACITY: usize = 256 * 1024;
+    if socket.recv_buffer_size()? < RECEIVE_CAPACITY {
+        socket.set_recv_buffer_size(RECEIVE_CAPACITY)?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use nix::libc;
+        use std::os::fd::AsRawFd;
+        // Transparent UDP cannot shrink or replay an application's datagram.
+        // Permit IPv4 routers to fragment the first oversized packet, before
+        // an ICMP message has populated the kernel's path-MTU cache. Apply this
+        // to replies from listeners as well as sockets connecting to targets.
+        let (level, option) = if ipv4 {
+            (libc::IPPROTO_IP, libc::IP_MTU_DISCOVER)
+        } else {
+            (libc::IPPROTO_IPV6, libc::IPV6_MTU_DISCOVER)
+        };
+        let value: libc::c_int = libc::IP_PMTUDISC_DONT;
+        // SAFETY: socket owns a live descriptor; value and its exact size stay
+        // valid for the duration of setsockopt, which does not retain the pointer.
+        let result = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                level,
+                option,
+                (&value as *const libc::c_int).cast(),
+                std::mem::size_of_val(&value) as libc::socklen_t,
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).context("configure UDP fragmentation");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = ipv4;
+    Ok(())
 }
 
 pub(crate) fn preflight(rule: &Rule) -> Result<()> {
@@ -268,6 +310,7 @@ pub(crate) fn udp_listener(address: SocketAddr) -> Result<UdpSocket> {
     if address.is_ipv6() {
         socket.set_only_v6(true)?;
     }
+    configure_udp(&socket, address.is_ipv4())?;
     crate::datagram::configure(&socket, address)?;
     socket.bind(&address.into())?;
     socket.set_nonblocking(true)?;

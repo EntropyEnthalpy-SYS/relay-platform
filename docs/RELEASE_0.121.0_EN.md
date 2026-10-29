@@ -4,6 +4,8 @@ Native SS UDP client profiles exported by the panel and sing-box subscriptions n
 
 The optional Relay SS compatibility client now defaults to allowing fragmentation for SS. An explicit `udp_fragment: false` remains authoritative. Its existing TCP write-half-close patch remains in place. All three patches, pinned upstream source archives, checksums and licenses are under `third_party/`; `scripts/build_ss_compat_client.py` builds the version recorded in its manifest. Standard `ss://` URIs cannot carry this setting or negotiate UoT: third-party clients retain their own defaults.
 
+On Linux, Relay's forwarding and SS UDP sockets now allow fragmentation, including listener replies. This avoids dropping the first oversized IPv4 packet on a routed MTU bottleneck while waiting for ICMP to populate the path cache. UDP receive buffers request a bounded 256 KiB when the OS default is smaller; the kernel may cap the request. The compatibility client's SOCKS association receive socket also requests 256 KiB to handle bounded bursts on small VPS images. These changes do not alter host sysctls or add datagram retries.
+
 ## Early SS2022 response race
 
 The compatibility client now records its request salt before sending the request and synchronizes access from the concurrent reader. Previously, a fast response could arrive while the initial write was still returning, causing a valid response to fail with `bad request salt`. This can terminate an entire UoT association, particularly on a single-CPU host.
@@ -25,10 +27,11 @@ Run the ordinary suite with `sh scripts/verify.sh`. Then use the release server 
 ```sh
 python3 scripts/check_listener_startup.py --binary /path/to/relay --cycles 30 --output startup.json
 sudo python3 scripts/check_ss_udp_mtu.py --binary /path/to/relay --client /path/to/relay-ss-client --output mtu.json
+sudo python3 scripts/check_ss_udp_mtu.py --routed --binary /path/to/relay --client /path/to/relay-ss-client --output routed-mtu.json
 python3 scripts/check_ss_uot.py --binary /path/to/relay --client /path/to/relay-ss-client --output ss-interop.json
 ```
 
-The MTU probe requires Linux root and `iproute2`. It uses disposable network namespaces and a veth pair at MTU 1280, without changing host routes or firewall rules. It tests native UDP defaults, explicit fragmentation, UoT and an explicit no-fragment negative control. `--previous-client` can additionally demonstrate the prior client default. All positive samples, including the first empty datagram, count; the probe does not retry failed datagrams into passes.
+The MTU probe requires Linux root and `iproute2`. It uses disposable network namespaces and a veth pair at MTU 1280, without changing host routes or firewall rules. It tests native UDP defaults, explicit fragmentation, UoT and an explicit no-fragment negative control. `--previous-client` can additionally demonstrate the prior client default. `--routed` uses four fresh namespaces with 1500-byte endpoint links and a 1280-byte transit link, exercising a cold path-MTU cache in both directions. All positive samples, including the first empty datagram, count; the probe does not retry failed datagrams into passes.
 
 The startup probe includes a deliberately delayed three-second process start, exceeding the former two-second polling window, and verifies listener cleanup for every cycle.
 

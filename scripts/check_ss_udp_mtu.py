@@ -62,6 +62,9 @@ def worker(directory, client, case):
 def run(args):
     if sys.platform!='linux' or os.geteuid()!=0: raise RuntimeError('requires Linux root and iproute2')
     suffix=uuid.uuid4().hex[:7];names=['r121c'+suffix,'r121s'+suffix];links=['r121a'+suffix,'r121b'+suffix]
+    if args.routed:
+        names += ['r121r'+suffix, 'r121t'+suffix]
+        links += ['r121d'+suffix, 'r121e'+suffix, 'r121f'+suffix, 'r121g'+suffix]
     created=[];processes=[];logs=[];results=[]
     def ip(*values):return subprocess.run(['ip',*values],check=True,capture_output=True,text=True,timeout=15)
     def launch(namespace, command, log):
@@ -72,26 +75,42 @@ def run(args):
         root=Path(directory);os.chmod(root,0o700)
         try:
             for name in names:ip('netns','add',name);created.append(name)
-            ip('link','add',links[0],'type','veth','peer','name',links[1])
-            for index,name in enumerate(names):
-                ip('link','set',links[index],'netns',name)
-                ip('-n',name,'link','set','lo','up')
-                ip('-n',name,'addr','add',f'198.18.0.{index+1}/24','dev',links[index])
-                ip('-n',name,'link','set',links[index],'mtu','1280','up')
+            for name in names:ip('-n',name,'link','set','lo','up')
+            def link(left, right, left_ns, right_ns, left_ip, right_ip, mtu):
+                ip('link','add',left,'type','veth','peer','name',right)
+                for device,namespace,address in [(left,left_ns,left_ip),(right,right_ns,right_ip)]:
+                    ip('link','set',device,'netns',namespace)
+                    ip('-n',namespace,'addr','add',address,'dev',device)
+                    ip('-n',namespace,'link','set',device,'mtu',str(mtu),'up')
+            if args.routed:
+                # End hosts see MTU 1500; the transit routers expose a 1280 bottleneck.
+                # Every run has a fresh per-namespace route/PMTU cache.
+                link(*links[:2],names[0],names[2],'198.18.10.2/24','198.18.10.1/24',1500)
+                link(*links[2:4],names[2],names[3],'198.18.20.1/24','198.18.20.2/24',1280)
+                link(*links[4:],names[3],names[1],'198.18.30.1/24','198.18.30.2/24',1500)
+                for namespace in names[2:]:
+                    subprocess.run(['ip','netns','exec',namespace,'sysctl','-qw','net.ipv4.ip_forward=1'],check=True)
+                for namespace,network,gateway in [(names[0],'default','198.18.10.1'),(names[1],'default','198.18.30.1'),(names[2],'198.18.30.0/24','198.18.20.2'),(names[3],'198.18.10.0/24','198.18.20.1')]:
+                    ip('-n',namespace,'route','add',network,'via',gateway)
+                server_ip='198.18.30.2'
+            else:
+                link(*links,names[0],names[1],'198.18.0.1/24','198.18.0.2/24',1280)
+                server_ip='198.18.0.2'
             secret=base64.b64encode(os.urandom(32)).decode()
             base={'tenant_id':'default','owner_id':'admin','protocol':'both','enabled':True,'meter_epoch':'mtu','connect_timeout_ms':3000,'idle_timeout_secs':30}
-            rules=[{**base,'id':'entry','name':'MTU entry','listen':'198.18.0.2:28228','targets':[{'address':'127.0.0.1:28229','weight':1}]},
+            rules=[{**base,'id':'entry','name':'MTU entry','listen':server_ip+':28228','targets':[{'address':'127.0.0.1:28229','weight':1}]},
                    {**base,'id':'exit','name':'MTU SS exit','listen':'127.0.0.1:28229','targets':[],
                     'inbound_shadowsocks':{'method':'2022-blake3-aes-256-gcm','password':secret,'allow_private_destinations':True,'udp_over_tcp':True}}]
             config=root/'relay.json';config.write_text(json.dumps({'api_version':1,'node_id':'mtu-fixture','revision':1,'rules':rules}));config.chmod(0o600)
             profile={'log':{'level':'warn'},'inbounds':[{'type':'socks','listen':'127.0.0.1','listen_port':28340}],
-                     'outbounds':[{'type':'shadowsocks','tag':'test','server':'198.18.0.2','server_port':28228,'method':'2022-blake3-aes-256-gcm','password':secret}],
+                     'outbounds':[{'type':'shadowsocks','tag':'test','server':server_ip,'server_port':28228,'method':'2022-blake3-aes-256-gcm','password':secret}],
                      'route':{'final':'test'}}
             (root/'profile.json').write_text(json.dumps(profile));(root/'profile.json').chmod(0o600)
             echo="import socket\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('127.0.0.1',28230))\nwhile True:\n b,p=s.recvfrom(65535);s.sendto(b,p)"
             launch(names[1],[sys.executable,'-c',echo],root/'echo.log')
             relay=launch(names[1],[args.binary,'standalone','--config',config,'--database',root/'state.sqlite'],root/'relay.log')
             ready="import socket,time\nend=time.monotonic()+15\nwhile True:\n try:\n  s=socket.create_connection(('198.18.0.2',28228),timeout=.2);s.close();break\n except OSError:\n  if time.monotonic()>end:raise\n  time.sleep(.05)"
+            ready=ready.replace('198.18.0.2',server_ip)
             subprocess.run(['ip','netns','exec',names[1],sys.executable,'-c',ready],check=True,capture_output=True,timeout=20)
             cases=[('explicit-false',args.client),('default',args.client),('explicit-true',args.client),('uot',args.client)]
             if args.previous_client:cases.insert(0,('previous-default',args.previous_client))
@@ -111,11 +130,11 @@ def run(args):
             for link in links:subprocess.run(['ip','link','del',link],capture_output=True,timeout=15)
     present=subprocess.check_output(['ip','netns','list'],text=True)
     cleaned=all(name not in present for name in created)
-    return {'completed':True,'mtu':1280,'topology':'two disposable namespaces; plain entry -> SS exit -> UDP echo','cases':results,'cleanup_passed':cleaned,'passed':cleaned and all(r['passed'] for r in results)}
+    return {'completed':True,'mtu':1280,'routed_bottleneck':args.routed,'topology':'four namespaces with 1500/1280/1500 links' if args.routed else 'two disposable namespaces; plain entry -> SS exit -> UDP echo','cases':results,'cleanup_passed':cleaned,'passed':cleaned and all(r['passed'] for r in results)}
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path);p.add_argument('--client',type=Path,required=True);p.add_argument('--previous-client',type=Path);p.add_argument('--output',type=Path);p.add_argument('--worker');p.add_argument('--directory');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path);p.add_argument('--client',type=Path,required=True);p.add_argument('--previous-client',type=Path);p.add_argument('--output',type=Path);p.add_argument('--worker');p.add_argument('--directory');p.add_argument('--routed',action='store_true',help='Cold route cache, MTU 1500 endpoints and a 1280 transit bottleneck');a=p.parse_args()
     if a.worker:print(json.dumps(worker(a.directory,str(a.client),a.worker)))
     else:
         if not a.binary or not a.output:p.error('--binary and --output are required')

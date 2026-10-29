@@ -11,3 +11,19 @@
  	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
  	if err != nil {
  		return nil, err
+--- a/common/listener/listener_udp.go
++++ b/common/listener/listener_udp.go
+@@ -95 +95,12 @@
+-		return listenConfig.ListenPacket(ctx, network, address)
++		conn, err := listenConfig.ListenPacket(ctx, network, address)
++		if err != nil {
++			return nil, err
++		}
++		// SOCKS UDP associations must survive bounded bursts on small VPS images.
++		if udp, ok := conn.(*net.UDPConn); ok {
++			if err = udp.SetReadBuffer(256 * 1024); err != nil {
++				conn.Close()
++				return nil, err
++			}
++		}
++		return conn, nil
