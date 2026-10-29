@@ -1,5 +1,7 @@
 # Relay workspace UI — 0.117.0
 
+For the current appearance controls and full UI review, see [0.126.0](RELEASE_0.126.0_EN.md). The original workflow below remains applicable.
+
 This release adds English and Simplified Chinese to the console introduced in 0.116.0. The data plane, billing behavior, permissions and protocol configuration are unchanged; the broader non-payment roadmap is still in development.
 
 ## Language switch

@@ -12,6 +12,7 @@ node --check web/workflows.js
 node scripts/test_web_i18n.cjs
 node scripts/test_web_workflows.cjs
 node scripts/test_web_dialogs.cjs
+node scripts/test_web_runtime.cjs
 for RELAY_TEST_LANGUAGE in zh-CN en; do
     export RELAY_TEST_LANGUAGE
     node scripts/test_web_path_setup.cjs
