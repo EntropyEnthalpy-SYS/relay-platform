@@ -1,0 +1,175 @@
+--- a/shadowaead_2022/method.go
++++ b/shadowaead_2022/method.go
+@@ -13,6 +13,7 @@
+ 	"net"
+ 	"os"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	C "github.com/sagernet/sing-shadowsocks2/cipher"
+@@ -163,12 +164,13 @@
+ 
+ type clientConn struct {
+ 	net.Conn
+-	method          *Method
+-	destination     M.Socksaddr
+-	requestSalt     []byte
+-	reader          *shadowio.Reader
+-	readWaitOptions N.ReadWaitOptions
+-	writer          *shadowio.Writer
++	method           *Method
++	destination      M.Socksaddr
++	requestSalt      []byte
++	requestSaltMutex sync.RWMutex
++	reader           *shadowio.Reader
++	readWaitOptions  N.ReadWaitOptions
++	writer           *shadowio.Writer
+ 	shadowio.WriterInterface
+ }
+ 
+@@ -226,6 +228,11 @@
+ 	}
+ 	writer.Encrypt(variableLengthBuffer.Index(0), variableLengthBuffer.Bytes())
+ 	variableLengthBuffer.Extend(shadowio.Overhead)
++	// Publish the request salt before the peer can answer an early write.
++	// Reads may run concurrently while Conn.Write is still returning.
++	c.requestSaltMutex.Lock()
++	c.requestSalt = requestSalt
++	c.requestSaltMutex.Unlock()
+ 	_, err = c.Conn.Write(requestBuffer.Bytes())
+ 	if err != nil {
+ 		return err
+@@ -236,7 +243,6 @@
+ 			return err
+ 		}
+ 	}
+-	c.requestSalt = requestSalt
+ 	c.writer = writer
+ 	return nil
+ }
+@@ -294,7 +300,10 @@
+ 		return E.Extend(ErrBadTimestamp, "received ", epoch, ", diff ", diff, "s")
+ 	}
+ 	responseSalt := common.Must1(fixedResponseBuffer.ReadBytes(c.method.keySaltLength))
+-	if !bytes.Equal(responseSalt, c.requestSalt) {
++	c.requestSaltMutex.RLock()
++	validRequestSalt := bytes.Equal(responseSalt, c.requestSalt)
++	c.requestSaltMutex.RUnlock()
++	if !validRequestSalt {
+ 		return ErrBadRequestSalt
+ 	}
+ 	var length uint16
+--- /dev/null
++++ b/shadowaead_2022/request_salt_test.go
+@@ -0,0 +1,110 @@
++package shadowaead_2022
++
++import (
++	"bytes"
++	"context"
++	"encoding/binary"
++	"io"
++	"net"
++	"testing"
++	"time"
++
++	C "github.com/sagernet/sing-shadowsocks2/cipher"
++	M "github.com/sagernet/sing/common/metadata"
++)
++
++// Force a valid response to arrive before the request Write returns. A real
++// network can schedule the reader this way, particularly with an early UoT dial.
++type heldRequestWrite struct {
++	net.Conn
++	release <-chan struct{}
++}
++
++func (c heldRequestWrite) Write(p []byte) (int, error) {
++	n, err := c.Conn.Write(p)
++	<-c.release
++	return n, err
++}
++
++func TestEarlyResponseBeforeRequestWriteReturns(t *testing.T) {
++	for _, name := range MethodList {
++		t.Run(name, func(t *testing.T) {
++			keyLength := 32
++			if name == "2022-blake3-aes-128-gcm" {
++				keyLength = 16
++			}
++			key := bytes.Repeat([]byte{7}, keyLength)
++			generic, err := NewMethod(context.Background(), name, C.MethodOptions{KeyList: [][]byte{key}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			method := generic.(*Method)
++			client, server := net.Pipe()
++			defer client.Close()
++			defer server.Close()
++			client.SetDeadline(time.Now().Add(10 * time.Second))
++			server.SetDeadline(time.Now().Add(10 * time.Second))
++			release := make(chan struct{})
++			defer close(release)
++			conn := method.DialEarlyConn(heldRequestWrite{client, release}, M.ParseSocksaddr("example.com:443"))
++			requestResult := make(chan error, 1)
++			go func() { _, e := conn.Write([]byte("request")); requestResult <- e }()
++			responseResult := make(chan error, 1)
++			go func() { responseResult <- sendEarlyResponse(server, method, key) }()
++			payload := make([]byte, 1)
++			if _, err := io.ReadFull(conn, payload); err != nil {
++				t.Fatal(err)
++			}
++			if string(payload) != "R" {
++				t.Fatalf("unexpected response: %q", payload)
++			}
++			if err := <-responseResult; err != nil {
++				t.Fatal(err)
++			}
++			select {
++			case err := <-requestResult:
++				t.Fatalf("fixture did not hold Write: %v", err)
++			default:
++			}
++		})
++	}
++}
++
++func sendEarlyResponse(conn net.Conn, method *Method, key []byte) error {
++	salt := make([]byte, method.keySaltLength)
++	if _, err := io.ReadFull(conn, salt); err != nil {
++		return err
++	}
++	requestCipher, err := method.constructor(SessionKey(key, salt, len(salt)))
++	if err != nil {
++		return err
++	}
++	fixed := make([]byte, RequestHeaderFixedChunkLength+requestCipher.Overhead())
++	if _, err := io.ReadFull(conn, fixed); err != nil {
++		return err
++	}
++	nonce := make([]byte, requestCipher.NonceSize())
++	plain, err := requestCipher.Open(nil, nonce, fixed, nil)
++	if err != nil {
++		return err
++	}
++	variable := make([]byte, int(binary.BigEndian.Uint16(plain[9:]))+requestCipher.Overhead())
++	if _, err := io.ReadFull(conn, variable); err != nil {
++		return err
++	}
++	replySalt := bytes.Repeat([]byte{0xA5}, len(salt))
++	responseCipher, err := method.constructor(SessionKey(key, replySalt, len(salt)))
++	if err != nil {
++		return err
++	}
++	header := []byte{HeaderTypeServer}
++	header = binary.BigEndian.AppendUint64(header, uint64(method.time().Unix()))
++	header = append(header, salt...)
++	header = binary.BigEndian.AppendUint16(header, 1)
++	output := append([]byte{}, replySalt...)
++	output = responseCipher.Seal(output, nonce, header, nil)
++	nonce[0]++
++	output = responseCipher.Seal(output, nonce, []byte("R"), nil)
++	_, err = conn.Write(output)
++	return err
++}

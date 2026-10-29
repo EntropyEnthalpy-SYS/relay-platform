@@ -2,7 +2,7 @@
   "name": "Relay SS compatibility client",
   "version": "0.121.0",
   "upstream_client": "sing-box 1.14.4",
-  "purpose": "Optional client build preserving SS TCP half-close and allowing native UDP fragmentation by default; explicit udp_fragment:false remains supported; server remains native Relay",
+  "purpose": "Optional client build preserving SS TCP half-close and allowing native UDP fragmentation by default; explicit udp_fragment:false remains supported; server remains native Relay; synchronize the SS2022 request salt before early responses",
   "dependency_source": {
     "filename": "sing-shadowsocks2-a69d1086332b-source.tar.gz",
     "url": "https://codeload.github.com/SagerNet/sing-shadowsocks2/tar.gz/a69d1086332b",
@@ -12,5 +12,9 @@
   "client_patch": {
     "filename": "udp-fragment.patch",
     "sha256": "6a05ae9bc293224ca2939548c2436c66cfbe71e1a5ff527f8aca04693ca095b6"
+  },
+  "request_salt_patch": {
+    "filename": "request-salt.patch",
+    "sha256": "adff63bcba03698e942b53a35472de5adf292e8f692a76d84d2049244e32285f"
   }
 }

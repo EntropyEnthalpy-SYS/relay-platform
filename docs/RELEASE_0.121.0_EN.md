@@ -2,7 +2,13 @@
 
 Native SS UDP client profiles exported by the panel and sing-box subscriptions now set `udp_fragment: true`. SS encryption adds overhead; disabling fragmentation can prevent a large application datagram from leaving the client on a small-MTU path. TCP-only exports are unchanged, and UoT profiles keep their explicit v2 negotiation.
 
-The optional Relay SS compatibility client now defaults to allowing fragmentation for SS. An explicit `udp_fragment: false` remains authoritative. Its existing TCP write-half-close patch remains in place. Both patches, pinned upstream source archives, checksums and licenses are under `third_party/`; `scripts/build_ss_compat_client.py` builds the version recorded in its manifest. Standard `ss://` URIs cannot carry this setting or negotiate UoT: third-party clients retain their own defaults.
+The optional Relay SS compatibility client now defaults to allowing fragmentation for SS. An explicit `udp_fragment: false` remains authoritative. Its existing TCP write-half-close patch remains in place. All three patches, pinned upstream source archives, checksums and licenses are under `third_party/`; `scripts/build_ss_compat_client.py` builds the version recorded in its manifest. Standard `ss://` URIs cannot carry this setting or negotiate UoT: third-party clients retain their own defaults.
+
+## Early SS2022 response race
+
+The compatibility client now records its request salt before sending the request and synchronizes access from the concurrent reader. Previously, a fast response could arrive while the initial write was still returning, causing a valid response to fail with `bad request salt`. This can terminate an entire UoT association, particularly on a single-CPU host.
+
+`request-salt.patch` includes a deterministic test that holds the request write open while the peer sends a valid response. It covers all three SS2022 methods. The client build runs that test twenty times per method; the verification records the unpatched negative control and a Go race-detector run. This fixes the bundled client; it does not change third-party clients installed independently.
 
 ## Listener startup
 

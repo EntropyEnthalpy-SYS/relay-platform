@@ -497,3 +497,5 @@ Subscriptions add format `sing_box`. Both `sing_box` and `clash` (mihomo/Clash M
 面板及 sing-box 订阅的原生 SS UDP JSON 现在包含 `udp_fragment: true`；UoT 仍显式使用 v2，TCP-only 不添加 UDP 设置。随源码提供的 Relay SS 客户端也默认允许 SS UDP 分片，用户显式设置 `false` 时继续遵从。普通 `ss://` 无法表达分片或 UoT 选项。
 
 CLI `reverse-mux-server --ready-file <新文件路径>` 在监听绑定和参数校验完成后生成权限 0600 的 JSON，报告实际地址、PID、版本和 `listeners_bound` 状态。支持 `:0`，避免先探测空闲端口再关闭造成的竞争；已有文件不会覆盖。消费者须等待完整 JSON 并核对存活 PID，业务连通仍须另测。详见 [0.121.0 guide](RELEASE_0.121.0_EN.md)。
+
+随源码提供的 SS 客户端还修复了 SS2022 并发首包响应的 request-salt 竞争，避免有效 UoT 响应在首次写入尚未返回时被误拒绝。补丁包含三种 2022 算法的确定性回归测试。
