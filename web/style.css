@@ -1,4 +1,7 @@
 /* Paper, ink and a restrained terracotta accent. No remote fonts or UI runtime. */
+.workflow-callout { padding: 14px 18px; border-left: 3px solid var(--accent); border-radius: 6px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
+.path-hop { min-width: 0; margin: 18px 0; }
+.path-hop .toolbar { justify-content: flex-end; margin-top: 12px; }
 :root {
   color-scheme: light;
   --bg: #fbfaf7; --grid: rgba(75, 64, 50, .045);

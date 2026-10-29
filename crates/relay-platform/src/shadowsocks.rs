@@ -117,6 +117,10 @@ pub struct ServerConfig {
     /// that only the node itself should see.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_private_destinations: bool,
+    /// Accept SagerNet UDP-over-TCP v1/v2 inside authenticated TCP sessions.
+    /// Clients must explicitly enable the same extension.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub udp_over_tcp: bool,
 }
 impl std::fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -126,6 +130,7 @@ impl std::fmt::Debug for ServerConfig {
                 "allow_private_destinations",
                 &self.allow_private_destinations,
             )
+            .field("udp_over_tcp", &self.udp_over_tcp)
             .finish_non_exhaustive()
     }
 }
@@ -169,6 +174,10 @@ pub fn validate_rule(rule: &crate::model::Rule) -> Result<()> {
         return Ok(());
     };
     config.key()?;
+    ensure!(
+        !config.udp_over_tcp || rule.protocol.tcp(),
+        "Shadowsocks UDP-over-TCP requires a TCP listener"
+    );
     ensure!(
         rule.inbound_tls.is_none()
             && rule.inbound_websocket.is_none()
@@ -218,7 +227,6 @@ fn parse_address(data: &[u8]) -> Result<Option<(Destination, usize)>> {
         return Ok(None);
     }
     let port = u16::from_be_bytes([data[host_end], data[host_end + 1]]);
-    ensure!(port != 0, "destination port 0");
     let destination = match host {
         None if kind == 1 => {
             let ip: [u8; 4] = data[1..5].try_into().unwrap();
@@ -239,6 +247,10 @@ fn parse_address(data: &[u8]) -> Result<Option<(Destination, usize)>> {
             Destination::Domain(name.to_ascii_lowercase(), port)
         }
     };
+    ensure!(
+        port != 0 || crate::shadowsocks_uot::version(&destination).is_some(),
+        "destination port 0"
+    );
     Ok(Some((destination, host_end + 2)))
 }
 
@@ -947,6 +959,7 @@ mod tests {
             method,
             password: password.into(),
             allow_private_destinations: false,
+            udp_over_tcp: false,
         })
         .unwrap()
     }
@@ -1159,6 +1172,7 @@ mod tests {
             method: Method::Blake3Aes256Gcm,
             password: base64::engine::general_purpose::STANDARD.encode([9; 16]),
             allow_private_destinations: false,
+            udp_over_tcp: false,
         };
         assert!(Server::new(&short).is_err());
     }

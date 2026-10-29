@@ -538,6 +538,15 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route(
+            "/assets/workflows.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/workflows.js"),
+                )
+            }),
+        )
+        .route(
             "/assets/console-ui.js",
             get(|| async {
                 (

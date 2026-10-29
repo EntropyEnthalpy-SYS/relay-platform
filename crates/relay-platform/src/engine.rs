@@ -36,6 +36,8 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+mod uot;
+
 const BUFFER_SIZE: usize = 64 * 1024;
 /// TCP copy buffers start here and double, up to BUFFER_SIZE, whenever a read
 /// fills them, so idle connections stay small and bulk transfers reach full size.
@@ -3386,6 +3388,16 @@ async fn tcp_session(
                 return Ok(());
             }
         };
+        if let Some(version) = crate::shadowsocks_uot::version(&destination) {
+            ensure!(
+                rule.spec
+                    .inbound_shadowsocks
+                    .as_ref()
+                    .is_some_and(|s| s.udp_over_tcp),
+                "Shadowsocks UDP-over-TCP is disabled"
+            );
+            return uot::relay(session, version, rule, meter, stats, inlet).await;
+        }
         let target = connect_destination(&rule, server, &destination, inlet).await?;
         (Box::new(session) as BoxStream, target)
     } else if rule.spec.outbound_multipath.is_some() {
@@ -3961,7 +3973,7 @@ async fn datagram_address(
                 _ => {
                     let deadline =
                         Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
-                    let address = timeout_at(deadline, rule.resolver.resolve(&name))
+                    let address = timeout_at(deadline, resolve_destination(rule, &name))
                         .await
                         .context("name lookup timed out")??
                         .into_iter()
@@ -3978,8 +3990,16 @@ async fn datagram_address(
         }
     };
     ensure!(
-        server.permits(address.ip()),
+        address.port() != 0 && server.permits(address.ip()),
         "{destination} is not a public address"
+    );
+    let endpoint = destination.to_string();
+    ensure!(
+        !rule
+            .destination
+            .filter_sockets(destination_acl::host_from_endpoint(&endpoint), [address])
+            .is_empty(),
+        "destination denied by rule policy: {destination}"
     );
     Ok(address)
 }

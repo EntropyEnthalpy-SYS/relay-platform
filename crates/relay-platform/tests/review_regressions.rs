@@ -229,6 +229,7 @@ async fn shadowsocks_replay_state_survives_compatible_rule_revisions() {
         method: shadowsocks::Method::Blake3Aes128Gcm,
         password: "AAECAwQFBgcICQoLDA0ODw==".into(),
         allow_private_destinations: true,
+        udp_over_tcp: false,
     });
     let listen = r.listen;
     let mut config = config(r);
@@ -280,6 +281,7 @@ async fn shadowsocks_replay_state_survives_compatible_rule_revisions() {
         method: shadowsocks::Method::Blake3Aes128Gcm,
         password: "Dw4NDAsKCQgHBgUEAwIBAA==".into(),
         allow_private_destinations: true,
+        udp_over_tcp: false,
     });
     engine.apply(config).await.unwrap();
     send_ss(listen, &fresh).await;

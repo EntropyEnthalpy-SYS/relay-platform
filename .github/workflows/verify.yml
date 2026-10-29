@@ -21,6 +21,8 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
       RUST_BACKTRACE: "1"
     steps:
       - name: Check out source

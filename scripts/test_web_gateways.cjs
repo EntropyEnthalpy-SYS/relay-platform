@@ -14,6 +14,7 @@ async function serialize(existing) {
   const node = { id: 'node', tenant_id: 'tenant' };
   const context = {
     ...require('./web_i18n_helpers.cjs').loadI18n(),
+    ...require('./web_i18n_helpers.cjs').loadWorkflows(),
     TextEncoder, Uint8Array, Uint32Array, btoa, crypto: require('node:crypto').webcrypto,
     document: { createTextNode: text => text },
     state: { config: { node_id: 'node', revision: 3, rules: [existing] }, nodes: [node], actor: { id: 'owner' } },
@@ -31,7 +32,8 @@ async function serialize(existing) {
     number: (data, key) => data.get(key) === '' || data.get(key) === null ? null : Number(data.get(key)),
   };
   for (const [helper, key] of [['shadowsocksEditor','inbound_shadowsocks'], ['socks5Editor','inbound_socks5'], ['httpConnectEditor','inbound_http_connect'], ['http2ConnectEditor','inbound_http2_connect']]) context[helper] = spec => ({ box: new Element(), read: () => spec, enabled: () => !!spec, onchange() {} });
-  vm.createContext(context); vm.runInContext(code + '\nthis.editRule = editRule;', context);
+  vm.createContext(context);
+  vm.runInContext(source.slice(source.indexOf('function sectionVisible('), source.indexOf('function websocketEditor(')) + code + '\nthis.editRule = editRule;', context);
   await context.editRule(existing);
   const values = new Map();
   for (const input of form.querySelectorAll()) if (input.name && !input.disabled && (input.type !== 'checkbox' || input.checked)) values.set(input.name, input.type === 'checkbox' ? 'on' : input.value);

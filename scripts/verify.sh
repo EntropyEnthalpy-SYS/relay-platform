@@ -8,7 +8,10 @@ node --check web/app.js
 node --check web/console-ui.js
 node --check web/i18n.js
 node --check web/i18n-en.js
+node --check web/workflows.js
 node scripts/test_web_i18n.cjs
+node scripts/test_web_workflows.cjs
+node scripts/test_web_dialogs.cjs
 for RELAY_TEST_LANGUAGE in zh-CN en; do
     export RELAY_TEST_LANGUAGE
     node scripts/test_web_console.cjs

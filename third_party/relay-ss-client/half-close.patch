@@ -1,0 +1,42 @@
+--- a/shadowaead/method.go
++++ b/shadowaead/method.go
+@@ -212,6 +212,18 @@
+ 	return c.writer == nil
+ }
+ 
++// CloseWrite preserves the response direction after the application sends EOF.
++// The cipher writes each record synchronously; closing it here would also close
++// the reader and discard a response that arrives after the request FIN.
++func (c *clientConn) CloseWrite() error {
++	if c.writer == nil {
++		if err := c.writeRequest(nil); err != nil {
++			return err
++		}
++	}
++	return N.CloseWrite(c.Conn)
++}
++
+ func (c *clientConn) Upstream() any {
+ 	return c.Conn
+ }
+--- a/shadowaead_2022/method.go
++++ b/shadowaead_2022/method.go
+@@ -350,6 +350,18 @@
+ 	return c.writer == nil
+ }
+ 
++// CloseWrite preserves the response direction after the application sends EOF.
++// The cipher writes each record synchronously; closing it here would also close
++// the reader and discard a response that arrives after the request FIN.
++func (c *clientConn) CloseWrite() error {
++	if c.writer == nil {
++		if err := c.writeRequest(nil); err != nil {
++			return err
++		}
++	}
++	return N.CloseWrite(c.Conn)
++}
++
+ func (c *clientConn) Upstream() any {
+ 	return c.Conn
+ }

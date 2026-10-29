@@ -311,3 +311,7 @@ Generated from the locked Cargo resolution by `scripts/generate_sbom.py`. Includ
 ## Optional protocol engine
 
 sing-box 1.14.4 runs as a separate process. Source archive SHA-256: `0958ccd23b1ea9a141d715d15478b1e040fd04bcca19d8ff5529636b1b753e18`. GPL-3.0-or-later; upstream also prohibits derivative naming/association without permission. Preserve LICENSE. Source, dependency declarations/checksums and licenses are in `third_party/sing-box/`. Go transitive dependencies are not expanded in this Cargo inventory. See `docs/PROTOCOL_GATEWAYS.md` for build and staging instructions.
+
+## Optional Relay SS compatibility client (0.119.0)
+
+A separately named patched client is built from the already bundled sing-box 1.14.4 source and pinned sing-shadowsocks2 revision `a69d1086332b`. The dependency source, original GPL-3.0-or-later license, exact half-close patch and checksums are in `third_party/relay-ss-client/`. `scripts/build_ss_compat_client.py` preserves source and license files in its output. This client is optional; the native Relay SS exit does not load it. See [the compatibility guide](SS_COMPATIBILITY_0.119.0_EN.md).

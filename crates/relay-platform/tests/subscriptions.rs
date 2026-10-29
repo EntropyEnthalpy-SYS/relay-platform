@@ -21,6 +21,7 @@ fn ss_rule() -> Rule {
         method: shadowsocks::Method::Blake3Aes256Gcm,
         password: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
         allow_private_destinations: false,
+        udp_over_tcp: false,
     });
     rule.targets.clear();
     rule.advertise = Some("edge.example.com:9000".into());

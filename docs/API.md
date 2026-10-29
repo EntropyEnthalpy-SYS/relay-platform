@@ -486,3 +486,7 @@ Rules accept optional `protocol_gateway`: `{listen, protocol, security, allow_pr
 Gateway rules use the existing configuration/template APIs and rule policy fields. `EngineStats.protocol_gateway` reports `gateways`, `running`, `restarts`, `last_error`, `engine_version`, and local `process_id`. Engine binaries are selected only by node-local `RELAY_PROTOCOL_ENGINE` or deployment settings. The API cannot upload a binary or supply arbitrary engine configuration.
 
 Subscriptions add format `sing_box`. Both `sing_box` and `clash` (mihomo/Clash Meta) render managed gateways; legacy formats explicitly report unsupported rules in preview. Set template `host` for wildcard public listeners. See [PROTOCOL_GATEWAYS.md](PROTOCOL_GATEWAYS.md) for source/license provenance, supported payloads and lifecycle limits.
+
+## 0.119.0 Shadowsocks UDP-over-TCP
+
+`inbound_shadowsocks` 新增 `udp_over_tcp`（boolean，缺省 false）。启用后需 `protocol=tcp` 或 `both`，接受 SagerNet UoT v1/v2；客户端必须显式启用同一扩展。普通 `ss://` 链接无法表达此选项，面板提供包含入口地址、出口凭据和 UoT v2 的 sing-box / Relay JSON，订阅的 sing-box 和 mihomo 格式也会写入相应选项。UoT 使用 TCP 连接数上限与活动计数，按 UDP 负载执行配额、速率、目的地 / 端口 ACL 和私网限制。原生 SS UDP 同时执行显式目的地 ACL。先升级 Agent 再发布。客户端半关闭补丁、源代码与使用步骤见 [SS_COMPATIBILITY_0.119.0_EN.md](SS_COMPATIBILITY_0.119.0_EN.md)。

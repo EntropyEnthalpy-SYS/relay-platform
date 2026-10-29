@@ -7,11 +7,12 @@ const assert = require('node:assert/strict');
   assert.deepEqual(Object.keys(titles).sort(), Object.keys(pageInfo).sort());
   const admin = { role: 'system_admin' }, tenant = { role: 'tenant_admin' }, viewer = { role: 'viewer' };
   assert.equal(searchEntries('', null, titles).length, 0, 'signed-out search must contain no results');
-  for (const [actor, forbidden] of [[tenant, ['templates', 'dns', 'audit', 'recovery']], [viewer, ['templates', 'dns', 'audit', 'recovery', 'alerts']]]) {
+  for (const [actor, forbidden] of [[tenant, ['dns', 'audit', 'recovery']], [viewer, ['templates', 'dns', 'audit', 'recovery', 'alerts']]]) {
     const results = searchEntries('', actor, titles);
     for (const view of forbidden) { assert.equal(canVisit(view, actor), false); assert.ok(!results.some(r => r.view === view), `search exposed restricted page ${view}`); }
     assert.ok(results.some(r => r.view === 'account')); assert.ok(results.some(r => r.topic === 'security'));
   }
+  assert.equal(canVisit('templates', tenant), true, 'tenant admins can manage their own templates');
   for (const view of Object.keys(pageInfo)) { assert.equal(canVisit(view, admin), true); assert.equal(parseRoute('#' + view).view, view); }
   for (const hash of ['', '#unknown', '#constructor', '#__proto__', '#<script>']) assert.equal(parseRoute(hash).view, 'overview');
   for (const article of guideArticles) {

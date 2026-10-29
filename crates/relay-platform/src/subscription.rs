@@ -161,6 +161,8 @@ pub struct Entry {
     pub password: String,
     pub udp: bool,
     #[serde(skip)]
+    udp_over_tcp: bool,
+    #[serde(skip)]
     outbound: Option<serde_json::Value>,
 }
 #[derive(Clone, Debug, Serialize)]
@@ -254,6 +256,10 @@ fn clash(entries: &[Entry]) -> Result<String> {
         proxy.insert(Value::from("cipher"), Value::from(entry.method.clone()));
         proxy.insert(Value::from("password"), Value::from(entry.password.clone()));
         proxy.insert(Value::from("udp"), Value::from(entry.udp));
+        if entry.udp_over_tcp {
+            proxy.insert(Value::from("udp-over-tcp"), Value::from(true));
+            proxy.insert(Value::from("udp-over-tcp-version"), Value::from(2));
+        }
         proxies.push(Value::Mapping(proxy));
     }
     let names: Vec<Value> = entries
@@ -394,6 +400,7 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 method: gateway.protocol.kind().into(),
                 password: String::new(),
                 udp,
+                udp_over_tcp: false,
                 outbound: Some(outbound),
             });
             continue;
@@ -484,7 +491,11 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 port,
                 method: method_name(shadowsocks.method),
                 password: shadowsocks.password.clone(),
-                udp: template.udp && rule.protocol.udp(),
+                udp: template.udp
+                    && (rule.protocol.udp()
+                        || (shadowsocks.udp_over_tcp
+                            && matches!(format, Format::SingBox | Format::Clash))),
+                udp_over_tcp: template.udp && shadowsocks.udp_over_tcp,
                 outbound: None,
             });
         }
@@ -500,6 +511,7 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
             let mut outbounds: Vec<_> = entries.iter().map(|entry| entry.outbound.clone().unwrap_or_else(|| {
                 let mut value = serde_json::json!({"type":"shadowsocks","tag":entry.name,"server":entry.host,"server_port":entry.port,"method":entry.method,"password":entry.password});
                 if !entry.udp { value["network"] = "tcp".into(); }
+                else if entry.udp_over_tcp { value["udp_over_tcp"] = serde_json::json!({"enabled":true,"version":2}); }
                 value
             })).collect();
             // A selector name cannot collide with an arbitrary user-facing rule label.
@@ -594,6 +606,7 @@ mod tests {
                 method: crate::shadowsocks::Method::Blake3Aes256Gcm,
                 password: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=".into(),
                 allow_private_destinations: false,
+                udp_over_tcp: false,
             }),
             inbound_socks5: None,
             inbound_http_connect: None,
@@ -624,6 +637,30 @@ mod tests {
             node_tags: vec!["prod".into()],
             rule: rule(),
         }]
+    }
+
+    #[test]
+    fn optional_uot_is_exported_only_in_formats_that_represent_it() {
+        let mut candidate = candidates().remove(0);
+        candidate
+            .rule
+            .inbound_shadowsocks
+            .as_mut()
+            .unwrap()
+            .udp_over_tcp = true;
+        let sing = render(Format::SingBox, &Template::default(), &[candidate.clone()]).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&sing.content).unwrap();
+        assert_eq!(json["outbounds"][0]["udp_over_tcp"]["version"], 2);
+        let clash = render(Format::Clash, &Template::default(), &[candidate.clone()]).unwrap();
+        assert!(clash.content.contains("udp-over-tcp: true"));
+        let no_udp = Template {
+            udp: false,
+            ..Default::default()
+        };
+        let sing = render(Format::SingBox, &no_udp, &[candidate]).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&sing.content).unwrap();
+        assert_eq!(json["outbounds"][0]["network"], "tcp");
+        assert!(json["outbounds"][0].get("udp_over_tcp").is_none());
     }
 
     #[test]

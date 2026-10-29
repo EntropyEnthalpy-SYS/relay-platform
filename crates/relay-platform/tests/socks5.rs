@@ -43,6 +43,7 @@ fn socks5_rules_require_tcp_no_targets_and_paired_credentials() {
         method: relay_platform::shadowsocks::Method::Blake3Aes128Gcm,
         password: "AAECAwQFBgcICQoLDA0ODw==".into(),
         allow_private_destinations: false,
+        udp_over_tcp: false,
     });
     rule.inbound_socks5 = Some(socks5::ServerConfig {
         username: None,

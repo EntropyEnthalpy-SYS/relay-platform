@@ -22,9 +22,9 @@ export const pageInfo = localize({
   capabilities: ['管理与帮助', 'DELIVERY STATUS', '区分已实现的能力与仍在开发、等待验收的部分。', 'operations', 'features roadmap 功能 进度'],
   guide: ['管理与帮助', 'THE RELAY HANDBOOK', '从第一次连接到日常运维，在操作旁边找到答案。', 'quickstart', 'docs documentation help 文档 指南 帮助'],
 });
-const adminViews = new Set(['templates', 'dns', 'audit', 'recovery']);
+const adminViews = new Set(['dns', 'audit', 'recovery']);
 export function canVisit(view, actor) {
-  return !!actor && Object.hasOwn(pageInfo, view) && (!adminViews.has(view) || actor.role === 'system_admin') && (view !== 'alerts' || actor.role !== 'viewer');
+  return !!actor && Object.hasOwn(pageInfo, view) && (!adminViews.has(view) || actor.role === 'system_admin') && (!['alerts', 'templates'].includes(view) || actor.role !== 'viewer');
 }
 export const guideArticles = localize([
   { id: 'quickstart', title: '连接你的第一个节点', subtitle: '从一台服务器开始，建立可观测的转发路径。', icon: 'server', read: '3 分钟', target: 'nodes', steps: [
@@ -34,10 +34,10 @@ export const guideArticles = localize([
     ['验证完整链路', '使用真实客户端连接入口，核对目标响应和流量账本。控制在线只表示 Agent 可联系面板，不能代替业务连接测试。'],
   ], note: '小规格机器先从少量规则与连接开始。最低配置取决于协议、并发与流量，不能用空载内存推算满载容量。' },
   { id: 'rules', title: '规则、协议与多跳链路', subtitle: '先定义入口与目标，再按需要添加协议和策略。', icon: 'arrows', read: '4 分钟', target: 'rules', steps: [
-    ['选择规则类型', '原生 TCP / UDP 规则使用目标列表。SOCKS5、HTTP CONNECT、HTTP/2 CONNECT 和受管协议使用各自的入口配置。界面会校验互斥的入口模式。'],
+    ['选择规则类型', '在规则对话框选择“运行节点 / VPS”和“规则用途”。端口转发指向下一跳或固定目标；代理服务在所选 VPS 终止协议并连接客户端请求的目的地。'],
     ['配置受管协议', 'VLESS、Reality、Hysteria2、TUIC、AnyTLS、Trojan 与 VMess 按对应表单配置。节点需要已部署支持的协议引擎；公网监听与本机桥接监听是不同端点。'],
     ['保护与限制', '按需要配置来源 / 目的地 ACL、配额、有效期、会话上限与限速。TLS 证书编号对应节点本地证书；Reality 私钥应保留在可信配置中。'],
-    ['组织多跳与发布', '通过「多跳拓扑」引用下一跳规则，检查协议一致性与环路。批量发布提交期望配置，各节点分别应用；发布成功后仍需核对节点回报。'],
+    ['组织多跳与发布', '点击“创建转发路径”，按顺序选择入口、中转和出口 VPS。选择 Shadowsocks 时只在最后一跳创建 SS 服务；预览并发布后，在拓扑页用“入口客户端链接”导入客户端。检查所有节点的应用回执，再验证真实流量。'],
   ], note: 'MPTCP 的 Require 模式需要两端内核和网络支持。自有多路径聚合与 Linux MPTCP 是不同机制，不能用其中一种的结果替代另一种验收。' },
   { id: 'observability', title: '读懂监控与告警', subtitle: '把控制连通、目标探测和业务验证分开判断。', icon: 'activity', read: '3 分钟', target: 'health', steps: [
     ['查看总览', '吞吐曲线取自节点上报的采样；多跳流量逐跳计入。活跃会话合并 TCP 连接与 UDP 会话，没有近期回报时显示为空缺。'],
@@ -53,7 +53,7 @@ export const guideArticles = localize([
   ], note: '控制器从旧备份恢复后可能暂停新增额度分配。应完成恢复与对账，不能通过清除记录来回收未知消费。' },
   { id: 'clients', title: '交付客户端订阅', subtitle: '将兼容规则转换为可预览、可撤销的订阅。', icon: 'link', read: '2 分钟', target: 'subscriptions', steps: [
     ['检查公开端点', '确认规则的公开访问地址、端口、协议和证书服务名正确。本机桥接地址不能作为客户端访问入口。'],
-    ['选择客户端格式', '在「客户端订阅」选择规则和目标格式。不同客户端支持的协议不同，不兼容项会列出；使用 sing-box 或 mihomo 格式时也要核对客户端版本。'],
+    ['选择客户端格式', '订阅按所有者收集兼容规则，可用节点标签筛选。当前订阅保存端点快照，不自动替换多跳入口端口；SS 多跳路径请使用拓扑页的“入口客户端链接”。不兼容的规则会列出原因。'],
     ['预览并导入', '先检查生成内容，再将订阅导入真实客户端，验证访问、DNS 和计量。Reality 私钥与内部桥接凭据不应出现在导出中。'],
     ['管理生命周期', '按需要设置有效期、轮换或撤销链接。订阅链接包含访问凭证，只分享给授权使用者。规则变化后按订阅页面的快照行为重新生成。'],
   ], note: '生成配置不等于客户端验收。每个要支持的客户端和协议组合都需要实际连接测试。' },

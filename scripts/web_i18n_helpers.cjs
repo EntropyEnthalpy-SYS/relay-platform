@@ -14,4 +14,8 @@ function loadTitles(i18n = loadI18n()) {
   const source = fs.readFileSync('web/app.js', 'utf8').match(/^const titles = (.*);$/m)[1];
   return vm.runInNewContext(source, i18n);
 }
-module.exports = { loadI18n, loadConsole, loadTitles, english };
+function loadWorkflows() {
+  const source = fs.readFileSync('web/workflows.js', 'utf8').replace(/^export /gm, '');
+  return vm.runInNewContext(source + '\n;({ serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile })');
+}
+module.exports = { loadI18n, loadConsole, loadTitles, loadWorkflows, english };

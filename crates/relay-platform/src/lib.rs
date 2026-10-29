@@ -28,6 +28,7 @@ pub mod reverse;
 pub mod reverse_mux;
 mod routing;
 pub mod shadowsocks;
+mod shadowsocks_uot;
 pub mod socks5;
 pub mod state;
 pub mod store;
