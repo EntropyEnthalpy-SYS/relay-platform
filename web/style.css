@@ -793,8 +793,8 @@ html[lang="en"] .nav-label { letter-spacing: .02em; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 
-/* Monitoring restores the spacious operations overview; both layouts use the
-   same telemetry, declared paths and navigation. Theme remains independent. */
+/* Monitoring changes spacing and arrangement only. Both overview layouts
+   inherit the workspace palette, typography and surface treatments. */
 .overview-controls { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin: 0 0 22px; }
 .overview-controls > span { color: var(--muted); font-size: 11px; }
 .overview-layout-picker { display: inline-flex; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); }
@@ -806,33 +806,18 @@ html[lang="en"] .nav-label { letter-spacing: .02em; }
 .overview-waiting p { margin: 5px 0 0; font-size: 12px; color: var(--text-2); max-width: 70em; }
 .overview-waiting button { flex-shrink: 0; }
 .overview-grid > .panel { min-width: 0; }
-body[data-overview-layout="monitoring"] { color: var(--text); background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px); background-size: 48px 48px; }
-:root[data-theme="dark"] body[data-overview-layout="monitoring"] {
-  --bg: #080f19; --grid: #20324725;
-  --surface: #0c1724; --surface-2: #111e2e; --surface-3: #1a2b3e;
-  --line: #203044; --line-strong: #354d65;
-  --text: #e1eaf5; --text-2: #b4c4d6; --muted: #91a4bb;
-  --accent: #26d398; --accent-hover: #51e1b0; --accent-ink: #05241b; --accent-soft: #0e302c;
-  --green: #26d398; --green-soft: #102f2a; --blue: #54a6ff; --violet: #ac8dff;
-  --amber: #ffbd49; --amber-soft: #342a17; --red: #ff6570; --red-soft: #351e29;
-}
 body[data-overview-layout="monitoring"] main { max-width: none; }
 body[data-overview-layout="monitoring"] .kpis { gap: 18px; margin-bottom: 24px; }
-body[data-overview-layout="monitoring"] .kpi { container-type: inline-size; min-height: 186px; padding: 23px 24px 18px; border-radius: 12px; gap: 18px; }
+body[data-overview-layout="monitoring"] .kpi { container-type: inline-size; min-height: 186px; padding: 23px 24px 18px; gap: 18px; }
 body[data-overview-layout="monitoring"] .kpi .metric-label { font-size: 12px; }
-body[data-overview-layout="monitoring"] .kpi .metric-label::before { display: none; }
-body[data-overview-layout="monitoring"] .kpi .metric-value { font: 650 clamp(18px, 14cqw, 42px) / 1.2 var(--mono); margin-top: 14px; letter-spacing: -.04em; }
-body[data-overview-layout="monitoring"] .kpi:first-child .metric-value { color: var(--green); }
+body[data-overview-layout="monitoring"] .kpi .metric-value { font-size: clamp(18px, 14cqw, 42px); line-height: 1.2; margin-top: 14px; }
 body[data-overview-layout="monitoring"] .kpi .metric-foot { font-size: 11px; }
 body[data-overview-layout="monitoring"] .kpi > .spark { height: 46px; }
-body[data-overview-layout="monitoring"] .spark.accent { --spark: var(--green); }
 body[data-overview-layout="monitoring"] .overview-grid { grid-template-columns: minmax(0, 1fr); gap: 24px; margin-bottom: 24px; }
-body[data-overview-layout="monitoring"] .panel { border-radius: 12px; }
 body[data-overview-layout="monitoring"] .panel-head { padding: 22px 24px; }
 body[data-overview-layout="monitoring"] .panel-head h2 { font-size: 16px; }
 body[data-overview-layout="monitoring"] .panel-head p { font-size: 12px; }
-body[data-overview-layout="monitoring"] .chain-wrap { min-height: 300px; padding: 22px 24px; background: radial-gradient(ellipse at 50% 50%, var(--accent-soft), transparent 70%); }
-body[data-overview-layout="monitoring"] .chain-node rect { fill: var(--surface-2); }
+body[data-overview-layout="monitoring"] .chain-wrap { min-height: 300px; padding: 22px 24px; }
 body[data-overview-layout="monitoring"] .chain-node .name { font-size: 14px; }
 body[data-overview-layout="monitoring"] .chain-node .sub { font-size: 12px; }
 body[data-overview-layout="monitoring"] .incidents { display: block; }

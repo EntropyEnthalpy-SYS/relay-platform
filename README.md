@@ -1,6 +1,6 @@
 # Relay 独立转发平台
 
-0.125.0 restores the spacious monitoring overview: choose **Monitoring** or **Workspace**, with independent light/dark themes, live metric charts, a full-width forwarding graph, events and node resources. Unenrolled nodes are clearly identified. See the [monitoring guide](docs/RELEASE_0.125.0_EN.md).
+0.125.1 keeps the spacious monitoring overview in the existing workspace theme: choose **Monitoring** or **Workspace**, with independent light/dark themes, live metric charts, a full-width forwarding graph, events and node resources. Unenrolled nodes are clearly identified. See the [monitoring guide](docs/RELEASE_0.125.0_EN.md).
 
 0.123.0 adds guided VPS selection, reusable reachable addresses and automatic port allocation. Choose entry, optional relays and exit, then review the path before publishing. SS runs only on the selected exit. See the [guided setup guide](docs/RELEASE_0.123.0_EN.md).
 
@@ -10,7 +10,7 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.125.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.125.1 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
 
 0.117.0 新增登录页与控制台 English / 中文切换，覆盖页面、编辑器、校验提示和七篇指南；保存浏览器偏好，切换时保留会话和当前页面。此前 0.116.0 重整控制台界面：分组导航、页面与指南本地搜索、七篇内嵌操作指南、浅色 / 深色主题、移动端抽屉与可分享页面链接。现有规则、协议、计量和权限流程保留，详见 [UI workspace guide](docs/UI_WORKSPACE_EN.md)。
 

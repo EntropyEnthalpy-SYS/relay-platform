@@ -1,8 +1,8 @@
-# Monitoring overview — 0.125.0
+# Monitoring overview — 0.125.x
 
 Open **Overview** and choose **Monitoring**. This restores the spacious operations display: four metric cards with sparklines, a full-width forwarding graph, the event list underneath, and the node resource table. **Workspace** keeps the compact arrangement. The browser remembers this choice; a new browser defaults to Monitoring.
 
-Use the theme button independently for light or dark colors. Dark Monitoring uses the blue-black and green palette from the earlier dashboard, while retaining the current navigation, handbook and language switch. Switching pages restores the normal workspace appearance. Layout and language controls remain keyboard accessible.
+Updated in **0.125.1**: Monitoring uses the existing workspace theme, including its warm paper light palette, charcoal dark palette, terracotta accents, sans-serif typography, card surfaces and dotted diagram canvas. It changes spacing and arrangement only. Use the theme button independently for light or dark colors; both overview layouts share that choice. Layout and language controls remain keyboard accessible.
 
 ## What populates the display
 
