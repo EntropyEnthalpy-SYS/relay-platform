@@ -2,6 +2,37 @@
 .workflow-callout { padding: 14px 18px; border-left: 3px solid var(--accent); border-radius: 6px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
 .path-hop { min-width: 0; margin: 18px 0; }
 .path-hop .toolbar { justify-content: flex-end; margin-top: 12px; }
+.setup-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 20px; }
+.setup-card { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: 24px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); }
+.setup-card h3 { margin: 16px 0 8px; font-size: 18px; }
+.setup-card p { margin: 0 0 18px; color: var(--text-2); font-size: 13px; line-height: 1.7; }
+.setup-card .setup-route { width: 100%; padding: 12px; border-radius: 8px; background: var(--surface-2); color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
+.setup-card button { margin-top: auto; }
+.setup-step { margin: 24px 0 12px; font-size: 16px; }
+.setup-step:first-child { margin-top: 0; }
+dialog:has(.setup-cards) { width: min(960px, calc(100% - 32px)); }
+dialog .setup-cards { padding: 0; margin: 20px 0; }
+.path-summary { margin: 20px; border: 1px solid var(--line-strong); border-radius: 12px; overflow: hidden; }
+.path-summary-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 20px; }
+.path-summary-head h3 { margin: 0 0 6px; font-size: 16px; }
+.path-summary-head p { margin: 0; }
+.path-summary .forwarding-diagram { margin: 0; border-width: 1px 0; border-radius: 0; }
+.path-summary .flow-heading { display: none; }
+.path-summary .flow-card > .fine { display: none; }
+.path-summary .flow-terminal > .mono { font-size: 11px; }
+.path-summary .flow-track { padding: 18px; }
+.path-node-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 16px 20px; }
+@media (min-width: 651px) {
+  .path-summary .flow-card { flex-basis: 150px; width: 150px; }
+  .path-summary .flow-terminal { flex-basis: 132px; width: 132px; }
+  .path-summary .flow-edge { flex-basis: 38px; width: 38px; padding: 0 1px; overflow-wrap: normal; }
+}
+@media (max-width: 650px) {
+  .setup-cards { grid-template-columns: 1fr; padding: 14px; }
+  .setup-card { padding: 18px; }
+  .path-summary { margin: 14px; }
+  .path-summary-head { align-items: flex-start; padding: 16px; }
+}
 
 /* The live path is a routing explanation, never an animated health indicator. */
 dialog:has(.forwarding-diagram) { width: min(1120px, calc(100% - 32px)); }

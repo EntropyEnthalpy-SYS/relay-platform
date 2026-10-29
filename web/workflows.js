@@ -44,6 +44,30 @@ export function applicationState(node, now = Date.now()) {
   return 'applied';
 }
 
+// Show complete routes once, starting at their entry rules. Shared exits may
+// appear in several routes; disconnected rules and malformed cycles stay visible.
+export function forwardingPathRoots(snapshot) {
+  const rules = new Map((snapshot.configs || []).flatMap(config => config.rules.map(rule =>
+    [`${config.node_id}/${rule.id}`, { node_id: config.node_id, rule_id: rule.id, rule }])));
+  const next = item => serviceKind(item.rule) === 'forward' ? (item.rule.targets || [])
+    .filter(target => target.via).map(target => `${target.via.node_id}/${target.via.rule_id}`) : [];
+  const referenced = new Set([...rules.values()].flatMap(next));
+  const roots = [...rules].filter(([key]) => !referenced.has(key)).map(([, item]) => item);
+  const covered = new Set();
+  function visit(item) {
+    const pending = [item];
+    while (pending.length) {
+      const current = pending.pop(), key = `${current.node_id}/${current.rule_id}`;
+      if (covered.has(key)) continue;
+      covered.add(key);
+      for (const key of next(current)) if (rules.has(key)) pending.push(rules.get(key));
+    }
+  }
+  roots.forEach(visit);
+  for (const [key, item] of rules) if (!covered.has(key)) { roots.push(item); visit(item); }
+  return roots.map(({ node_id, rule_id }) => ({ node_id, rule_id }));
+}
+
 // A bounded, credential-free view of declared routing, never a reachability test.
 // A target with no `via` is opaque: matching an address does not prove another VPS.
 export function forwardingDiagram(snapshot, root, draft = null) {

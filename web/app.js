@@ -1,9 +1,9 @@
 import { t as translate, msg, localize, getLanguage, setupLanguageSwitcher, eventMessage } from '/assets/i18n.js';
 import { createConsoleUI, canVisit, parseRoute } from '/assets/console-ui.js';
-import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram } from '/assets/workflows.js';
+import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram, forwardingPathRoots } from '/assets/workflows.js';
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
-const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则', topology: '多跳拓扑', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度', guide: '使用指南' });
+const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '节点规则', topology: '转发路径', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '模板库', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度', guide: '使用指南' });
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
@@ -101,21 +101,24 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
   function add(target = { address: '', weight: 1 }, path = {}) {
     if (rows.length >= 32) return;
     const id = serial++, box = el('fieldset', undefined, 'target-editor'), grid = el('div', undefined, 'form-grid');
+    const options = el('details'), tuning = el('div', undefined, 'form-grid');
+    options.append(el('summary', translate('目标高级选项：均衡、TLS 与传输')));
+    options.open = !!(target.tls || target.proxy_protocol || target.websocket || target.draining || multipathPaths);
     box.append(el('legend', translate('转发目标')));
-    const address = field(grid, `target-address-${id}`, translate('目标地址 / host:port'), target.address);
+    const address = field(grid, `target-address-${id}`, translate('目标地址 / host:port'), target.address); address.placeholder = '203.0.113.10:443';
     const endpoints = (topology?.configs || []).flatMap(config => config.rules.filter(rule => rule.advertise && rule.tenant_id === sourceTenant && rule.id !== currentRule).map(rule => ({ key: `${config.node_id}/${rule.id}`, config, rule })));
     const selected = target.via ? `${target.via.node_id}/${target.via.rule_id}` : '';
     const choices = [['', translate('外部目标 · 手动输入地址')], ...endpoints.map(item => [item.key, `${topology.nodes.find(node => node.id === item.config.node_id)?.name || item.config.node_id} → ${item.rule.name}`])];
     if (selected && !choices.some(([key]) => key === selected)) choices.push([selected, translate('当前引用暂不可选择 · 保留原配置')]);
-    const via = select(grid, `target-via-${id}`, translate('下一跳规则（聚合模式下须选择同一汇聚规则）'), choices, selected);
+    const via = select(grid, `target-via-${id}`, translate('已有下一跳规则（可选）'), choices, selected);
     function chooseEndpoint(update) { const endpoint = endpoints.find(item => item.key === via.value); address.readOnly = !!via.value && !endpoint?.rule.inbound_multipath; if (update && endpoint) address.value = endpoint.rule.advertise; }
     via.addEventListener('change', () => chooseEndpoint(true)); chooseEndpoint(false);
-    const weight = field(grid, `target-weight-${id}`, translate('权重'), target.weight, 'number'); weight.min = 1; weight.max = 1000;
-    const priority = field(grid, `target-priority-${id}`, translate('优先级（越小越优先，同级按均衡策略）'), target.priority ?? 0, 'number'); priority.min = 0; priority.max = 65535;
-    const draining = select(grid, `target-draining-${id}`, translate('维护排空（新会话优先走其他目标，已有会话保持）'), [['off', translate('正常使用')], ['on', translate('维护排空')]], target.draining ? 'on' : 'off');
-    const maximum = field(grid, `target-max-${id}`, translate('目标会话上限（TCP + UDP，留空不限）'), target.max_sessions, 'number', false); maximum.min = 1; maximum.max = 1000000;
-    const prewarm = field(grid, `target-prewarm-${id}`, translate('预热连接数（提前建好、待用的 TCP 连接，留空关闭；需启用 PROXY）'), target.prewarm, 'number', false); prewarm.min = 1; prewarm.max = 32;
-    const mode = select(grid, `target-mode-${id}`, translate('连接目标的安全方式'), [['plain', translate('普通 TCP / UDP')], ['tls', translate('TLS（验证目标证书）')]], target.tls ? 'tls' : 'plain'); box.append(grid);
+    const weight = field(tuning, `target-weight-${id}`, translate('权重'), target.weight, 'number'); weight.min = 1; weight.max = 1000;
+    const priority = field(tuning, `target-priority-${id}`, translate('优先级（越小越优先，同级按均衡策略）'), target.priority ?? 0, 'number'); priority.min = 0; priority.max = 65535;
+    const draining = select(tuning, `target-draining-${id}`, translate('维护排空（新会话优先走其他目标，已有会话保持）'), [['off', translate('正常使用')], ['on', translate('维护排空')]], target.draining ? 'on' : 'off');
+    const maximum = field(tuning, `target-max-${id}`, translate('目标会话上限（TCP + UDP，留空不限）'), target.max_sessions, 'number', false); maximum.min = 1; maximum.max = 1000000;
+    const prewarm = field(tuning, `target-prewarm-${id}`, translate('预热连接数（提前建好、待用的 TCP 连接，留空关闭；需启用 PROXY）'), target.prewarm, 'number', false); prewarm.min = 1; prewarm.max = 32;
+    const mode = select(tuning, `target-mode-${id}`, translate('连接目标的安全方式'), [['plain', translate('普通 TCP / UDP')], ['tls', translate('TLS（验证目标证书）')]], target.tls ? 'tls' : 'plain'); box.append(grid); options.append(tuning);
     const secure = el('div', undefined, 'form-grid');
     const name = field(secure, `target-server-name-${id}`, translate('证书中的服务名或 IP'), target.tls?.server_name || '', 'text', false);
     const ca = field(secure, `target-ca-${id}`, translate('CA 编号（留空使用公共 CA）'), target.tls?.ca || '', 'text', false);
@@ -137,7 +140,7 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     multipathMode?.addEventListener('change', showMultipath); showMultipath();
     const row = { box, address, via, weight, priority, draining, maximum, prewarm, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws, up, down, bindIp, bindInterface }; rows.push(row);
     function showSecurity() { const enabled = mode.value === 'tls'; secure.classList.toggle('hidden', !enabled); name.required = enabled; [name, ca, identity].forEach(input => { input.disabled = !enabled; }); }
-    mode.onchange = showSecurity; showSecurity(); box.append(secure, proxyFields, ws.box, mp, button(translate('移除此目标'), () => { multipathMode?.removeEventListener('change', showMultipath); rows.splice(rows.indexOf(row), 1); box.remove(); changed(); }, 'table-action danger')); container.append(box); changed();
+    mode.onchange = showSecurity; showSecurity(); options.append(secure, proxyFields, ws.box, mp); box.append(options, button(translate('移除此目标'), () => { multipathMode?.removeEventListener('change', showMultipath); rows.splice(rows.indexOf(row), 1); box.remove(); changed(); }, 'table-action danger')); container.append(box); changed();
   }
   targets.forEach((target, index) => add(target, multipathPaths?.[index])); form.append(container, button(translate('＋ 添加目标'), () => add()));
   const read = () => { if (!rows.length) throw new Error(translate('至少保留一个转发目标')); return rows.map(row => {
@@ -653,6 +656,43 @@ function newNode() {
 }
 
 
+const setupRecipes = localize([
+  { id: 'forward', title: '单 VPS 端口转发', scope: '1 台 VPS', route: '客户端 → VPS → 固定目标', description: '把一个监听端口的 TCP / UDP 流量转发到已有服务。', mode: 'forward', path: false },
+  { id: 'ss', title: '单 VPS Shadowsocks', scope: '1 台 VPS', route: '客户端 → VPS（SS）→ 网站 / 服务', description: '在所选 VPS 运行 SS，由客户端指定目的地。', mode: 'ss', path: false },
+  { id: 'forward-path', title: '多跳端口转发', scope: '2 台或更多 VPS', route: '客户端 → 入口 → 中转 / 出口 → 固定目标', description: '按顺序连接多台 VPS，把流量送到固定目标。', mode: 'forward', path: true },
+  { id: 'ss-path', title: '多跳 Shadowsocks', scope: '2 台或更多 VPS', route: '客户端 → 入口 → 出口（SS）→ 网站 / 服务', description: '前面的 VPS 转发加密流量，只在最后一台 VPS 运行 SS。', mode: 'ss', path: true },
+]);
+function setupCards(pathOnly = false) {
+  const grid = el('div', undefined, 'setup-cards');
+  for (const recipe of setupRecipes.filter(recipe => !pathOnly || recipe.path)) {
+    const card = el('article', undefined, 'setup-card'); card.dataset.recipe = recipe.id;
+    card.append(badge(recipe.scope), el('h3', recipe.title), el('p', recipe.description), el('p', recipe.route, 'setup-route'));
+    card.append(button(translate('使用此模板'), () => startSetup(recipe.id), 'primary'));
+    grid.append(card);
+  }
+  return grid;
+}
+function chooseSetup(pathOnly = false) {
+  const body = el('div');
+  body.append(el('p', translate('先选择要实现的连接方式。下一步选择 VPS 和地址，检查路径后再发布。'), 'workflow-callout'), setupCards(pathOnly));
+  if (!pathOnly) body.append(button(translate('其他协议 / 高级规则'), () => startSetup('advanced')));
+  modal(translate('你想建立什么连接？'), body);
+}
+async function startSetup(id) {
+  const recipe = setupRecipes.find(recipe => recipe.id === id), snapshot = await api('/topology');
+  state.nodes = snapshot.nodes;
+  if (snapshot.nodes.length < (recipe?.path ? 2 : 1)) {
+    const body = empty(translate('先连接所需的 VPS'), recipe?.path ? translate('多跳模板需要至少两个节点。注册 VPS 并启动 Agent 后，再选择入口和出口。') : translate('先注册一台 VPS 并启动 Agent，再用模板创建服务。'), button(translate('前往节点管理'), () => { $('#dialog').close(); return navigate('nodes'); }, 'primary'));
+    modal(translate('准备节点'), body); return;
+  }
+  if (recipe?.path) return newTopologyChain(snapshot, { mode: recipe.mode, protocol: 'both', name: recipe.title });
+  const node = snapshot.nodes.find(n => n.id === state.selectedNode) || snapshot.nodes.find(n => n.tenant_id === state.actor.tenant_id) || snapshot.nodes[0];
+  state.selectedNode = node.id; state.config = snapshot.configs.find(config => config.node_id === node.id);
+  const seed = recipe ? { name: recipe.title, protocol: 'both', listen: '0.0.0.0:9000', targets: [{ address: '', weight: 1 }],
+    ...(recipe.mode === 'ss' ? { inbound_shadowsocks: { method: '2022-blake3-aes-256-gcm', password: shadowsocksKey('2022-blake3-aes-256-gcm'), udp_over_tcp: true } } : {}) } : {};
+  return editRule(null, seed);
+}
+
 async function renderRules() {
   state.nodes = await api('/nodes'); const content = $('#content');
   if (!state.nodes.length) { content.replaceChildren(empty(translate('还没有节点'), translate('先注册节点，再创建规则。'), button(translate('前往节点管理'), () => navigate('nodes'), 'primary'))); return; }
@@ -660,12 +700,12 @@ async function renderRules() {
   const toolbar = el('div', undefined, 'toolbar'), selector = el('select'); selector.setAttribute('aria-label', translate('选择节点')); state.nodes.forEach(n => { const option = el('option', n.name); option.value = n.id; selector.append(option); }); selector.value = state.selectedNode; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; const nodeLabel = el('label', translate('运行节点 / VPS')); nodeLabel.append(selector); toolbar.append(nodeLabel);
   const nodeId = state.selectedNode; const config = await api(`/nodes/${nodeId}/config`); if (state.view !== 'rules' || state.selectedNode !== nodeId) return; state.config = config;
   toolbar.append(badge(msg`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? msg`节点总限速 ${mbit(config.rate_bytes_per_sec)}` : translate('节点不限速'), config.rate_bytes_per_sec ? 'orange' : ''), button(translate('版本历史'), history)); if (canWrite()) toolbar.append(button(translate('节点总限速'), () => editNodeRate(config)));
-  const actions = el('div'); if (canWrite()) actions.append(button(translate('创建转发路径'), async () => newTopologyChain(await api('/topology'))), button(translate('＋ 添加规则'), () => editRule(), 'primary'));
+  const actions = el('div'); if (canWrite()) actions.append(button(translate('查看完整路径'), () => navigate('topology')), button(translate('＋ 添加规则'), () => chooseSetup(), 'primary'));
   toolbar.append(applicationBadge(state.nodes.find(n => n.id === nodeId)));
-  const p = panel(translate('转发规则'), translate('每条规则运行在所选节点。跨 VPS 转发与出口代理服务请使用“创建转发路径”。'), actions);
+  const p = panel(translate('所选 VPS 的规则'), translate('这里管理单台 VPS 的监听和服务。一条多跳路径会在每台参与的 VPS 上各创建一条规则。'), actions);
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
-  if (!config.rules.length) p.append(empty(translate('创建一条真实转发规则'), translate('支持 TCP、UDP 和双协议，可设置多个目标、配额、速率和来源网段。'), canWrite() ? button(translate('添加规则'), () => editRule(), 'primary') : null));
+  if (!config.rules.length) p.append(empty(translate('此 VPS 还没有规则'), translate('选择一个模板，说明这台 VPS 是转发流量还是提供代理服务。'), canWrite() ? button(translate('从模板开始'), () => chooseSetup(), 'primary') : null));
   else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button(translate('删除'), async () => { if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, msg`${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(toolbar, p);
 }
@@ -758,9 +798,11 @@ function mptcpEditor(value) {
   box.append(el('p', translate('MPTCP 需要 Linux 内核与对端支持。额外路径由节点网络配置决定；协商成功不代表已聚合多条线路。更改入口模式前请先停用并发布规则。'), 'fine'));
   return { box, gateway(on) { inbound.parentElement.classList.toggle('hidden', on); inbound.disabled = on; }, read: (protocol, gateway = false) => mptcpConfig(gateway ? 'off' : inbound.value, outbound.value, protocol) };
 }
-async function editRule(existing) {
+async function editRule(existing, seed = {}) {
   let baseConfig = state.config, nodeLoad = null;
-  const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || {};
+  const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || seed;
+  form.append(el('h3', translate('1. 选择运行 VPS 与服务'), 'setup-step'));
+  const extraGrid = el('div', undefined, 'form-grid');
   if ([r.inbound_shadowsocks, r.inbound_socks5, r.inbound_http_connect, r.inbound_http2_connect, r.protocol_gateway].filter(Boolean).length > 1) throw new Error(translate('每条规则只能启用一种代理入口'));
   const tenant = state.nodes.find(n => n.id === baseConfig.node_id).tenant_id;
   const runOn = select(grid, 'run_on', translate('运行节点 / VPS'), state.nodes.filter(n => n.tenant_id === tenant).map(n => [n.id, n.name || n.id]), baseConfig.node_id);
@@ -769,10 +811,10 @@ async function editRule(existing) {
   field(grid, 'name', translate('规则名称'), r.name || '').maxLength = 120;
   const protocolControl = select(grid, 'protocol', translate('传输协议（TCP / UDP）'), [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], r.protocol || 'tcp');
   const listenControl = field(grid, 'listen', translate('监听地址'), r.protocol_gateway?.listen || r.listen || '127.0.0.1:9000');
-  const advertise = field(grid, 'advertise', translate('供其他节点连接的地址（跨节点引用时填写）'), r.advertise || '', 'text', false);
-  const endPort = field(grid, 'listen_end_port', translate('结束端口（留空只监听一个端口，最多 256 个）'), r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
-  const mapping = select(grid, 'port_mapping', translate('端口段的目标映射'), [['fixed', translate('全部入口连接同一目标端口')], ['offset', translate('按入口端口偏移目标端口')]], r.port_mapping || 'fixed');
-  const balance = select(grid, 'balance', translate('目标分配'), [['weighted_round_robin', translate('加权轮询')], ['source_hash', translate('来源 IP 哈希')], ['least_connections', translate('最少连接')], ['lowest_latency', translate('最低延迟（须启用健康探测）')]], r.balance || 'weighted_round_robin'); form.append(grid);
+  const advertise = field(grid, 'advertise', translate('客户端 / 上一跳连接地址（VPS 公网 IP 或域名:端口）'), r.advertise || '', 'text', !!seed.name); advertise.placeholder = 'vps.example.com:9000';
+  const endPort = field(extraGrid, 'listen_end_port', translate('结束端口（留空只监听一个端口，最多 256 个）'), r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
+  const mapping = select(extraGrid, 'port_mapping', translate('端口段的目标映射'), [['fixed', translate('全部入口连接同一目标端口')], ['offset', translate('按入口端口偏移目标端口')]], r.port_mapping || 'fixed');
+  const balance = select(extraGrid, 'balance', translate('目标分配'), [['weighted_round_robin', translate('加权轮询')], ['source_hash', translate('来源 IP 哈希')], ['least_connections', translate('最少连接')], ['lowest_latency', translate('最低延迟（须启用健康探测）')]], r.balance || 'weighted_round_robin'); form.append(grid);
   const placement = el('p', '', 'workflow-callout'), reachability = el('p', '', 'fine'); form.append(placement, reachability);
   function describePlacement() {
     const node = state.nodes.find(n => n.id === runOn.value);
@@ -786,6 +828,7 @@ async function editRule(existing) {
     nodeLoad.catch(error => notify(error.message, true));
   });
   listenControl.addEventListener('input', describePlacement);
+  form.append(el('h3', translate('2. 设置目标或代理凭据'), 'setup-step'));
   const shadowsocks = shadowsocksEditor(r.inbound_shadowsocks); form.append(shadowsocks.box);
   const socks5 = socks5Editor(r.inbound_socks5); form.append(socks5.box);
   const httpConnect = httpConnectEditor(r.inbound_http_connect); form.append(httpConnect.box);
@@ -794,9 +837,11 @@ async function editRule(existing) {
   const services = { ss: shadowsocks, socks5, http: httpConnect, h2: http2Connect, gateway };
   const mptcp = mptcpEditor(r.mptcp); form.append(mptcp.box);
   const routed = el('div'); form.append(routed);
-  const readHealth = healthEditor(routed, r.health_check, protocolControl);
-  const multipath = multipathEditor(routed, r);
+  const routedOptions = el('details'); routedOptions.append(el('summary', translate('高级路由：健康检查与多路径')));
+  const readHealth = healthEditor(routedOptions, r.health_check, protocolControl);
+  const multipath = multipathEditor(routedOptions, r);
   const readTargets = targetEditor(routed, r.targets?.length ? r.targets : [{ address: '127.0.0.1:8000', weight: 1 }], topology, state.nodes.find(node => node.id === baseConfig.node_id).tenant_id, r.id, r.outbound_multipath?.paths, multipath.mode);
+  routed.append(routedOptions);
   let proxyInput;
   // A proxy server goes where each client asks, so it has no fixed targets.
   function showRouted() {
@@ -861,7 +906,7 @@ async function editRule(existing) {
   for (const [name, label, fallback, min, max] of [['connect_timeout_ms', translate('连接超时 / ms'), 5000, 100, 60000], ['idle_timeout_secs', translate('空闲回收 / 秒'), 120, 1, 86400], ['max_connections', translate('TCP 最大连接'), 4096, 1, 1000000], ['udp_max_sessions', translate('UDP 最大会话'), 1024, 1, 100000]]) { const input = field(advanced, name, label, r[name] ?? fallback, 'number'); input.min = min; input.max = max; }
   const expiry = field(advanced, 'expires_at_ms', translate('到期 / Unix 毫秒（留空永不过期）'), r.expires_at_ms, 'number', false); expiry.min = 0; details.append(advanced); textarea(details, 'allow_sources', translate('允许来源 CIDR（留空允许所有未拒绝来源，每行一个）'), (r.allow_sources || []).join('\n')); textarea(details, 'deny_sources', translate('拒绝来源 CIDR（优先于允许列表，每行一个）'), (r.deny_sources || []).join('\n')); textarea(details, 'allow_destinations', translate('允许目的地（IP/CIDR/域名/*.example.com，留空允许所有未拒绝，每行一个）'), (r.allow_destinations || []).join('\n')); textarea(details, 'deny_destinations', translate('拒绝目的地（优先于允许列表，每行一个）'), (r.deny_destinations || []).join('\n')); textarea(details, 'allow_destination_ports', translate('允许目的地端口（443、8000-8080、*，留空允许所有，每行一个）'), (r.allow_destination_ports || []).join('\n')); textarea(details, 'deny_destination_ports', translate('拒绝目的地端口（优先于允许列表，每行一个）'), (r.deny_destination_ports || []).join('\n')); form.append(details);
   const enabledLabel = el('label', undefined, 'inline-check'), enabled = el('input'); enabled.name = 'enabled'; enabled.type = 'checkbox'; enabled.checked = r.enabled ?? true; enabledLabel.append(enabled, document.createTextNode(translate('启用规则'))); form.append(enabledLabel);
-  form.append(el('p', translate('同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。'), 'fine'));
+  limits.append(el('p', translate('同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。'), 'fine'));
   async function readRule(data) {
     if (nodeLoad) await nodeLoad;
     if (baseConfig.node_id !== runOn.value) throw new Error(translate('节点配置仍在加载，请稍后再试。'));
@@ -892,7 +937,9 @@ async function editRule(existing) {
     for (const key of ['quota_bytes', 'rate_bytes_per_sec', 'expires_at_ms', 'connect_timeout_ms', 'idle_timeout_secs', 'max_connections', 'udp_max_sessions']) rule[key] = number(data, key);
     return rule;
   }
-  const pathView = forwardingPathView(); form.prepend(pathView.box);
+  const options = el('details'); options.append(el('summary', translate('配额、端口范围与高级选项')), extraGrid, mptcp.box, routing, transport, inboundWs.box, proxyInput, limits, details);
+  form.append(options);
+  const pathView = forwardingPathView(); form.append(el('h3', translate('3. 检查并预览发布'), 'setup-step'), pathView.box);
   function redrawPath() {
     const data = new FormData(form), draft = { id: r.id || 'draft', tenant_id: tenant, protocol: protocolControl.value,
       listen: listenControl.value, advertise: purpose.value === 'gateway' ? null : advertise.value, listen_end_port: endPort.value, port_mapping: mapping.value,
@@ -907,15 +954,17 @@ async function editRule(existing) {
   }
   form.addEventListener('input', redrawPath); form.addEventListener('change', redrawPath); readTargets.onchange(redrawPath); redrawPath();
   const rulesFor = rule => existing ? baseConfig.rules.map(item => item.id === r.id ? rule : item) : [...baseConfig.rules, rule];
-  form.append(button(translate('检查配置与路径'), async () => {
+  if (existing) form.append(button(translate('检查配置与路径'), async () => {
     if (!form.reportValidity()) return;
     const rule = await readRule(new FormData(form));
     await previewTopology(topology, { updates: [{ node_id: baseConfig.node_id, expected_revision: baseConfig.revision, rules: rulesFor(rule) }] }, '',
       () => modal(existing ? translate('编辑节点规则') : translate('添加节点规则或代理服务'), form), [{ node_id: baseConfig.node_id, rule_id: rule.id }]);
   }));
-  submit(form, existing ? translate('发布修改') : translate('创建并发布'), async data => {
+  submit(form, existing ? translate('发布修改') : translate('检查并预览发布'), async data => {
     const rule = await readRule(data); state.selectedNode = baseConfig.node_id;
-    await saveRules(rulesFor(rule), baseConfig);
+    if (existing) await saveRules(rulesFor(rule), baseConfig);
+    else await previewTopology(topology, { updates: [{ node_id: baseConfig.node_id, expected_revision: baseConfig.revision, rules: rulesFor(rule) }] }, placement.textContent,
+      () => modal(translate('添加节点规则或代理服务'), form), [{ node_id: baseConfig.node_id, rule_id: rule.id }]);
   }); modal(existing ? translate('编辑节点规则') : translate('添加节点规则或代理服务'), form);
 }
 const shadowsocksMethods = localize([['2022-blake3-aes-256-gcm', '2022-blake3-aes-256-gcm（推荐 · 防重放）'], ['2022-blake3-aes-128-gcm', '2022-blake3-aes-128-gcm（防重放）'], ['2022-blake3-chacha20-poly1305', '2022-blake3-chacha20-poly1305（无 AES 加速的设备）'], ['aes-256-gcm', 'aes-256-gcm（旧客户端兼容）'], ['aes-128-gcm', 'aes-128-gcm（旧客户端兼容）'], ['chacha20-ietf-poly1305', 'chacha20-ietf-poly1305（旧客户端兼容）']]);
@@ -928,10 +977,11 @@ function shadowsocksEditor(spec) {
   const box = el('details'); box.open = !!spec; box.append(el('summary', translate('Shadowsocks 代理服务（客户端自选目的地）')));
   const method = select(box, 'ss_method', translate('加密方式'), [['off', translate('关闭 · 按下方目标转发')], ...shadowsocksMethods], spec?.method || 'off');
   const fields = el('div', undefined, 'form-grid');
-  const password = field(fields, 'ss_password', translate('密钥'), spec?.password || ''); password.autocomplete = 'off'; password.classList.add('mono');
+  const password = field(fields, 'ss_password', translate('密钥'), spec?.password || '', 'password'); password.autocomplete = 'off'; password.classList.add('mono');
   select(fields, 'ss_private', translate('允许访问内网 / 本机地址'), [['no', translate('不允许（推荐）')], ['yes', translate('允许 · 客户端可访问本节点所在内网')]], spec?.allow_private_destinations ? 'yes' : 'no');
   select(fields, 'ss_uot', translate('UDP 传输兼容'), [['no', translate('仅原生 UDP')], ['yes', translate('同时支持 UDP over TCP · 适合 UDP 分片受限网络')]], spec ? (spec.udp_over_tcp ? 'yes' : 'no') : 'yes');
   const regenerate = button(translate('生成新密钥'), () => { password.value = shadowsocksKey(method.value); });
+  const reveal = button(translate('显示密钥'), () => { password.type = password.type === 'password' ? 'text' : 'password'; reveal.textContent = password.type === 'password' ? translate('显示密钥') : translate('隐藏密钥'); });
   let last = method.value;
   function show() {
     const enabled = method.value !== 'off'; box.querySelectorAll('.ss-fields').forEach(n => n.classList.toggle('hidden', !enabled)); fields.querySelectorAll('input, select').forEach(input => { input.disabled = !enabled; });
@@ -940,8 +990,8 @@ function shadowsocksEditor(spec) {
     last = method.value;
   }
   const note = el('p', translate('启用后本规则不设目标：客户端（Shadowrocket、Clash、sing-box、v2rayN 等）在每个连接里指定要访问的网站，本节点直接连接。保存后在规则列表点“分享链接”导入客户端。协议选 TCP + UDP 时客户端的 QUIC、DNS、游戏和语音也经过本节点。2022 方式要求两端时钟误差在 30 秒内。'), 'fine');
-  fields.classList.add('ss-fields'); regenerate.classList.add('ss-fields'); note.classList.add('ss-fields');
-  box.append(fields, regenerate, note);
+  fields.classList.add('ss-fields'); regenerate.classList.add('ss-fields'); reveal.classList.add('ss-fields'); note.classList.add('ss-fields');
+  box.append(fields, regenerate, reveal, note);
   method.addEventListener('change', show); show();
   return { box, setEnabled(on) { method.value = on ? (method.value === 'off' ? '2022-blake3-aes-256-gcm' : method.value) : 'off'; show(); }, enabled: () => method.value !== 'off', onchange: f => method.addEventListener('change', f), read: () => method.value === 'off' ? null : { method: method.value, password: password.value.trim(), allow_private_destinations: fields.querySelector('[name=ss_private]').value === 'yes', udp_over_tcp: fields.querySelector('[name=ss_uot]').value === 'yes' } };
 }
@@ -1080,14 +1130,16 @@ const ticketStatuses = localize({ open: '待处理', pending: '处理中', close
 const ticketPriorities = localize({ low: '低', normal: '普通', high: '高' });
 async function renderTemplates() {
   const [templates, nodes] = await Promise.all([api('/templates'), api('/nodes')]); state.nodes = nodes;
-  const p = panel(translate('规则模板'), translate('模板保存一份已验证的规则内容；应用时生成新的规则 ID、名称、监听地址和计量周期，并走正常配置校验。'), null);
-  if (!templates.length) p.append(empty(translate('还没有模板'), translate('在“转发规则”表格中把一条规则存为模板。')));
+  const starters = panel(translate('选择一个起点'), translate('内置模板会打开配置向导。填写实际 VPS、端口和目标后，先预览再发布。'));
+  starters.append(setupCards());
+  const p = panel(translate('我的规则模板'), translate('从节点规则保存的可复用配置。应用时生成新的规则身份与计量周期，并校验端口和引用。'), null);
+  if (!templates.length) p.append(empty(translate('还没有自定义模板'), translate('上方内置模板可以直接使用。配置好规则后，点击“存为模板”即可在这里复用。')));
   else p.append(table([translate('名称'), translate('范围'), translate('说明'), translate('源监听'), translate('操作')], templates.map(template => {
-    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button(translate('预览'), () => previewTemplate(template), 'table-action')); actions.append(button(translate('应用'), () => applyTemplate(template), 'table-action')); actions.append(button(translate('批量应用'), () => rolloutTemplate(template), 'table-action')); actions.append(button(translate('版本'), () => templateVersions(template), 'table-action')); actions.append(button(translate('差异'), () => templateDiff(template), 'table-action')); }
+    const actions = el('div'); if (state.actor.role !== 'viewer') { actions.append(button(translate('使用此模板'), () => applyTemplate(template), 'table-action')); actions.append(button(translate('批量应用'), () => rolloutTemplate(template), 'table-action')); actions.append(button(translate('版本'), () => templateVersions(template), 'table-action')); actions.append(button(translate('差异'), () => templateDiff(template), 'table-action')); }
     if (state.actor.role === 'system_admin' || template.tenant_id === state.actor.tenant_id) actions.append(button(translate('删除'), () => deleteTemplate(template), 'table-action danger'));
     return [namedCell(template.name, template.id), template.tenant_id || translate('全局'), template.description || '—', template.rule.protocol_gateway?.listen || template.rule.listen, actions];
   })));
-  $('#content').replaceChildren(p);
+  if (state.view === 'templates') $('#content').replaceChildren(starters, p);
 }
 async function saveTemplate(source) {
   const name = await promptValue(translate('模板名称'), source.name); if (!name) return;
@@ -1164,28 +1216,23 @@ async function rolloutTemplate(template) {
   modal(msg`批量应用 · ${template.name}`, form);
 }
 
-async function previewTemplate(template) {
-  const nodes = state.nodes; if (!nodes.length) throw new Error(translate('先注册节点，再创建规则。')); const form = el('form'), grid = el('div', undefined, 'form-grid');
-  const node = select(grid, 'node', translate('节点'), nodes.map(n => [n.id, n.name || n.id]), nodes[0]?.id);
-  field(grid, 'name', translate('新规则名称'), template.name).maxLength = 120;
-  field(grid, 'listen', translate('监听地址'), '127.0.0.1:9000');
-  form.append(grid, el('p', translate('预览只校验并返回拟创建的规则，不写修订。'), 'fine'));
-  submit(form, translate('预览'), async data => {
-    const preview = await api(`/nodes/${node.value}/templates/${template.id}/preview`, { method: 'POST', body: { name: String(data.get('name')).trim(), listen: String(data.get('listen')).trim() } });
-    $('#dialog').close(); modal(msg`模板预览 · ${template.name}`, el('pre', JSON.stringify(preview, null, 2), 'json-preview'));
-  });
-  modal(msg`预览模板 · ${template.name}`, form);
-}
 async function applyTemplate(template) {
   const nodes = state.nodes; if (!nodes.length) throw new Error(translate('先注册节点，再创建规则。')); const form = el('form'), grid = el('div', undefined, 'form-grid');
   const node = select(grid, 'node', translate('节点'), nodes.map(n => [n.id, n.name || n.id]), nodes[0]?.id);
   field(grid, 'name', translate('新规则名称'), template.name).maxLength = 120;
   field(grid, 'listen', translate('监听地址'), '127.0.0.1:9000');
-  form.append(grid, el('p', translate('应用会创建一个新修订；并发的配置编辑会以 409 拒绝，不会覆盖。'), 'fine'));
-  submit(form, translate('应用到节点'), async data => {
-    const config = await api(`/nodes/${node.value}/config`);
-    await api(`/nodes/${node.value}/templates/${template.id}`, { method: 'POST', body: { expected_revision: config.revision, name: String(data.get('name')).trim(), listen: String(data.get('listen')).trim() } });
-    $('#dialog').close(); state.selectedNode = node.value; await navigate('rules'); notify(translate('模板已应用，请在节点总览确认实际应用修订。'));
+  const advertise = field(grid, 'advertise', translate('客户端 / 上一跳连接地址（VPS 公网 IP 或域名:端口）'), '', 'text', false); advertise.placeholder = 'vps.example.com:9000';
+  advertise.disabled = !!template.rule.protocol_gateway;
+  form.append(grid, el('p', translate('保留模板的目标与策略；请填写这台 VPS 的新监听和可达地址。下一步检查完整路径，不会立即发布。'), 'fine'));
+  submit(form, translate('检查并预览发布'), async data => {
+    const snapshot = await api('/topology'), config = snapshot.configs.find(config => config.node_id === node.value);
+    if (!config) throw new Error(translate('配置已变化，请重新检查模板。'));
+    const preview = await api(`/nodes/${node.value}/templates/${template.id}/preview`, { method: 'POST', body: { name: String(data.get('name')).trim(), listen: String(data.get('listen')).trim() } });
+    if (preview.current_revision !== config.revision) throw new Error(translate('配置已变化，请重新检查模板。'));
+    const rule = { ...preview.rule, advertise: advertise.disabled ? null : advertise.value.trim() || null };
+    state.selectedNode = node.value;
+    await previewTopology(snapshot, { updates: [{ node_id: node.value, expected_revision: config.revision, rules: [...config.rules, rule] }] }, '',
+      () => modal(msg`应用模板 · ${template.name}`, form), [{ node_id: node.value, rule_id: rule.id }]);
   });
   modal(msg`应用模板 · ${template.name}`, form);
 }
@@ -1602,7 +1649,7 @@ async function newSubscription() {
   const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'name', translate('名称（说明用途，如“手机订阅”）')).maxLength = 120;
   select(grid, 'format', translate('客户端格式'), Object.entries(subscriptionFormats), 'sing_box');
-  form.append(el('p', translate('订阅按所有者和节点标签收集兼容规则，保存当前端点快照。多跳 SS 请使用拓扑页的入口客户端链接；此处不会自动改写入口端口。'), 'workflow-callout'));
+  form.append(el('p', translate('订阅按所有者和节点标签收集兼容规则，保存当前端点快照。多跳 SS 请使用转发路径页的入口客户端链接；此处不会自动改写入口端口。'), 'workflow-callout'));
   field(grid, 'prefix', translate('客户端显示名称前缀（可选）'), 'Relay ').maxLength = 64;
   const host = field(grid, 'host', translate('替换所有节点地址（可选，NAT / 域名场景）'), '', 'text', false); host.maxLength = 253;
   const tags = field(grid, 'tags', translate('只包含这些节点标签（逗号分隔，留空全部）'), '', 'text', false);
@@ -1992,7 +2039,7 @@ function forwardingPathView() {
     const help = el('details'); help.append(el('summary', translate('如何理解与验证这条路径')));
     help.append(el('p', translate('入口协议、节点间传输和出口服务是不同层。SS 路径的客户端使用入口地址及出口密钥；只有标为 Shadowsocks 服务的 VPS 处理 SS，其余节点转发流量。')),
       el('p', translate('每个 VPS 都需要 Agent。监听地址属于该 VPS；连接地址必须能被客户端或上一跳访问。检查每跳端口、防火墙和来源 ACL；发布不会自动开放端口。')),
-      el('p', translate('配置校验检查规则结构、引用和修订，不会发送网络探测。发布后到拓扑页检查 Agent 回执，再从入口运行真实客户端；目标健康探测只能证明所配置的探测条件。')));
+      el('p', translate('配置校验检查规则结构、引用和修订，不会发送网络探测。发布后到转发路径页检查 Agent 回执，再从入口运行真实客户端；目标健康探测只能证明所配置的探测条件。')));
     box.append(help);
   }
   return { box, update };
@@ -2000,33 +2047,47 @@ function forwardingPathView() {
 async function renderTopology() {
   const snapshot = await api('/topology');
   const names = new Map(snapshot.nodes.map(node => [node.id, node.name]));
-  const rules = snapshot.configs.flatMap(config => config.rules.map(rule => ({ config, rule, key: `${config.node_id}/${rule.id}` })));
-  const byKey = new Map(rules.map(item => [item.key, item]));
-  const displayed = rules.filter(item => item.rule.advertise || item.rule.targets.some(target => target.via));
-  const actions = el('div'); if (canWrite()) actions.append(button(translate('批量编辑'), () => editTopologyBatch(snapshot)), button(translate('创建转发路径'), () => newTopologyChain(snapshot), 'primary'));
-  const p = panel(translate('跨节点链路'), translate('每行是一条实际规则；普通规则的多个下一跳是候选组，聚合规则表示通往同一汇聚端的子流，顺序中转由下一跳规则继续连接。每跳独立计量，同一用户额度会累计各跳接纳量。'), actions);
-  if (!displayed.length) p.append(empty(translate('创建入口、中转和出口'), translate('先注册节点，再为链路填写各节点监听与可达地址。')));
-  else p.append(table([translate('节点 / 规则'), translate('监听 / 可达地址'), translate('下一跳或最终目标'), translate('状态'), translate('操作')], displayed.map(item => {
-    const r = item.rule, targets = el('div');
-    if (serviceKind(r) !== 'forward') targets.append(el('strong', r.inbound_shadowsocks ? translate('Shadowsocks 出口 · 客户端指定目的地') : translate('代理服务 · 客户端指定目的地')));
-    r.targets.forEach((target, index) => {
-      const next = target.via ? byKey.get(topologyKey(target.via)) : null, path = r.outbound_multipath?.paths[index];
-      const label = next ? names.get(next.config.node_id) + ' / ' + next.rule.name : target.address;
-      const policy = path ? translate('子流 · 上/下权重 ') + path.upload_weight + '/' + path.download_weight : translate('候选 · 权重 ') + target.weight;
-      targets.append(el('div', '→ ' + label + ' · ' + policy));
-    });
-    const actions = el('div');
-    actions.append(button(translate('查看路径图'), () => { const view = forwardingPathView(); view.update(forwardingDiagram(snapshot, { node_id: item.config.node_id, rule_id: r.id }), 'saved'); modal(translate('转发路径预览'), view.box); }, 'table-action'));
-    const path = shadowsocksPath(snapshot, { node_id: item.config.node_id, rule_id: r.id });
-    if (path && snapshot.graph.roots.some(root => root.node_id === item.config.node_id && root.rule_id === r.id)) actions.append(button(translate('入口客户端链接'), () => shareShadowsocks(path.exit, path.entry, path.hops.map(h => names.get(h.node_id)).join(' → ')), 'table-action'));
-    actions.append(button(translate('编辑节点规则'), async () => { state.selectedNode = item.config.node_id; await navigate('rules'); }, 'table-action'));
-    if (canWrite()) actions.append(button(r.enabled ? translate('停用关联链路') : translate('启用关联链路'), () => changeTopologyComponent(snapshot, item.key, !r.enabled), 'table-action'));
-    return [namedCell(names.get(item.config.node_id), r.name), namedCell(r.protocol_gateway?.listen || r.listen, r.advertise || translate('未声明可达地址')), targets, namedCell(r.enabled ? translate('期望启用') : translate('期望停用'), applicationBadge(snapshot.nodes.find(n => n.id === item.config.node_id)).textContent), actions];
-  })));
-  const ids = new Set(displayed.map(item => item.config.node_id));
+  const rules = new Map(snapshot.configs.flatMap(config => config.rules.map(rule => [`${config.node_id}/${rule.id}`, rule])));
+  const roots = forwardingPathRoots(snapshot), ids = new Set();
+  const actions = el('div');
+  if (canWrite()) actions.append(button(translate('批量编辑'), () => editTopologyBatch(snapshot)), button(translate('创建转发路径'), () => chooseSetup(true), 'primary'));
+  const p = panel(translate('从入口到目的地'), translate('每张卡片是一条完整路径，入口、中转与出口在同一张图中。修改某台 VPS 的端口或服务，请进入对应节点规则。'), actions);
+  if (!roots.length) p.append(empty(translate('还没有转发路径'), translate('从模板创建单 VPS 服务或多跳路径。发布后，这里会自动按规则引用组成路径图。'), canWrite() ? button(translate('从模板开始'), () => chooseSetup(), 'primary') : null));
+  const pageSize = 10;
+  state.pathPage = Math.min(state.pathPage || 0, Math.max(0, Math.ceil(roots.length / pageSize) - 1));
+  for (const root of roots.slice(state.pathPage * pageSize, (state.pathPage + 1) * pageSize)) {
+    const model = forwardingDiagram(snapshot, root), members = new Map();
+    function collect(item) {
+      if (item.kind !== 'node') return;
+      members.set(`${item.node_id}/${item.rule_id}`, item); ids.add(item.node_id);
+      item.children.forEach(child => collect(child.next));
+    }
+    collect(model.root);
+    const nodeIds = [...new Set([...members.values()].map(item => item.node_id))];
+    const card = el('article', undefined, 'path-summary'), head = el('div', undefined, 'path-summary-head');
+    const title = el('div'); title.append(el('h3', rules.get(topologyKey(root))?.name || translate('转发路径')), el('p', msg`${nodeIds.length} 台 VPS · ${members.size} 条节点规则`, 'fine'));
+    head.append(title, badge(nodeIds.length > 1 ? translate('多跳路径') : translate('单 VPS 路径'))); card.append(head);
+    const view = forwardingPathView(); view.update(model, 'saved'); card.append(view.box);
+    const nodeActions = el('div', undefined, 'path-node-actions');
+    nodeActions.append(el('span', translate('管理各跳规则：'), 'fine'));
+    for (const id of nodeIds) nodeActions.append(button(names.get(id) || id, async () => { state.selectedNode = id; await navigate('rules'); }, 'subtle'));
+    const path = shadowsocksPath(snapshot, root);
+    if (path) nodeActions.append(button(translate('入口客户端链接'), () => shareShadowsocks(path.exit, path.entry, path.hops.map(hop => names.get(hop.node_id)).join(' → ')), 'primary'));
+    if (canWrite()) {
+      const enabled = rules.get(topologyKey(root))?.enabled;
+      nodeActions.append(button(enabled ? translate('停用关联链路') : translate('启用关联链路'), () => changeTopologyComponent(snapshot, topologyKey(root), !enabled)));
+    }
+    card.append(nodeActions); p.append(card);
+  }
+  if (roots.length > pageSize) {
+    const pager = el('div', undefined, 'toolbar');
+    const previous = button(translate('上一页'), () => { state.pathPage--; return renderTopology(); }); previous.disabled = state.pathPage === 0;
+    const next = button(translate('下一页'), () => { state.pathPage++; return renderTopology(); }); next.disabled = (state.pathPage + 1) * pageSize >= roots.length;
+    pager.append(previous, el('span', msg`第 ${state.pathPage + 1} 页 · 共 ${roots.length} 条路径`), next); p.append(pager);
+  }
   const status = panel(translate('节点应用状态'), translate('配置在控制器一次提交，各节点异步应用。修订一致不代表业务探测成功；改向前需停用相关链路，并确认涉及节点的全部活跃会话归零。'));
   status.append(table([translate('节点'), translate('实际 / 期望修订'), translate('活跃 TCP / UDP'), translate('回报'), translate('应用结果')], snapshot.nodes.filter(node => ids.has(node.id)).map(node => [node.name, `${node.applied_revision} / ${node.desired_revision}`, `${node.stats.active_tcp} / ${node.stats.active_udp}`, timestamp(node.last_seen_ms), node.apply_error || applicationBadge(node).textContent])));
-  if (state.view === 'topology') $('#content').replaceChildren(p, status);
+  if (state.view === 'topology') $('#content').replaceChildren(p, ...(roots.length ? [status] : []));
 }
 async function previewTopology(snapshot, input, summary = '', back = null, diagramRoots = []) {
   const preview = await api('/configurations/preview', { method: 'POST', body: input });
@@ -2034,11 +2095,11 @@ async function previewTopology(snapshot, input, summary = '', back = null, diagr
   const combined = { ...snapshot, configs: snapshot.configs.map(config => preview.configs.find(updated => updated.node_id === config.node_id) || config) };
   for (const root of diagramRoots) { const view = forwardingPathView(); view.update(forwardingDiagram(combined, root), 'validated'); body.append(view.box); }
   if (summary) body.append(el('p', summary, 'workflow-callout'));
-  body.append(el('p', translate('下面是服务器校验后的变更。发布会同时提交期望配置；节点应用结果请在拓扑页逐项确认。')), table([translate('节点'), translate('修订'), translate('新增 / 修改 / 删除规则')], preview.changes.map(change => [snapshot.nodes.find(node => node.id === change.node_id)?.name || change.node_id, `${change.from_revision} → ${change.to_revision}`, `${change.added.length} / ${change.modified.length} / ${change.removed.length}`])));
+  body.append(el('p', translate('下面是服务器校验后的变更。发布会同时提交期望配置；节点应用结果请在转发路径页逐项确认。')), table([translate('节点'), translate('修订'), translate('新增 / 修改 / 删除规则')], preview.changes.map(change => [snapshot.nodes.find(node => node.id === change.node_id)?.name || change.node_id, `${change.from_revision} → ${change.to_revision}`, `${change.added.length} / ${change.modified.length} / ${change.removed.length}`])));
   for (const change of preview.changes) for (const diff of change.rule_changes) { const details = el('details'); details.append(el('summary', msg`${diff.after?.name || diff.before?.name} · 查看发布前后配置`), el('pre', JSON.stringify({ before: diff.before, after: diff.after }, null, 2))); body.append(details); }
   if (back) body.append(button(translate('返回编辑'), back));
   body.append(button(translate('发布这些变更'), async () => { await api('/configurations/publish', { method: 'POST', body: input }); $('#dialog').close(); notify(translate('期望配置已同时提交，正在等待各节点应用。')); await navigate('topology'); }, 'primary'));
-  modal(translate('多节点发布预览'), body);
+  modal(translate('发布前检查'), body);
 }
 async function changeTopologyComponent(snapshot, seed, enabled) {
   const selected = new Set([seed]); let changed = true;
@@ -2046,24 +2107,25 @@ async function changeTopologyComponent(snapshot, seed, enabled) {
   const updates = snapshot.configs.filter(config => config.rules.some(rule => selected.has(`${config.node_id}/${rule.id}`))).map(config => ({ node_id: config.node_id, expected_revision: config.revision, rules: config.rules.map(rule => selected.has(`${config.node_id}/${rule.id}`) ? { ...rule, enabled } : rule) }));
   await previewTopology(snapshot, { updates });
 }
-async function newTopologyChain(snapshot) {
+async function newTopologyChain(snapshot, preset = {}) {
   if (snapshot.nodes.length < 2) { notify(translate('创建路径需要至少两个节点。请先注册并在对应 VPS 安装 Agent。'), true); return; }
   const users = await api('/users');
   const form = el('form'), rows = [], holder = el('div'), header = el('div', undefined, 'form-grid path-config-header');
-  field(header, 'name', translate('链路名称')).maxLength = 80;
+  form.append(el('h3', translate('1. 选择路径类型'), 'setup-step'));
+  field(header, 'name', translate('链路名称'), preset.name || '').maxLength = 80;
   const ownerField = select(header, 'owner', translate('规则所有者（须与所有节点同一租户）'), users.map(user => [user.id, `${user.username} · ${user.tenant_id}`]), state.actor.id);
-  const mode = select(header, 'exit_service', translate('出口服务'), localize([['forward', '转发到固定目标'], ['ss', '在出口 VPS 创建 Shadowsocks']]), 'forward');
-  const protocol = select(header, 'protocol', translate('传输协议（TCP / UDP）'), [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], 'tcp');
+  const mode = select(header, 'exit_service', translate('出口服务'), localize([['forward', '转发到固定目标'], ['ss', '在出口 VPS 创建 Shadowsocks']]), preset.mode || 'forward');
+  const protocol = select(header, 'protocol', translate('传输协议（TCP / UDP）'), [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], preset.protocol || 'tcp');
   const transport = select(header, 'transport', translate('节点间传输'), [['plain', translate('原生 TCP / UDP')], ['ws', translate('WS 流隧道 · 仅 TCP')], ['wss', translate('WSS 双向证书 · 仅 TCP')]], 'plain');
   form.append(header);
-  const pathView = forwardingPathView(); form.append(pathView.box);
+  const pathView = forwardingPathView();
   const placement = el('p', '', 'workflow-callout'); form.append(placement);
   const secure = el('div', undefined, 'form-grid');
   const identity = field(secure, 'server_identity', translate('中转 / 出口的服务器证书编号'), 'server');
   const authority = field(secure, 'ca_identity', translate('各节点的信任 CA 编号'), 'root');
   const clientIdentity = field(secure, 'client_identity', translate('入口 / 中转的客户端证书编号'), 'client');
   const wsFields = el('div'); const wsPath = field(wsFields, 'ws_path', translate('WebSocket 路径'), '/relay'); wsPath.maxLength = 1024;
-  form.append(secure, wsFields, holder);
+  form.append(secure, wsFields, el('h3', translate('2. 按顺序选择 VPS 和端口'), 'setup-step'), holder);
   let serial = 0;
   function draw() {
     holder.replaceChildren();
@@ -2096,6 +2158,7 @@ async function newTopologyChain(snapshot) {
   const appendHop = button(translate('＋ 添加一跳'), () => { add(); draw(); }); form.append(appendHop);
   const targetBox = el('div'); const targets = textarea(targetBox, 'targets', translate('出口最终目标（每行一个；多个目标为加权相同的候选）'), '', true); form.append(targetBox);
   const ss = shadowsocksEditor(null); form.append(ss.box);
+  ss.setEnabled(mode.value === 'ss');
   function show() {
     const proxy = mode.value === 'ss';
     if (proxy) transport.value = 'plain'; transport.disabled = proxy;
@@ -2120,6 +2183,7 @@ async function newTopologyChain(snapshot) {
   transport.addEventListener('change', show);
   protocol.addEventListener('change', show); ownerField.addEventListener('change', show); targets.addEventListener('input', show); ss.box.addEventListener('change', show);
   add(); add(); draw();
+  form.append(el('h3', translate('3. 检查整条路径'), 'setup-step'), pathView.box);
   form.append(el('p', translate('先校验并预览，再发布到各节点。发布不会开放防火墙；每跳独立计量。SS 路径分享链接使用入口地址和出口密钥。其他受管协议仍需先在出口节点配置服务及引擎。'), 'fine'));
   submit(form, translate('校验并预览链路'), async data => {
     const messages = localize({ path_hops: '路径需要 2–16 跳。', path_duplicate: '每一跳请选择不同的 VPS。', path_name: '请填写路径名称。', path_mode: '请选择有效的路径类型和传输协议。', path_transport: 'WS / WSS 仅支持 TCP；SS 向导使用原生转发。', path_ss: '请为出口选择 Shadowsocks 加密方式。', path_targets: '请填写至少一个最终目标。', path_tenant: '所有节点与规则所有者必须属于同一租户。', path_listen: '请为每一跳填写有效的监听地址和端口。', path_advertise: '请填写每一跳实际可达的 IP 或域名和端口，不能使用通配地址。', path_config: '节点配置缺失，请刷新后重试。' });

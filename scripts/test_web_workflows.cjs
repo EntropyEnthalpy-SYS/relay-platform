@@ -113,3 +113,19 @@ bounds.configs[0].rules.at(-1).targets = Array.from({ length: 40 }, (_, i) => ({
 assert.equal(forwardingDiagram(bounds, root).root.children.length, 32);
 assert.ok(forwardingDiagram(bounds, root).issues.some(i => i.code === 'truncated'));
 console.log('Diagram contracts passed: exit-only SS, live order and targets, branches, unresolved references, cycles, protocol/tenant checks, UoT requirements, bounded rendering and credential exclusion');
+
+const { forwardingPathRoots } = loadWorkflows();
+const rootsOf = value => copy(forwardingPathRoots({ ...value, configs: value.configs.map(config => ({ ...config, rules: config.rules.filter(rule => !rule.id.startsWith('existing-')) })) }));
+assert.deepEqual(rootsOf(topology), [root], 'a three-hop path must appear once, not as three rule rows');
+const independent = copy(topology);
+independent.configs[1].rules.push({ id: 'single', name: 'Independent listener', protocol: 'tcp', listen: '127.0.0.1:9009', targets: [{ address: 'localhost:9010' }] });
+assert.deepEqual(rootsOf(independent), [root, { node_id: 'node-2', rule_id: 'single' }], 'standalone listeners without advertised addresses must remain visible');
+const shared = copy(topology);
+shared.configs[0].rules.push({ ...shared.configs[0].rules[0], id: 'second-entry', targets: [copy(rules[0].targets[0])] });
+assert.deepEqual(rootsOf(shared), [root, { node_id: 'node-1', rule_id: 'second-entry' }], 'two entries sharing an exit are two complete paths');
+const cycleRoots = rootsOf(cyclic);
+assert.equal(cycleRoots.length, 1, 'a malformed cycle must stay visible without repeating forever');
+assert.ok(forwardingDiagram(cyclic, cycleRoots[0]).issues.some(issue => issue.code === 'cycle'));
+assert.equal(rootsOf(missing).length, 1, 'a broken reference must not hide its entry');
+assert.equal(rootsOf({ nodes: [], configs: [] }).length, 0);
+console.log('Path page grouping passed: complete chains, independent rules, shared exits, broken references and cycles');
