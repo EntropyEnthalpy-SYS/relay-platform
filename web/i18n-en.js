@@ -1810,7 +1810,7 @@ export default {
   "2. 按顺序选择 VPS 和端口": "2. Choose VPSs and ports in order",
   "3. 检查整条路径": "3. Review the complete path",
   "从入口到目的地": "From entry to destination",
-  "每张卡片是一条完整路径，入口、中转与出口在同一张图中。修改某台 VPS 的端口或服务，请进入对应节点规则。": "Each card shows a complete path, with entry, relays and exit in one diagram. Open a VPS's node rules to change its listeners or services.",
+  "每张路径图展示入口、中转与出口。点击图中的 VPS 卡片，即可编辑对应的节点规则。": "Each diagram shows the entry, relays and exit. Click a VPS card to edit its node rule.",
   "还没有转发路径": "No forwarding paths yet",
   "从模板创建单 VPS 服务或多跳路径。发布后，这里会自动按规则引用组成路径图。": "Create a single-VPS service or a multi-hop path from a template. Once published, its rule references form a path here automatically.",
   "{0} 台 VPS · {1} 条节点规则": "VPSs: {0} · Node rules: {1}",
@@ -1876,5 +1876,16 @@ export default {
   "创建规则 · 单台 VPS": "Create rule · One VPS",
   "1. 选择服务 VPS": "1. Choose the service VPS",
   "已自动生成 SS 密钥。客户端直接连接所选 VPS 上的 SS 服务。": "An SS key is generated for you. Clients connect directly to SS on the selected VPS.",
-  "路径：客户端 → {0}（SS）→ 客户端请求的目的地。": "Path: Client → {0} (SS) → Client-requested destination."
+  "路径：客户端 → {0}（SS）→ 客户端请求的目的地。": "Path: Client → {0} (SS) → Client-requested destination.",
+  "编辑 {0} · {1}": "Edit {0} · {1}",
+  "编辑 {0}": "Edit {0}",
+  "已选择 · 正在编辑": "Selected · Editing",
+  "点击编辑此跳": "Click to edit this hop",
+  "点击 VPS 卡片返回编辑，修改后重新预览。": "Click a VPS card to edit. Preview again after making changes.",
+  "点击 VPS 卡片编辑此跳；也支持 Tab 与 Enter。": "Click a VPS card to edit its hop. Tab and Enter also work.",
+  "此规则已变化，请刷新路径后重试。": "This rule has changed. Refresh the path and try again.",
+  "出口服务正在下方的图示编辑器中编辑。": "Exit service settings are open in the diagram editor below.",
+  "编辑选中的路径节点": "Edit selected path hop",
+  "完成此跳编辑": "Done editing this hop",
+  "正在图中编辑 · 查看设置": "Editing in diagram · View settings"
 };

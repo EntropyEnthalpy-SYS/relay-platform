@@ -13,6 +13,22 @@
 .address-setup { padding: 10px; border: 1px solid var(--line-strong); border-radius: 8px; margin-top: 8px; }
 .address-setup button { font-size: 11px; }
 .path-picker .error:empty { display: none; }
+.path-hop-placeholder { padding: 16px; border: 1px dashed var(--accent); border-radius: 10px; background: var(--surface-2); }
+.path-hop-placeholder strong { font-size: 12px; color: var(--accent); }
+.path-hop-placeholder p { font-size: 13px; }
+.path-inspector { margin: 16px 0; border: 1px solid var(--accent); border-radius: 12px; background: var(--surface); scroll-margin: 80px; }
+.path-inspector-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
+.path-inspector-head h3 { margin: 0; font-size: 14px; }
+.path-inspector-body { padding: 0 18px 18px; }
+.path-inspector .path-hop { margin-bottom: 0; }
+.path-inspector .path-hop .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (min-width: 900px) {
+  .path-inspector-body.with-service { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .path-inspector-body.with-service .form-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 650px) {
+  .path-inspector .path-hop .form-grid { grid-template-columns: 1fr; }
+}
 .setup-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 20px; }
 .setup-card { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: 24px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--surface); }
 .setup-card h3 { margin: 16px 0 8px; font-size: 18px; }
@@ -56,6 +72,11 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
 .flow-route, .flow-branch { display: flex; align-items: center; flex: 0 0 auto; }
 .flow-card { display: flex; flex-direction: column; align-items: flex-start; flex: 0 0 160px; width: 160px; padding: 12px; gap: 7px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); overflow-wrap: anywhere; }
 .flow-card > strong { font-size: 13px; line-height: 1.5; }
+.flow-card.flow-selectable { text-align: left; white-space: normal; color: var(--text); font-weight: 400; cursor: pointer; }
+.flow-card.flow-selectable:hover { border-color: var(--accent); background: var(--surface); box-shadow: 0 0 0 1px var(--accent); }
+.flow-card.flow-selectable:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+.flow-card.flow-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+.flow-edit-hint { margin-top: 5px; font-size: 11px; color: var(--accent); font-weight: 600; }
 .flow-card .fine { margin: 0; font-size: 11px; line-height: 1.6; }
 .flow-role { font-size: 10px; color: var(--muted); letter-spacing: .04em; }
 .flow-service { border-color: var(--accent); box-shadow: inset 0 3px 0 var(--accent); }

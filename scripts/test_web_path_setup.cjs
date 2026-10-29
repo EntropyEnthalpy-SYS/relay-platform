@@ -10,12 +10,14 @@ class Element {
   addEventListener(type, handler) { (this.events[type] ||= []).push(handler); }
   async fire(type) { for (const handler of this.events[type] || []) await handler(); }
   setAttribute() {}
+  focus() { this.focused = true; }
+  scrollIntoView() { this.scrolledIntoView = true; }
   get options() { return this.children; }
   all() { return this.children.flatMap(x => [x, ...x.all()]); }
   querySelectorAll() { return this.all().filter(x => ['input', 'select', 'textarea'].includes(x.tag)); }
 }
 async function fixture(single = false, entryNode) {
-  let form, handler, preview, diagram, pending, delayed = false, savedProfiles = 0;
+  let form, handler, preview, diagram, pending, viewOptions, focusedRef, delayed = false, savedProfiles = 0;
   const nodes = [1,2,3,4].map(i => ({ id: 'node-' + i, name: 'VPS ' + i, tenant_id: 'tenant', enrolled: true, profile: { revision: 2, settings: { notes: 'Preserve metadata', forwarding: i === 3 ? null : { host: '192.0.2.' + i, port_start: 20000, port_end: 29999 } } } }));
   const snapshot = { nodes, configs: nodes.map(n => ({ node_id: n.id, revision: 5, rules: [{ id: 'keep-' + n.id }] })) };
   const actor = { id: 'admin', tenant_id: 'tenant' };
@@ -25,9 +27,9 @@ async function fixture(single = false, entryNode) {
     button: (text, fn) => { const b = new Element('button', text); b.action = fn; return b; },
     modal: (_title, body) => { form = body; }, notify: message => { throw Error(message); },
     submit: (_form, _text, fn) => { handler = fn; },
-    forwardingPathView: () => ({ box: new Element('div'), update: value => { diagram = value; } }),
+    forwardingPathView: options => { viewOptions = options; return { box: new Element('div'), update: value => { diagram = value; }, focusNode: ref => { focusedRef = ref; } }; },
     shadowsocksEditor: () => { let on = false; return { box: new Element('details'), setEnabled: value => { on = value; }, read: () => on ? { method: '2022-blake3-aes-256-gcm', password: 'test-key', udp_over_tcp: true } : null }; },
-    previewTopology: async (current, input) => { preview = { current, input }; },
+    previewTopology: async (current, input, summary, back, roots, editHop) => { preview = { current, input, back, roots, editHop }; },
     api: async (path, options) => {
       if (path === '/users') return [actor];
       if (path.endsWith('/profile')) {
@@ -58,6 +60,9 @@ async function fixture(single = false, entryNode) {
     orderedNodes: () => form.all().filter(x => x.tag === 'select' && x.name.startsWith('node-')).map(x => x.value),
     flush: async () => { const fn = pending; pending = null; if (fn) await fn(); },
     delayNext: () => { delayed = true; },
+    selectHop: node_id => viewOptions.onSelect({ node_id }),
+    get selectedHop() { return viewOptions.selected(); },
+    get focusedRef() { return focusedRef; },
     submit: () => handler({ get: name => form.all().find(x => x.name === name)?.value ?? null })
   };
 }
@@ -113,5 +118,38 @@ async function fixture(single = false, entryNode) {
   race.control('node-1').value = 'node-1'; await race.control('node-1').fire('change'); await race.flush();
   race.ctx.rejectOld(); await oldFailure;
   assert.ok(!race.form.all().some(x => x.textContent === 'stale allocation failed'), 'late rejection must not overwrite current allocation status');
+  const interactive = await fixture();
+  interactive.selectHop('node-2');
+  assert.equal(interactive.selectedHop.node_id, 'node-2');
+  assert.ok(interactive.control('node-1').focused, 'diagram selection must focus the real VPS control');
+  assert.equal(interactive.form.all().filter(x => x.name === 'node-1').length, 1, 'inspector must reuse controls, not duplicate them');
+  interactive.control('node-1').value = 'node-4'; await interactive.control('node-1').fire('change'); await interactive.flush();
+  assert.equal(interactive.selectedHop.node_id, 'node-4');
+  assert.equal(interactive.diagram.root.children[0].next.name, 'VPS 4');
+  interactive.control('manual-1').checked = true; await interactive.control('manual-1').fire('change');
+  interactive.control('listen-1').value = '0.0.0.0:31111'; interactive.control('advertise-1').value = 'exit.example:41111';
+  await interactive.control('advertise-1').fire('input'); await interactive.flush();
+  assert.equal(interactive.diagram.root.children[0].next.endpoint, 'exit.example:41111');
+  await interactive.submit();
+  const reviewed = interactive.preview, reviewedExit = reviewed.input.updates.at(-1);
+  await reviewed.editHop({ node_id: reviewedExit.node_id, rule_id: reviewedExit.rules.at(-1).id });
+  assert.equal(interactive.selectedHop.node_id, 'node-4', 'review card must reopen the matching draft hop');
+  interactive.control('advertise-1').value = 'exit.example:41112'; await interactive.control('advertise-1').fire('input'); await interactive.flush();
+  await interactive.submit();
+  assert.equal(interactive.preview.input.updates.at(-1).rules.at(-1).advertise, 'exit.example:41112');
+  assert.equal(reviewed.input.updates.at(-1).rules.at(-1).advertise, 'exit.example:41111', 'editing must not mutate an old validated batch');
+  await interactive.button('完成此跳编辑').action();
+  assert.equal(interactive.selectedHop, null);
+  assert.equal(interactive.focusedRef.node_id, 'node-4');
+  assert.equal(interactive.control('advertise-1').value, 'exit.example:41112', 'closing inspector must retain the draft');
+  assert.equal(interactive.form.all().filter(x => x.name === 'advertise-1').length, 1);
+  await interactive.button('＋ 添加中转 VPS（可选）').action(); await interactive.flush();
+  interactive.selectHop('node-2');
+  await interactive.control('node-2').parentElement.parentElement.all().find(x => x.tag === 'button' && x.textContent === interactive.ctx.translate('移除此跳')).action(); await interactive.flush();
+  assert.equal(interactive.selectedHop, null, 'removing the selected relay must close its inspector');
+  assert.deepEqual(interactive.orderedNodes(), ['node-1', 'node-4']);
+  await interactive.submit();
+  assert.equal(interactive.preview.input.updates.at(-1).node_id, 'node-4', 'removing a selected relay must preserve the SS exit');
+  console.log('Diagram selection passed: original controls reused, selected VPS/port edits update the path, review edits invalidate prior validation, close retains drafts and restores card focus');
   console.log('Guided setup passed: automatic endpoints, fixed exit on relay insertion/reorder, one-time address setup, manual override, fresh config preservation, exit-only SS, single VPS, preview-only submit and stale response rejection');
 })().catch(error => { console.error(error); process.exitCode = 1; });
