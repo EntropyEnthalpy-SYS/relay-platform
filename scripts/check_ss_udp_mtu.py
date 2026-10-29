@@ -96,14 +96,31 @@ def run(args):
             else:
                 link(*links,names[0],names[1],'198.18.0.1/24','198.18.0.2/24',1280)
                 server_ip='198.18.0.2'
+            client_server_ip=server_ip
+            if args.nat_entry:
+                # DNAT happens only inside the disposable router namespace. The
+                # wildcard entry must reply from its actual private destination.
+                client_server_ip='198.18.20.2'
+                for protocol in ['tcp','udp']:
+                    subprocess.run(['ip','netns','exec',names[3],'iptables','-t','nat','-A','PREROUTING',
+                        '-d',client_server_ip,'-p',protocol,'--dport','28228','-j','DNAT',
+                        '--to-destination',server_ip+':28228'],check=True,capture_output=True)
+                subprocess.run(['ip','netns','exec',names[3],'iptables','-t','nat','-A','PREROUTING',
+                    '-d',client_server_ip,'-p','udp','--dport','28231','-j','DNAT',
+                    '--to-destination',server_ip+':28231'],check=True,capture_output=True)
             secret=base64.b64encode(os.urandom(32)).decode()
             base={'tenant_id':'default','owner_id':'admin','protocol':'both','enabled':True,'meter_epoch':'mtu','connect_timeout_ms':3000,'idle_timeout_secs':30}
-            rules=[{**base,'id':'entry','name':'MTU entry','listen':server_ip+':28228','targets':[{'address':'127.0.0.1:28229','weight':1}]},
+            rules=[{**base,'id':'entry','name':'MTU entry','listen':('0.0.0.0' if args.nat_entry else server_ip)+':28228','targets':[{'address':'127.0.0.1:28229','weight':1}]},
                    {**base,'id':'exit','name':'MTU SS exit','listen':'127.0.0.1:28229','targets':[],
                     'inbound_shadowsocks':{'method':'2022-blake3-aes-256-gcm','password':secret,'allow_private_destinations':True,'udp_over_tcp':True}}]
+            if args.nat_entry:
+                rules += [{**base,'id':'plain-entry','name':'NAT plain entry','listen':'0.0.0.0:28231','protocol':'udp',
+                           'targets':[{'address':'127.0.0.1:28232','weight':1}]},
+                          {**base,'id':'plain-exit','name':'NAT plain exit','listen':'127.0.0.1:28232','protocol':'udp',
+                           'targets':[{'address':'127.0.0.1:28230','weight':1}]}]
             config=root/'relay.json';config.write_text(json.dumps({'api_version':1,'node_id':'mtu-fixture','revision':1,'rules':rules}));config.chmod(0o600)
             profile={'log':{'level':'warn'},'inbounds':[{'type':'socks','listen':'127.0.0.1','listen_port':28340}],
-                     'outbounds':[{'type':'shadowsocks','tag':'test','server':server_ip,'server_port':28228,'method':'2022-blake3-aes-256-gcm','password':secret}],
+                     'outbounds':[{'type':'shadowsocks','tag':'test','server':client_server_ip,'server_port':28228,'method':'2022-blake3-aes-256-gcm','password':secret}],
                      'route':{'final':'test'}}
             (root/'profile.json').write_text(json.dumps(profile));(root/'profile.json').chmod(0o600)
             echo="import socket\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.bind(('127.0.0.1',28230))\nwhile True:\n b,p=s.recvfrom(65535);s.sendto(b,p)"
@@ -112,6 +129,11 @@ def run(args):
             ready="import socket,time\nend=time.monotonic()+15\nwhile True:\n try:\n  s=socket.create_connection(('198.18.0.2',28228),timeout=.2);s.close();break\n except OSError:\n  if time.monotonic()>end:raise\n  time.sleep(.05)"
             ready=ready.replace('198.18.0.2',server_ip)
             subprocess.run(['ip','netns','exec',names[1],sys.executable,'-c',ready],check=True,capture_output=True,timeout=20)
+            if args.nat_entry:
+                # First application packet on this new DNAT listener is empty.
+                plain="import json,socket\ns=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.settimeout(3);s.setsockopt(socket.IPPROTO_IP,10,0);s.connect((%r,28231));rows=[]\nfor i,n in enumerate([0,1,64,512,1000,1180,1200,1400,4096,8192]*3):\n b=bytes([i])*n;s.send(b)\n try:r=s.recv(65535);ok=r==b\n except socket.timeout:ok=False\n rows.append({'bytes':n,'delivered':ok})\nprint(json.dumps({'case':'plain-native-DNAT','negative_control':False,'passed':all(r['delivered'] for r in rows),'samples':rows}))"%client_server_ip
+                output=subprocess.check_output(['ip','netns','exec',names[0],sys.executable,'-c',plain],timeout=120,text=True)
+                results.append(json.loads(output))
             cases=[('explicit-false',args.client),('default',args.client),('explicit-true',args.client),('uot',args.client)]
             if args.previous_client:cases.insert(0,('previous-default',args.previous_client))
             for case,client in cases:
@@ -130,11 +152,12 @@ def run(args):
             for link in links:subprocess.run(['ip','link','del',link],capture_output=True,timeout=15)
     present=subprocess.check_output(['ip','netns','list'],text=True)
     cleaned=all(name not in present for name in created)
-    return {'completed':True,'mtu':1280,'routed_bottleneck':args.routed,'topology':'four namespaces with 1500/1280/1500 links' if args.routed else 'two disposable namespaces; plain entry -> SS exit -> UDP echo','cases':results,'cleanup_passed':cleaned,'passed':cleaned and all(r['passed'] for r in results)}
+    return {'completed':True,'mtu':1280,'routed_bottleneck':args.routed,'nat_entry':args.nat_entry,'topology':'four namespaces with 1500/1280/1500 links' if args.routed else 'two disposable namespaces; plain entry -> SS exit -> UDP echo','cases':results,'cleanup_passed':cleaned,'passed':cleaned and all(r['passed'] for r in results)}
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path);p.add_argument('--client',type=Path,required=True);p.add_argument('--previous-client',type=Path);p.add_argument('--output',type=Path);p.add_argument('--worker');p.add_argument('--directory');p.add_argument('--routed',action='store_true',help='Cold route cache, MTU 1500 endpoints and a 1280 transit bottleneck');a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--binary',type=Path);p.add_argument('--client',type=Path,required=True);p.add_argument('--previous-client',type=Path);p.add_argument('--output',type=Path);p.add_argument('--worker');p.add_argument('--directory');p.add_argument('--routed',action='store_true',help='Cold route cache, MTU 1500 endpoints and a 1280 transit bottleneck');p.add_argument('--nat-entry',action='store_true',help='With --routed: DNAT public endpoint to a wildcard private entry in disposable namespaces');a=p.parse_args()
+    if a.nat_entry and not a.routed:p.error('--nat-entry requires --routed')
     if a.worker:print(json.dumps(worker(a.directory,str(a.client),a.worker)))
     else:
         if not a.binary or not a.output:p.error('--binary and --output are required')
