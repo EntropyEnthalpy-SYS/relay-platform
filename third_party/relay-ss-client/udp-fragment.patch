@@ -1,0 +1,13 @@
+--- a/protocol/shadowsocks/outbound.go
++++ b/protocol/shadowsocks/outbound.go
+@@ -50,6 +50,10 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	// SS framing adds bytes to the application's datagram. Permit IP
++	// fragmentation on smaller paths unless the operator explicitly disables it.
++	// This changes the default only: an explicit udp_fragment:false still wins.
++	options.UDPFragmentDefault = true
+ 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
+ 	if err != nil {
+ 		return nil, err

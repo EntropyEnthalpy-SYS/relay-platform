@@ -490,3 +490,10 @@ Subscriptions add format `sing_box`. Both `sing_box` and `clash` (mihomo/Clash M
 ## 0.119.0 Shadowsocks UDP-over-TCP
 
 `inbound_shadowsocks` 新增 `udp_over_tcp`（boolean，缺省 false）。启用后需 `protocol=tcp` 或 `both`，接受 SagerNet UoT v1/v2；客户端必须显式启用同一扩展。普通 `ss://` 链接无法表达此选项，面板提供包含入口地址、出口凭据和 UoT v2 的 sing-box / Relay JSON，订阅的 sing-box 和 mihomo 格式也会写入相应选项。UoT 使用 TCP 连接数上限与活动计数，按 UDP 负载执行配额、速率、目的地 / 端口 ACL 和私网限制。原生 SS UDP 同时执行显式目的地 ACL。先升级 Agent 再发布。客户端半关闭补丁、源代码与使用步骤见 [SS_COMPATIBILITY_0.119.0_EN.md](SS_COMPATIBILITY_0.119.0_EN.md)。
+
+
+## 0.121.0 UDP 客户端与监听就绪
+
+面板及 sing-box 订阅的原生 SS UDP JSON 现在包含 `udp_fragment: true`；UoT 仍显式使用 v2，TCP-only 不添加 UDP 设置。随源码提供的 Relay SS 客户端也默认允许 SS UDP 分片，用户显式设置 `false` 时继续遵从。普通 `ss://` 无法表达分片或 UoT 选项。
+
+CLI `reverse-mux-server --ready-file <新文件路径>` 在监听绑定和参数校验完成后生成权限 0600 的 JSON，报告实际地址、PID、版本和 `listeners_bound` 状态。支持 `:0`，避免先探测空闲端口再关闭造成的竞争；已有文件不会覆盖。消费者须等待完整 JSON 并核对存活 PID，业务连通仍须另测。详见 [0.121.0 guide](RELEASE_0.121.0_EN.md)。

@@ -512,6 +512,7 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 let mut value = serde_json::json!({"type":"shadowsocks","tag":entry.name,"server":entry.host,"server_port":entry.port,"method":entry.method,"password":entry.password});
                 if !entry.udp { value["network"] = "tcp".into(); }
                 else if entry.udp_over_tcp { value["udp_over_tcp"] = serde_json::json!({"enabled":true,"version":2}); }
+                else { value["udp_fragment"] = true.into(); }
                 value
             })).collect();
             // A selector name cannot collide with an arbitrary user-facing rule label.
@@ -637,6 +638,23 @@ mod tests {
             node_tags: vec!["prod".into()],
             rule: rule(),
         }]
+    }
+
+    #[test]
+    fn native_udp_profiles_allow_fragmentation_without_changing_tcp_only_profiles() {
+        for udp in [true, false] {
+            let template = Template {
+                udp,
+                ..Default::default()
+            };
+            let result = render(Format::SingBox, &template, &candidates()).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+            if udp {
+                assert_eq!(value["outbounds"][0]["udp_fragment"], true);
+            } else {
+                assert!(value["outbounds"][0].get("udp_fragment").is_none());
+            }
+        }
     }
 
     #[test]

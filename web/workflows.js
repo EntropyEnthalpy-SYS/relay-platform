@@ -27,7 +27,10 @@ export function shadowsocksClientProfile(spec, endpoint, tag, protocol = 'both')
   if (!endpoint?.host || endpoint.wildcard || !endpoint.port) throw new Error('client_endpoint');
   const outbound = { type: 'shadowsocks', tag: 'relay-path', server: endpoint.host, server_port: Number(endpoint.port), method: spec.method, password: spec.password };
   if (spec.udp_over_tcp) outbound.udp_over_tcp = { enabled: true, version: 2 };
-  else if (protocol !== 'both') outbound.network = protocol;
+  else {
+    if (protocol !== 'tcp') outbound.udp_fragment = true;
+    if (protocol !== 'both') outbound.network = protocol;
+  }
   return { log: { level: 'warn' }, inbounds: [{ type: 'socks', tag: tag || 'Relay', listen: '127.0.0.1', listen_port: 1080 }], outbounds: [outbound], route: { final: 'relay-path' } };
 }
 

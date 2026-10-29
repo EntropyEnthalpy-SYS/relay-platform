@@ -60,6 +60,10 @@ assert.equal(compatible.outbounds[0].password, key);
 assert.deepEqual(compatible.outbounds[0].udp_over_tcp, { enabled: true, version: 2 });
 assert.equal(compatible.inbounds[0].listen, '127.0.0.1');
 assert.equal(shadowsocksClientProfile(input.shadowsocks, path.endpoint, 'Native').outbounds[0].udp_over_tcp, undefined);
+assert.equal(shadowsocksClientProfile(input.shadowsocks, path.endpoint, 'Native').outbounds[0].udp_fragment, true, 'native UDP must allow fragmentation on low-MTU paths');
+assert.equal(shadowsocksClientProfile(input.shadowsocks, path.endpoint, 'UDP only', 'udp').outbounds[0].udp_fragment, true);
+assert.equal(shadowsocksClientProfile(input.shadowsocks, path.endpoint, 'TCP only', 'tcp').outbounds[0].udp_fragment, undefined);
+assert.equal(compatible.outbounds[0].udp_fragment, undefined, 'UoT uses its negotiated TCP transport');
 assert.throws(() => shadowsocksClientProfile(input.shadowsocks, { host: '', port: '90' }, 'Invalid'), /client_endpoint/);
 console.log('SS client profiles preserve entry address, exit credentials and explicit UoT negotiation');
 

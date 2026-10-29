@@ -26,9 +26,11 @@ def build(directory, target, go):
     source = root / 'sing-box' / upstream['source']['filename']
     dependency = root / 'relay-ss-client' / patch_manifest['dependency_source']['filename']
     patch = root / 'relay-ss-client/half-close.patch'
+    client_patch = root / 'relay-ss-client' / patch_manifest['client_patch']['filename']
     for path, expected in [(source, upstream['source']['sha256']),
                            (dependency, patch_manifest['dependency_source']['sha256']),
-                           (patch, patch_manifest['patch_sha256'])]:
+                           (patch, patch_manifest['patch_sha256']),
+                           (client_patch, patch_manifest['client_patch']['sha256'])]:
         if sha(path) != expected:
             raise ValueError(f'source checksum mismatch: {path.name}')
     directory = Path(directory).absolute()
@@ -43,16 +45,18 @@ def build(directory, target, go):
         dependency_source = temp / 'sing-shadowsocks2-a69d1086332b'
         with patch.open('rb') as changes:
             subprocess.run(['patch', '-p1', '--batch'], cwd=dependency_source, stdin=changes, check=True)
+        with client_patch.open('rb') as changes:
+            subprocess.run(['patch', '-p1', '--batch'], cwd=client_source, stdin=changes, check=True)
         subprocess.run([go, 'mod', 'edit', '-replace',
                         'github.com/sagernet/sing-shadowsocks2=' + str(dependency_source)],
                        cwd=client_source, check=True)
         staged = temp / 'output'; staged.mkdir()
         env = dict(os.environ, CGO_ENABLED='0', GOOS=target.split('-')[0], GOARCH=target.split('-')[1])
         subprocess.run([go, 'build', '-trimpath', '-ldflags',
-                        '-s -w -X github.com/sagernet/sing-box/constant.Version=relay-ss-client-0.119.0',
+                        '-s -w -X github.com/sagernet/sing-box/constant.Version=relay-ss-client-' + patch_manifest['version'],
                         '-o', str(staged / 'relay-ss-client'), './cmd/sing-box'],
                        cwd=client_source, env=env, check=True)
-        for path in [source, dependency, patch, root / 'sing-box/LICENSE',
+        for path in [source, dependency, patch, client_patch, root / 'sing-box/LICENSE',
                      root / 'sing-box/COPYING.GPL-3.0.txt', root / 'relay-ss-client/LICENSE.sing-shadowsocks2']:
             shutil.copy2(path, staged / path.name)
         manifest = dict(patch_manifest, target=target, binary_sha256=sha(staged / 'relay-ss-client'),

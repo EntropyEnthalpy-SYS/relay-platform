@@ -88,6 +88,10 @@ enum Command {
         public_listen: SocketAddr,
         #[arg(long)]
         token_file: PathBuf,
+        /// Create a new private JSON file after listeners bind and options validate.
+        /// Reports the selected ports when --control-listen/--public-listen use :0.
+        #[arg(long)]
+        ready_file: Option<PathBuf>,
         /// Concurrent public streams per control connection (1-1024).
         #[arg(long, default_value_t = 256, value_parser = clap::value_parser!(u16).range(1..=1024))]
         max_streams: u16,
@@ -510,6 +514,7 @@ async fn main() -> Result<()> {
             control_listen,
             public_listen,
             token_file,
+            ready_file,
             max_streams,
             idle_timeout_secs,
             tls_cert,
@@ -531,6 +536,10 @@ async fn main() -> Result<()> {
             let token = std::fs::read_to_string(&token_file)?
                 .trim_end_matches(['\r', '\n'])
                 .to_owned();
+            ensure!(
+                !token.is_empty() && token.len() <= 256,
+                "reverse token must be 1..256 bytes"
+            );
             relay_platform::reverse_mux::set_max_controls(max_controls);
             relay_platform::reverse_mux::set_max_total_streams(max_total_streams);
             relay_platform::reverse_mux::set_max_stream_bytes(max_stream_bytes);
@@ -548,10 +557,14 @@ async fn main() -> Result<()> {
             if udp.is_some() && max_controls != 1 {
                 anyhow::bail!("--udp-listen currently requires --max-controls 1");
             }
-            if let Some(address) = metrics_listen {
+            let metrics_address = if let Some(address) = metrics_listen {
                 let listener = tokio::net::TcpListener::bind(address).await?;
+                let address = listener.local_addr()?;
                 tokio::spawn(serve_mux_metrics(listener));
-            }
+                Some(address)
+            } else {
+                None
+            };
             let allow_public = allow_public_cidr
                 .iter()
                 .map(|value| {
@@ -575,14 +588,36 @@ async fn main() -> Result<()> {
                     "--public-tls-cert, --public-tls-key and --public-tls-client-ca must be paired"
                 ),
             };
-            match (tls_cert, tls_key, tls_client_ca) {
-                (Some(cert), Some(key), client_ca) => {
-                    let acceptor = match client_ca {
-                        Some(ca) => relay_platform::reverse_mux::tls_acceptor_with_client_ca(
-                            &cert, &key, &ca,
-                        )?,
-                        None => relay_platform::reverse_mux::tls_acceptor(&cert, &key)?,
-                    };
+            let control_tls = match (tls_cert, tls_key, tls_client_ca) {
+                (Some(cert), Some(key), client_ca) => Some(match client_ca {
+                    Some(ca) => {
+                        relay_platform::reverse_mux::tls_acceptor_with_client_ca(&cert, &key, &ca)?
+                    }
+                    None => relay_platform::reverse_mux::tls_acceptor(&cert, &key)?,
+                }),
+                (None, None, None) => None,
+                _ => anyhow::bail!(
+                    "--tls-cert, --tls-key and --tls-client-ca require both certificate and key"
+                ),
+            };
+            if let Some(path) = ready_file {
+                // Consumers wait for a complete JSON document and monitor the
+                // process too. Never overwrite a stale file or a symlink.
+                write_secret(
+                    &path,
+                    &serde_json::to_vec(&serde_json::json!({
+                        "state": "listeners_bound",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "pid": std::process::id(),
+                        "control_listen": control.local_addr()?,
+                        "public_listen": public.local_addr()?,
+                        "udp_listen": udp.as_ref().map(|s| s.local_addr()).transpose()?,
+                        "metrics_listen": metrics_address,
+                    }))?,
+                )?;
+            }
+            match control_tls {
+                Some(acceptor) => {
                     if let Some(udp) = udp {
                         relay_platform::reverse_mux::serve_mux_tls_public_udp(
                             control,
@@ -621,7 +656,7 @@ async fn main() -> Result<()> {
                         .await?;
                     }
                 }
-                (None, None, None) => {
+                None => {
                     if let Some(udp) = udp {
                         if let Some(public_acceptor) = public_tls {
                             relay_platform::reverse_mux::serve_mux_public_tls_udp(
@@ -670,9 +705,6 @@ async fn main() -> Result<()> {
                         .await?;
                     }
                 }
-                _ => anyhow::bail!(
-                    "--tls-cert, --tls-key and --tls-client-ca require both certificate and key"
-                ),
             }
         }
         Command::ReverseMuxClient {
