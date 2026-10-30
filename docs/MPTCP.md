@@ -10,7 +10,44 @@ The rule editor exposes both policies. Node statistics include cumulative negoti
 
 Linux acceptance has established a real relay flow with three kernel subflows over two disposable virtual Ethernet paths, then disabled its primary client interface. The same connection continued transferring correct data. Its persisted ledger contained exactly 2 MiB upload and 2 MiB download. This verifies subflows/failover, not WAN capacity or aggregation gain on independent physical links. Reproduce with `python3 scripts/check_linux_mptcp.py --binary PATH --workdir NEW_DIRECTORY` as root on a Linux test host. The harness only changes its own namespaces and removes them afterwards.
 
-Explicit Linux Rust probes: `cargo test --locked --test managed_mptcp -- --test-threads=1 --include-ignored`. The two opt-in tests require enabled MPTCP. Ordinary cross-platform checks verify validation, TCP fallback, observer cleanup and preservation of the previous configuration after a rejected live mode change.
+Explicit Linux Rust probes: `cargo test --locked --test managed_mptcp -- --test-threads=1 --include-ignored`. The three opt-in tests require enabled MPTCP; source-binding acceptance also uses IPv6 loopback. Ordinary cross-platform checks verify validation, TCP fallback, observer cleanup and preservation of the previous configuration after a rejected live mode change.
+
+## Linux 6.1 compatibility
+
+Before 0.127.1, outbound setup propagated a rejected `IP_BIND_ADDRESS_NO_PORT`
+option before it could connect. Linux 6.1 accepts creation of MPTCP sockets but
+rejects this optimization, causing both `prefer` and `require` connections to
+fail. Version 0.127.1 tolerates only `EOPNOTSUPP` and `ENOPROTOOPT`, and only when
+`SO_PROTOCOL` confirms the socket is actually MPTCP. A `prefer` socket already
+created as plain TCP receives no exception. Other option errors, interface/IP
+binding failures and connection failures remain fatal.
+
+The explicit source bind is preserved. An older kernel reserves an ephemeral
+port at bind time for those MPTCP sockets, so the port-sharing optimization is
+unavailable there. Ordinary TCP still defers allocation until connect. `prefer`
+can negotiate ordinary TCP with a TCP peer; `require` still rejects that peer.
+Ignoring an unsupported allocation optimization does not change either policy.
+
+Run the compatibility acceptance on an actual Linux 6.1 kernel with MPTCP and
+IPv6 enabled. A Debian 12 container on a newer host kernel does not provide this
+coverage. First build the test executable, then pass its path from Cargo's
+`compiler-artifact` record (`target.name == "managed_mptcp"`):
+
+```sh
+cargo test --locked --test managed_mptcp --no-run --message-format=json > mptcp-build.jsonl
+python3 scripts/check_linux_mptcp_compat.py \
+  --test-binary PATH_FROM_COMPILER_ARTIFACT \
+  --expected-kernel-prefix 6.1. --expect-unsupported-bind-option \
+  --output mptcp-linux61.json
+```
+
+The probe records the running kernel and the raw TCP/MPTCP option results for
+IPv4 and IPv6, then runs all managed MPTCP tests including the opt-in tests. It
+checks `prefer` fallback, strict rejection, negotiated MPTCP, explicit source
+binding, metering and observer cleanup. It uses loopback and ephemeral ports;
+it changes no sysctls, firewall rules or installed services. Linux unit tests
+also inject the legacy errno results, so newer-kernel CI checks the exception's
+scope even when its kernel accepts the option.
 
 Endpoint and route provisioning remain a host/network management task in this stage; the panel does not yet provision kernel endpoints. End-to-end WAN acceptance and equal-condition throughput comparisons remain open.
 

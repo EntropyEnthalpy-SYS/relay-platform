@@ -135,6 +135,25 @@ fn source_address(bind: Option<&OutboundBind>, ipv4: bool) -> Result<SocketAddr>
     }
 }
 
+#[cfg(target_os = "linux")]
+fn check_deferred_port_result(
+    result: nix::Result<()>,
+    protocol: impl FnOnce() -> std::io::Result<Option<Protocol>>,
+) -> Result<()> {
+    // Linux 6.1 can create MPTCP sockets but does not implement this
+    // optimization on them. Keep the socket and the explicit source bind;
+    // its ephemeral port will be reserved at bind time on those kernels.
+    // Inspect the actual socket: Prefer may already have selected TCP.
+    if matches!(
+        result,
+        Err(nix::errno::Errno::EOPNOTSUPP | nix::errno::Errno::ENOPROTOOPT)
+    ) && protocol().context("inspect outbound socket protocol")? == Some(Protocol::MPTCP)
+    {
+        return Ok(());
+    }
+    result.context("configure outbound deferred port allocation")
+}
+
 fn tcp_socket(
     bind: Option<&OutboundBind>,
     ipv4: bool,
@@ -155,10 +174,13 @@ fn tcp_socket(
     // node could hold only one ephemeral range of outbound connections in total
     // and any port in TIME_WAIT would be unusable.
     #[cfg(target_os = "linux")]
-    nix::sys::socket::setsockopt(
-        &socket,
-        nix::sys::socket::sockopt::IpBindAddressNoPort,
-        &true,
+    check_deferred_port_result(
+        nix::sys::socket::setsockopt(
+            &socket,
+            nix::sys::socket::sockopt::IpBindAddressNoPort,
+            &true,
+        ),
+        || reference.protocol(),
     )?;
     socket.bind(source_address(bind, ipv4)?)?;
     Ok(socket)
@@ -319,6 +341,48 @@ pub(crate) fn udp_listener(address: SocketAddr) -> Result<UdpSocket> {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use super::*;
+    use nix::errno::Errno;
+
+    #[test]
+    fn deferred_port_compatibility_requires_an_actual_mptcp_socket() {
+        for error in [Errno::EOPNOTSUPP, Errno::ENOPROTOOPT] {
+            assert!(check_deferred_port_result(Err(error), || Ok(Some(Protocol::MPTCP))).is_ok());
+            // Includes a Prefer socket that fell back to TCP during creation.
+            let tcp = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+            let failure = check_deferred_port_result(Err(error), || tcp.protocol()).unwrap_err();
+            assert_eq!(failure.downcast_ref::<Errno>(), Some(&error));
+            assert!(check_deferred_port_result(Err(error), || Ok(None)).is_err());
+            assert!(
+                check_deferred_port_result(Err(error), || {
+                    Err(std::io::Error::from_raw_os_error(Errno::EBADF as i32))
+                })
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_port_compatibility_preserves_other_errors() {
+        for error in [
+            Errno::EINVAL,
+            Errno::EPERM,
+            Errno::EACCES,
+            Errno::EBADF,
+            Errno::ENOMEM,
+        ] {
+            let failure = check_deferred_port_result(Err(error), || {
+                panic!("other errors must not inspect or fall back")
+            })
+            .unwrap_err();
+            assert_eq!(failure.downcast_ref::<Errno>(), Some(&error));
+        }
+        check_deferred_port_result(Ok(()), || {
+            panic!("successful option needs no protocol query")
+        })
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn outbound_sockets_take_their_port_at_connect_time() {
         // A port reserved at bind time would be unique across destinations,

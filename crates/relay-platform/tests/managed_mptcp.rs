@@ -139,6 +139,61 @@ mod linux {
             .await
             .unwrap()
     }
+
+    #[tokio::test]
+    #[ignore = "requires Linux with enabled IPv4/IPv6 MPTCP; run during kernel compatibility acceptance"]
+    async fn outbound_modes_preserve_source_binding_on_both_address_families() {
+        for (address, source) in [("127.0.0.1:0", "127.0.0.2"), ("[::1]:0", "::1")] {
+            let address: std::net::SocketAddr = address.parse().unwrap();
+            let source: std::net::IpAddr = source.parse().unwrap();
+            for mode in [Mode::Prefer, Mode::Require] {
+                let socket = Socket::new(
+                    Domain::for_address(address),
+                    Type::STREAM,
+                    Some(SocketProtocol::MPTCP),
+                )
+                .unwrap();
+                socket.set_nonblocking(true).unwrap();
+                socket.bind(&address.into()).unwrap();
+                socket.listen(8).unwrap();
+                let listener = TcpListener::from_std(socket.into()).unwrap();
+                let target = listener.local_addr().unwrap();
+                let echo = tokio::spawn(async move {
+                    let (mut stream, peer) = listener.accept().await.unwrap();
+                    assert_eq!(peer.ip(), source, "explicit outbound IP must be preserved");
+                    assert_eq!(
+                        relay_platform::mptcp::inspect(&stream).negotiated,
+                        Some(true)
+                    );
+                    let (mut reader, mut writer) = stream.split();
+                    tokio::io::copy(&mut reader, &mut writer).await.unwrap();
+                });
+                let temp = tempfile::tempdir().unwrap();
+                let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+                let mut r = rule(target, Protocol::Tcp);
+                r.outbound_bind = Some(OutboundBind {
+                    ip: Some(source),
+                    interface: None,
+                });
+                r.mptcp = Some(Config {
+                    inbound: Mode::Off,
+                    outbound: mode,
+                });
+                engine.apply(configured(1, r.clone())).await.unwrap();
+                let mut stream = TcpStream::connect(r.listen).await.unwrap();
+                exchange(&mut stream).await;
+                let observed = engine.stats().mptcp.unwrap();
+                assert_eq!(observed.negotiated_total, 1);
+                assert_eq!(observed.fallback_total, 0);
+                drop(stream);
+                engine.shutdown().await.unwrap();
+                timeout(Duration::from_secs(3), echo)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+    }
     #[tokio::test]
     #[ignore = "requires Linux with enabled MPTCP; run explicitly during Linux acceptance"]
     async fn required_mptcp_forwards_and_reports_live_negotiation() {

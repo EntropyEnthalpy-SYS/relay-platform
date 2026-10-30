@@ -54,3 +54,20 @@ jobs:
 
       - name: Run the regression suite
         run: sh scripts/verify.sh
+
+      - name: Run all managed MPTCP cases on the runner kernel
+        run: |
+          cargo test --locked --test managed_mptcp --no-run --message-format=json > mptcp-build.jsonl
+          python3 - <<'PY'
+          import json, pathlib, platform, subprocess
+          artifacts = [json.loads(line) for line in pathlib.Path('mptcp-build.jsonl').read_text().splitlines()]
+          executable = next(row['executable'] for row in artifacts
+                            if row.get('reason') == 'compiler-artifact'
+                            and row['target']['name'] == 'managed_mptcp' and row.get('executable'))
+          result = subprocess.run(['python3', 'scripts/check_linux_mptcp_compat.py',
+                                   '--test-binary', executable,
+                                   '--expected-kernel-prefix', platform.release(),
+                                   '--output', 'mptcp-runner.json'])
+          print(pathlib.Path('mptcp-runner.json').read_text())
+          raise SystemExit(result.returncode)
+          PY
