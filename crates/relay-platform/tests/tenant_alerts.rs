@@ -124,12 +124,40 @@ async fn mixed_tenant_incidents_are_routed_and_read_without_cross_tenant_data() 
             .ledger_id;
         report(&db, &node.id, &ledger, Some(&format!("{name} rejected")));
     }
+    // Hold delivery until both incidents are due. Their event timestamps differ,
+    // so an arbitrary polling tick can otherwise send two separate global
+    // messages instead of the mixed batch whose tenant routing this test checks.
+    db.set_alert_settings(
+        &admin,
+        alerts::Settings {
+            maintenance_until_ms: Some(now_ms() + 60_000),
+        },
+    )
+    .unwrap();
     let stop = CancellationToken::new();
     let worker = tokio::spawn(alerts::run(
         db.clone(),
         Duration::from_millis(20),
         stop.clone(),
     ));
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let open = db.alerts().snapshot().open;
+            if open.len() == 2
+                && open
+                    .iter()
+                    .all(|incident| now_ms() - incident.opened_at_ms >= alerts::GROUP_WAIT_MS)
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both tenant incidents must be due before releasing the mixed batch");
+    assert!(db.alerts().snapshot().deliveries.is_empty());
+    db.set_alert_settings(&admin, alerts::Settings::default())
+        .unwrap();
     let next = |rx: mpsc::UnboundedReceiver<String>| async move {
         let mut rx = rx;
         timeout(Duration::from_secs(10), rx.recv())
@@ -140,7 +168,10 @@ async fn mixed_tenant_incidents_are_routed_and_read_without_cross_tenant_data() 
     let (ma, mb, mg) = tokio::join!(next(a_rx), next(b_rx), next(g_rx));
     assert!(ma.contains("node-A-private") && !ma.contains("node-B-private"));
     assert!(mb.contains("node-B-private") && !mb.contains("node-A-private"));
-    assert!(mg.contains("node-A-private") && mg.contains("node-B-private"));
+    assert!(
+        mg.contains("node-A-private") && mg.contains("node-B-private"),
+        "{mg}"
+    );
     let visible = db.alert_overview(&op).unwrap();
     assert_eq!(visible["incidents"]["open"].as_array().unwrap().len(), 1);
     assert!(!visible.to_string().contains("node-B-private"));
