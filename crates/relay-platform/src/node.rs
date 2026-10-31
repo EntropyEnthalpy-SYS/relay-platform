@@ -145,11 +145,23 @@ pub struct NodeCost {
     pub amount_micros: u64,
     pub period: CostPeriod,
 }
+/// Where the operator says a node is. Only the panel map reads it; routing never does.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NodeLocation {
+    pub name: String,
+    /// Millionths of a degree, so saved profiles compare exactly.
+    pub latitude_micros: i32,
+    pub longitude_micros: i32,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct NodeSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forwarding: Option<ForwardingDefaults>,
+    /// Omitted when unset so profiles without a location stay readable by 0.127.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<NodeLocation>,
     pub kinds: Vec<NodeKind>,
     pub group: Option<String>,
     pub tags: Vec<String>,
@@ -162,6 +174,7 @@ impl Default for NodeSettings {
     fn default() -> Self {
         Self {
             forwarding: None,
+            location: None,
             kinds: vec![],
             group: None,
             tags: vec![],
@@ -209,6 +222,16 @@ impl NodeSettings {
                 .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
         {
             return reject(400, "invalid node kinds, group, tags or notes");
+        }
+        if self.location.as_ref().is_some_and(|location| {
+            !label(&location.name, 64)
+                || !(-90_000_000..=90_000_000).contains(&location.latitude_micros)
+                || !(-180_000_000..=180_000_000).contains(&location.longitude_micros)
+        }) {
+            return reject(
+                400,
+                "location requires a 1..64 byte name, latitude within 90 degrees and longitude within 180 degrees",
+            );
         }
         if self.cost.as_ref().is_some_and(|cost| {
             cost.currency.len() != 3
@@ -310,6 +333,7 @@ impl NodeFilter {
                     .into_iter()
                     .chain(settings.tags.iter())
                     .chain(settings.group.iter())
+                    .chain(settings.location.iter().map(|location| &location.name))
                     .any(|text| text.to_lowercase().contains(&q))
             })
     }

@@ -552,6 +552,15 @@ pub fn router(state: AppState) -> Router {
             }),
         )
         .route(
+            "/assets/globe.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    include_str!("../../../web/globe.js"),
+                )
+            }),
+        )
+        .route(
             "/assets/console-ui.js",
             get(|| async {
                 (

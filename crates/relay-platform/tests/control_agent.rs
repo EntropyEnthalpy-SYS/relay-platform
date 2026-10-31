@@ -840,7 +840,13 @@ async fn http_auth_role_and_schema_enforcement() {
     assert!(page.contains("id=\"command-dialog\""));
     assert!(page.contains("id=\"language-toggle\""));
     assert!(page.contains("id=\"login-language-toggle\""));
-    for asset in ["app.js", "console-ui.js", "i18n.js", "i18n-en.js"] {
+    for asset in [
+        "app.js",
+        "console-ui.js",
+        "i18n.js",
+        "i18n-en.js",
+        "globe.js",
+    ] {
         let response = client
             .get(format!("{origin}/assets/{asset}"))
             .send()

@@ -1,27 +1,29 @@
 import { t as translate, msg, localize, searchAliases } from '/assets/i18n.js';
 // The console shell is dependency-free and searches only its local page/guide index.
 export const pageInfo = localize({
-  overview: ['工作空间', 'NETWORK OVERVIEW', '从一处了解节点、转发链路与实时运行状态。', 'observability', 'dashboard monitor 总览 监控'],
-  nodes: ['工作空间', 'NODES & INFRASTRUCTURE', '连接你的服务器，管理每个节点的身份、配置与生命周期。', 'quickstart', 'server agent 服务器 注册'],
-  rules: ['工作空间', 'NODE RULES', '管理一台 VPS 上的监听端口、代理服务和转发目标。', 'rules', 'proxy gateway vless reality tuic hysteria2 socks http2 代理 网关'],
-  templates: ['工作空间', 'SETUP TEMPLATES', '从常见场景开始，选择 VPS，自动填写地址与端口，再预览发布。', 'rules', 'template 模板 端口'],
-  topology: ['工作空间', 'FORWARDING PATHS', '从客户端到最终目标查看完整路径；每一跳对应一条节点规则。', 'rules', 'chain route network 链路 聚合'],
-  health: ['观测与资源', 'TARGET HEALTH', '跟踪真实目标的探测结果，定位不可用的线路。', 'observability', 'latency failover 健康 延迟'],
-  usage: ['观测与资源', 'TRAFFIC LEDGER', '按规则与周期查看已上报的流量，核对用量记录。', 'resources', 'traffic bandwidth 计量 流量'],
-  budgets: ['观测与资源', 'SHARED BUDGETS', '在多个节点之间分配额度，追踪消费与尚未归还的预留。', 'resources', 'quota limit 配额 预算 限速'],
-  alerts: ['观测与资源', 'ALERTS & NOTIFICATIONS', '为需要关注的运行事件设置通知通道。', 'observability', 'smtp email telegram 邮件 告警'],
-  subscriptions: ['服务与协作', 'CLIENT SUBSCRIPTIONS', '将兼容规则交付给客户端，管理订阅的预览、有效期与撤销。', 'clients', 'clash mihomo sing-box subscription 客户端'],
-  dns: ['服务与协作', 'MANAGED DNS', '管理服务商与解析记录，先观察变更，再按需要应用。', 'operations', 'cloudflare 域名 解析'],
-  announcements: ['服务与协作', 'ANNOUNCEMENTS', '向工作空间与租户发布有明确生效时间的消息。', 'operations', '公告 消息'],
-  tickets: ['服务与协作', 'SUPPORT DESK', '将问题、回复与处理状态放在同一条记录中。', 'operations', 'support 工单 支持'],
-  commerce: ['服务与协作', 'WALLET & ORDERS', '查看现有钱包、套餐与订单记录；支付集成不在本轮交付范围。', 'operations', 'wallet order 钱包 订单'],
-  users: ['管理与帮助', 'PEOPLE & PERMISSIONS', '管理账号与租户，按角色分配工作空间访问权限。', 'security', 'tenant role user 租户 用户 权限'],
-  account: ['管理与帮助', 'ACCOUNT SECURITY', '管理登录保护、两步验证与自己的 API 令牌。', 'security', 'totp token password 安全 密码 令牌'],
-  audit: ['管理与帮助', 'AUDIT LOG', '追踪操作发生的时间、执行者与对象。', 'security', 'audit history 审计 日志'],
-  recovery: ['管理与帮助', 'RECOVERY & CONTINUITY', '检查恢复日志、备份与额度对账，保留系统的连续记录。', 'operations', 'backup restore 备份 恢复'],
-  capabilities: ['管理与帮助', 'DELIVERY STATUS', '区分已实现的能力与仍在开发、等待验收的部分。', 'operations', 'features roadmap 功能 进度'],
-  guide: ['管理与帮助', 'THE RELAY HANDBOOK', '从第一次连接到日常运维，在操作旁边找到答案。', 'quickstart', 'docs documentation help 文档 指南 帮助'],
+  overview: ['总览', 'NETWORK OVERVIEW', '节点在哪里、是否在线、流量走向哪里，一页看清。', 'observability', 'dashboard monitor globe map 总览 监控 地球 地图'],
+  nodes: ['转发配置', 'STEP 1 · SERVERS', '第一步：接入服务器。管理每台服务器的位置、身份、默认地址与运行许可。', 'quickstart', 'server agent location 服务器 注册 位置'],
+  topology: ['转发配置', 'STEP 2 · FORWARDING', '第二步：建立转发。每条转发从客户端出发，经过一台或多台服务器到达目标。', 'rules', 'chain route path forward 链路 路径 转发 多跳'],
+  rules: ['转发配置', 'STEP 2 · FORWARDING', '同一份转发配置，按服务器列出它上面运行的监听端口和服务。', 'rules', 'proxy gateway vless reality tuic hysteria2 socks http2 代理 网关 节点规则'],
+  templates: ['转发配置', 'REUSABLE TEMPLATES', '把常用的协议、目标和限制保存为模板，之后在任意服务器上一键创建规则。', 'rules', 'template 模板 模板库 端口'],
+  health: ['监控与用量', 'TARGET HEALTH', '跟踪真实目标的探测结果，定位不可用的线路。', 'observability', 'latency failover 健康 延迟'],
+  usage: ['监控与用量', 'TRAFFIC LEDGER', '按规则与周期查看已上报的流量，核对用量记录。', 'resources', 'traffic bandwidth 计量 流量'],
+  budgets: ['监控与用量', 'SHARED BUDGETS', '在多个节点之间分配额度，追踪消费与尚未归还的预留。', 'resources', 'quota limit 配额 预算 限速'],
+  alerts: ['监控与用量', 'ALERTS & NOTIFICATIONS', '为需要关注的运行事件设置通知通道。', 'observability', 'smtp email telegram 邮件 告警'],
+  subscriptions: ['客户与服务', 'CLIENT SUBSCRIPTIONS', '将兼容规则交付给客户端，管理订阅的预览、有效期与撤销。', 'clients', 'clash mihomo sing-box subscription 客户端'],
+  dns: ['客户与服务', 'MANAGED DNS', '管理服务商与解析记录，先观察变更，再按需要应用。', 'operations', 'cloudflare 域名 解析'],
+  announcements: ['客户与服务', 'ANNOUNCEMENTS', '向工作空间与租户发布有明确生效时间的消息。', 'operations', '公告 消息'],
+  tickets: ['客户与服务', 'SUPPORT DESK', '将问题、回复与处理状态放在同一条记录中。', 'operations', 'support 工单 支持'],
+  commerce: ['客户与服务', 'WALLET & ORDERS', '查看现有钱包、套餐与订单记录；支付集成不在本轮交付范围。', 'operations', 'wallet order 钱包 订单'],
+  users: ['系统与帮助', 'PEOPLE & PERMISSIONS', '管理账号与租户，按角色分配工作空间访问权限。', 'security', 'tenant role user 租户 用户 权限'],
+  account: ['系统与帮助', 'ACCOUNT SECURITY', '管理登录保护、两步验证与自己的 API 令牌。', 'security', 'totp token password 安全 密码 令牌'],
+  audit: ['系统与帮助', 'AUDIT LOG', '追踪操作发生的时间、执行者与对象。', 'security', 'audit history 审计 日志'],
+  recovery: ['系统与帮助', 'RECOVERY & CONTINUITY', '检查恢复日志、备份与额度对账，保留系统的连续记录。', 'operations', 'backup restore 备份 恢复'],
+  capabilities: ['系统与帮助', 'DELIVERY STATUS', '区分已实现的能力与仍在开发、等待验收的部分。', 'operations', 'features roadmap 功能 进度'],
+  guide: ['系统与帮助', 'THE RELAY HANDBOOK', '从第一次连接到日常运维，在操作旁边找到答案。', 'quickstart', 'docs documentation help 文档 指南 帮助'],
 });
+// "By server" is a tab of Forwarding rules, so the sidebar highlights that entry.
+export const navView = view => view === 'rules' ? 'topology' : view;
 const adminViews = new Set(['dns', 'audit', 'recovery']);
 export function canVisit(view, actor) {
   return !!actor && Object.hasOwn(pageInfo, view) && (!adminViews.has(view) || actor.role === 'system_admin') && (!['alerts', 'templates'].includes(view) || actor.role !== 'viewer');
@@ -30,14 +32,14 @@ export const guideArticles = localize([
   { id: 'quickstart', title: '连接你的第一个节点', subtitle: '从一台服务器开始，建立可观测的转发路径。', icon: 'server', read: '3 分钟', target: 'nodes', steps: [
     ['注册节点', '在「节点管理」创建节点，确认所属租户与用途，获取一次性注册令牌。令牌仅用于注册，请保存在受限权限的文件中。'],
     ['启动 Agent', '按照节点注册对话框中的部署信息，在服务器启动 Agent。控制服务地址、令牌文件与状态目录须对应同一个节点；等待控制在线。'],
-    ['创建并检查规则', '进入「模板库」选择单 VPS 或多跳转发 / SS。选择 VPS 后地址和端口自动填好；缺少地址时仅需保存一次，再预览发布。'],
+    ['创建并检查转发', '进入「转发规则」点击“＋ 新建转发”，选择单台服务器或多跳的端口转发 / SS。选择服务器后地址和端口自动填好；缺少地址时仅需保存一次，再预览发布。'],
     ['验证完整链路', '使用真实客户端连接入口，核对目标响应和流量账本。控制在线只表示 Agent 可联系面板，不能代替业务连接测试。'],
   ], note: '小规格机器先从少量规则与连接开始。最低配置取决于协议、并发与流量，不能用空载内存推算满载容量。' },
-  { id: 'rules', title: '规则、协议与多跳链路', subtitle: '先定义入口与目标，再按需要添加协议和策略。', icon: 'arrows', read: '4 分钟', target: 'rules', steps: [
-    ['选择规则类型', '「节点规则」管理一台 VPS 的服务；「转发路径」从入口展示整条连接；「模板库」提供四种常见场景的起点。三者使用同一份规则配置。'],
+  { id: 'rules', title: '规则、协议与多跳链路', subtitle: '先定义入口与目标，再按需要添加协议和策略。', icon: 'arrows', read: '4 分钟', target: 'topology', steps: [
+    ['选择规则类型', '「转发规则」的“全部转发”从客户端展示整条连接，“按服务器”列出一台服务器上运行的规则；两者是同一份配置。「规则模板」保存可复用的规则，可直接新建或从现有规则另存。'],
     ['配置受管协议', 'VLESS、Reality、Hysteria2、TUIC、AnyTLS、Trojan 与 VMess 按对应表单配置。节点需要已部署支持的协议引擎；公网监听与本机桥接监听是不同端点。'],
     ['保护与限制', '按需要配置来源 / 目的地 ACL、配额、有效期、会话上限与限速。TLS 证书编号对应节点本地证书；Reality 私钥应保留在可信配置中。'],
-    ['组织多跳与发布', '点击“创建转发路径”，选择入口与出口，按需添加中转；地址和端口自动分配。SS 仅在出口运行。点击“预览发布内容”检查图示后确认发布。等所有节点应用后，用“入口客户端链接”导入客户端并验证流量。'],
+    ['组织多跳与发布', '点击“＋ 新建转发”并选择多跳方式，选择入口与出口，按需添加中转；地址和端口自动分配。SS 仅在出口运行。点击“预览发布内容”检查图示后确认发布。等所有节点应用后，用“客户端链接”导入客户端并验证流量。'],
   ], note: 'MPTCP 的 Require 模式需要两端内核和网络支持。自有多路径聚合与 Linux MPTCP 是不同机制，不能用其中一种的结果替代另一种验收。' },
   { id: 'observability', title: '读懂监控与告警', subtitle: '把控制连通、目标探测和业务验证分开判断。', icon: 'activity', read: '3 分钟', target: 'health', steps: [
     ['查看总览', '吞吐曲线取自节点上报的采样；多跳流量逐跳计入。活跃会话合并 TCP 连接与 UDP 会话，没有近期回报时显示为空缺。'],
@@ -53,7 +55,7 @@ export const guideArticles = localize([
   ], note: '控制器从旧备份恢复后可能暂停新增额度分配。应完成恢复与对账，不能通过清除记录来回收未知消费。' },
   { id: 'clients', title: '交付客户端订阅', subtitle: '将兼容规则转换为可预览、可撤销的订阅。', icon: 'link', read: '2 分钟', target: 'subscriptions', steps: [
     ['检查公开端点', '确认规则的公开访问地址、端口、协议和证书服务名正确。本机桥接地址不能作为客户端访问入口。'],
-    ['选择客户端格式', '订阅按所有者收集兼容规则，可用节点标签筛选。当前订阅保存端点快照，不自动替换多跳入口端口；SS 多跳路径请使用转发路径页的“入口客户端链接”。不兼容的规则会列出原因。'],
+    ['选择客户端格式', '订阅按所有者收集兼容规则，可用节点标签筛选。当前订阅保存端点快照，不自动替换多跳入口端口；SS 多跳路径请在「转发规则」中使用该路径的“客户端链接”。不兼容的规则会列出原因。'],
     ['预览并导入', '先检查生成内容，再将订阅导入真实客户端，验证访问、DNS 和计量。Reality 私钥与内部桥接凭据不应出现在导出中。'],
     ['管理生命周期', '按需要设置有效期、轮换或撤销链接。订阅链接包含访问凭证，只分享给授权使用者。规则变化后按订阅页面的快照行为重新生成。'],
   ], note: '生成配置不等于客户端验收。每个要支持的客户端和协议组合都需要实际连接测试。' },
@@ -167,7 +169,7 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
   function sync(view) {
     const info = pageInfo[view]; $('#breadcrumb-group').textContent = info[0]; $('#breadcrumb-current').textContent = titles[view]; $('#page-kicker').textContent = info[1]; $('#view-description').textContent = info[2];
     document.title = `${titles[view]} · Relay`; $('#console-tab').classList.toggle('active', view !== 'guide'); $('#guide-tab').classList.toggle('active', view === 'guide');
-    document.querySelectorAll('[data-view]').forEach(n => { if (n.dataset.view === view) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current'); });
+    document.querySelectorAll('[data-view]').forEach(n => { if (n.dataset.view === navView(view)) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current'); });
     drawer(false); $('#main-content').dataset.view = view;
   }
   function renderGuide(container) {

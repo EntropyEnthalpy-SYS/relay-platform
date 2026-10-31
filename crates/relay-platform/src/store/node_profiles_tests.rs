@@ -1,6 +1,6 @@
 use super::*;
 use crate::lease::{LeasePolicy, LeaseProof, LeaseRelease, LeaseRequest};
-use crate::node::{CostPeriod, NodeCost, NodeKind, NodeLifecycle};
+use crate::node::{CostPeriod, NodeCost, NodeKind, NodeLifecycle, NodeLocation};
 
 struct Fixture {
     tmp: tempfile::TempDir,
@@ -64,6 +64,11 @@ fn detailed() -> NodeSettings {
             period: CostPeriod::Monthly,
         }),
         expires_at_ms: Some(now_ms() + 86_400_000),
+        location: Some(NodeLocation {
+            name: "台北 · 信义".into(),
+            latitude_micros: 25_033_000,
+            longitude_micros: 121_565_000,
+        }),
         ..Default::default()
     }
 }
@@ -164,6 +169,11 @@ fn filters_and_profile_updates_preserve_tenant_and_read_only_permissions() {
         1
     );
     assert!(f.db.nodes_filtered(&other, filter).unwrap().is_empty());
+    let by_location = NodeFilter {
+        q: Some("信义".into()),
+        ..Default::default()
+    };
+    assert_eq!(f.db.nodes_filtered(&viewer, by_location).unwrap().len(), 1);
     assert!(
         f.db.nodes_filtered(
             &viewer,
@@ -213,6 +223,15 @@ fn invalid_inventory_and_offline_lifecycle_controls_are_rejected_without_writes(
     cases.push(s);
     let mut s = detailed();
     s.expires_at_ms = Some(0);
+    cases.push(s);
+    let mut s = detailed();
+    s.location.as_mut().unwrap().latitude_micros = 90_000_001;
+    cases.push(s);
+    let mut s = detailed();
+    s.location.as_mut().unwrap().longitude_micros = i32::MIN;
+    cases.push(s);
+    let mut s = detailed();
+    s.location.as_mut().unwrap().name = String::new();
     cases.push(s);
     for settings in cases {
         denied(

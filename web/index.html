@@ -34,33 +34,34 @@
     <div class="topbar-brand"><button id="menu-toggle" class="icon-control mobile-only" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button><a class="brand" href="#overview"><span class="brand-mark small">R</span><span>Relay<span class="brand-sub">NETWORK WORKSPACE</span></span></a></div>
     <div class="topbar-tabs" aria-label="工作空间入口"><button id="console-tab" class="topbar-tab active">控制台</button><button id="guide-tab" class="topbar-tab">使用指南 <span aria-hidden="true">↗</span></button></div>
     <button id="command-open" class="search-trigger" aria-label="搜索页面与指南"><span data-icon="search"></span><span>搜索页面与指南…</span><kbd>⌘ K</kbd></button>
-    <div class="topbar-actions"><span class="build-badge">DEV 0.127.3</span><button id="language-toggle" class="language-toggle" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button><button id="theme" class="subtle appearance-trigger" type="button" aria-label="外观与布局" title="外观与布局" aria-haspopup="dialog"><span data-icon="sliders"></span><span class="appearance-label">外观</span></button><span id="identity" class="identity"></span></div>
+    <div class="topbar-actions"><span class="build-badge">DEV 0.128.0</span><button id="language-toggle" class="language-toggle" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button><button id="theme" class="subtle appearance-trigger" type="button" aria-label="外观与布局" title="外观与布局" aria-haspopup="dialog"><span data-icon="sliders"></span><span class="appearance-label">外观</span></button><span id="identity" class="identity"></span></div>
   </div>
   <button id="nav-backdrop" class="nav-backdrop" aria-label="关闭导航" tabindex="-1" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="工作空间导航">
     <div class="workspace-label"><span class="workspace-icon" data-icon="layers"></span><div><strong>我的工作空间</strong><span>Self-hosted infrastructure</span></div></div>
     <nav aria-label="主导航">
-      <div class="nav-group"><p class="nav-label">工作空间</p>
+      <div class="nav-group"><p class="nav-label">总览</p>
         <button data-view="overview" class="nav-button active"><span data-icon="overview"></span>运行总览</button>
-        <button data-view="nodes" class="nav-button"><span data-icon="server"></span>节点管理</button>
-        <button data-view="rules" class="nav-button"><span data-icon="arrows"></span>节点规则</button>
-        <button data-view="templates" class="nav-button tenant-admin-only"><span data-icon="layers"></span>模板库</button>
-        <button data-view="topology" class="nav-button"><span data-icon="network"></span>转发路径</button>
       </div>
-      <div class="nav-group"><p class="nav-label">观测与资源</p>
+      <div class="nav-group"><p class="nav-label">转发配置</p>
+        <button data-view="nodes" class="nav-button"><span data-icon="server"></span>节点管理</button>
+        <button data-view="topology" class="nav-button"><span data-icon="arrows"></span>转发规则</button>
+        <button data-view="templates" class="nav-button tenant-admin-only"><span data-icon="layers"></span>规则模板</button>
+      </div>
+      <div class="nav-group"><p class="nav-label">监控与用量</p>
         <button data-view="health" class="nav-button"><span data-icon="activity"></span>目标健康</button>
         <button data-view="usage" class="nav-button"><span data-icon="chart"></span>流量账本</button>
         <button data-view="budgets" class="nav-button"><span data-icon="gauge"></span>共享额度</button>
         <button data-view="alerts" class="nav-button tenant-admin-only"><span data-icon="bell"></span>告警通知</button>
       </div>
-      <div class="nav-group"><p class="nav-label">服务与协作</p>
+      <div class="nav-group"><p class="nav-label">客户与服务</p>
         <button data-view="subscriptions" class="nav-button"><span data-icon="link"></span>客户端订阅</button>
         <button data-view="dns" class="nav-button admin-only"><span data-icon="globe"></span>DNS 管理</button>
         <button data-view="announcements" class="nav-button"><span data-icon="flag"></span>公告</button>
         <button data-view="tickets" class="nav-button"><span data-icon="message"></span>工单</button>
         <button data-view="commerce" class="nav-button"><span data-icon="wallet"></span>钱包与订单</button>
       </div>
-      <div class="nav-group"><p class="nav-label">管理与帮助</p>
+      <div class="nav-group"><p class="nav-label">系统与帮助</p>
         <button data-view="users" class="nav-button"><span data-icon="users"></span>用户与权限</button>
         <button data-view="account" class="nav-button"><span data-icon="shield"></span>账户安全</button>
         <button data-view="audit" class="nav-button admin-only"><span data-icon="list"></span>操作审计</button>
@@ -72,7 +73,7 @@
     <div class="sidebar-bottom"><div><span class="version">独立部署 · 持续开发</span><span class="fine">你的网络，由你掌握。</span></div><button id="logout" data-logout class="icon-control" aria-label="退出登录" title="退出登录" data-icon="logout"></button></div>
   </aside>
   <main id="main-content" tabindex="-1">
-    <div class="page-breadcrumb"><span data-icon="home"></span><span>Relay</span><span aria-hidden="true">/</span><span id="breadcrumb-group">概览</span><span aria-hidden="true">/</span><span id="breadcrumb-current">运行总览</span></div>
+    <div class="page-breadcrumb"><span data-icon="home"></span><span>Relay</span><span aria-hidden="true">/</span><span id="breadcrumb-group">总览</span><span aria-hidden="true">/</span><span id="breadcrumb-current">运行总览</span></div>
     <header class="page-header"><div><p id="page-kicker" class="eyebrow">NETWORK OVERVIEW</p><h1 id="view-title">运行总览</h1><p id="view-description" class="view-description"></p></div><div class="header-right"><button id="context-help" class="subtle" type="button"><span data-icon="book"></span>页面指南</button><button id="refresh" class="subtle" type="button"><span data-icon="refresh"></span>刷新</button></div></header>
     <div class="page-meta"><span id="status-pill" class="status-pill" role="status"></span><span class="data-note"><span class="live-dot"></span>当前工作空间<span class="meta-separator">/</span><span id="refreshed">等待数据</span></span></div>
     <div id="overview-controls" class="overview-controls hidden"><div class="overview-layout-picker" role="group" aria-label="总览显示模式"><button id="overview-monitoring" type="button" aria-pressed="true" aria-controls="content">展开总览</button><button id="overview-workspace" type="button" aria-pressed="false" aria-controls="content">紧凑总览</button></div><span>同一份实时数据 · 仅切换显示布局</span></div>

@@ -9,6 +9,7 @@ node --check web/console-ui.js
 node --check web/i18n.js
 node --check web/i18n-en.js
 node --check web/workflows.js
+node --check web/globe.js
 node scripts/test_web_i18n.cjs
 node scripts/test_web_workflows.cjs
 node scripts/test_web_dialogs.cjs
