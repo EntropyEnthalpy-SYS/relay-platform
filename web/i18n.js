@@ -59,10 +59,23 @@ export function eventMessage(event) {
     target_down: [/^规则 (.+) 的目标 (.+)（(TCP|UDP) 端口 (\d+)）不可用，新连接改用其他目标(?:；原因：([\s\S]*))?$/, match => msg`规则 ${match[1]} 的目标 ${match[2]}（${match[3]} 端口 ${match[4]}）不可用，新连接改用其他目标${match[5] ? msg`；原因：${t(match[5])}` : ''}`],
     target_recovered: [/^规则 (.+) 的目标 (.+)（(TCP|UDP) 端口 (\d+)）恢复可用$/, match => msg`规则 ${match[1]} 的目标 ${match[2]}（${match[3]} 端口 ${match[4]}）恢复可用`],
     target_removed: [/^规则 (.+) 的目标 (\d+)（(TCP|UDP) 端口 (\d+)）已从配置移除$/, match => msg`规则 ${match[1]} 的目标 ${match[2]}（${match[3]} 端口 ${match[4]}）已从配置移除`],
+    // Written by the controller's alert loop for node silence, not by telemetry.
+    node_silent: [/^节点 (.+) 已 (\d+) 秒无回报$/, match => msg`节点 ${match[1]} 已 ${match[2]} 秒无回报`],
+    node_reported: [/^节点 (.+) 恢复回报$/, match => msg`节点 ${match[1]} 恢复回报`],
   };
   const pattern = Object.hasOwn(patterns, event.kind) ? patterns[event.kind] : null;
   const match = pattern && String(event.message).match(pattern[0]);
   return match ? pattern[1](match) : event.message;
+}
+// An alert keeps the text of the event that opened or resolved it; its key prefix names the source.
+const incidentKinds = { target: ['target_down', 'target_recovered', 'target_removed'], config: ['config_rejected', 'config_recovered'], node: ['node_silent', 'node_reported'] };
+export function incidentMessage(incident) {
+  const source = String(incident.key).split(':')[0];
+  for (const kind of Object.hasOwn(incidentKinds, source) ? incidentKinds[source] : []) {
+    const text = eventMessage({ kind, message: incident.summary });
+    if (text !== incident.summary) return text;
+  }
+  return incident.summary;
 }
 
 export function setupLanguageSwitcher(onChange) {

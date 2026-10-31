@@ -1,5 +1,7 @@
 # Relay 独立转发平台
 
+0.127.3 makes the panel easier to read: the sidebar shows only the current page as selected, wide tables keep their row actions pinned and wrap long headers, node rules show plain protocol and balancing names, the Traffic ledger shows node names, and recovered alerts follow the selected language.
+
 0.127.2 stops healthy agent heartbeats from growing the recovery log (status rows are rewritten only on a change or once a minute; the panel keeps showing the latest report), adds deletion of revoked or never-enrolled nodes that nothing references (`DELETE /api/v1/nodes/{node}`, audited), and shows the full signed-in account name.
 
 0.127.1 fixes outbound MPTCP setup on Linux 6.1 when the kernel rejects `IP_BIND_ADDRESS_NO_PORT`. Source binding and strict `require` negotiation remain enforced; see [MPTCP compatibility](docs/MPTCP.md#linux-61-compatibility).
@@ -16,7 +18,7 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.127.2 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.127.3 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
 
 0.117.0 新增登录页与控制台 English / 中文切换，覆盖页面、编辑器、校验提示和七篇指南；保存浏览器偏好，切换时保留会话和当前页面。此前 0.116.0 重整控制台界面：分组导航、页面与指南本地搜索、七篇内嵌操作指南、浅色 / 深色主题、移动端抽屉与可分享页面链接。现有规则、协议、计量和权限流程保留，详见 [UI workspace guide](docs/UI_WORKSPACE_EN.md)。
 

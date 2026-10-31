@@ -18,6 +18,9 @@ assert.equal(i18n.eventMessage({ kind: 'config_applied', message: '已应用配�
 assert.equal(i18n.eventMessage({ kind: 'config_rejected', message: '节点拒绝新配置，继续运行修订 12：原始诊断 {0}' }), 'Node rejected the new configuration; still running revision 12: 原始诊断 {0}');
 assert.equal(i18n.eventMessage({ kind: 'target_down', message: '规则 测试 的目标 example.test:443（TCP 端口 9000）不可用，新连接改用其他目标；原因：探测超时' }), 'Rule 测试: target example.test:443 (TCP port 9000) unavailable; new connections use other targets; reason: Probe timed out');
 assert.equal(i18n.eventMessage({ kind: 'unknown', message: '已应用配置修订 12' }), '已应用配置修订 12');
+assert.equal(i18n.incidentMessage({ key: 'target:n1:r1', summary: '规则 测试 的目标 example.test:443（UDP 端口 53）恢复可用' }), 'Rule 测试: target example.test:443 (UDP port 53) recovered');
+assert.equal(i18n.incidentMessage({ key: 'node:n1', summary: '节点 东京 已 95 秒无回报' }), 'Node 东京 has not reported for 95 seconds');
+assert.equal(i18n.incidentMessage({ key: 'config:n1', summary: '节点 东京 恢复回报' }), '节点 东京 恢复回报', 'a message only matches the kinds its source can emit');
 const opaque = '节点管理 <img onerror=alert(1)> {1} $&';
 assert.equal(i18n.msg(['删除「', '」会终止其会话，历史账本保留。'], opaque), `Deleting “${opaque}” terminates its sessions. Ledger history is preserved.`);
 assert.equal(i18n.msg(['为「', '」输入新的 ', ' 地址（DDNS）；当前 ', ''], '测试', 'AAAA', '::1'), 'Enter a new AAAA address for “测试” (DDNS); current address: ::1');

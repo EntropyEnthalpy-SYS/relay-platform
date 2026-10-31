@@ -1,4 +1,4 @@
-import { t as translate, msg, localize, getLanguage, setupLanguageSwitcher, eventMessage } from '/assets/i18n.js';
+import { t as translate, msg, localize, getLanguage, setupLanguageSwitcher, eventMessage, incidentMessage } from '/assets/i18n.js';
 import { createConsoleUI, canVisit, parseRoute } from '/assets/console-ui.js';
 import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram, forwardingPathRoots } from '/assets/workflows.js';
 const $ = (s, root = document) => root.querySelector(s);
@@ -403,14 +403,17 @@ async function renderOverview() {
   }
   const search = el('input'); search.type = 'search'; search.placeholder = translate('按名称、ID 或分组筛选'); search.value = state.overviewFilter || ''; search.setAttribute('aria-label', translate('筛选节点'));
   const nodePanel = panel(translate('中转节点'), msg`${enrolled.length} 个已注册 · 采样来自每次节点回报`, search);
-  const t = table([translate('节点'), translate('状态'), translate('探测往返'), translate('吞吐（15 分钟）'), 'CPU', translate('内存'), translate('会话'), translate('配置修订'), translate('最近回报'), ''], rows.map(r => {
+  // Related readings share a cell (status with its report age, CPU with memory) so the table fits a laptop screen.
+  const t = table([translate('节点'), translate('状态 / 最近回报'), translate('探测往返'), translate('吞吐（15 分钟）'), translate('CPU / 内存'), translate('会话'), translate('配置修订'), ''], rows.map(r => {
     const { node, latest } = r, memory = latest?.memory_total_bytes ? 1 - latest.memory_available_bytes / latest.memory_total_bytes : null;
     const throughput = el('div', undefined, 'throughput'); throughput.append(spark(r.series.rate, 'accent'), el('span', r.rate == null ? '—' : bits(r.rate)));
-    return [namedCell(node.name, node.profile?.settings.group || node.id.slice(0, 8)), badge(r.status[0], r.status[1]), latest ? millis(latest.probe_latency_us) : '—', throughput,
-      latest?.cpu_percent != null ? meter(latest.cpu_percent / 100, `${latest.cpu_percent.toFixed(0)}%`) : '—',
-      memory != null ? meter(memory, `${bytes(latest.memory_total_bytes - latest.memory_available_bytes)} / ${bytes(latest.memory_total_bytes)}`) : '—',
+    const status = el('div'); status.append(badge(r.status[0], r.status[1]), el('div', node.last_seen_ms ? ago(node.last_seen_ms, now) : translate('尚未回报'), 'subline'));
+    const resources = el('div', undefined, 'resource-meters');
+    if (latest?.cpu_percent != null) resources.append(meter(latest.cpu_percent / 100, `CPU ${latest.cpu_percent.toFixed(0)}%`));
+    if (memory != null) resources.append(meter(memory, `${bytes(latest.memory_total_bytes - latest.memory_available_bytes)} / ${bytes(latest.memory_total_bytes)}`));
+    return [namedCell(node.name, node.profile?.settings.group || node.id.slice(0, 8)), status, latest ? millis(latest.probe_latency_us) : '—', throughput, resources.childElementCount ? resources : '—',
       latest ? (node.stats?.prewarmed_connections ? namedCell(String(latest.active_sessions), msg`预热接手 ${node.stats.prewarmed_connections}`) : String(latest.active_sessions)) : '—', node.apply_error ? namedCell(`${node.applied_revision} / ${node.desired_revision}`, translate('应用失败')) : `${node.applied_revision} / ${node.desired_revision}`,
-      node.last_seen_ms ? ago(node.last_seen_ms, now) : translate('尚未回报'), button(translate('规则 →'), async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action')];
+      button(translate('规则 →'), async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action')];
   }));
   const trs = [...t.querySelectorAll('tbody tr')], keys = rows.map(r => [r.node.name, r.node.id, r.node.profile?.settings.group || ''].join(' ').toLowerCase());
   const filter = () => { state.overviewFilter = search.value; const q = search.value.trim().toLowerCase(); trs.forEach((tr, i) => tr.classList.toggle('hidden', !!q && !keys[i].includes(q))); };
@@ -516,7 +519,7 @@ async function renderNodes() {
 function nodeLeaseBadge(node) {
   const lease = node.lease;
   if (!lease) return badge(translate('未提供'), '');
-  if (!lease.policy) return badge(translate('离线模式'), 'orange');
+  if (!lease.policy) return badge(translate('可用优先'), '');
   if (lease.recovery_wait_ms > 0) return badge(translate('恢复等待'), 'orange');
   return badge(lease.active ? translate('有效租约') : translate('未持有'), lease.active ? 'green' : '');
 }
@@ -633,7 +636,7 @@ function nodeDiagnostics(node) {
       [translate('策略'), lease.policy ? translate('严格租约 · ') + (lease.policy.ttl_ms / 1000) + translate(' 秒') : translate('离线运行')],
       [translate('所有权代数'), lease.generation], [translate('最近运行编号'), lease.holder_run_id || '—'],
       [translate('服务端剩余保留 / 秒'), (lease.remaining_ms / 1000).toFixed(2)], [translate('恢复等待 / 秒'), (lease.recovery_wait_ms / 1000).toFixed(2)]
-    ]), el('p', translate('租约保留不等于业务健康。严格模式失去续租后停止业务，离线模式不提供跨机器互斥。租约到期不会自动退还未知消费的额度。'), 'fine'));
+    ]), el('p', translate('租约保留不等于业务健康。严格租约失去续租后停止业务，可用优先不提供跨机器互斥。租约到期不会自动退还未知消费的额度。'), 'fine'));
   }
   if (stats.budget_recovery) {
     const recovery = stats.budget_recovery;
@@ -812,17 +815,20 @@ async function renderRules() {
   if (state.view !== 'rules' || !actor || state.actor !== actor) return;
   state.nodes = nodes; const content = $('#content');
   if (!state.nodes.length) { content.replaceChildren(empty(translate('还没有节点'), translate('先注册节点，再创建规则。'), button(translate('前往节点管理'), () => navigate('nodes'), 'primary'))); return; }
-  if (!state.nodes.some(n => n.id === state.selectedNode)) state.selectedNode = state.nodes[0].id;
-  const toolbar = el('div', undefined, 'toolbar'), selector = el('select'); selector.setAttribute('aria-label', translate('选择节点')); state.nodes.forEach(n => { const option = el('option', n.name); option.value = n.id; selector.append(option); }); selector.value = state.selectedNode; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; const nodeLabel = el('label', translate('运行节点 / VPS')); nodeLabel.append(selector); toolbar.append(nodeLabel);
+  if (!state.nodes.some(n => n.id === state.selectedNode)) state.selectedNode = (state.nodes.find(online) || state.nodes[0]).id;
+  const toolbar = el('div', undefined, 'toolbar node-toolbar'), selector = el('select'); selector.setAttribute('aria-label', translate('选择节点')); state.nodes.forEach(n => { const option = el('option', n.name); option.value = n.id; selector.append(option); }); selector.value = state.selectedNode; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; const nodeLabel = el('label', translate('运行节点 / VPS')); nodeLabel.append(selector); toolbar.append(nodeLabel);
   const nodeId = state.selectedNode; const config = await api(`/nodes/${nodeId}/config`); if (state.view !== 'rules' || state.actor !== actor || state.selectedNode !== nodeId) return; state.config = config;
-  toolbar.append(badge(msg`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? msg`节点总限速 ${mbit(config.rate_bytes_per_sec)}` : translate('节点不限速'), config.rate_bytes_per_sec ? 'orange' : ''), button(translate('版本历史'), history)); if (canWrite()) toolbar.append(button(translate('节点总限速'), () => editNodeRate(config)));
+  const nodeStatus = el('div', undefined, 'node-toolbar-status'), nodeTools = el('div', undefined, 'node-toolbar-actions');
+  nodeStatus.append(applicationBadge(state.nodes.find(n => n.id === nodeId)), badge(msg`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? msg`节点总限速 ${mbit(config.rate_bytes_per_sec)}` : translate('节点不限速'), config.rate_bytes_per_sec ? 'orange' : ''));
+  nodeTools.append(button(translate('版本历史'), history)); if (canWrite()) nodeTools.append(button(translate('节点总限速'), () => editNodeRate(config)));
+  toolbar.append(nodeTools, nodeStatus);
   const actions = el('div'); if (canWrite()) actions.append(button(translate('查看完整路径'), () => navigate('topology')), button(translate('＋ 添加规则'), () => chooseSetup(), 'primary'));
-  toolbar.append(applicationBadge(state.nodes.find(n => n.id === nodeId)));
+  const protocols = { tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' }, balances = { weighted_round_robin: translate('加权轮询'), source_hash: translate('来源 IP 哈希'), least_connections: translate('最少连接'), lowest_latency: translate('最低延迟') };
   const p = panel(translate('所选 VPS 的规则'), translate('这里管理单台 VPS 的监听和服务。一条多跳路径会在每台参与的 VPS 上各创建一条规则。'), actions);
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('此 VPS 还没有规则'), translate('选择一个模板，说明这台 VPS 是转发流量还是提供代理服务。'), canWrite() ? button(translate('从模板开始'), () => chooseSetup(), 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action'), button(translate('删除'), async () => { if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), rule.protocol.toUpperCase()), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, msg`${rule.targets.length} 个目标 · ${rule.balance}`), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(toolbar, p);
 }
 function mbit(rate) { return `${+(rate * 8 / 1e6).toFixed(2)} Mbit/s`; }
@@ -1837,7 +1843,7 @@ async function deleteSubscription(item) {
   await renderSubscriptions();
 }
 
-async function renderUsage() { const actor = state.actor; const records = await api('/usage'); if (state.view !== 'usage' || !actor || state.actor !== actor) return; const p = panel(translate('已接纳应用负载'), translate('累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。')); if (!records.length) p.append(empty(translate('还没有流量记录'), translate('让一条转发规则通过真实流量，Agent 会在同步后上报。'))); else p.append(table([translate('规则 / 周期'), translate('节点'), translate('上行'), translate('下行'), translate('序号'), translate('最近上报')], records.map(r => [namedCell(r.rule_id, r.meter_epoch), r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)]))); if (state.view === 'usage') $('#content').replaceChildren(p); }
+async function renderUsage() { const actor = state.actor; const [records, nodes] = await Promise.all([api('/usage'), api('/nodes')]); const names = new Map(nodes.map(n => [n.id, n.name])); if (state.view !== 'usage' || !actor || state.actor !== actor) return; const p = panel(translate('已接纳应用负载'), translate('累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。')); if (!records.length) p.append(empty(translate('还没有流量记录'), translate('让一条转发规则通过真实流量，Agent 会在同步后上报。'))); else p.append(table([translate('规则 / 周期'), translate('节点'), translate('上行'), translate('下行'), translate('序号'), translate('最近上报')], records.map(r => [namedCell(r.rule_id, r.meter_epoch), names.has(r.node_id) ? namedCell(names.get(r.node_id), r.node_id.slice(0, 8)) : r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)]))); if (state.view === 'usage') $('#content').replaceChildren(p); }
 async function renderUsers() { const actor = state.actor; const users = await api('/users'); if (state.view !== 'users' || !actor || state.actor !== actor) return; const p = panel(translate('用户与会话'), translate('权限由服务端校验；撤销、停用、改密或删除后，该用户已有的 Web 会话和 API 令牌立即失效。'), canWrite() ? button(translate('＋ 添加用户'), newUser, 'primary') : null); p.append(table([translate('账号'), translate('角色'), translate('租户'), translate('状态'), translate('两步验证'), translate('跨节点总限速'), translate('操作')], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.disabled ? badge(translate('已停用'), 'red') : badge(translate('启用'), 'green'), u.mfa_enabled ? badge(translate('已启用'), 'green') : badge(translate('未启用')), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge(translate('不限速')), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function userActions(u) {
   if (!canWrite() && u.id !== state.actor.id) return '—';
@@ -1973,7 +1979,7 @@ async function renderAlerts() {
   else list.append(table([translate('名称'), translate('租户范围'), translate('类型'), translate('发送到'), translate('级别'), translate('状态'), translate('操作')], channels.map(c => { const ops = el('div', undefined, 'row-actions'); if (can_manage) ops.append(button(translate('测试'), async () => { notify(msg`正在向 ${c.name} 发送测试消息…`); try { await api(`/alerts/channels/${c.id}/test`, { method: 'POST' }); notify(msg`测试消息已发送到 ${c.name}，请确认已收到。`); } finally { await renderAlerts(); } }, 'table-action'), button(translate('编辑'), () => editAlertChannel(c), 'table-action'), button(translate('删除'), async () => { if (!await confirmAction(msg`删除通知通道“${c.name}”？`)) return; await api(`/alerts/channels/${c.id}`, { method: 'DELETE' }); await renderAlerts(); }, 'table-action danger')); return [namedCell(c.name, c.secret_set ? translate('已设置密钥') : translate('未设置密钥')), c.tenant_id || translate('全部租户'), alertKinds[c.kind], el('span', c.destination, 'mono'), severityNames[c.min_severity], badge(c.enabled ? translate('已启用') : translate('已停用'), c.enabled ? 'green' : ''), ops]; })));
   grid.append(list);
   const levels = { warning: [translate('警告'), 'orange'], critical: [translate('严重'), 'red'] };
-  const incidentRows = (items, resolved) => items.map(i => [resolved ? `${timestamp(i.resolved_at_ms)} · ${ago(i.resolved_at_ms, now)}` : `${timestamp(i.opened_at_ms)} · ${ago(i.opened_at_ms, now)}`, i.node_name, badge(...(levels[i.severity] || [i.severity])), el('span', i.summary, 'wrap'), i.repeats ? msg`${i.repeats} 次` : '—', resolved ? (i.last_notice_ms ? translate('已通知恢复') : translate('未通知')) : i.notified ? badge(translate('已通知'), 'green') : badge(maintaining ? translate('维护中暂缓') : translate('等待发送'), 'orange')]);
+  const incidentRows = (items, resolved) => items.map(i => [resolved ? `${timestamp(i.resolved_at_ms)} · ${ago(i.resolved_at_ms, now)}` : `${timestamp(i.opened_at_ms)} · ${ago(i.opened_at_ms, now)}`, i.node_name, badge(...(levels[i.severity] || [i.severity])), el('span', incidentMessage(i), 'wrap'), i.repeats ? msg`${i.repeats} 次` : '—', resolved ? (i.last_notice_ms ? translate('已通知恢复') : translate('未通知')) : i.notified ? badge(translate('已通知'), 'green') : badge(maintaining ? translate('维护中暂缓') : translate('等待发送'), 'orange')]);
   const open = panel(translate('当前告警'), translate('仍未恢复的问题。控制器重启后会在 1 分钟内重新检测。'));
   open.append(incidents.open.length ? table([translate('开始'), translate('节点'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.open, false)) : empty(translate('一切正常'), translate('没有未恢复的告警。')));
   grid.append(open);
@@ -2057,7 +2063,7 @@ async function showBudgetReservations(budget) {
     rows.push(...page.reservations);
     content.replaceChildren(rows.length ? table([translate('节点 / 运行'), translate('预留编号'), translate('已分配'), translate('已确认消费'), translate('未归还'), translate('运行保护')], rows.map(row => [
       namedCell(row.node_name, row.run_id), row.grant_id, bytes(row.allocated_bytes), bytes(row.confirmed_consumed_bytes), bytes(row.outstanding_bytes),
-      !row.node_lease.policy ? translate('离线模式') : row.node_lease.active && row.node_lease.holder_run_id === row.run_id ? translate('当前运行持有租约') : translate('当前无此运行租约')
+      !row.node_lease.policy ? translate('可用优先') : row.node_lease.active && row.node_lease.holder_run_id === row.run_id ? translate('当前运行持有租约') : translate('当前无此运行租约')
     ])) : empty(translate('没有尚未关闭的预留'), translate('已正常结算的预留不在此列表中。')));
     controls.replaceChildren();
     if (page.next) controls.append(button(translate('加载下一页'), () => load(page.next), 'table-action'));
@@ -2140,7 +2146,8 @@ function forwardingPathView(options = {}) {
     heading.append(el('h3', translate('转发路径预览')), badge(stage === 'validated' ? translate('服务器配置校验通过') : stage === 'saved' ? translate('已保存的期望路径') : translate('草稿 · 随编辑更新'), stage === 'validated' ? 'green' : ''));
     const figure = el('figure', undefined, 'flow-figure'), track = el('div', undefined, 'flow-track'); track.tabIndex = 0; track.setAttribute('aria-label', translate('路径图（可滚动）'));
     const client = el('div', undefined, 'flow-card flow-terminal'); client.append(el('span', translate('连接起点'), 'flow-role'), el('strong', translate('客户端 / 上游')), el('p', translate('连接入口地址'), 'fine'));
-    function edge(text) { const arrow = el('div', undefined, 'flow-edge'); arrow.append(el('span', text), el('span', '→', 'flow-arrow')); arrow.lastChild.setAttribute('aria-hidden', 'true'); return arrow; }
+    // Each label part gets its own line so narrow arrows never split a phrase such as "TCP + UDP".
+    function edge(parts) { const arrow = el('div', undefined, 'flow-edge'); for (const part of [parts].flat()) arrow.append(el('span', part)); arrow.append(el('span', '→', 'flow-arrow')); arrow.lastChild.setAttribute('aria-hidden', 'true'); return arrow; }
     function tree(item) {
       const editable = item.kind === 'node' && options.onSelect && (!options.canSelect || options.canSelect(item));
       const wrap = el('div', undefined, 'flow-route'), card = editable ? button('', () => options.onSelect(item), 'flow-card flow-selectable') : el('div', undefined, 'flow-card');
@@ -2168,9 +2175,9 @@ function forwardingPathView(options = {}) {
         if (item.children.length > 1) branches.append(el('p', item.aggregate ? translate('并行子流 · 汇聚到同一规则') : translate('候选目标 · 按策略选择，不是顺序中转'), 'flow-branch-label'));
         for (const child of item.children) {
           const branch = el('div', undefined, 'flow-branch');
-          let label = [protocols[child.protocol] || '—', child.transport].filter(Boolean).join(' · ');
-          if (item.children.length > 1 && !item.aggregate) label += ` · ${translate('权重')} ${child.weight} · ${translate('优先级')} ${child.priority}`;
-          if (child.draining) label += ' · ' + translate('维护排空');
+          const label = [protocols[child.protocol] || '—', child.transport].filter(Boolean);
+          if (item.children.length > 1 && !item.aggregate) label.push(`${translate('权重')} ${child.weight}`, `${translate('优先级')} ${child.priority}`);
+          if (child.draining) label.push(translate('维护排空'));
           branch.append(edge(label), tree(child.next)); branches.append(branch);
         }
         wrap.append(branches);
@@ -2178,7 +2185,7 @@ function forwardingPathView(options = {}) {
       return wrap;
     }
     // Gateway `protocol` describes proxied payloads, not its client wire transport.
-    track.append(client, edge(model.root.service === 'gateway' ? translate('受管协议接入') : [protocols[model.root.protocol] || '—', model.root.inboundTransport].filter(Boolean).join(' · ')), tree(model.root));
+    track.append(client, edge(model.root.service === 'gateway' ? translate('受管协议接入') : [protocols[model.root.protocol] || '—', model.root.inboundTransport].filter(Boolean)), tree(model.root));
     figure.append(track, el('figcaption', translate('箭头表示期望转发方向，响应沿连接返回。图示不证明防火墙、网络或业务已经连通。')));
     const checks = el('ol', undefined, 'flow-checks');
     for (const [title, text] of [[translate('配置检查'), stage === 'validated' ? translate('服务器校验通过；尚未发布此草稿。') : stage === 'saved' ? translate('显示控制器中的期望配置。') : translate('填写后校验；尚未验证完整配置。')], [translate('Agent 应用'), translate('发布后逐跳确认实际修订与期望修订一致。')], [translate('真实流量'), translate('尚未测试；用真实客户端从入口验证 TCP、UDP 和出口地址。')]]) { const item = el('li'); item.append(el('strong', title), el('span', text)); checks.append(item); }
@@ -2529,23 +2536,25 @@ async function renderHealth() {
   const nodes = await api('/nodes');
   if (state.view !== 'health' || !actor || state.actor !== actor) return;
   if (!nodes.length) { if (state.view === 'health') $('#content').replaceChildren(empty(translate('还没有节点'), translate('先接入节点，再在规则中设置目标健康探测。'))); return; }
-  if (!nodes.some(n => n.id === state.selectedNode)) state.selectedNode = nodes[0].id;
-  const selected = state.selectedNode, toolbar = el('div', undefined, 'toolbar'), selector = el('select'); selector.setAttribute('aria-label', translate('选择节点'));
-  nodes.forEach(node => { const option = el('option', node.name); option.value = node.id; selector.append(option); }); selector.value = selected; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; toolbar.append(selector);
+  if (!nodes.some(n => n.id === state.selectedNode)) state.selectedNode = (nodes.find(online) || nodes[0]).id;
+  const selected = state.selectedNode, toolbar = el('div', undefined, 'toolbar node-toolbar'), selector = el('select'); selector.setAttribute('aria-label', translate('选择节点'));
+  nodes.forEach(node => { const option = el('option', node.name); option.value = node.id; selector.append(option); }); selector.value = selected; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; const nodeLabel = el('label', translate('节点')); nodeLabel.append(selector); toolbar.append(nodeLabel);
   const snapshot = await api(`/nodes/${selected}/health`);
   if (state.view !== 'health' || state.actor !== actor || state.selectedNode !== selected) return;
   const node = nodes.find(n => n.id === selected);
-  toolbar.append(badge(msg`生效 v${snapshot.applied_revision} / 期望 v${snapshot.desired_revision}`), badge(online(node) ? translate('控制在线') : translate('无近期控制回报'), online(node) ? 'green' : 'orange'), button(translate('配置规则'), () => navigate('rules')));
+  const nodeStatus = el('div', undefined, 'node-toolbar-status'), nodeTools = el('div', undefined, 'node-toolbar-actions');
+  nodeStatus.append(badge(online(node) ? translate('控制在线') : translate('无近期控制回报'), online(node) ? 'green' : 'orange'), badge(msg`生效 v${snapshot.applied_revision} / 期望 v${snapshot.desired_revision}`)); nodeTools.append(button(translate('配置规则'), () => navigate('rules')));
+  toolbar.append(nodeTools, nodeStatus);
   const panelHealth = panel(translate('目标观测与选路'), translate('TCP 与 UDP 独立判断；同优先级按规则的均衡策略分配，低优先级目标作为候选后备。已有 TCP 不会因单次健康状态变化被强制迁移。丢包与抖动按每个端点最近 20 次探测计算；“最低延迟”选路把丢包计入耗时。'));
   const kinds = { tcp_connect: translate('传输建立'), tcp_exchange: translate('TCP 响应前缀'), udp_exchange: translate('UDP 完整回复') };
   const statuses = { unknown: translate('尚未确认'), healthy: translate('探测通过'), unhealthy: translate('已摘除'), recovering: translate('恢复观察'), stale: translate('结果过期') };
   const reasons = { eligible: translate('参与优先池'), standby: translate('后备候选'), unknown: translate('等待探测确认'), unhealthy: translate('故障排除'), recovering: translate('等待持续成功'), stale: translate('等待新结果'), at_capacity: translate('会话已满'), expired: translate('规则已到期') };
   const errors = { dns: translate('域名解析失败'), transport: translate('连接、握手或路径检查失败'), timeout: translate('探测超时'), io: translate('收发失败'), unexpected_response: translate('回复不符或提前关闭'), expired: translate('规则已到期') };
-  const info = el('div', undefined, 'panel-body'); info.append(el('p', msg`最近节点回报：${timestamp(snapshot.last_seen_ms)} · ${snapshot.reports.length} / ${snapshot.expected_endpoints} 个配置端点有记录 · 当前探测 ${snapshot.active_probes} 个`)); if (snapshot.apply_error) info.append(el('p', msg`配置应用失败：${snapshot.apply_error}`, 'error')); panelHealth.append(info);
+  const info = el('div', undefined, 'panel-body health-summary'); info.append(el('p', msg`最近节点回报：${timestamp(snapshot.last_seen_ms)} · ${snapshot.reports.length} / ${snapshot.expected_endpoints} 个配置端点有记录 · 当前探测 ${snapshot.active_probes} 个`)); if (snapshot.apply_error) info.append(el('p', msg`配置应用失败：${snapshot.apply_error}`, 'error')); panelHealth.append(info);
   if (!snapshot.reports.length) panelHealth.append(empty(translate('暂无目标探测结果'), snapshot.expected_endpoints ? translate('节点尚未上报这些端点的结果，不能视为健康。') : translate('在规则编辑器启用健康探测，填写对应业务的成功条件。')));
   else panelHealth.append(table([translate('规则 / 目标'), translate('端口 / 成功条件'), translate('观测状态'), translate('选路原因'), translate('优先级 / 会话'), translate('耗时 / 丢包 · 抖动'), translate('连续成功 / 失败'), translate('诊断')], snapshot.reports.map(r => {
     const diagnostic = el('details'); diagnostic.append(el('summary', r.last_error ? errors[r.last_error] : translate('查看探测统计')), el('p', msg`完成 ${r.completed_checks} 次，成功 ${r.successful_checks} 次`), el('p', msg`结果年龄 ${r.sample_age_ms === null ? '—' : msg`${(r.sample_age_ms / 1000).toFixed(1)} 秒`}，有效期 ${(r.max_age_ms / 1000).toFixed(1)} 秒`), el('p', msg`源节点探测应用量：发送 ${bytes(r.probe_sent_bytes)} / 接收 ${bytes(r.probe_received_bytes)}`), el('p', msg`节点记录时间：${timestamp(r.checked_at_ms)}`));
-    return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), `${r.listen_port} / ${kinds[r.probe_kind]}`, badge(statuses[r.status], r.eligible ? 'green' : 'orange'), r.selection_reason === 'degraded' ? namedCell(translate('丢包降级'), translate('同级暂作后备')) : r.selection_reason === 'draining' ? namedCell(translate('维护排空'), translate('仅作最后备用')) : reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? translate('不限')}`, namedCell(r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.window_checks ? msg`丢包 ${Math.round(100 * r.window_failures / r.window_checks)}% · 抖动 ${r.jitter_us == null ? '—' : `${(r.jitter_us / 1000).toFixed(2)} ms`}` : translate('尚无探测')), `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
+    return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), namedCell(String(r.listen_port), kinds[r.probe_kind]), badge(statuses[r.status], r.eligible ? 'green' : 'orange'), r.selection_reason === 'degraded' ? namedCell(translate('丢包降级'), translate('同级暂作后备')) : r.selection_reason === 'draining' ? namedCell(translate('维护排空'), translate('仅作最后备用')) : reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? translate('不限')}`, namedCell(r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.window_checks ? msg`丢包 ${Math.round(100 * r.window_failures / r.window_checks)}% · 抖动 ${r.jitter_us == null ? '—' : `${(r.jitter_us / 1000).toFixed(2)} ms`}` : translate('尚无探测')), `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
   })));
   $('#content').replaceChildren(toolbar, panelHealth);
 }
