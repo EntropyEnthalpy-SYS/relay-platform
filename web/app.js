@@ -317,10 +317,11 @@ function median(values) { const v = values.filter(x => x != null).sort((a, b) =>
 // Counters restart with the agent process, so a falling counter contributes nothing.
 function nodeSeries(samples, now) {
   const start = now - SPAN_MS, bin = t => Math.min(BINS - 1, Math.floor((t - start) / BIN_MS));
-  const rate = Array(BINS).fill(null), sessions = Array(BINS).fill(null), latency = Array.from({ length: BINS }, () => []);
+  const rate = Array(BINS).fill(null), sessions = Array(BINS).fill(null), available = Array(BINS).fill(null), latency = Array.from({ length: BINS }, () => []);
   samples.forEach((s, i) => {
     const b = bin(s.at_ms); if (b < 0) return;
     sessions[b] = s.active_sessions; if (s.probe_latency_us != null) latency[b].push(s.probe_latency_us);
+    if (s.probed_targets) available[b] = s.healthy_targets / s.probed_targets;
     const prev = samples[i - 1]; if (!prev || s.forwarded_bytes < prev.forwarded_bytes || s.at_ms <= prev.at_ms) return;
     const perMs = (s.forwarded_bytes - prev.forwarded_bytes) / (s.at_ms - prev.at_ms);
     for (let k = Math.max(0, bin(prev.at_ms)); k <= b; k++) {
@@ -328,7 +329,7 @@ function nodeSeries(samples, now) {
       if (overlap > 0) rate[k] = (rate[k] ?? 0) + overlap * perMs / (BIN_MS / 1000);
     }
   });
-  return { rate, sessions, latency };
+  return { rate, sessions, latency, available };
 }
 function currentRate(samples) {
   const last = samples.at(-1), first = samples.find(s => s.at_ms >= last?.at_ms - 20_000);
@@ -336,9 +337,9 @@ function currentRate(samples) {
   return (last.forwarded_bytes - first.forwarded_bytes) / ((last.at_ms - first.at_ms) / 1000);
 }
 function sumBins(list) { return Array.from({ length: BINS }, (_, i) => { const v = list.map(s => s[i]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; }); }
-function spark(values, cls, width = 160, height = 44) {
+function spark(values, cls, width = 160, height = 44, ceiling = null) {
   const box = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, `spark ${cls}`);
-  const top = Math.max(0, ...values.filter(v => v != null)) || 1, x = i => i / (values.length - 1) * width, y = v => height - 2 - v / top * (height - 6);
+  const top = ceiling ?? (Math.max(0, ...values.filter(v => v != null)) || 1), x = i => i / (values.length - 1) * width, y = v => height - 2 - v / top * (height - 6);
   const runs = []; let run = [];
   values.forEach((v, i) => { if (v == null) { if (run.length) runs.push(run); run = []; } else run.push([x(i), y(v)]); }); if (run.length) runs.push(run);
   box.append(svg('line', { x1: 0, x2: width, y1: height - 2, y2: height - 2 }, 'spark-empty'));
@@ -355,6 +356,56 @@ function meter(ratio, label) {
   bar.append(svg('rect', { width: 100, height: 6, rx: 3 }, 'meter-track'), svg('rect', { width: Math.max(0, Math.min(1, ratio ?? 0)) * 100, height: 6, rx: 3 }, `meter-fill ${level}`));
   cell.append(el('span', label, 'meter-label'), bar); return cell;
 }
+// The monitoring pages open as charts; the table view is one click away and remembered per page.
+function displayMode(view) { try { return localStorage.getItem(`relay-display-${view}`) === 'table' ? 'table' : 'chart'; } catch { return 'chart'; } }
+function displayToggle(view, render) {
+  const group = el('div', undefined, 'mode-picker'); group.setAttribute('role', 'group'); group.setAttribute('aria-label', translate('显示方式'));
+  for (const [mode, label] of [['chart', translate('图表')], ['table', translate('表格')]]) {
+    const choice = button(label, async () => { try { localStorage.setItem(`relay-display-${view}`, mode); } catch { /* The page still switches without storage. */ } await render(); });
+    choice.setAttribute('aria-pressed', String(displayMode(view) === mode)); group.append(choice);
+  }
+  return group;
+}
+function chartKey(parts) { const key = el('div', undefined, 'legend chart-key'); for (const [name, cls] of parts) { const item = el('span'); item.append(el('i', undefined, cls), name); key.append(item); } return key; }
+function clock(ms) { return new Date(ms).toLocaleTimeString(getLanguage(), { hour: '2-digit', minute: '2-digit', hour12: false }); }
+// One labelled bar per row, split into `parts` ([legend name, colour class]).
+// Rows share one scale unless a row brings its own `max`, as a budget does with its limit; `failed` hatches an empty track.
+function barChart(rows, parts) {
+  const box = el('div', undefined, 'bar-chart'), top = Math.max(1, ...rows.map(r => r.values.reduce((a, b) => a + b, 0)));
+  if (parts.length > 1) box.append(chartKey(parts));
+  for (const r of rows) {
+    const label = el('div', undefined, 'bar-label'), track = el('div', undefined, r.failed ? 'bar-track failed' : 'bar-track'), value = el('span', r.text, 'bar-value');
+    label.append(el('strong', r.label)); if (r.detail) label.append(el('span', r.detail, 'subline'));
+    r.values.forEach((v, i) => { if (v > 0) { const part = el('i', undefined, `chart-part ${parts[i][1]}`); part.style.width = `${Math.max(0.8, v / (r.max || top) * 100)}%`; track.append(part); } });
+    for (const cell of [label, track, value]) cell.title = r.title || '';
+    const actions = el('div', undefined, 'bar-actions'); if (r.actions) actions.append(r.actions);
+    box.append(label, track, value, actions);
+  }
+  return box;
+}
+// Stacked columns with a value axis; columns: { label, values, title }. Empty labels keep crowded axes readable.
+function columnChart(columns, parts, format) {
+  const box = el('div', undefined, 'column-chart'), top = Math.max(0, ...columns.map(c => c.values.reduce((a, b) => a + b, 0)));
+  if (parts.length > 1) box.append(chartKey(parts));
+  const frame = el('div', undefined, 'chart-frame'), axis = el('div', undefined, 'chart-axis'), plot = el('div', undefined, 'column-plot'), labels = el('div', undefined, 'chart-labels column-labels');
+  axis.append(el('span', format(top)), el('span', format(top / 2)), el('span', format(0)));
+  plot.style.setProperty('--columns', columns.length); labels.style.setProperty('--columns', columns.length);
+  for (const c of columns) {
+    const column = el('div', undefined, 'column'); column.title = c.title || '';
+    c.values.forEach((v, i) => { if (v > 0) { const part = el('i', undefined, `chart-part ${parts[i][1]}`); part.style.height = `${v / (top || 1) * 100}%`; column.append(part); } });
+    plot.append(column); labels.append(el('span', c.label || ''));
+  }
+  frame.append(axis, plot, el('span'), labels); box.append(frame); return box;
+}
+// A 15-minute line with a value axis, built on the overview sparkline.
+function trendChart(values, cls, format, now, ceiling = null) {
+  const frame = el('div', undefined, 'chart-frame trend-chart'), axis = el('div', undefined, 'chart-axis'), labels = el('div', undefined, 'chart-labels');
+  const top = ceiling ?? Math.max(0, ...values.filter(v => v != null));
+  axis.append(el('span', top ? format(top) : '—'), el('span', top ? format(top / 2) : ''), el('span', format(0)));
+  labels.append(el('span', clock(now - SPAN_MS)), el('span', clock(now - SPAN_MS / 2)), el('span', clock(now)));
+  frame.append(axis, spark(values, cls, 600, 150, ceiling), el('span'), labels); return frame;
+}
+function chartPanel(title, description, chart) { const p = panel(title, description); const body = el('div', undefined, 'panel-body chart-body'); body.append(chart); p.append(body); return p; }
 function kpi(label, value, foot, chart) { const n = el('div', undefined, 'kpi'), text = el('div', undefined, 'kpi-text'); text.append(el('div', label, 'metric-label'), el('div', value, 'metric-value'), el('div', foot, 'metric-foot')); n.append(text, chart); return n; }
 function overviewStatus(node, latest) {
   if (!node.enrolled) return [translate('待注册'), '', 'idle'];
@@ -431,7 +482,9 @@ function globePanel(rows, topology, now) {
   const located = rows.filter(r => r.node.profile?.settings.location), sessions = r => r.latest ? msg`${r.latest.active_sessions} 会话` : '';
   overviewGlobe.update(located.map(r => { const l = r.node.profile.settings.location; return { id: r.node.id, name: r.node.name, lat: l.latitude_micros / 1e6, lon: l.longitude_micros / 1e6, status: r.status[2], detail: [r.status[0], locationName(l), sessions(r)].filter(Boolean).join(' · ') }; }),
     [...chainEdges(topology).edges.values()].filter(e => e.from !== 'client' && e.to !== 'sink').map(e => ({ from: e.from, to: e.to, state: linkState(e.states) })));
-  const p = panel(translate('全球节点'), translate('位置来自节点资料；连线是规则声明的下一跳，颜色为该段最新探测结果。拖动地球可旋转，点击节点可定位。'), legend());
+  const setLocations = () => editLocations(rows.map(r => r.node)), actions = el('div');
+  actions.append(legend()); if (canWrite()) actions.append(button(translate('设置位置'), setLocations, 'table-action'));
+  const p = panel(translate('全球节点'), translate('位置来自节点资料；连线是规则声明的下一跳，颜色为该段最新探测结果。拖动地球可旋转，点击节点可定位。'), actions);
   p.classList.add('globe-panel');
   const body = el('div', undefined, 'globe-body'), side = el('div', undefined, 'globe-side'), list = el('ul', undefined, 'globe-list');
   side.append(el('p', msg`${located.length} / ${rows.length} 个节点已标注位置`, 'globe-count'));
@@ -446,9 +499,36 @@ function globePanel(rows, topology, now) {
     item.append(entry); list.append(item);
   }
   side.append(list);
-  if (!located.length) side.append(el('p', canWrite() ? translate('在节点资料中选择所在城市后，节点和它们之间的连线会出现在地球上。点击上方节点即可设置。') : translate('管理员为节点设置位置后，节点和连线会出现在地球上。'), 'fine'));
-  body.append(overviewGlobe.element, side); p.append(body);
+  // An empty globe explains itself instead of looking broken.
+  const stage = el('div', undefined, 'globe-stage'); stage.append(overviewGlobe.element);
+  if (!located.length) {
+    const note = el('div', undefined, 'globe-empty'); note.append(el('strong', translate('还没有节点设置位置')), el('p', canWrite() ? translate('为节点选择所在城市后，节点和转发连线会出现在地球上。') : translate('管理员为节点设置位置后，节点和连线会出现在地球上。')));
+    if (canWrite()) note.append(button(translate('设置节点位置'), setLocations, 'primary'));
+    stage.append(note);
+  }
+  body.append(stage, side); p.append(body);
   return p;
+}
+function cityLocation(city) { const english = getLanguage() === 'en'; return { name: english ? city[2] : city[1], latitude_micros: Math.round(city[3] * 1e6), longitude_micros: Math.round(city[4] * 1e6) }; }
+function cityOptions() { const english = getLanguage() === 'en'; return cities.map(c => [c[0], `${english ? c[2] : c[1]} · ${c[0]}`]).sort((a, b) => a[1].localeCompare(b[1], getLanguage())); }
+// Every node's city in one dialog; only changed nodes are saved, in one batch.
+function editLocations(nodes) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  form.append(el('p', translate('选择每个节点所在的城市，保存后显示在总览地球上。列表中没有的城市，可在节点资料中手动填写坐标。'), 'fine'), grid);
+  const choices = nodes.map(node => {
+    const current = node.profile.settings.location, city = cityFor(current), initial = current ? city?.[0] || 'keep' : '';
+    const options = [['', translate('不设置')], ...(initial === 'keep' ? [['keep', msg`保持：${current.name}`]] : []), ...cityOptions()];
+    return { node, initial, choice: select(grid, `city_${node.id}`, node.name, options, initial) };
+  });
+  submit(form, translate('保存位置'), async () => {
+    const updates = choices.filter(c => c.choice.value !== c.initial).map(({ node, choice }) => {
+      const city = cities.find(c => c[0] === choice.value);
+      return { node_id: node.id, update: { expected_revision: node.profile.revision, name: node.name, settings: { ...node.profile.settings, location: city ? cityLocation(city) : null } } };
+    });
+    if (updates.length) await api('/nodes/profiles', { method: 'POST', body: { updates } });
+    $('#dialog').close(); await refresh(); notify(updates.length ? msg`已保存 ${updates.length} 个节点的位置。` : translate('位置没有变化。'));
+  });
+  modal(translate('设置节点位置'), form);
 }
 function legend() { const n = el('div', undefined, 'legend'); for (const [text, cls] of [[translate('正常'), 'up'], [translate('部分可用'), 'partial'], [translate('不可用'), 'down'], [translate('未探测'), 'unknown']]) { const item = el('span'); item.append(el('i', undefined, cls), text); n.append(item); } return n; }
 function eventTable(events, byId, now) {
@@ -778,8 +858,8 @@ function nodeSettingsEditor(form, settings = {}, strict = () => true) {
 }
 // A listed city, or a named point; the overview globe draws the node there.
 function locationEditor(parent, value) {
-  const city = cityFor(value), english = getLanguage() === 'en';
-  const choice = select(parent, 'location_city', translate('所在城市（显示在总览地球上）'), [['', translate('不设置')], ...cities.map(c => [c[0], `${english ? c[2] : c[1]} · ${c[0]}`]).sort((a, b) => a[1].localeCompare(b[1], getLanguage())), ['custom', translate('其他位置 · 手动填写坐标')]], value ? city?.[0] || 'custom' : '');
+  const city = cityFor(value);
+  const choice = select(parent, 'location_city', translate('所在城市（显示在总览地球上）'), [['', translate('不设置')], ...cityOptions(), ['custom', translate('其他位置 · 手动填写坐标')]], value ? city?.[0] || 'custom' : '');
   const custom = el('div', undefined, 'form-grid');
   const name = field(custom, 'location_name', translate('位置名称'), city ? '' : value?.name || ''); name.maxLength = 64;
   const lat = field(custom, 'location_lat', translate('纬度（-90 到 90，北纬为正）'), value && !city ? value.latitude_micros / 1e6 : '', 'number');
@@ -789,7 +869,7 @@ function locationEditor(parent, value) {
   const show = () => sectionVisible(custom, choice.value === 'custom'); choice.addEventListener('change', show); show();
   return { read() {
     if (!choice.value) return null;
-    if (choice.value !== 'custom') { const c = cities.find(c => c[0] === choice.value); return { name: english ? c[2] : c[1], latitude_micros: Math.round(c[3] * 1e6), longitude_micros: Math.round(c[4] * 1e6) }; }
+    if (choice.value !== 'custom') return cityLocation(cities.find(c => c[0] === choice.value));
     const latitude = Number(lat.value), longitude = Number(lon.value);
     if (!name.value.trim() || !(Math.abs(latitude) <= 90) || !(Math.abs(longitude) <= 180)) throw new Error(translate('请填写位置名称，以及有效的纬度和经度'));
     return { name: name.value.trim(), latitude_micros: Math.round(latitude * 1e6), longitude_micros: Math.round(longitude * 1e6) };
@@ -1978,7 +2058,27 @@ async function deleteSubscription(item) {
   await renderSubscriptions();
 }
 
-async function renderUsage() { const actor = state.actor; const [records, nodes] = await Promise.all([api('/usage'), api('/nodes')]); const names = new Map(nodes.map(n => [n.id, n.name])); if (state.view !== 'usage' || !actor || state.actor !== actor) return; const p = panel(translate('已接纳应用负载'), translate('累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。')); if (!records.length) p.append(empty(translate('还没有流量记录'), translate('让一条转发规则通过真实流量，Agent 会在同步后上报。'))); else p.append(table([translate('规则 / 周期'), translate('节点'), translate('上行'), translate('下行'), translate('序号'), translate('最近上报')], records.map(r => [namedCell(r.rule_id, r.meter_epoch), names.has(r.node_id) ? namedCell(names.get(r.node_id), r.node_id.slice(0, 8)) : r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)]))); if (state.view === 'usage') $('#content').replaceChildren(p); }
+async function renderUsage() {
+  const actor = state.actor; const [records, nodes] = await Promise.all([api('/usage'), api('/nodes')]); const names = new Map(nodes.map(n => [n.id, n.name]));
+  if (state.view !== 'usage' || !actor || state.actor !== actor) return;
+  const toolbar = el('div', undefined, 'toolbar view-toolbar'); toolbar.append(displayToggle('usage', renderUsage));
+  const p = panel(translate('已接纳应用负载'), translate('累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。'));
+  if (!records.length) { p.append(empty(translate('还没有流量记录'), translate('让一条转发规则通过真实流量，Agent 会在同步后上报。'))); if (state.view === 'usage') $('#content').replaceChildren(p); return; }
+  if (displayMode('usage') === 'chart') {
+    const parts = [[translate('上行'), 'accent'], [translate('下行'), 'blue']];
+    const totals = key => { const sums = new Map(); for (const r of records) { const k = key(r), v = sums.get(k) || [0, 0]; v[0] += r.upload_bytes; v[1] += r.download_bytes; sums.set(k, v); } return [...sums].sort((a, b) => b[1][0] + b[1][1] - a[1][0] - a[1][1]); };
+    const row = (label, [up, down], detail) => ({ label, detail, values: [up, down], text: bytes(up + down), title: msg`上行 ${bytes(up)} · 下行 ${bytes(down)}` });
+    const byRule = totals(r => r.rule_id), byNode = totals(r => r.node_id), byMonth = totals(r => r.meter_epoch).sort((a, b) => a[0].localeCompare(b[0]));
+    const all = byNode.reduce((sum, [, [up, down]]) => sum + up + down, 0), grid = el('div', undefined, 'chart-grid');
+    grid.append(chartPanel(translate('按规则'), byRule.length > 12 ? msg`流量最多的 12 条规则，共 ${byRule.length} 条。多跳转发在经过的每台服务器上各计一次。` : translate('各规则累计的上行与下行。多跳转发在经过的每台服务器上各计一次。'), barChart(byRule.slice(0, 12).map(([rule, v]) => row(rule, v)), parts)),
+      chartPanel(translate('按节点'), msg`合计 ${bytes(all)}`, barChart(byNode.map(([id, v]) => row(names.get(id) || id, v, names.has(id) ? id.slice(0, 8) : '')), parts)));
+    if (byMonth.length > 1) grid.append(chartPanel(translate('按计量月份'), translate('每个月的上行与下行合计。'), columnChart(byMonth.map(([month, [up, down]]) => ({ label: month, values: [up, down], title: msg`${month} · 上行 ${bytes(up)} · 下行 ${bytes(down)}` })), parts, bytes)));
+    if (state.view === 'usage') $('#content').replaceChildren(toolbar, grid);
+    return;
+  }
+  p.append(table([translate('规则 / 周期'), translate('节点'), translate('上行'), translate('下行'), translate('序号'), translate('最近上报')], records.map(r => [namedCell(r.rule_id, r.meter_epoch), names.has(r.node_id) ? namedCell(names.get(r.node_id), r.node_id.slice(0, 8)) : r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)])));
+  if (state.view === 'usage') $('#content').replaceChildren(toolbar, p);
+}
 async function renderUsers() { const actor = state.actor; const users = await api('/users'); if (state.view !== 'users' || !actor || state.actor !== actor) return; const p = panel(translate('用户与会话'), translate('权限由服务端校验；撤销、停用、改密或删除后，该用户已有的 Web 会话和 API 令牌立即失效。'), canWrite() ? button(translate('＋ 添加用户'), newUser, 'primary') : null); p.append(table([translate('账号'), translate('角色'), translate('租户'), translate('状态'), translate('两步验证'), translate('跨节点总限速'), translate('操作')], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.disabled ? badge(translate('已停用'), 'red') : badge(translate('启用'), 'green'), u.mfa_enabled ? badge(translate('已启用'), 'green') : badge(translate('未启用')), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge(translate('不限速')), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function userActions(u) {
   if (!canWrite() && u.id !== state.actor.id) return '—';
@@ -2095,6 +2195,27 @@ async function renderAudit() { const actor = state.actor; const rows = await api
 const alertKinds = localize({ smtp: 'Email / SMTP', webhook: 'Webhook', telegram: 'Telegram', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' });
 const alertFields = localize({ smtp: [], webhook: [['url', 'Webhook 地址'], ['secret', '签名密钥（可选，HMAC-SHA256）', true]], telegram: [['bot_token', 'Bot Token'], ['chat_id', 'Chat ID']], wecom: [['url', '群机器人 Webhook 地址']], feishu: [['url', '自定义机器人 Webhook 地址'], ['secret', '签名校验密钥（可选）', true]], dingtalk: [['url', '自定义机器人 Webhook 地址'], ['secret', '加签密钥（可选）', true]] });
 const severityNames = localize({ warning: '警告及以上', critical: '仅严重' });
+// Alerts of the last 24 hours, one lane per node; an alert that is still open runs to now.
+function incidentTimeline(incidents, now) {
+  const span = 86_400_000, start = now - span, lanes = new Map(), box = el('div', undefined, 'timeline');
+  for (const i of incidents) if ((i.resolved_at_ms ?? now) >= start) { if (!lanes.has(i.node_name)) lanes.set(i.node_name, []); lanes.get(i.node_name).push(i); }
+  if (!lanes.size) return empty(translate('最近 24 小时没有告警'), translate('目标不可用、配置拒绝或节点离线时，这里会按节点显示每次告警持续了多久。'));
+  box.append(chartKey([[translate('警告'), 'partial'], [translate('严重'), 'down'], [translate('仍未恢复'), 'open']]));
+  for (const [name, items] of [...lanes].sort((a, b) => a[0].localeCompare(b[0]))) {
+    // Alerts that overlap on one node each get their own line in the lane.
+    const track = el('div', undefined, 'timeline-track'), ends = [];
+    for (const i of items.sort((a, b) => a.opened_at_ms - b.opened_at_ms)) {
+      const from = Math.max(i.opened_at_ms, start), to = i.resolved_at_ms ?? now, bar = el('i', undefined, `timeline-bar ${i.severity === 'critical' ? 'down' : 'partial'}${i.resolved_at_ms ? '' : ' open'}`);
+      let line = ends.findIndex(end => end < from); if (line < 0) line = ends.length; ends[line] = to;
+      bar.style.left = `${(from - start) / span * 100}%`; bar.style.width = `${Math.max(0.4, (to - from) / span * 100)}%`; bar.style.top = `${4 + line * 14}px`;
+      bar.title = `${incidentMessage(i)}\n${timestamp(i.opened_at_ms)} → ${i.resolved_at_ms ? timestamp(i.resolved_at_ms) : translate('仍未恢复')}`;
+      track.append(bar);
+    }
+    track.style.height = `${8 + ends.length * 14}px`; box.append(el('strong', name, 'timeline-name'), track);
+  }
+  const ticks = el('div', undefined, 'chart-labels'); for (let h = 0; h <= 24; h += 6) ticks.append(el('span', clock(start + h * 3_600_000)));
+  box.append(el('span'), ticks); return box;
+}
 async function renderAlerts() {
   const actor = state.actor;
   const data = await api('/alerts');
@@ -2109,6 +2230,8 @@ async function renderAlerts() {
   const maintain = ms => api('/alerts/settings', { method: 'PUT', body: { maintenance_until_ms: ms } }).then(renderAlerts);
   if (can_manage) actions.append(maintaining ? button(translate('结束维护'), () => maintain(null), 'primary') : badge(translate('正常通知'), 'green'), button(translate('维护 1 小时'), () => maintain(Date.now() + 3600_000)), button(translate('维护 4 小时'), () => maintain(Date.now() + 4 * 3600_000)));
   strip.append(actions); status.append(strip); grid.append(status);
+  const charts = displayMode('alerts') === 'chart', toolbar = el('div', undefined, 'toolbar view-toolbar'); toolbar.append(displayToggle('alerts', renderAlerts));
+  if (charts) grid.append(chartPanel(translate('最近 24 小时'), translate('每行一个节点，色条从告警出现画到恢复；仍未恢复的延续到现在。恢复记录保存在控制器内存中，控制器重启后重新记录。'), incidentTimeline([...incidents.open, ...incidents.resolved], now)));
   const list = panel(translate('通知通道'), can_manage ? translate('可向全局或指定租户发送通知。密钥保存后不再显示。最多 20 个通道。') : translate('仅显示本租户专用通道和事件。通道由系统管理员配置。'), can_manage ? button(translate('＋ 添加通道'), () => editAlertChannel(), 'primary') : null);
   if (!channels.length) list.append(empty(translate('还没有通知通道'), translate('系统管理员可添加 Email、Webhook 或聊天机器人通道。'), can_manage ? button(translate('＋ 添加通道'), () => editAlertChannel(), 'primary') : null));
   else list.append(table([translate('名称'), translate('租户范围'), translate('类型'), translate('发送到'), translate('级别'), translate('状态'), translate('操作')], channels.map(c => { const ops = el('div', undefined, 'row-actions'); if (can_manage) ops.append(button(translate('测试'), async () => { notify(msg`正在向 ${c.name} 发送测试消息…`); try { await api(`/alerts/channels/${c.id}/test`, { method: 'POST' }); notify(msg`测试消息已发送到 ${c.name}，请确认已收到。`); } finally { await renderAlerts(); } }, 'table-action'), button(translate('编辑'), () => editAlertChannel(c), 'table-action'), button(translate('删除'), async () => { if (!await confirmAction(msg`删除通知通道“${c.name}”？`)) return; await api(`/alerts/channels/${c.id}`, { method: 'DELETE' }); await renderAlerts(); }, 'table-action danger')); return [namedCell(c.name, c.secret_set ? translate('已设置密钥') : translate('未设置密钥')), c.tenant_id || translate('全部租户'), alertKinds[c.kind], el('span', c.destination, 'mono'), severityNames[c.min_severity], badge(c.enabled ? translate('已启用') : translate('已停用'), c.enabled ? 'green' : ''), ops]; })));
@@ -2118,12 +2241,17 @@ async function renderAlerts() {
   const open = panel(translate('当前告警'), translate('仍未恢复的问题。控制器重启后会在 1 分钟内重新检测。'));
   open.append(incidents.open.length ? table([translate('开始'), translate('节点'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.open, false)) : empty(translate('一切正常'), translate('没有未恢复的告警。')));
   grid.append(open);
-  if (incidents.resolved.length) { const done = panel(translate('最近恢复'), translate('最近 200 条，保存在控制器内存中。')); done.append(table([translate('恢复'), translate('节点'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.resolved.slice(0, 50), true))); grid.append(done); }
+  if (!charts && incidents.resolved.length) { const done = panel(translate('最近恢复'), translate('最近 200 条，保存在控制器内存中。')); done.append(table([translate('恢复'), translate('节点'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.resolved.slice(0, 50), true))); grid.append(done); }
   const statusNames = { cancelled: [translate('已取消'), ''], sent: [translate('已送达'), 'green'], failed: [translate('失败'), 'red'], retrying: [translate('重试中'), 'orange'], pending: [translate('发送中'), ''] }, noticeNames = { opened: translate('告警'), resolved: translate('恢复'), test: translate('测试') };
   const log = panel(translate('发送记录'), translate('失败会在 10 秒、1 分钟、5 分钟后重试。最近 200 条。'));
   log.append(incidents.deliveries.length ? table([translate('时间'), translate('通道'), translate('类型'), translate('结果'), translate('尝试'), translate('错误')], incidents.deliveries.slice(0, 100).map(d => [timestamp(d.created_at_ms), d.channel_name, d.incidents > 1 ? msg`${noticeNames[d.notice]} · 合并 ${d.incidents} 条` : noticeNames[d.notice], badge(...statusNames[d.status]), String(d.attempts), d.error ? Object.assign(el('span', d.error, 'clip mono'), { title: d.error }) : '—'])) : empty(translate('还没有发送记录'), translate('发送测试消息或出现告警后会显示在这里。')));
-  grid.append(log);
-  if (state.view === 'alerts') $('#content').replaceChildren(grid);
+  if (!charts) grid.append(log);
+  else if (incidents.deliveries.length) {
+    const results = new Map(); for (const d of incidents.deliveries) { const v = results.get(d.channel_name) || [0, 0, 0, 0]; v[{ sent: 0, failed: 2, cancelled: 3 }[d.status] ?? 1] += 1; results.set(d.channel_name, v); }
+    grid.append(chartPanel(translate('发送结果'), translate('按通道统计最近 200 条发送记录。'), barChart([...results].map(([name, v]) => ({ label: name, values: v, text: msg`送达 ${v[0]} / 共 ${v.reduce((a, b) => a + b, 0)}` })),
+      [[statusNames.sent[0], 'up'], [translate('发送中或重试'), 'partial'], [statusNames.failed[0], 'down'], [statusNames.cancelled[0], 'unknown']])));
+  }
+  if (state.view === 'alerts') $('#content').replaceChildren(toolbar, grid);
 }
 function smtpConfig(data) {
   const value = key => String(data.get(key) || '').trim();
@@ -2178,9 +2306,20 @@ async function renderBudgets() {
   if (overview.allocation_paused) p.append(el('p', translate('控制器已从备份恢复，新增额度分配暂停。恢复完整的预留记录前，系统不会重复发放旧备份中遗漏的额度。'), 'error'));
   function scopeLabel(b) { return b.scope === 'user' ? users.find(u => u.id === b.scope_id)?.username || b.scope_id : b.scope === 'node' ? nodes.find(n => n.id === b.scope_id)?.name || b.scope_id : b.scope_id; }
   if (!overview.budgets.length) p.append(empty(translate('为多个入口设置一个总额度'), translate('创建前先暂停该范围内的规则，并确认所有相关节点已应用；之后重新启用规则，系统会自动绑定额度。')));
-  else p.append(table([translate('名称 / 范围'), translate('总额度'), translate('已上报用量'), translate('尚未归还预留'), translate('可分配'), translate('操作')], overview.budgets.map(b => [namedCell(b.name, `${budgetScopeNames[b.scope]} · ${scopeLabel(b)}`), bytes(b.limit_bytes), bytes(b.consumed_bytes), bytes(b.committed_bytes - b.consumed_bytes), bytes(b.limit_bytes - b.committed_bytes), budgetActions(b, users, nodes, overview.allocation_paused)])));
+  else if (displayMode('budgets') === 'chart') {
+    // Each bar is the budget's own limit: used, then reserved but not yet returned, then still available.
+    const body = el('div', undefined, 'panel-body chart-body'), parts = [[translate('已上报用量'), 'accent'], [translate('尚未归还预留'), 'partial'], [translate('可分配'), 'free']];
+    body.append(barChart(overview.budgets.map(b => {
+      const reserved = b.committed_bytes - b.consumed_bytes, available = b.limit_bytes - b.committed_bytes;
+      return { label: b.name, detail: `${budgetScopeNames[b.scope]} · ${scopeLabel(b)}`, values: [b.consumed_bytes, reserved, available], max: b.limit_bytes || 1,
+        text: msg`已占用 ${b.limit_bytes ? Math.round(100 * b.committed_bytes / b.limit_bytes) : 100}% · 共 ${bytes(b.limit_bytes)}`, title: msg`已上报用量 ${bytes(b.consumed_bytes)} · 尚未归还预留 ${bytes(reserved)} · 可分配 ${bytes(available)}`,
+        actions: budgetActions(b, users, nodes, overview.allocation_paused) };
+    }), parts));
+    p.append(body);
+  } else p.append(table([translate('名称 / 范围'), translate('总额度'), translate('已上报用量'), translate('尚未归还预留'), translate('可分配'), translate('操作')], overview.budgets.map(b => [namedCell(b.name, `${budgetScopeNames[b.scope]} · ${scopeLabel(b)}`), bytes(b.limit_bytes), bytes(b.consumed_bytes), bytes(b.committed_bytes - b.consumed_bytes), bytes(b.limit_bytes - b.committed_bytes), budgetActions(b, users, nodes, overview.allocation_paused)])));
   p.append(el('p', translate('节点按需领取预留。全节点会话空闲或正常停机后可归还未用部分；严格节点保留原状态且交接历史连续时，重启会先核对并恢复预留；旧备份或无法确认的部分继续占额。预留明细显示当前记录，增加总额度不会清零已有账。'), 'fine'));
-  if (state.view === 'budgets') $('#content').replaceChildren(p);
+  const toolbar = el('div', undefined, 'toolbar view-toolbar'); toolbar.append(displayToggle('budgets', renderBudgets));
+  if (state.view === 'budgets') $('#content').replaceChildren(...(overview.budgets.length ? [toolbar] : []), p);
 }
 function budgetActions(budget, users, nodes, paused) {
   const actions = el('div');
@@ -2699,22 +2838,36 @@ async function renderHealth() {
   if (!nodes.some(n => n.id === state.selectedNode)) state.selectedNode = (nodes.find(online) || nodes[0]).id;
   const selected = state.selectedNode, toolbar = el('div', undefined, 'toolbar node-toolbar'), selector = el('select'); selector.setAttribute('aria-label', translate('选择节点'));
   nodes.forEach(node => { const option = el('option', node.name); option.value = node.id; selector.append(option); }); selector.value = selected; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; const nodeLabel = el('label', translate('节点')); nodeLabel.append(selector); toolbar.append(nodeLabel);
-  const snapshot = await api(`/nodes/${selected}/health`);
+  const charts = displayMode('health') === 'chart', [snapshot, telemetry] = await Promise.all([api(`/nodes/${selected}/health`), charts ? api('/telemetry') : null]);
   if (state.view !== 'health' || state.actor !== actor || state.selectedNode !== selected) return;
   const node = nodes.find(n => n.id === selected);
   const nodeStatus = el('div', undefined, 'node-toolbar-status'), nodeTools = el('div', undefined, 'node-toolbar-actions');
-  nodeStatus.append(badge(online(node) ? translate('控制在线') : translate('无近期控制回报'), online(node) ? 'green' : 'orange'), badge(msg`生效 v${snapshot.applied_revision} / 期望 v${snapshot.desired_revision}`)); nodeTools.append(button(translate('配置规则'), () => navigate('rules')));
+  nodeStatus.append(badge(online(node) ? translate('控制在线') : translate('无近期控制回报'), online(node) ? 'green' : 'orange'), badge(msg`生效 v${snapshot.applied_revision} / 期望 v${snapshot.desired_revision}`)); nodeTools.append(displayToggle('health', renderHealth), button(translate('配置规则'), () => navigate('rules')));
   toolbar.append(nodeTools, nodeStatus);
   const panelHealth = panel(translate('目标观测与选路'), translate('TCP 与 UDP 独立判断；同优先级按规则的均衡策略分配，低优先级目标作为候选后备。已有 TCP 不会因单次健康状态变化被强制迁移。丢包与抖动按每个端点最近 20 次探测计算；“最低延迟”选路把丢包计入耗时。'));
   const kinds = { tcp_connect: translate('传输建立'), tcp_exchange: translate('TCP 响应前缀'), udp_exchange: translate('UDP 完整回复') };
   const statuses = { unknown: translate('尚未确认'), healthy: translate('探测通过'), unhealthy: translate('已摘除'), recovering: translate('恢复观察'), stale: translate('结果过期') };
-  const reasons = { eligible: translate('参与优先池'), standby: translate('后备候选'), unknown: translate('等待探测确认'), unhealthy: translate('故障排除'), recovering: translate('等待持续成功'), stale: translate('等待新结果'), at_capacity: translate('会话已满'), expired: translate('规则已到期') };
+  const reasons = { eligible: translate('参与优先池'), standby: translate('后备候选'), unknown: translate('等待探测确认'), unhealthy: translate('故障排除'), recovering: translate('等待持续成功'), stale: translate('等待新结果'), at_capacity: translate('会话已满'), expired: translate('规则已到期'), degraded: translate('丢包降级'), draining: translate('维护排空') };
   const errors = { dns: translate('域名解析失败'), transport: translate('连接、握手或路径检查失败'), timeout: translate('探测超时'), io: translate('收发失败'), unexpected_response: translate('回复不符或提前关闭'), expired: translate('规则已到期') };
   const info = el('div', undefined, 'panel-body health-summary'); info.append(el('p', msg`最近节点回报：${timestamp(snapshot.last_seen_ms)} · ${snapshot.reports.length} / ${snapshot.expected_endpoints} 个配置端点有记录 · 当前探测 ${snapshot.active_probes} 个`)); if (snapshot.apply_error) info.append(el('p', msg`配置应用失败：${snapshot.apply_error}`, 'error')); panelHealth.append(info);
   if (!snapshot.reports.length) panelHealth.append(empty(translate('暂无目标探测结果'), snapshot.expected_endpoints ? translate('节点尚未上报这些端点的结果，不能视为健康。') : translate('在规则编辑器启用健康探测，填写对应业务的成功条件。')));
-  else panelHealth.append(table([translate('规则 / 目标'), translate('端口 / 成功条件'), translate('观测状态'), translate('选路原因'), translate('优先级 / 会话'), translate('耗时 / 丢包 · 抖动'), translate('连续成功 / 失败'), translate('诊断')], snapshot.reports.map(r => {
+  else if (charts) {
+    // Bar length is the smoothed probe time; the colour is the observed state.
+    const slot = { healthy: 0, recovering: 1, unhealthy: 2 }, body = el('div', undefined, 'panel-body chart-body');
+    body.append(barChart(snapshot.reports.map(r => {
+      const values = [0, 0, 0, 0], loss = r.window_checks ? Math.round(100 * r.window_failures / r.window_checks) : null; values[slot[r.status] ?? 3] = r.latency_ewma_us ?? 0;
+      const silent = r.status === 'unhealthy' && r.latency_ewma_us == null, time = silent ? translate('无响应') : millis(r.latency_ewma_us);
+      return { label: snapshot.rule_names?.[r.rule_id] || r.rule_id, detail: `${r.target_address} · ${kinds[r.probe_kind]}`, values, failed: silent, text: loss == null ? time : msg`${time} · 丢包 ${loss}%`,
+        title: [statuses[r.status], reasons[r.selection_reason] || r.selection_reason, r.last_error ? errors[r.last_error] : ''].filter(Boolean).join(' · ') };
+    }), [[statuses.healthy, 'up'], [statuses.recovering, 'partial'], [statuses.unhealthy, 'down'], [translate('尚未确认或结果过期'), 'unknown']]));
+    panelHealth.append(body);
+  } else panelHealth.append(table([translate('规则 / 目标'), translate('端口 / 成功条件'), translate('观测状态'), translate('选路原因'), translate('优先级 / 会话'), translate('耗时 / 丢包 · 抖动'), translate('连续成功 / 失败'), translate('诊断')], snapshot.reports.map(r => {
     const diagnostic = el('details'); diagnostic.append(el('summary', r.last_error ? errors[r.last_error] : translate('查看探测统计')), el('p', msg`完成 ${r.completed_checks} 次，成功 ${r.successful_checks} 次`), el('p', msg`结果年龄 ${r.sample_age_ms === null ? '—' : msg`${(r.sample_age_ms / 1000).toFixed(1)} 秒`}，有效期 ${(r.max_age_ms / 1000).toFixed(1)} 秒`), el('p', msg`源节点探测应用量：发送 ${bytes(r.probe_sent_bytes)} / 接收 ${bytes(r.probe_received_bytes)}`), el('p', msg`节点记录时间：${timestamp(r.checked_at_ms)}`));
     return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), namedCell(String(r.listen_port), kinds[r.probe_kind]), badge(statuses[r.status], r.eligible ? 'green' : 'orange'), r.selection_reason === 'degraded' ? namedCell(translate('丢包降级'), translate('同级暂作后备')) : r.selection_reason === 'draining' ? namedCell(translate('维护排空'), translate('仅作最后备用')) : reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? translate('不限')}`, namedCell(r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.window_checks ? msg`丢包 ${Math.round(100 * r.window_failures / r.window_checks)}% · 抖动 ${r.jitter_us == null ? '—' : `${(r.jitter_us / 1000).toFixed(2)} ms`}` : translate('尚无探测')), `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
   })));
-  $('#content').replaceChildren(toolbar, panelHealth);
+  if (!charts) { $('#content').replaceChildren(toolbar, panelHealth); return; }
+  const series = nodeSeries(telemetry.nodes.find(t => t.id === selected)?.samples || [], telemetry.generated_at_ms), trends = el('div', undefined, 'chart-grid');
+  trends.append(chartPanel(translate('探测往返（中位数）'), msg`${node.name} 最近 15 分钟，来自每次节点回报。`, trendChart(series.latency.map(median), 'violet', millis, telemetry.generated_at_ms)),
+    chartPanel(translate('目标可用比例'), translate('探测通过的目标占已探测目标的比例。'), trendChart(series.available, 'up', v => `${Math.round(v * 100)}%`, telemetry.generated_at_ms, 1)));
+  $('#content').replaceChildren(toolbar, panelHealth, trends);
 }
