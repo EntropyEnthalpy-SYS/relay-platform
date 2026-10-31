@@ -277,7 +277,7 @@ impl Store {
         let conn = self.0.lock().unwrap();
         let all = all_configs(&conn)?;
         let mut q = conn.prepare("SELECT id,name,tenant_id,desired_revision,applied_revision,last_seen_ms,apply_error,stats_json,token_hash IS NOT NULL FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY id")?;
-        let mut nodes = q.query_map(params![actor.role.as_str(),actor.tenant_id],|r| Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?,"tenant_id":r.get::<_,String>(2)?,"desired_revision":r.get::<_,u64>(3)?,"applied_revision":r.get::<_,u64>(4)?,"last_seen_ms":r.get::<_,Option<i64>>(5)?,"apply_error":r.get::<_,Option<String>>(6)?,"stats":serde_json::from_str::<EngineStats>(&r.get::<_,String>(7)?).unwrap_or_default(),"enrolled":r.get::<_,bool>(8)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut nodes = q.query_map(params![actor.role.as_str(),actor.tenant_id],|r| { let id: String = r.get(0)?; let (last_seen, stats) = self.4.current(&id, r.get(5)?, r.get(7)?); Ok(serde_json::json!({"id":id,"name":r.get::<_,String>(1)?,"tenant_id":r.get::<_,String>(2)?,"desired_revision":r.get::<_,u64>(3)?,"applied_revision":r.get::<_,u64>(4)?,"last_seen_ms":last_seen,"apply_error":r.get::<_,Option<String>>(6)?,"stats":serde_json::from_str::<EngineStats>(&stats).unwrap_or_default(),"enrolled":r.get::<_,bool>(8)?})) })?.collect::<rusqlite::Result<Vec<_>>>()?;
         for node in &mut nodes {
             let profile = node_profiles::read(&conn, node["id"].as_str().unwrap())?;
             node["lifecycle"] = serde_json::to_value(profile.settings.lifecycle(now_ms()))?;

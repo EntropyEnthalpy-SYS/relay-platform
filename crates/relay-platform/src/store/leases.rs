@@ -159,6 +159,9 @@ pub(super) fn initialize(
         },
     )
 }
+pub(super) fn deleted(clocks: &mut LeaseClocks, node: &str) {
+    clocks.nodes.remove(node);
+}
 pub(super) fn created(clocks: &mut LeaseClocks, node: &str) {
     let now = Instant::now();
     clocks.nodes.insert(

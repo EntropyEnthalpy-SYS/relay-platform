@@ -116,6 +116,7 @@ impl Store {
         let conn = self.0.lock().unwrap();
         require_node(&conn, actor, node, false)?;
         let (applied,desired,last_seen,error,stats):(u64,u64,Option<i64>,Option<String>,String)=conn.query_row("SELECT applied_revision,desired_revision,last_seen_ms,apply_error,stats_json FROM nodes WHERE id=?1",[node],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        let (last_seen, stats) = self.4.current(node, last_seen, stats);
         let stats: EngineStats = serde_json::from_str(&stats).unwrap_or_default();
         let config: NodeConfig = serde_json::from_str(&conn.query_row(
             "SELECT config_json FROM config_history WHERE node_id=?1 AND revision=?2",

@@ -585,6 +585,71 @@ impl Store {
             token,
         ))
     }
+    /// Deletes a node that can no longer run: it holds no credential or live
+    /// lease, and no other node, DNS record, template or budget points at it.
+    /// Its rules, usage and configuration history go with it; the audit log,
+    /// rollout history and the used-credential fence are kept.
+    pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
+        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        require_node(&tx, actor, node, true)?;
+        let (name, enrolled): (String, bool) = tx.query_row(
+            "SELECT name,token_hash IS NOT NULL FROM nodes WHERE id=?1",
+            [node],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if enrolled {
+            return reject(409, "revoke the node identity before deleting the node");
+        }
+        let lease = leases::status(&tx, &mut self.3.lock().unwrap(), node)?;
+        if lease.active || lease.recovery_wait_ms > 0 {
+            return reject(
+                409,
+                "the node execution lease has not ended yet; retry after it expires",
+            );
+        }
+        let reference: Option<String> = tx
+            .query_row(
+                &format!("SELECT 'node '||n.name FROM nodes n JOIN config_history c ON c.node_id=n.id AND c.revision IN (n.desired_revision,n.applied_revision) WHERE n.id<>?1 AND instr(c.config_json,?1)>0
+                 UNION ALL SELECT key FROM metadata WHERE instr(value,?1)>0 AND NOT ({OWNED}) AND key NOT GLOB 'retired_node_*' AND key NOT GLOB 'rollout:*'
+                 UNION ALL SELECT 'budget '||id FROM budgets WHERE scope='node' AND scope_id=?1
+                 UNION ALL SELECT 'budget grant '||id FROM budget_grants WHERE node_id=?1
+                 UNION ALL SELECT 'budget request '||request_id FROM cancelled_budget_requests WHERE node_id=?1
+                 LIMIT 1"),
+                [node],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(reference) = reference {
+            return reject(
+                409,
+                format!("{reference} still uses this node; remove that reference first"),
+            );
+        }
+        tx.execute("INSERT OR IGNORE INTO metadata(key,value) SELECT 'retired_node_enrollment:'||enrollment_hash,id FROM nodes WHERE id=?1 AND enrollment_hash IS NOT NULL", [node])?;
+        for statement in [
+            "DELETE FROM usage WHERE node_id=?1",
+            "DELETE FROM rule_epochs WHERE rule_id IN (SELECT rule_id FROM rule_bindings WHERE node_id=?1)",
+            "DELETE FROM rule_bindings WHERE node_id=?1",
+            "DELETE FROM config_history WHERE node_id=?1",
+            &format!("DELETE FROM metadata WHERE {OWNED}"),
+            "DELETE FROM nodes WHERE id=?1",
+        ] {
+            tx.execute(statement, [node])?;
+        }
+        audit(
+            &tx,
+            &actor.id,
+            "node.delete",
+            node,
+            &serde_json::json!({ "name": name }).to_string(),
+        )?;
+        tx.commit()?;
+        leases::deleted(&mut self.3.lock().unwrap(), node);
+        self.4.forget(node);
+        Ok(())
+    }
     pub fn enroll(&self, node: &str, token: &str, credential: &str) -> Result<()> {
         self.enroll_revision(node, token, credential).map(|_| ())
     }
@@ -659,20 +724,22 @@ impl Store {
         let conn = self.0.lock().unwrap();
         let mut q=conn.prepare("SELECT id,tenant_id,name,desired_revision,applied_revision,last_seen_ms,apply_error,token_hash IS NOT NULL,stats_json FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY name,id")?;
         let rows = q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
+            let id: String = r.get(0)?;
+            let (last_seen_ms, stats) = self.4.current(&id, r.get(5)?, r.get(8)?);
             Ok(Node {
                 credential_phase: crate::credential::CredentialPhase::NotEnrolled,
                 profile: Default::default(),
                 lifecycle: Default::default(),
                 lease: crate::lease::LeaseStatus::default(),
-                id: r.get(0)?,
+                id,
                 tenant_id: r.get(1)?,
                 name: r.get(2)?,
                 desired_revision: r.get(3)?,
                 applied_revision: r.get(4)?,
-                last_seen_ms: r.get(5)?,
+                last_seen_ms,
                 apply_error: r.get(6)?,
                 enrolled: r.get(7)?,
-                stats: serde_json::from_str(&r.get::<_, String>(8)?).unwrap_or_default(),
+                stats: serde_json::from_str(&stats).unwrap_or_default(),
             })
         })?;
         let mut nodes: Vec<Node> = rows.collect::<rusqlite::Result<_>>()?;
@@ -693,7 +760,9 @@ impl Store {
             let conn = self.0.lock().unwrap();
             let mut q = conn.prepare("SELECT id,name,last_seen_ms,token_hash IS NOT NULL FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY name,id")?;
             q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                let id: String = r.get(0)?;
+                let (last_seen, _) = self.4.current(&id, r.get(2)?, String::new());
+                Ok((id, r.get(1)?, last_seen, r.get(3)?))
             })?
             .collect::<rusqlite::Result<_>>()?
         };

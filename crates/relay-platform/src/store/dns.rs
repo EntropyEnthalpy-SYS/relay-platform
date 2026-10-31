@@ -451,6 +451,7 @@ impl Store {
         let Some((last_seen, stats)) = row else {
             return Ok(false);
         };
+        let (last_seen, stats) = self.4.current(&gate.node_id, last_seen, stats);
         if super::node_profiles::read(&conn, &gate.node_id)?
             .settings
             .lifecycle(now_ms())

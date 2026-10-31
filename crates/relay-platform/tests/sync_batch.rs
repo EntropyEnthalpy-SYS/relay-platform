@@ -262,6 +262,131 @@ fn failed_journal_confirmation_never_returns_partial_batch_success_and_retries_a
     );
 }
 
+#[test]
+fn heartbeats_stay_visible_without_growing_the_recovery_log() {
+    let f = Fixture::new(false);
+    let sync = |input: (String, SyncRequest)| {
+        let replies = f.store.sync_authenticated_batch(vec![input]).unwrap();
+        assert!(replies[0].is_ok());
+    };
+    let node = || {
+        f.store
+            .nodes(&f.admin)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == f.nodes[0])
+            .unwrap()
+    };
+    sync(f.input(0));
+    let sequence = f.sequence();
+    let first_seen = node().last_seen_ms.unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let (credential, mut beat) = f.input(0);
+    beat.usage.clear();
+    beat.budget = None;
+    beat.need_config = false;
+    beat.stats.failed_connections = 7;
+    sync((credential.clone(), beat));
+    assert_eq!(f.sequence(), sequence);
+    assert_eq!(node().stats.failed_connections, 7);
+    assert!(node().last_seen_ms.unwrap() > first_seen);
+    // Topology changes wait for idle nodes, so busy and idle are stored at once.
+    let (_, mut busy) = f.input(0);
+    busy.usage.clear();
+    busy.budget = None;
+    busy.stats.active_tcp = 1;
+    sync((credential, busy));
+    assert_eq!(f.sequence(), sequence + 1);
+}
+
+#[test]
+fn only_revoked_unreferenced_nodes_are_deleted_and_the_deletion_replays() {
+    use relay_platform::credential::RevokeCredential;
+    let f = Fixture::new(false);
+    let backup = f.tmp.path().join("backup.sqlite");
+    f.store.backup(&backup).unwrap();
+    let (credential, mut report) = f.input(0);
+    report.budget = None;
+    assert!(
+        f.store
+            .sync_authenticated_batch(vec![(credential, report)])
+            .unwrap()[0]
+            .is_ok()
+    );
+    // An unenrolled exit that another node's rule still routes through.
+    let mut hops = vec![];
+    for name in ["hop-entry", "hop-exit"] {
+        let (node, _) = f.store.create_node(&f.admin, "default", name).unwrap();
+        let mut r = rule("127.0.0.1:9000".parse().unwrap(), Protocol::Tcp);
+        r.id = format!("{name}-rule");
+        r.advertise = Some(r.listen.to_string());
+        hops.push((node.id, r));
+    }
+    hops[0].1.targets[0].address = hops[1].1.listen.to_string();
+    hops[0].1.targets[0].via = Some(RuleRef {
+        node_id: hops[1].0.clone(),
+        rule_id: hops[1].1.id.clone(),
+    });
+    f.store
+        .publish_configs(
+            &f.admin,
+            relay_platform::topology::ConfigBatch {
+                updates: hops
+                    .iter()
+                    .map(|(node, r)| relay_platform::topology::ConfigUpdate {
+                        node_id: node.clone(),
+                        expected_revision: 0,
+                        rules: vec![r.clone()],
+                        rate_bytes_per_sec: None,
+                    })
+                    .collect(),
+            },
+        )
+        .unwrap();
+    let exit = hops[1].0.clone();
+    let delete = |node: &str| f.store.delete_node(&f.admin, node);
+    assert_eq!(status(&delete(&f.nodes[0]).unwrap_err()), 409);
+    for node in [&f.nodes[0], &exit] {
+        let revision = f
+            .store
+            .node_credential_status(&f.admin, node)
+            .unwrap()
+            .revision;
+        f.store
+            .revoke_node_credential(
+                &f.admin,
+                node,
+                RevokeCredential {
+                    operation_id: format!("retire-{revision}-{}", &node[..8]),
+                    expected_revision: revision,
+                    reason: "retired".into(),
+                },
+            )
+            .unwrap();
+    }
+    let referenced = delete(&exit).unwrap_err();
+    assert_eq!(status(&referenced), 409);
+    assert!(referenced.to_string().contains("hop-entry"), "{referenced}");
+    delete(&f.nodes[0]).unwrap();
+    assert_eq!(status(&delete(&f.nodes[0]).unwrap_err()), 404);
+    let names = |store: &Store| {
+        store
+            .nodes(&f.admin)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect::<Vec<_>>()
+    };
+    let remaining = ["hop-entry", "hop-exit", "node-1", "node-2", "node-3"];
+    assert_eq!(names(&f.store), remaining);
+    assert!(f.store.reported_usage(&f.admin).unwrap().is_empty());
+    drop(f.store);
+    let output = f.tmp.path().join("restored");
+    restore_controller(&backup, &f.tmp.path().join("recovery.log"), &output).unwrap();
+    let restored = Store::open(&output.join("controller.sqlite")).unwrap();
+    assert_eq!(names(&restored), remaining);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_coalesces_requests_preserves_response_identity_and_restricts_metrics() {
     use axum::{

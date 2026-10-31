@@ -305,6 +305,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/nodes", get(nodes).post(create_node))
         .route("/api/v1/nodes/profiles", post(update_node_profiles))
+        .route("/api/v1/nodes/{node}", delete(delete_node))
         .route(
             "/api/v1/nodes/{node}/profile",
             axum::routing::put(update_node_profile),
@@ -1309,6 +1310,14 @@ async fn node_credential(
         })
         .await?,
     ))
+}
+async fn delete_node(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_node(&actor, &node)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 async fn revoke_credential(
     State(state): State<AppState>,

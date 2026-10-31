@@ -67,9 +67,9 @@ impl Store {
                 Ok(AlertNode {
                     tenant_id,
                     watched: enrolled && active,
+                    last_seen_ms: self.4.current(&id, last_seen_ms, String::new()).0,
                     id,
                     name,
-                    last_seen_ms,
                 })
             })
             .collect()

@@ -10,6 +10,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/session` | 当前用户与角色 |
 | POST | `/auth/logout` | 撤销当前会话 |
 | GET / POST | `/nodes` | 按可选 q/kind/group/tag/lifecycle 筛选可见节点；`{name,tenant_id?,lease_policy?,settings?}` 创建节点并返回一次性注册令牌；省略或 `null` 的 `lease_policy` 为离线（可用优先）模式，`{}` 或 `{ttl_ms}` 为严格租约 |
+| DELETE | `/nodes/{id}` | 删除已撤销或未注册、没有有效执行租约、且未被其他节点 `via`、DNS 记录、订阅、模板或预算引用的节点；一并删除其规则、配置历史与用量记录，保留审计和已用凭据栅栏；仍被引用时返回 409 |
 | PUT | `/nodes/{id}/profile` | `{expected_revision,name,settings}`；更新完整资料，独立于转发修订 |
 | POST | `/nodes/profiles` | `{updates:[{node_id,update}]}`；原子保存 1..100 个节点资料，逐节点返回修订 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |

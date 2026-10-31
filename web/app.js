@@ -63,7 +63,7 @@ async function api(path, options = {}) {
 }
 setupLanguageSwitcher(() => {
   if (!state.actor) { document.title = translate('Relay · 独立转发平台'); return; }
-  $('#identity').textContent = `${state.actor.username} · ${roleNames[state.actor.role]}`;
+  $('#identity').textContent = $('#identity').title = `${state.actor.username} · ${roleNames[state.actor.role]}`;
   $('#view-title').textContent = titles[state.view];
   $('#notification').classList.add('hidden');
   consoleUI.sync(state.view);
@@ -278,7 +278,7 @@ $('#refresh').onclick = () => refresh().catch(e => notify(e.message, true));
 document.querySelectorAll('[data-view]').forEach(n => n.addEventListener('click', () => navigate(n.dataset.view)));
 async function enter() {
   $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden');
-  $('#identity').textContent = `${state.actor.username} · ${roleNames[state.actor.role]}`;
+  $('#identity').textContent = $('#identity').title = `${state.actor.username} · ${roleNames[state.actor.role]}`;
   document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin'));
   document.querySelectorAll('.tenant-admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role === 'viewer'));
   const route = parseRoute(location.hash); await navigate(route.view, { topic: route.topic, history: false });
@@ -558,6 +558,7 @@ async function nodeCredential(node) {
   if (status.replacement) body.append(el('p', msg`替换票据到期：${timestamp(status.replacement.expires_at_ms)} · ${status.replacement.enrolled_at_ms ? translate('已注册') : translate('尚未使用')}`, 'fine'));
   if (status.blocked_quota_periods?.length) body.append(el('p', translate('以下旧配额周期可能存在未上报消费，替换实例会等待。请停用对应规则，或在规则编辑中明确开始新周期。旧账和共享预算不会清零。'), 'fine'), table([translate('规则'), translate('受保护的旧周期')], status.blocked_quota_periods.map(p => [p.rule_id,p.meter_epoch])));
   if (status.pending) body.append(el('p', msg`任务编号：${status.pending.id}`, 'fine'));
+  const actions = el('div', undefined, 'dialog-actions');
   if (canWrite() && phase === 'active' && !status.pending) {
     const action = button(translate('发起凭据轮换'), async () => {
       action.disabled = true;
@@ -566,14 +567,22 @@ async function nodeCredential(node) {
         await nodeCredential(node);
       } finally { action.disabled = false; }
     }, 'primary');
-    body.append(action);
+    actions.append(action);
   }
   if (canWrite()) {
-    body.append(button(phase === 'not_enrolled' ? translate('撤销遗失的注册令牌') : translate('紧急撤销身份'), () => revokeNodeIdentity(node,status), 'danger'));
-    if (phase === 'revoked' || phase === 'replacement_pending') body.append(button(translate('签发替换票据'), () => replaceNodeIdentity(node,status), 'primary'));
+    actions.append(button(phase === 'not_enrolled' ? translate('撤销遗失的注册令牌') : translate('紧急撤销身份'), () => revokeNodeIdentity(node,status), 'subtle danger'));
+    if (phase === 'revoked' || phase === 'replacement_pending') actions.append(button(translate('签发替换票据'), () => replaceNodeIdentity(node,status), 'primary'));
+    if (phase === 'revoked' || phase === 'not_enrolled') actions.append(button(translate('删除节点'), () => deleteNode(node), 'subtle danger'));
   }
-  body.append(button(translate('刷新状态'), () => nodeCredential(node)));
+  actions.append(button(translate('刷新状态'), () => nodeCredential(node)));
+  body.append(actions);
   modal(translate('节点身份与凭据'), body);
+}
+async function deleteNode(node) {
+  if (!await confirmAction(msg`永久删除节点「${node.name}」及其规则、配置历史和用量记录？审计日志保留。仍被其他节点、DNS 记录或预算引用的节点不能删除。`)) return;
+  await api(`/nodes/${node.id}`, { method: 'DELETE' });
+  if (state.selectedNode === node.id) state.selectedNode = null;
+  notify(msg`节点「${node.name}」已删除。`); await refresh();
 }
 function revokeNodeIdentity(node,status) {
   const form = el('form');

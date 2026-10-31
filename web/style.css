@@ -192,6 +192,8 @@ button.primary:hover { background: var(--accent-hover); border-color: var(--acce
   padding: 8px 13px; color: var(--text-2); font-size: 13px; white-space: nowrap;
 }
 .subtle:hover { background: var(--surface-3); color: var(--text); border-color: var(--muted); }
+.subtle.danger { color: var(--red); }
+.subtle.danger:hover { background: var(--red-soft); color: var(--red); border-color: var(--red); }
 .icon-button { border: 0; background: none; font-size: 22px; line-height: 1; color: var(--muted); padding: 4px 8px; }
 .icon-button:hover { color: var(--text); background: var(--surface-3); }
 .table-action {
@@ -324,7 +326,7 @@ kbd { font-family: var(--sans); font-size: 10px; font-weight: 400; border: 1px s
 .build-badge { font-family: var(--mono); font-size: 9px; letter-spacing: .02em; color: var(--muted); padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; white-space: nowrap; }
 .icon-control { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0; border: 0; background: transparent; color: var(--muted); flex-shrink: 0; }
 .icon-control:hover { background: var(--surface-3); color: var(--text); }
-.identity { font-size: 11px; max-width: 168px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-2); padding-left: 14px; border-left: 1px solid var(--line-strong); }
+.identity { font-size: 11px; max-width: 260px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--text-2); padding-left: 14px; border-left: 1px solid var(--line-strong); }
 .identity:empty { display: none; }
 .mobile-only { display: none; }
 .sidebar { position: fixed; inset: 72px auto 0 0; width: 248px; display: flex; flex-direction: column; background: var(--bg); border-right: 1px solid var(--line); z-index: 25; padding: 0 16px; }
@@ -452,7 +454,7 @@ dialog::backdrop { background: rgba(0, 0, 0, .55); backdrop-filter: blur(4px); }
 .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; border-bottom: 1px solid var(--line); }
 #dialog-body { padding: 4px 24px 24px; }
 .dialog-actions {
-  position: sticky; bottom: 0; display: flex; justify-content: flex-end; gap: 10px;
+  position: sticky; bottom: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px;
   margin: 22px -24px -24px; padding: 14px 24px; border-top: 1px solid var(--line); background: var(--surface);
 }
 
@@ -702,7 +704,7 @@ html[lang="en"] .nav-label { letter-spacing: .02em; }
   .incident-empty { min-height: 65px; grid-column: 1 / -1; }
   .build-badge { display: none; }
   .topbar { gap: 22px; }
-  .identity { max-width: 145px; }
+  .identity { max-width: 210px; }
   .kpi { padding: 18px 15px 12px; }
   .kpi .metric-value { font-size: 25px; }
 }

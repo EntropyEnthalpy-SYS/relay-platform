@@ -1,5 +1,10 @@
 use super::*;
 
+/// A report rewrites a node's stored status at least this often even when
+/// nothing important changed. It stays under the 90 s freshness gates (DNS
+/// health, rollouts), which read the stored copy right after a restart.
+const STATUS_REFRESH_MS: i64 = 60_000;
+
 /// Keep each request's atomic boundary while sharing one durable journal commit.
 /// Only expected input/auth conflicts are isolated; storage errors abort the batch.
 impl Store {
@@ -14,9 +19,9 @@ impl Store {
             request.budget.as_ref().map(|b| b.run_id.as_str()),
         )?;
         let report = Report::of(&request);
-        let response = apply_sync(&tx, node, request, &self.6)?;
+        let (response, stored_seen) = apply_sync(&tx, node, request, &self.6)?;
         tx.commit()?;
-        report.record(&self.4, node);
+        report.record(&self.4, node, stored_seen);
         Ok(response)
     }
 
@@ -53,8 +58,8 @@ impl Store {
                     input.budget.as_ref().map(|b| b.run_id.as_str()),
                 )?;
                 let report = Report::of(&input);
-                let response = apply_sync(&tx, &node, input, &self.6)?;
-                reports.push((node, report));
+                let (response, stored_seen) = apply_sync(&tx, &node, input, &self.6)?;
+                reports.push((node, report, stored_seen));
                 Ok(response)
             })();
             if let Err(error) = &result {
@@ -67,8 +72,8 @@ impl Store {
             responses.push(result);
         }
         tx.commit()?;
-        for (node, report) in reports {
-            report.record(&self.4, &node);
+        for (node, report, stored_seen) in reports {
+            report.record(&self.4, &node, stored_seen);
         }
         Ok(responses)
     }
@@ -86,8 +91,9 @@ impl Report {
         )
     }
 
-    fn record(self, telemetry: &crate::telemetry::Telemetry, node: &str) {
+    fn record(self, telemetry: &crate::telemetry::Telemetry, node: &str, stored_seen: Option<i64>) {
         telemetry.record(node, self.0, self.1.as_deref(), &self.2);
+        telemetry.keep_status(node, stored_seen, &self.2);
     }
 }
 
@@ -96,7 +102,7 @@ fn apply_sync(
     node: &str,
     request: SyncRequest,
     rates: &std::sync::Mutex<super::user_rates::UserRates>,
-) -> Result<SyncResponse> {
+) -> Result<(SyncResponse, Option<i64>)> {
     if request.usage.len() > 1024
         || request.stats.user_rates.len() > 1024
         || request.apply_error.as_ref().is_some_and(|e| e.len() > 2048)
@@ -161,7 +167,35 @@ fn apply_sync(
         .budget
         .map(|exchange| budgets::exchange(tx, node, &request.ledger_id, exchange))
         .transpose()?;
-    tx.execute("UPDATE nodes SET applied_revision=?1,last_seen_ms=?2,apply_error=?3,stats_json=?4 WHERE id=?5",params![request.applied_revision,now_ms(),request.apply_error,serde_json::to_string(&request.stats)?,node])?;
+    // Every write is a durable recovery-log record, and heartbeats used to be
+    // nearly all of the log. Store the status only when the revision, error or
+    // quiescence changes, or once it is STATUS_REFRESH_MS old. Readers take
+    // newer reports from telemetry while the row's `last_seen` is still the
+    // one returned here.
+    let (stored_applied, stored_error, stored_seen, stored_stats): (
+        u64,
+        Option<String>,
+        Option<i64>,
+        String,
+    ) = tx.query_row(
+        "SELECT applied_revision,apply_error,last_seen_ms,stats_json FROM nodes WHERE id=?1",
+        [node],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let now = now_ms();
+    let quiet = |stats: &EngineStats| stats.business_idle() && stats.active_probes == 0;
+    let stored_seen = if stored_applied != request.applied_revision
+        || stored_error != request.apply_error
+        || stored_seen.is_none_or(|seen| now.saturating_sub(seen) >= STATUS_REFRESH_MS)
+        || serde_json::from_str::<EngineStats>(&stored_stats)
+            .ok()
+            .is_none_or(|stored| quiet(&stored) != quiet(&request.stats))
+    {
+        tx.execute("UPDATE nodes SET applied_revision=?1,last_seen_ms=?2,apply_error=?3,stats_json=?4 WHERE id=?5",params![request.applied_revision,now,request.apply_error,serde_json::to_string(&request.stats)?,node])?;
+        Some(now)
+    } else {
+        stored_seen
+    };
     let config = if request.need_config || desired != request.applied_revision {
         Some(serde_json::from_str(&tx.query_row(
             "SELECT config_json FROM config_history WHERE node_id=?1 AND revision=?2",
@@ -177,13 +211,16 @@ fn apply_sync(
         node,
         &request.stats.user_rates,
     )?;
-    Ok(SyncResponse {
-        user_rates: Some(user_rates),
-        credential_rotation: super::credentials::read(tx, node)?.pending,
-        budget,
-        controller_instance: "store-direct".into(),
-        config,
-        acknowledgements,
-        server_time_ms: now_ms(),
-    })
+    Ok((
+        SyncResponse {
+            user_rates: Some(user_rates),
+            credential_rotation: super::credentials::read(tx, node)?.pending,
+            budget,
+            controller_instance: "store-direct".into(),
+            config,
+            acknowledgements,
+            server_time_ms: now_ms(),
+        },
+        stored_seen,
+    ))
 }

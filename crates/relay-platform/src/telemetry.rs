@@ -64,6 +64,10 @@ struct Track {
     applied: u64,
     apply_error: Option<String>,
     last_seen: Option<i64>,
+    /// The latest committed report's stats JSON and the database `last_seen`
+    /// it was committed against; sync rewrites that row only on changes or
+    /// once a minute.
+    status: Option<(Option<i64>, String)>,
 }
 
 #[derive(Default)]
@@ -251,6 +255,42 @@ impl Telemetry {
         {
             track.samples.pop_front();
         }
+    }
+
+    /// Keeps a committed report's stats with the stored `last_seen` they
+    /// were committed against.
+    pub fn keep_status(&self, node: &str, stored_seen: Option<i64>, stats: &EngineStats) {
+        if let (Some(track), Ok(json)) = (
+            self.0.lock().unwrap().nodes.get_mut(node),
+            serde_json::to_string(stats),
+        ) {
+            track.status = Some((stored_seen, json));
+        }
+    }
+
+    /// A node's last report time and stats JSON: the newest committed report
+    /// while the stored row is still the one it was committed against, so any
+    /// other write to that row (a lease reset, a restore) takes precedence.
+    pub fn current(
+        &self,
+        node: &str,
+        last_seen: Option<i64>,
+        stats: String,
+    ) -> (Option<i64>, String) {
+        let inner = self.0.lock().unwrap();
+        match inner.nodes.get(node) {
+            Some(Track {
+                last_seen: Some(seen),
+                status: Some((stored, live)),
+                ..
+            }) if *stored == last_seen => (Some(*seen), live.clone()),
+            _ => (last_seen, stats),
+        }
+    }
+
+    /// Drops the history of a deleted node.
+    pub fn forget(&self, node: &str) {
+        self.0.lock().unwrap().nodes.remove(node);
     }
 
     /// Every event newer than `after`, oldest first, regardless of tenant.
