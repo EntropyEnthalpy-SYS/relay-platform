@@ -298,3 +298,201 @@ fn nodes_join_with_reported_keys_and_get_their_peers_through_sync() {
     );
     assert!(!after.enabled && after.interfaces.is_empty());
 }
+
+/// What `key` sees of the peers `(key, endpoint, handshake, rx)` on `network`.
+fn seen(private_key: &str, network: &str, peers: &[(&str, Option<&str>, u64, u64)]) -> Report {
+    Report {
+        interfaces: vec![wireguard::InterfaceReport {
+            network_id: network.into(),
+            name: wireguard::interface_name(network),
+            error: None,
+            peers: peers
+                .iter()
+                .map(
+                    |(key, endpoint, handshake, rx_bytes)| wireguard::PeerReport {
+                        public_key: wireguard::public_key(key).unwrap(),
+                        endpoint: endpoint.map(str::to_string),
+                        handshake: *handshake,
+                        rx_bytes: *rx_bytes,
+                        tx_bytes: 0,
+                    },
+                )
+                .collect(),
+        }],
+        probes: true,
+        ..report(private_key, "")
+    }
+}
+/// Each peer of the node's only interface as `endpoint keepalive allowed`, by key.
+fn entries(desired: &Desired) -> std::collections::BTreeMap<String, String> {
+    desired.interfaces[0]
+        .peers
+        .iter()
+        .map(|p| {
+            let allowed: Vec<String> = p.allowed_ips.iter().map(|n| n.addr().to_string()).collect();
+            (
+                p.public_key.clone(),
+                format!(
+                    "{} {} {}",
+                    p.endpoint.as_deref().unwrap_or("-"),
+                    p.keepalive.unwrap_or(0),
+                    allowed.join(",")
+                ),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn nat_traversal_moves_a_pair_behind_nats_off_the_relay_and_back() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("controller.db")).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    let (mut nodes, mut credentials) = (vec![], vec![]);
+    for name in ["relay", "a", "b"] {
+        let (node, token) = db.create_node(&admin, "default", name).unwrap();
+        let credential = relay_platform::store::secret();
+        db.enroll(&node.id, &token, &credential).unwrap();
+        let ledger = ledger(&db, &node.id);
+        nodes.push((node.id, ledger, wireguard::private_key()));
+        credentials.push(credential);
+    }
+    let [
+        (relay, relay_ledger, relay_key),
+        (a, a_ledger, a_key),
+        (b, b_ledger, b_key),
+    ] = nodes.try_into().unwrap();
+    let b_credential = credentials.pop().unwrap();
+    let public = |key: &str| wireguard::public_key(key).unwrap();
+
+    // NAT traversal works on top of WireGuard networking.
+    assert_eq!(
+        rejection(db.set_feature(&admin, "nat-traversal", true)),
+        409
+    );
+    db.set_feature(&admin, "wireguard", true).unwrap();
+    for (node, ledger, key) in [
+        (&relay, &relay_ledger, &relay_key),
+        (&a, &a_ledger, &a_key),
+        (&b, &b_ledger, &b_key),
+    ] {
+        sync(&db, node, ledger, Some(report(key, "")));
+    }
+    let office = db
+        .create_wireguard_network(
+            &admin,
+            input(json!({"name":"office","cidr":"10.88.0.0/24"})),
+        )
+        .unwrap();
+    for value in [
+        json!({"kind":"node","node_id":relay,"endpoint":"203.0.113.1"}),
+        json!({"kind":"node","node_id":a}),
+        json!({"kind":"node","node_id":b}),
+    ] {
+        db.create_wireguard_member(&admin, &office.id, input(value))
+            .unwrap();
+    }
+    // The relay hears both through their NATs; `a` and `b` reach it.
+    let relay_sees = seen(
+        &relay_key,
+        &office.id,
+        &[
+            (&a_key, Some("198.51.100.2:40001"), 1000, 1),
+            (&b_key, Some("198.51.100.3:40002"), 1000, 1),
+        ],
+    );
+    let via_relay = |key: &str| {
+        seen(
+            key,
+            &office.id,
+            &[(&relay_key, Some("203.0.113.1:51820"), 1000, 1)],
+        )
+    };
+    sync(&db, &relay, &relay_ledger, Some(relay_sees.clone()));
+    sync(&db, &b, &b_ledger, Some(via_relay(&b_key)));
+    let relayed = sync(&db, &a, &a_ledger, Some(via_relay(&a_key)));
+    assert_eq!(
+        entries(&relayed),
+        [(
+            public(&relay_key),
+            "203.0.113.1:51820 25 10.88.0.1,10.88.0.3".to_string()
+        )]
+        .into()
+    );
+    let view = db.wireguard(&admin).unwrap();
+    let pair = |view: &wireguard::View| {
+        let pair = view.networks[0]
+            .pairs
+            .iter()
+            .find(|p| p.a == "a" && p.b == "b")
+            .unwrap();
+        (pair.path, pair.punched)
+    };
+    assert_eq!(pair(&view), ("relayed", false), "switched off: no attempt");
+
+    db.set_feature(&admin, "nat-traversal", true).unwrap();
+    sync(&db, &a, &a_ledger, Some(via_relay(&a_key)));
+    // The probe: `a` gets an entry at `b`'s NAT address that carries nothing
+    // yet, and `b`'s watch returns so it gets its entry at once.
+    let probing = sync(&db, &a, &a_ledger, Some(via_relay(&a_key)));
+    assert_eq!(
+        entries(&probing),
+        [
+            (
+                public(&relay_key),
+                "203.0.113.1:51820 25 10.88.0.1,10.88.0.3".to_string()
+            ),
+            (public(&b_key), "198.51.100.3:40002 25 ".to_string()),
+        ]
+        .into()
+    );
+    assert!(db.node_watch(&b_credential).unwrap().1);
+    assert!(!db.node_watch(&b_credential).unwrap().1, "once");
+    assert_eq!(pair(&db.wireguard(&admin).unwrap()), ("probing", false));
+    let b_probing = sync(&db, &b, &b_ledger, Some(via_relay(&b_key)));
+    assert_eq!(
+        entries(&b_probing)[&public(&a_key)],
+        "198.51.100.2:40001 25 "
+    );
+
+    // Both sides handshake through their NATs: traffic leaves the relay.
+    let punched = |key: &str, other: &str, rx| {
+        seen(
+            key,
+            &office.id,
+            &[
+                (&relay_key, Some("203.0.113.1:51820"), 1000, 1),
+                (other, Some("198.51.100.9:1"), 2000, rx),
+            ],
+        )
+    };
+    sync(&db, &b, &b_ledger, Some(punched(&b_key, &a_key, 92)));
+    let direct = sync(&db, &a, &a_ledger, Some(punched(&a_key, &b_key, 92)));
+    assert_eq!(
+        entries(&direct),
+        [
+            (
+                public(&relay_key),
+                "203.0.113.1:51820 25 10.88.0.1".to_string()
+            ),
+            (
+                public(&b_key),
+                "198.51.100.3:40002 25 10.88.0.3".to_string()
+            ),
+        ]
+        .into()
+    );
+    assert_eq!(pair(&db.wireguard(&admin).unwrap()), ("direct", true));
+    assert!(db.node_watch(&b_credential).unwrap().1);
+
+    // Switching it off puts the pair back on the relay.
+    db.set_feature(&admin, "nat-traversal", false).unwrap();
+    let back = sync(&db, &a, &a_ledger, Some(punched(&a_key, &b_key, 184)));
+    assert_eq!(entries(&back), entries(&relayed));
+    // WireGuard stays on while NAT traversal is on, even without networks.
+    db.set_feature(&admin, "nat-traversal", true).unwrap();
+    db.delete_wireguard_network(&admin, &office.id).unwrap();
+    assert_eq!(rejection(db.set_feature(&admin, "wireguard", false)), 409);
+    db.set_feature(&admin, "nat-traversal", false).unwrap();
+    db.set_feature(&admin, "wireguard", false).unwrap();
+}

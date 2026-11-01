@@ -603,13 +603,15 @@ All routes need a system administrator session (API tokens are refused). Creatin
 
 | Method | Path | Body / result |
 | --- | --- | --- |
-| GET | `/wireguard` | `{enabled, networks:[network + {interface, relay_in_use?, members:[member + {label, state, error?}], pairs:[{a, b, path, via?, handshake_age_s?, rx_bytes?, tx_bytes?}]}], nodes:[{id, name, key_reported, problem?}]}` |
+| GET | `/wireguard` | `{enabled, networks:[network + {interface, relay_in_use?, members:[member + {label, state, error?}], pairs:[{a, b, path, punched?, via?, reason?, retry_in_s?, handshake_age_s?, rx_bytes?, tx_bytes?}]}], nodes:[{id, name, key_reported, problem?}]}` |
 | POST | `/wireguard/networks` | `{name, cidr, listen_port?, mtu?}` |
 | PUT / DELETE | `/wireguard/networks/{id}` | `{name, cidr?, listen_port?, mtu?, relay?}`; `cidr` cannot change while members exist; DELETE also removes the members |
 | POST | `/wireguard/networks/{id}/members` | Node `{kind:"node", node_id, endpoint?, listen_port?, address?}` (409 until the node's agent reported a key) or device `{kind:"device", name, via?, public_key?, address?}`; a device reply adds `config` and, when the panel made the key, `qr_svg`, both shown only once |
 | PUT / DELETE | `/wireguard/members/{id}` | Same body; kind, node, address and key cannot change. A node that devices use, or the explicit relay, keeps its endpoint; deleting a node that devices use returns 409 |
 | POST | `/wireguard/members/{id}/rekey` | Devices only: a new key pair, returning `config` and `qr_svg` once |
 
-Node member `state` is `up`, `updating` (the agent has not applied the newest state), `error` (see `error`), `waiting` (no report yet, possibly an agent older than 0.138.0) or `offline` (no report for 90 s); devices are `connected` (handshake with the entry node within 180 s) or `idle`. Pair `path` is `direct`, `relayed` (through `via`) or `unreachable`.
+Node member `state` is `up`, `updating` (the agent has not applied the newest state), `error` (see `error`), `waiting` (no report yet, possibly an agent older than 0.138.0) or `offline` (no report for 90 s); devices are `connected` (handshake with the entry node within 180 s) or `idle`. Pair `path` is `direct`, `relayed` (through `via`) or `unreachable`; with NAT traversal (0.139.0) also `probing` (relayed through `via` while trying a direct path). A direct pair of two nodes behind NAT has `punched: true`; a relayed one that tried has `reason` and `retry_in_s` (seconds until the next attempt).
+
+Agents from 0.139.0 add `probes: true` to `EngineStats.wireguard`; only pairs where both agents send it are tried. `GET /agent/watch` (node credential) also returns early with `wireguard_changed: true` once when NAT traversal changed the node's interfaces since its last sync; agents from 0.139.0 sync at once, older agents ignore the field. `PUT /features/nat-traversal` returns 409 while `wireguard` is off, and `PUT /features/wireguard {enabled:false}` returns 409 while `nat-traversal` is on.
 
 Agents receive `SyncResponse.wireguard` and return `EngineStats.wireguard` as described in [WIREGUARD.md](WIREGUARD.md).

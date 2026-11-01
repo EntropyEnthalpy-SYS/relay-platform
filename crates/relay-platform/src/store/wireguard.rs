@@ -1,15 +1,18 @@
 //! WireGuard network persistence. Networks, members and the public keys that
 //! node agents report live in metadata, so the schema and recovery log stay
-//! unchanged. Only system administrators manage networks.
+//! unchanged. Only system administrators manage networks. NAT traversal
+//! state lives in memory only.
 use super::*;
 use crate::wireguard::{
     self as wg, Desired, Issued, Kind, MAX_MEMBERS, MAX_NETWORKS, MAX_NODE_NETWORKS, Member,
     MemberInput, MemberView, Network, NetworkInput, NetworkView, NodeReadiness, PairView, Path,
     PeerReport, Report, View,
+    punch::{Stage, Traversal},
 };
 use std::{collections::HashMap, net::Ipv4Addr};
 
 const FEATURE: &str = "wireguard";
+const TRAVERSAL: &str = "nat-traversal";
 /// A device counts as connected while its newest handshake is this recent.
 const CONNECTED_S: u64 = 180;
 
@@ -76,24 +79,54 @@ pub(super) fn network_count(conn: &Connection) -> Result<usize> {
     )?)
 }
 
-/// Keeps the public key a node's agent reports, written only when it changes.
-pub(super) fn observe(tx: &Transaction<'_>, node: &str, report: Option<&Report>) -> Result<()> {
-    let Some(key) = report
+/// Keeps the public key a node's agent reports, written only when it
+/// changes, and advances NAT traversal in the node's networks.
+pub(super) fn observe(
+    tx: &Transaction<'_>,
+    node: &str,
+    report: Option<&Report>,
+    traversal: &mut Traversal,
+) -> Result<()> {
+    if let Some(key) = report
         .and_then(|r| r.public_key.as_deref())
         .filter(|k| wg::valid_key(k))
-    else {
+    {
+        tx.execute(
+            "INSERT INTO metadata(key,value) VALUES('wg_node_key:'||?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value",
+            params![node, key],
+        )?;
+    }
+    let now = (now_ms() / 1000) as u64;
+    traversal.observe(node, report, now);
+    if !features::enabled(tx, FEATURE)? || !features::enabled(tx, TRAVERSAL)? {
+        traversal.clear();
         return Ok(());
-    };
-    tx.execute(
-        "INSERT INTO metadata(key,value) VALUES('wg_node_key:'||?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value<>excluded.value",
-        params![node, key],
-    )?;
+    }
+    let members = all::<Member>(tx, "member")?;
+    if members.iter().any(|m| m.node_id.as_deref() == Some(node)) {
+        let networks = all::<Network>(tx, "network")?;
+        traversal.retain(|id| networks.iter().any(|n| n.id == id));
+        let keys = node_keys(tx)?;
+        for network in &networks {
+            let mut peers: Vec<Member> = members
+                .iter()
+                .filter(|m| m.network_id == network.id)
+                .cloned()
+                .collect();
+            if peers.iter().any(|m| m.node_id.as_deref() == Some(node)) {
+                peers.sort_by_key(|m| m.address);
+                traversal.step(network, &peers, &keys, now);
+            }
+        }
+    }
+    // This sync delivers the node's change.
+    traversal.take_wake(node);
     Ok(())
 }
 
 /// What `node` should have: one interface per network it is a member of.
 /// Empty while the feature is off.
-pub(super) fn desired(conn: &Connection, node: &str) -> Result<Desired> {
+pub(super) fn desired(conn: &Connection, node: &str, traversal: &Traversal) -> Result<Desired> {
     if !features::enabled(conn, FEATURE)? {
         return Ok(Desired::new(false, vec![]));
     }
@@ -118,8 +151,13 @@ pub(super) fn desired(conn: &Connection, node: &str) -> Result<Desired> {
             .cloned()
             .collect();
         peers.sort_by_key(|m| m.address);
+        let punches = peers
+            .iter()
+            .find(|m| m.node_id.as_deref() == Some(node))
+            .map(|me| traversal.punches(&network.id, &me.id))
+            .unwrap_or_default();
         // One broken network must not stop the node's sync.
-        match wg::render(network, &peers, &keys, node) {
+        match wg::render(network, &peers, &keys, node, &punches) {
             Ok(interface) => interfaces.extend(interface),
             Err(error) => {
                 tracing::warn!(%error, network = %network.id, "WireGuard network skipped")
@@ -515,6 +553,7 @@ impl Store {
     pub fn wireguard(&self, actor: &Actor) -> Result<View> {
         require_admin(actor)?;
         let conn = self.0.lock().unwrap();
+        let traversal = self.8.lock().unwrap();
         let telemetry = &self.4;
         let keys = node_keys(&conn)?;
         let now_s = (now_ms() / 1000) as u64;
@@ -581,7 +620,7 @@ impl Store {
                         let digest = match expected.get(node) {
                             Some(digest) => digest.clone(),
                             None => {
-                                let digest = desired(&conn, node)?.digest;
+                                let digest = desired(&conn, node, &traversal)?.digest;
                                 expected.insert(node.clone(), digest.clone());
                                 digest
                             }
@@ -633,10 +672,27 @@ impl Store {
                         a: label(a),
                         b: label(b),
                         path: "unreachable",
+                        punched: false,
                         via: None,
+                        reason: None,
+                        retry_in_s: None,
                         handshake_age_s: None,
                         rx_bytes: None,
                         tx_bytes: None,
+                    };
+                    let attempt = traversal.attempt(&network.id, &a.id, &b.id);
+                    let route = match (route, attempt) {
+                        (Path::Relayed(_), Some(attempt)) if attempt.stage == Stage::Direct => {
+                            pair.punched = true;
+                            Path::Direct
+                        }
+                        (route, Some(attempt)) if attempt.stage == Stage::Relayed => {
+                            pair.reason = attempt.reason.clone();
+                            pair.retry_in_s =
+                                (attempt.retry_at > now_s).then(|| attempt.retry_at - now_s);
+                            route
+                        }
+                        (route, _) => route,
                     };
                     match route {
                         Path::Direct => {
@@ -648,7 +704,11 @@ impl Store {
                             }
                         }
                         Path::Relayed(relay) => {
-                            pair.path = "relayed";
+                            pair.path = if attempt.is_some_and(|a| a.stage == Stage::Probing) {
+                                "probing"
+                            } else {
+                                "relayed"
+                            };
                             pair.via = Some(label(relay));
                             let legs = [either(a, relay), either(b, relay)];
                             pair.handshake_age_s = legs

@@ -1560,12 +1560,14 @@ async fn watch_config(
     loop {
         let published = state.store.config_published();
         let credential = token.clone();
-        let revision = database(state.store.clone(), move |db| {
-            db.node_desired_revision(&credential)
-        })
-        .await?;
-        let reply = Json(serde_json::json!({ "desired_revision": revision }));
-        if revision > query.after {
+        let (revision, wireguard_changed) =
+            database(state.store.clone(), move |db| db.node_watch(&credential)).await?;
+        let mut reply = serde_json::json!({ "desired_revision": revision });
+        if wireguard_changed {
+            reply["wireguard_changed"] = true.into();
+        }
+        let reply = Json(reply);
+        if revision > query.after || wireguard_changed {
             return Ok(reply);
         }
         tokio::select! {
@@ -3724,8 +3726,8 @@ async fn rekey_wireguard_device(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery","dns-authoritative-pool","wireguard"],
-        "pending":["nat-traversal","dns-health-removal","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery","dns-authoritative-pool","wireguard","nat-traversal"],
+        "pending":["dns-health-removal","federation","postgresql-ha"]
     }))
 }
 

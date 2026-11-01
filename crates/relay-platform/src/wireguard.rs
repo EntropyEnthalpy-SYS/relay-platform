@@ -3,8 +3,9 @@
 //! member node should have, and the node's agent applies it on links named
 //! `rwg-*` only. A pair where neither side has a public endpoint goes through
 //! the network's relay node, and a device connects to one public node (its
-//! hub). Node private keys are made on the node and never leave it; device
-//! keys are made by the panel and shown once.
+//! hub). With NAT traversal on, two such nodes try to reach each other
+//! directly first ([`punch`]). Node private keys are made on the node and
+//! never leave it; device keys are made by the panel and shown once.
 use anyhow::{Context, Result, anyhow, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ipnet::Ipv4Net;
@@ -13,6 +14,8 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
+
+pub mod punch;
 
 pub const MAX_NETWORKS: usize = 16;
 pub const MAX_MEMBERS: usize = 64;
@@ -162,6 +165,10 @@ pub struct Report {
     pub public_key: Option<String>,
     /// The server lets the agent manage WireGuard.
     pub ready: bool,
+    /// The agent writes peer entries without allowed IPs, which NAT
+    /// traversal probes use; agents before 0.139.0 cannot.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub probes: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
     /// The digest of the desired state last applied; what failed is in
@@ -226,10 +233,20 @@ pub struct MemberView {
 pub struct PairView {
     pub a: String,
     pub b: String,
-    /// direct, relayed or unreachable.
+    /// direct, probing (relayed while trying to connect directly), relayed
+    /// or unreachable.
     pub path: &'static str,
+    /// Direct through both members' NATs.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub punched: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
+    /// Why a pair behind NATs is relayed after trying to connect directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Seconds until the next direct attempt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_in_s: Option<u64>,
     /// Seconds since the newest handshake on the path; for a relayed pair,
     /// the older of its two legs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -421,6 +438,14 @@ pub fn path<'a>(a: &Member, b: &Member, relay: Option<&'a Member>) -> Path<'a> {
         relay.map_or(Path::Unreachable, Path::Relayed)
     }
 }
+/// A direct entry for a peer that also lacks a public endpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Punch {
+    /// The peer's address and port as its NAT presents them to the relay.
+    pub endpoint: Option<String>,
+    /// The hole is open: traffic to the peer goes here, not through the relay.
+    pub open: bool,
+}
 pub fn hub<'a>(device: &Member, members: &'a [Member]) -> Option<&'a Member> {
     members
         .iter()
@@ -429,12 +454,14 @@ pub fn hub<'a>(device: &Member, members: &'a [Member]) -> Option<&'a Member> {
 
 /// The interface `node` should have in `network`, or `None` when it is no
 /// member. `keys` maps node ids to the public keys their agents reported;
-/// a node whose key is unknown is left out until it reports one.
+/// a node whose key is unknown is left out until it reports one. `punches`
+/// holds the node's direct entries for peers behind NATs, by member id.
 pub fn render(
     network: &Network,
     members: &[Member],
     keys: &HashMap<String, String>,
     node: &str,
+    punches: &HashMap<String, Punch>,
 ) -> Result<Option<Interface>> {
     let Some(me) = members
         .iter()
@@ -468,6 +495,7 @@ pub fn render(
     // `target` lives behind `next`: a node, or the hub of a device.
     let mut reach = |next: &Member, address: Ipv4Addr| match path(me, next, relay) {
         Path::Direct => route(next, address),
+        Path::Relayed(_) if punches.get(&next.id).is_some_and(|p| p.open) => route(next, address),
         Path::Relayed(relay) => route(relay, address),
         Path::Unreachable => {}
     };
@@ -480,6 +508,25 @@ pub fn render(
                 _ => {}
             },
         }
+    }
+    // A probe's entry carries no traffic until the hole is open.
+    for (id, punch) in punches {
+        let Some(other) = members.iter().find(|m| &m.id == id && m.kind == Kind::Node) else {
+            continue;
+        };
+        let Some(public_key) =
+            key(other).filter(|_| matches!(path(me, other, relay), Path::Relayed(_)))
+        else {
+            continue;
+        };
+        let peer = peers.entry(public_key.clone()).or_insert_with(|| Peer {
+            public_key,
+            endpoint: None,
+            allowed_ips: vec![],
+            keepalive: None,
+        });
+        peer.endpoint = punch.endpoint.clone();
+        peer.keepalive = Some(KEEPALIVE);
     }
     let mut seen = HashSet::new();
     let mut peers: Vec<Peer> = peers.into_values().collect();
@@ -517,8 +564,11 @@ pub fn wg_config(interface: &Interface, private_key: &str) -> String {
     );
     for peer in &interface.peers {
         text.push_str(&format!("\n[Peer]\nPublicKey = {}\n", peer.public_key));
-        let allowed: Vec<String> = peer.allowed_ips.iter().map(ToString::to_string).collect();
-        text.push_str(&format!("AllowedIPs = {}\n", allowed.join(", ")));
+        // wg refuses an empty list; leaving the line out clears the list.
+        if !peer.allowed_ips.is_empty() {
+            let allowed: Vec<String> = peer.allowed_ips.iter().map(ToString::to_string).collect();
+            text.push_str(&format!("AllowedIPs = {}\n", allowed.join(", ")));
+        }
         if let Some(endpoint) = &peer.endpoint {
             text.push_str(&format!("Endpoint = {endpoint}\n"));
         }
@@ -670,6 +720,9 @@ mod tests {
             .filter_map(|m| m.node_id.clone().map(|n| (n, format!("key-{}", m.id))))
             .collect()
     }
+    fn none() -> HashMap<String, Punch> {
+        HashMap::new()
+    }
     /// Each peer as `key endpoint keepalive allowed,allowed`.
     fn peers(interface: &Interface) -> Vec<String> {
         interface
@@ -704,7 +757,9 @@ mod tests {
         ];
         let net = network(Some("p2"));
         let keys = keys(&members);
-        let a = render(&net, &members, &keys, "node-a").unwrap().unwrap();
+        let a = render(&net, &members, &keys, "node-a", &none())
+            .unwrap()
+            .unwrap();
         assert_eq!(a.name, "rwg-0f1e2d3c");
         assert_eq!(
             (a.address, a.prefix, a.forwarding),
@@ -717,7 +772,9 @@ mod tests {
                 "key-p2 203.0.113.5:51820 25 10.88.0.3,10.88.0.5",
             ]
         );
-        let p2 = render(&net, &members, &keys, "node-p2").unwrap().unwrap();
+        let p2 = render(&net, &members, &keys, "node-p2", &none())
+            .unwrap()
+            .unwrap();
         assert!(p2.forwarding);
         assert_eq!(
             peers(&p2),
@@ -727,13 +784,19 @@ mod tests {
                 "key-p1 203.0.113.1:51820 0 10.88.0.1,10.88.0.9",
             ]
         );
-        let p1 = render(&net, &members, &keys, "node-p1").unwrap().unwrap();
+        let p1 = render(&net, &members, &keys, "node-p1", &none())
+            .unwrap()
+            .unwrap();
         assert!(p1.forwarding, "the device hub forwards");
         assert!(peers(&p1).contains(&"key-d - 0 10.88.0.9".to_string()));
-        assert!(render(&net, &members, &keys, "node-x").unwrap().is_none());
+        assert!(
+            render(&net, &members, &keys, "node-x", &none())
+                .unwrap()
+                .is_none()
+        );
 
         // Without an explicit relay the lowest public address relays.
-        let b = render(&network(None), &members, &keys, "node-b")
+        let b = render(&network(None), &members, &keys, "node-b", &none())
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -746,13 +809,49 @@ mod tests {
     }
 
     #[test]
+    fn probes_add_entries_without_traffic_and_open_holes_leave_the_relay() {
+        let members = vec![
+            member("p", Kind::Node, 1, Some("203.0.113.1:51820")),
+            member("a", Kind::Node, 2, None),
+            member("b", Kind::Node, 3, None),
+            member("c", Kind::Node, 4, None),
+        ];
+        let keys = keys(&members);
+        let punch = |endpoint: &str, open| Punch {
+            endpoint: Some(endpoint.into()),
+            open,
+        };
+        // Probing `b`, direct to `c`; a punch towards the public relay is ignored.
+        let punches = HashMap::from([
+            ("b".to_string(), punch("198.51.100.3:40002", false)),
+            ("c".to_string(), punch("198.51.100.4:40003", true)),
+            ("p".to_string(), punch("198.51.100.9:1", true)),
+        ]);
+        let a = render(&network(None), &members, &keys, "node-a", &punches)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            peers(&a),
+            [
+                "key-b 198.51.100.3:40002 25 ",
+                "key-c 198.51.100.4:40003 25 10.88.0.4",
+                "key-p 203.0.113.1:51820 25 10.88.0.1,10.88.0.3",
+            ]
+        );
+        assert!(!a.forwarding);
+        assert!(wg_config(&a, "K").contains(
+            "PublicKey = key-b\nEndpoint = 198.51.100.3:40002\nPersistentKeepalive = 25\n"
+        ));
+    }
+
+    #[test]
     fn unknown_keys_and_missing_relays_leave_peers_out() {
         let members = vec![
             member("a", Kind::Node, 2, None),
             member("b", Kind::Node, 3, None),
         ];
         let keys = keys(&members);
-        let a = render(&network(None), &members, &keys, "node-a")
+        let a = render(&network(None), &members, &keys, "node-a", &none())
             .unwrap()
             .unwrap();
         assert!(a.peers.is_empty(), "no relay: unreachable");
@@ -764,11 +863,11 @@ mod tests {
         ];
         let mut keys = self::keys(&members);
         keys.remove("node-c");
-        let b = render(&network(None), &members, &keys, "node-b")
+        let b = render(&network(None), &members, &keys, "node-b", &none())
             .unwrap()
             .unwrap();
         assert_eq!(peers(&b), ["key-a 198.51.100.2:51820 25 10.88.0.2"]);
-        let a = render(&network(None), &members, &keys, "node-a")
+        let a = render(&network(None), &members, &keys, "node-a", &none())
             .unwrap()
             .unwrap();
         assert_eq!(peers(&a), ["key-b - 0 10.88.0.3"]);
@@ -782,7 +881,7 @@ mod tests {
             member("a", Kind::Node, 2, None),
         ];
         let keys = keys(&members);
-        let a = render(&network(None), &members, &keys, "node-a")
+        let a = render(&network(None), &members, &keys, "node-a", &none())
             .unwrap()
             .unwrap();
         let text = wg_config(&a, "PRIVATE");

@@ -13,7 +13,11 @@ pub const FEATURES: &[&str] = &[
     "mptcp-paths",
     "dns-authoritative",
     "wireguard",
+    "nat-traversal",
 ];
+
+/// Features that work only on top of another one.
+const NEEDS: &[(&str, &str)] = &[("nat-traversal", "wireguard")];
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FeatureState {
@@ -121,6 +125,20 @@ impl Store {
                     users(id)
                 ),
             );
+        }
+        for (feature, base) in NEEDS {
+            if on && *feature == id && !enabled(&tx, base)? {
+                return reject(
+                    409,
+                    format!("{id} works on top of {base}; switch {base} on first"),
+                );
+            }
+            if !on && *base == id && enabled(&tx, feature)? {
+                return reject(
+                    409,
+                    format!("{feature} works on top of {id}; switch {feature} off first"),
+                );
+            }
         }
         tx.execute(
             "INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",

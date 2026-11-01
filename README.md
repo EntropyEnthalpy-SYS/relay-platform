@@ -1,5 +1,7 @@
 # Relay 独立转发平台
 
+0.139.0 adds optional NAT traversal for WireGuard networks (off by default; needs WireGuard networking on). Two nodes that are both behind NAT first try to connect directly ("hole punching") at the addresses their NATs show the relay, through a trial entry that carries no traffic until a handshake proves the path works. Traffic then leaves the relay; a failed attempt (for example a NAT that uses a new port for every destination) or a direct path that goes silent for 75 s puts the pair back on the relay with the reason shown, and the next attempt waits 5 minutes, doubling up to an hour. Agents switch within about a second of each other because the configuration watch now wakes them, and a controller restart keeps working direct paths. See [WIREGUARD.md](docs/WIREGUARD.md#nat-traversal-0139-optional-feature-off-by-default).
+
 0.138.0 adds optional WireGuard networking (off by default; new WireGuard networking page). Nodes and user devices join private IPv4 networks: nodes report their own public keys and get their peers on every sync, a pair where neither node has a public endpoint goes through a relay node, and devices connect to a public entry node with a configuration and QR code shown once. Agents act only on servers that install wireguard-tools and the new relay-agent-wireguard.conf drop-in, touch only links named rwg-*, refuse ranges that overlap the server's networks or the controller, and never change default routes, firewalls or server-wide settings. See [WIREGUARD.md](docs/WIREGUARD.md).
 
 0.137.0 adds an optional authoritative DNS pool (off by default; DNS page). Your own nodes answer DNS for a zone you delegate to them: A, AAAA, CNAME and TXT records, SOA and NS with glue, over UDP and TCP on explicit addresses only. Each value can follow a node rule's health, with a per-zone minimum that is never withdrawn. The controller sends every member its rendered answers on each sync, the agent keeps the last copy so a restart keeps answering while the controller is unreachable, and the panel shows each name server's state and the delegation records to add at your registrar. Port 53 needs the `deploy/relay-agent-dns.conf` permission drop-in on the server.
@@ -40,7 +42,7 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.138.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.139.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
 
 0.117.0 新增登录页与控制台 English / 中文切换，覆盖页面、编辑器、校验提示和七篇指南；保存浏览器偏好，切换时保留会话和当前页面。此前 0.116.0 重整控制台界面：分组导航、页面与指南本地搜索、七篇内嵌操作指南、浅色 / 深色主题、移动端抽屉与可分享页面链接。现有规则、协议、计量和权限流程保留，详见 [UI workspace guide](docs/UI_WORKSPACE_EN.md)。
 

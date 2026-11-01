@@ -1,5 +1,7 @@
 # WireGuard networking (0.138.0, optional feature, off by default)
 
+NAT traversal between nodes behind NAT was added in 0.139.0; see [below](#nat-traversal-0139-optional-feature-off-by-default).
+
 With `wireguard` switched on in **Optional features**, a system administrator can put nodes and user devices into private WireGuard networks on the **WireGuard networking** page. Networks, members and the public keys that agents report live in metadata (`wg_network:*`, `wg_member:*`, `wg_node_key:*`), so schema v5 and the recovery log format are unchanged.
 
 ## Model
@@ -21,7 +23,7 @@ The page lists each member's state (`up`, `updating`, `waiting`, `error` with th
 ## Sync protocol
 
 - The controller sends `SyncResponse.wireguard` `{enabled, digest, interfaces:[{network_id, name, address, prefix, mtu, listen_port, forwarding, peers:[{public_key, endpoint?, allowed_ips, keepalive?}]}]}` on every sync. It is empty for non-members and `enabled:false` while the feature is off. Older agents ignore the field; to newer agents, an older controller's missing field means no interfaces.
-- The agent returns `EngineStats.wireguard` `{public_key?, ready, problem?, applied, interfaces:[{network_id, name, error?, peers:[{public_key, endpoint?, handshake, rx_bytes, tx_bytes}]}]}` only to a controller that sent the field, because older controllers reject unknown statistics.
+- The agent returns `EngineStats.wireguard` `{public_key?, ready, probes?, problem?, applied, interfaces:[{network_id, name, error?, peers:[{public_key, endpoint?, handshake, rx_bytes, tx_bytes}]}]}` only to a controller that sent the field, because older controllers reject unknown statistics.
 
 ## What the agent does on a server
 
@@ -45,4 +47,29 @@ The agent acts only when its server allows it: `RELAY_WIREGUARD=1`, `CAP_NET_ADM
 - Unit tests: RFC 7748 key vectors, range and endpoint parsing, direct/relayed/device routing (including an explicit relay that is not the lowest address), digests, overlap guards and status parsing.
 - `tests/wireguard.rs`: the switch, roles, key reporting through sync, rendered peers, member states, device keys never stored, endpoint edits, node deletion rules.
 - `sudo python3 scripts/check_linux_wireguard.py --binary target/debug/relay --workdir /tmp/wg-check` (root only, disposable namespaces): one public node, two nodes that reach only the public node, and a device. It checks ping, TCP and UDP separately for direct, relayed and device paths, per-link forwarding with server-wide forwarding left off, unchanged routes outside the links, untouched decoy links, a refused overlapping range, traffic continuing while an agent is stopped, and cleanup.
-- Not covered: hole punching (direct connections between two nodes behind NAT are the next feature, `nat-traversal`), IPv6 inside networks, exit nodes and subnet routes, real NAT boxes, cloud security groups and WAN path-MTU problems.
+- Not covered: IPv6 inside networks, exit nodes and subnet routes, real NAT boxes, cloud security groups and WAN path-MTU problems.
+
+## NAT traversal (0.139.0, optional feature, off by default)
+
+With `nat-traversal` switched on (it needs `wireguard` on, and `wireguard` cannot be switched off while it is on), two node members that both lack a public endpoint first try to connect directly instead of through the relay. Devices always connect through their entry node.
+
+**How an attempt works**
+
+1. The relay's own status shows the address and port each node's NAT presents (its WireGuard *endpoint* for that peer). Once the relay has heard both nodes and both have reported recently, the controller starts a *probe*. Only agents from 0.139.0 take part (they report `probes: true`); older agents cannot write a peer entry without allowed IPs, so their pairs stay relayed without attempts.
+2. Each node gets a peer entry for the other at that address, with a 25 s keepalive and **no allowed IPs**, while the other's /32 stays on the relay's entry. Setting the keepalive sends a packet at once, so both NATs open a mapping towards each other; WireGuard retries the handshake every 5 s. The entry carries no traffic, so a failed probe costs nothing.
+3. When both nodes report a handshake on that entry newer than when the probe began, the pair is **direct**: the /32 moves to the direct entry and off the relay's. The node whose sync made the change gets it at once, and the other node's configuration watch returns (`wireguard_changed`) so it syncs immediately; in the namespace test no ping sent every 50 ms was lost during the switch.
+4. No handshake within 45 s: the pair stays **relayed** with the reason *hole punching failed*, and the next probe waits 5 minutes, doubling with each failure up to an hour. A success resets the wait.
+5. A direct pair where either side received nothing for 75 s (keepalives normally arrive every 25 s) goes back to the relay with the reason *the direct path received nothing*, and waits the same way. The direct entry follows the relay's view of the peer's address, so a NAT that moves a node to a new port is followed.
+
+**What is kept**: nothing is written to disk. A restarted controller rebuilds each pair from the agents' reports: a pair whose node still has a direct entry with a handshake stays direct, and no pair is decided before both nodes, or one with a working direct entry, have reported, so a restart does not move traffic. Handshake times from an agent are only compared with earlier ones from the same agent, so clock differences between servers do not matter.
+
+**What it needs from the network**: at least one of the two NATs must keep a node's source port for every destination (endpoint-independent mapping, as Linux masquerade and most home routers do). A NAT that picks a new port for each destination (symmetric NAT, common on carrier-grade NAT and some firewalls) cannot be punched; the pair stays on the relay and retries hourly at most. Nothing changes on servers beyond the WireGuard peers on `rwg-*` links: no firewall rules, no port mappings and no server-wide settings.
+
+**In the panel**: the connections table on the WireGuard networking page shows *Direct · through NAT*, *Trying direct · via relay meanwhile*, or *Via relay* with the reason and the minutes until the next attempt.
+
+**Verification**
+
+- Unit tests (`wireguard/punch.rs`): a probe that opens only when both sides handshake, failure after 45 s with a growing wait capped at an hour, a silent direct path falling back, a restart keeping a working direct path and deciding nothing on one report, stale reports ignored, and only endpoint-less node pairs followed. `wireguard.rs` checks the rendered probe and direct entries and the config text without an `AllowedIPs` line (wg refuses an empty one).
+- `tests/wireguard.rs`: the switch dependency, probe, direct and relayed entries through real syncs, the watch waking the other node once, the panel's pair paths, and switching off.
+- `sudo python3 scripts/check_linux_nat_traversal.py --binary target/debug/relay --workdir /tmp/nat-check` (root only, disposable namespaces with nftables NAT routers that drop unsolicited packets): with the feature off all NAT'd pairs are relayed; switched on, the two nodes behind port-keeping NATs went direct in 7 s with no ping lost, and the relay carried 0 bytes of their TCP and UDP traffic; both pairs with the node behind a random-port NAT fell back after 47 s with the reason and kept working through the relay; a controller restart kept the direct path (48 checks over 25 s); blocking the direct path made the pair fall back after 70 s; cleanup left routes and server-wide forwarding unchanged.
+- Not covered: real home routers, carrier-grade NAT, hairpinning behind the same NAT, IPv6, and NAT-PMP/PCP/UPnP mappings for WireGuard ports.

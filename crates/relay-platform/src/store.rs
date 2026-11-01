@@ -93,6 +93,7 @@ pub struct Store(
     Arc<crate::alerts::Alerts>,
     Arc<Mutex<user_rates::UserRates>>,
     Arc<Mutex<std::collections::HashSet<String>>>,
+    Arc<Mutex<crate::wireguard::punch::Traversal>>,
 );
 #[derive(Default)]
 struct BudgetSignals {
@@ -312,6 +313,7 @@ impl Store {
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
             Arc::new(Mutex::new(leases::LeaseClocks::default())),
+            Arc::default(),
             Arc::default(),
             Arc::default(),
             Arc::default(),
@@ -1021,15 +1023,25 @@ impl Store {
     pub fn config_published(&self) -> impl std::future::Future<Output = ()> + '_ {
         self.2.config.notified()
     }
-    pub fn node_desired_revision(&self, credential: &str) -> Result<u64> {
+    /// The node's desired revision, and whether its WireGuard interfaces
+    /// changed since its last sync (answered yes once).
+    pub fn node_watch(&self, credential: &str) -> Result<(u64, bool)> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let node = leases::authenticated(&tx, credential)?;
-        Ok(tx.query_row(
+        let revision = tx.query_row(
             "SELECT desired_revision FROM nodes WHERE id=?1",
-            [node],
+            [&node],
             |r| r.get(0),
-        )?)
+        )?;
+        Ok((revision, self.8.lock().unwrap().take_wake(&node)))
+    }
+    /// A NAT traversal step changed some node's interfaces: its watch returns
+    /// so it syncs at once, and both sides switch paths close together.
+    fn wake_wireguard_watches(&self) {
+        if self.8.lock().unwrap().take_changed() {
+            self.2.config.notify_waiters();
+        }
     }
     pub async fn budget_refill_needed(&self) {
         self.2.refill.notified().await;

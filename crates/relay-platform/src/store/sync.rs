@@ -19,8 +19,9 @@ impl Store {
             request.budget.as_ref().map(|b| b.run_id.as_str()),
         )?;
         let report = Report::of(&mut request);
-        let (mut response, stored_seen) = apply_sync(&tx, node, request, &self.6)?;
+        let (mut response, stored_seen) = apply_sync(&tx, node, request, &self.6, &self.8)?;
         tx.commit()?;
+        self.wake_wireguard_watches();
         response.log_cursor = Some(report.record(&self.4, node, stored_seen));
         response.authoritative_dns =
             Some(super::dns_authoritative::snapshot(&conn, &self.4, node)?);
@@ -60,7 +61,7 @@ impl Store {
                     input.budget.as_ref().map(|b| b.run_id.as_str()),
                 )?;
                 let report = Report::of(&mut input);
-                let (response, stored_seen) = apply_sync(&tx, &node, input, &self.6)?;
+                let (response, stored_seen) = apply_sync(&tx, &node, input, &self.6, &self.8)?;
                 reports.push((node, report, stored_seen, responses.len()));
                 Ok(response)
             })();
@@ -74,6 +75,7 @@ impl Store {
             responses.push(result);
         }
         tx.commit()?;
+        self.wake_wireguard_watches();
         for (node, report, stored_seen, index) in reports {
             let cursor = report.record(&self.4, &node, stored_seen);
             if let Ok(response) = &mut responses[index] {
@@ -118,6 +120,7 @@ fn apply_sync(
     node: &str,
     request: SyncRequest,
     rates: &std::sync::Mutex<super::user_rates::UserRates>,
+    traversal: &std::sync::Mutex<crate::wireguard::punch::Traversal>,
 ) -> Result<(SyncResponse, Option<i64>)> {
     if request.usage.len() > 1024
         || request.stats.user_rates.len() > 1024
@@ -234,7 +237,8 @@ fn apply_sync(
         node,
         &request.stats.user_rates,
     )?;
-    super::wireguard::observe(tx, node, request.stats.wireguard.as_ref())?;
+    let mut traversal = traversal.lock().unwrap();
+    super::wireguard::observe(tx, node, request.stats.wireguard.as_ref(), &mut traversal)?;
     let mptcp_paths = if super::features::enabled(tx, "mptcp-paths")? {
         super::node_profiles::read(tx, node)?
             .settings
@@ -248,7 +252,7 @@ fn apply_sync(
             mptcp_paths: Some(mptcp_paths),
             // Rendered after the commit, from the newest health reports.
             authoritative_dns: None,
-            wireguard: Some(super::wireguard::desired(tx, node)?),
+            wireguard: Some(super::wireguard::desired(tx, node, &traversal)?),
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

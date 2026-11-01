@@ -234,13 +234,18 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     .await?;
                 ensure!(response.status().is_success(), "HTTP {}", response.status());
                 let body: serde_json::Value = bounded_json(response).await?;
-                Ok::<_, anyhow::Error>(body["desired_revision"].as_u64().unwrap_or(0))
+                Ok::<_, anyhow::Error>((
+                    body["desired_revision"].as_u64().unwrap_or(0),
+                    body["wireguard_changed"] == true,
+                ))
             };
             match watched.await {
-                Ok(revision) if revision > after => {
+                Ok((revision, _)) if revision > after => {
                     seen = revision;
                     published.notify_one();
                 }
+                // NAT traversal moved a path: sync now so both sides switch together.
+                Ok((_, true)) => published.notify_one(),
                 Ok(_) => {}
                 Err(error) => {
                     tracing::debug!(%error, "configuration watch unavailable; polling");

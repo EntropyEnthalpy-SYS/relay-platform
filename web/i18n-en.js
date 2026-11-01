@@ -2448,5 +2448,14 @@ export default {
   "（自动）": " (automatic)",
   "＋ 新建网络": "＋ New network",
   "＋ 节点": "＋ Node",
-  "＋ 设备": "＋ Device"
+  "＋ 设备": "＋ Device",
+  "{0} 分钟后再试直连": "Next direct attempt in {0} min",
+  "两台都在 NAT 后面的 WireGuard 节点先尝试直接连接（打洞）。成功后它们之间的流量不再经过中继；尝试失败或直连中断时自动回到中继，并显示原因。": "WireGuard nodes that are both behind NAT first try to connect directly (hole punching). Once that works, their traffic no longer goes through the relay; if the attempt fails or the direct path stops working, they go back to the relay automatically and the panel shows why.",
+  "开启可选功能「NAT 穿透」后，经中继的节点会先尝试直接连接。": "Switch on the optional feature NAT traversal and relayed nodes first try to connect directly.",
+  "正在尝试直连 · 暂经 {0}": "Trying direct · via {0} meanwhile",
+  "直连 · 已穿透 NAT": "Direct · through NAT",
+  "直连中断：75 秒没有收到数据。": "The direct path stopped: nothing received for 75 s.",
+  "直连失败：45 秒内没有握手。对方的 NAT 可能为每个目标换端口（对称型 NAT）。": "Direct attempt failed: no handshake within 45 s. A NAT may be using a new port for every destination (symmetric NAT).",
+  "需先开启 WireGuard 组网 · 对称型 NAT 无法直连 · 真实 NAT 未验收": "Needs WireGuard networking · symmetric NAT cannot connect directly · not yet accepted on real NATs",
+  "需要先开启「WireGuard 组网」。开启后，「WireGuard 组网」页的连接表显示每对节点是直连、正在尝试还是经中继。只对两端都没有公网端点的节点生效，不修改服务器的防火墙或系统设置。对方的 NAT 为每个目标换端口（对称型 NAT）时无法直连，会继续经中继。": "Needs WireGuard networking switched on first. Once on, the connections table on the WireGuard networking page shows whether each pair of nodes is direct, trying or relayed. It applies only to pairs where neither node has a public endpoint, and it does not change server firewalls or system settings. When a NAT uses a new port for every destination (symmetric NAT), a direct path is impossible and the pair stays on the relay."
 };
