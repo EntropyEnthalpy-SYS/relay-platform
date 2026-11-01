@@ -36,6 +36,7 @@ mod templates;
 mod tickets;
 mod topology;
 mod user_rates;
+mod wireguard;
 pub use accounts::{
     API_TOKEN_PREFIX, ApiToken, SECOND_FACTOR_INVALID, SECOND_FACTOR_REQUIRED, Scope,
     SecondFactorSetup, SecondFactorStatus, UserSummary,
@@ -595,7 +596,7 @@ impl Store {
     /// Its rules, usage and configuration history go with it; the audit log,
     /// rollout history and the used-credential fence are kept.
     pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
-        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
+        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         require_node(&tx, actor, node, true)?;

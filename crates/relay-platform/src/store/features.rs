@@ -12,6 +12,7 @@ pub const FEATURES: &[&str] = &[
     "budget-recovery",
     "mptcp-paths",
     "dns-authoritative",
+    "wireguard",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -41,6 +42,7 @@ fn usage(conn: &Connection, id: &str) -> Result<usize> {
         "plan-entitlements" => commerce::live_count(conn)?,
         "mptcp-paths" => node_profiles::with_mptcp_paths(conn)?,
         "dns-authoritative" => dns_authoritative::zone_count(conn)?,
+        "wireguard" => wireguard::network_count(conn)?,
         _ => 0,
     })
 }
@@ -53,6 +55,7 @@ fn users(id: &str) -> &'static str {
         "plan-entitlements" => "plan(s) are active or waiting for a budget",
         "mptcp-paths" => "node(s) have MPTCP paths",
         "dns-authoritative" => "zone(s) are in the authoritative DNS pool",
+        "wireguard" => "WireGuard network(s) exist",
         _ => "setting(s) use this feature",
     }
 }

@@ -122,6 +122,11 @@ fn apply_sync(
     if request.usage.len() > 1024
         || request.stats.user_rates.len() > 1024
         || request.apply_error.as_ref().is_some_and(|e| e.len() > 2048)
+        || request
+            .stats
+            .wireguard
+            .as_ref()
+            .is_some_and(|r| !r.within_limits())
     {
         return reject(400, "sync payload exceeds limits");
     }
@@ -229,6 +234,7 @@ fn apply_sync(
         node,
         &request.stats.user_rates,
     )?;
+    super::wireguard::observe(tx, node, request.stats.wireguard.as_ref())?;
     let mptcp_paths = if super::features::enabled(tx, "mptcp-paths")? {
         super::node_profiles::read(tx, node)?
             .settings
@@ -242,6 +248,7 @@ fn apply_sync(
             mptcp_paths: Some(mptcp_paths),
             // Rendered after the commit, from the newest health reports.
             authoritative_dns: None,
+            wireguard: Some(super::wireguard::desired(tx, node)?),
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

@@ -135,6 +135,7 @@ impl Counters {
             budget_recovery: None,
             mptcp_paths: None,
             authoritative_dns: None,
+            wireguard: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),

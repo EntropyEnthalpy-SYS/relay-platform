@@ -47,5 +47,6 @@ pub mod transport;
 pub mod upnp;
 pub mod user_rate;
 pub mod websocket;
+pub mod wireguard;
 
 pub mod gateway;

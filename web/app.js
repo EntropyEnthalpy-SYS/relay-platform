@@ -4,7 +4,7 @@ import { createGlobe, cities, cityFor } from '/assets/globe.js';
 import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram, forwardingPathRoots } from '/assets/workflows.js';
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, features: {}, busy: false };
-const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', features: '可选功能', capabilities: '功能进度', guide: '使用指南' });
+const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', wireguard: 'WireGuard 组网', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', features: '可选功能', capabilities: '功能进度', guide: '使用指南' });
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
@@ -305,7 +305,7 @@ async function navigate(view, options = {}) {
 async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedActor = state.actor, requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(), requestedOverviewLayout = overviewLayout; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, features: renderFeatures, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, wireguard: renderWireguard, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, features: renderFeatures, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
   catch (error) { if (state.actor === requestedActor && state.actor && state.view === requestedView && location.hash === requestedHash && $('#content .loading-state')) $('#content').replaceChildren(empty(translate('页面暂时无法加载'), error.message, button(translate('重新加载'), () => { $('#notification').classList.add('hidden'); return refresh(); }, 'primary'))); throw error; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.actor !== requestedActor || getLanguage() !== requestedLanguage || state.view !== requestedView || location.hash !== requestedHash || (state.view === 'overview' && requestedOverviewLayout !== overviewLayout) || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
@@ -2702,18 +2702,133 @@ function editAlertChannel(existing) {
   });
   modal(existing ? msg`编辑通知通道 · ${existing.name}` : translate('添加通知通道'), form);
 }
+// WireGuard networks: nodes join with the key their agent reports; devices get a configuration once.
+const wgStates = localize({ up: '已连通', updating: '更新中', waiting: '等待节点报告', error: '出错', offline: '节点离线', connected: '已连接', idle: '未连接' });
+const wgStateColors = { up: 'green', connected: 'green', updating: 'orange', error: 'red', offline: 'red' };
+async function renderWireguard() {
+  const actor = state.actor;
+  if (!featureOn('wireguard')) { $('#content').replaceChildren(empty(translate('WireGuard 组网未开启'), translate('系统管理员可以在「可选功能」中开启。开启后，允许管理 WireGuard 的服务器会生成自己的密钥，之后才能加入网络。'), button(translate('前往可选功能'), () => navigate('features'), 'primary'))); return; }
+  const view = await api('/wireguard');
+  if (state.view !== 'wireguard' || state.actor !== actor) return;
+  const head = panel(translate('WireGuard 组网'), translate('把节点和设备连进同一个私有网络。有公网端点的节点之间直连；两台都没有公网端点的节点经中继节点转发；设备连接到一台有公网端点的节点（入口节点）。'), button(translate('＋ 新建网络'), () => wireguardNetworkForm(null), 'primary'));
+  const body = el('div', undefined, 'panel-body');
+  body.append(el('h3', translate('节点是否可以加入')), table([translate('节点'), translate('状态'), translate('说明')], view.nodes.map(node => [node.name, badge(node.key_reported ? translate('可以加入') : translate('未就绪'), node.key_reported ? 'green' : ''), el('span', node.problem || (node.key_reported ? translate('Agent 已报告公钥') : translate('等待 Agent 报告公钥：服务器需安装授权文件 relay-agent-wireguard.conf 和 wireguard-tools')), 'wrap')])));
+  head.append(body);
+  if (!view.networks.length) { head.append(empty(translate('还没有 WireGuard 网络'), translate('新建网络，先加入一台有公网端点的节点作为中继和设备入口，再加入其他节点和设备。'))); $('#content').replaceChildren(head); return; }
+  $('#content').replaceChildren(head, ...view.networks.map(network => wireguardNetworkPanel(network, view)));
+}
+function wireguardNetworkPanel(network, view) {
+  const label = id => network.members.find(m => m.id === id)?.label || '—';
+  const actions = el('div', undefined, 'panel-actions');
+  actions.append(button(translate('＋ 节点'), () => wireguardNodeForm(network, null, view), 'primary'), button(translate('＋ 设备'), () => wireguardDeviceForm(network, null)), button(translate('编辑'), () => wireguardNetworkForm(network)), button(translate('删除'), () => deleteWireguard(msg`删除网络「${network.name}」及其全部成员？各节点会移除这个 WireGuard 接口，设备配置随之失效。`, `/wireguard/networks/${network.id}`, translate('网络已删除。')), 'subtle danger'));
+  const p = panel(msg`网络 · ${network.name}`, msg`${network.cidr} · 接口 ${network.interface} · UDP 端口 ${network.listen_port} · MTU ${network.mtu} · 中继 ${network.relay_in_use ? label(network.relay_in_use) : translate('无')}${network.relay || !network.relay_in_use ? '' : translate('（自动）')}`, actions), body = el('div', undefined, 'panel-body');
+  body.append(el('h3', translate('成员')));
+  if (!network.members.length) body.append(el('p', translate('先加入一台有公网端点的节点。'), 'muted'));
+  else body.append(table([translate('名称'), translate('类型'), translate('网内地址'), translate('公网端点'), translate('状态'), translate('操作')], network.members.map(member => {
+    const buttons = el('div');
+    if (member.kind === 'node') buttons.append(button(translate('编辑'), () => wireguardNodeForm(network, member, view), 'table-action'));
+    else buttons.append(button(translate('编辑'), () => wireguardDeviceForm(network, member), 'table-action'), button(translate('新密钥'), () => rekeyWireguard(member), 'table-action'));
+    buttons.append(button(translate('移除'), () => deleteWireguard(msg`从网络移除「${member.label}」？`, `/wireguard/members/${member.id}`, translate('成员已移除。')), 'table-action danger'));
+    const status = el('div'); status.append(badge(wgStates[member.state] || member.state, wgStateColors[member.state] || ''));
+    if (member.error) status.append(el('span', member.error, 'wrap error-text'));
+    const kind = member.kind === 'node' ? translate('节点') : msg`设备 · 经 ${label(member.via)}`;
+    const endpoint = member.endpoint || (member.kind === 'node' ? translate('无（在 NAT 后）') : '—');
+    return [namedCell(member.label, member.listen_port ? msg`UDP 端口 ${member.listen_port}` : ''), kind, member.address, endpoint, status, buttons];
+  })));
+  if (network.pairs.length) {
+    body.append(el('h3', translate('成员之间的连接')), table([translate('成员'), translate('路径'), translate('最近握手'), translate('接收 / 发送')], network.pairs.map(pair => {
+      const path = pair.path === 'direct' ? badge(translate('直连'), 'green') : pair.path === 'relayed' ? badge(msg`经中继 · ${pair.via}`, 'orange') : badge(translate('不可达'), 'red');
+      const age = pair.handshake_age_s == null ? translate('尚未握手') : pair.handshake_age_s < 60 ? msg`${pair.handshake_age_s} 秒前` : pair.handshake_age_s < 3600 ? msg`${Math.floor(pair.handshake_age_s / 60)} 分钟前` : msg`${Math.floor(pair.handshake_age_s / 3600)} 小时前`;
+      return [`${pair.a} ⇄ ${pair.b}`, path, age, pair.rx_bytes == null ? '—' : `${bytes(pair.rx_bytes)} / ${bytes(pair.tx_bytes)}`];
+    })));
+    if (network.pairs.some(pair => pair.path === 'unreachable')) body.append(el('p', translate('两台都没有公网端点的节点需要一台有公网端点的节点做中继。给一台节点填写公网端点即可。'), 'fine'));
+    body.append(el('p', translate('握手每 2 分钟左右更新一次；没有流量时握手时间会变旧，这是正常的。经中继的连接显示两段中较旧的一次握手。'), 'fine'));
+  }
+  p.append(body);
+  return p;
+}
+async function deleteWireguard(question, path, done) {
+  if (!await confirmAction(question)) return;
+  await api(path, { method: 'DELETE' }); notify(done); await renderWireguard();
+}
+function wireguardNetworkForm(network) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', translate('网络名称'), network?.name || '').maxLength = 64;
+  const cidr = field(grid, 'cidr', translate('网内地址段（私有地址，/16 到 /29）'), network?.cidr || '10.88.0.0/24');
+  if (network?.members.length) { cidr.disabled = true; cidr.title = translate('网络有成员时不能修改地址段'); }
+  const port = field(grid, 'listen_port', translate('UDP 端口'), network?.listen_port ?? 51820, 'number'); port.min = 1; port.max = 65535;
+  const mtu = field(grid, 'mtu', 'MTU', network?.mtu ?? 1420, 'number'); mtu.min = 1280; mtu.max = 1420;
+  if (network) select(grid, 'relay', translate('中继节点'), [['', translate('自动（网内地址最小的公网节点）')], ...network.members.filter(m => m.kind === 'node' && m.endpoint).map(m => [m.id, m.label])], network.relay || '');
+  form.append(grid, el('p', translate('地址段不能与服务器已有的网段重叠，否则节点会拒绝创建接口并显示原因。有公网端点的节点需要在防火墙放行这里的 UDP 端口。'), 'fine'));
+  submit(form, network ? translate('保存网络') : translate('新建网络'), async data => {
+    const body = { name: String(data.get('name')).trim(), listen_port: number(data, 'listen_port'), mtu: number(data, 'mtu') };
+    if (!cidr.disabled) body.cidr = String(data.get('cidr')).trim();
+    if (network) body.relay = data.get('relay') || null;
+    if (network) await api(`/wireguard/networks/${network.id}`, { method: 'PUT', body });
+    else await api('/wireguard/networks', { method: 'POST', body });
+    $('#dialog').close(); notify(translate('网络已保存。')); await renderWireguard();
+  });
+  modal(network ? msg`编辑网络 · ${network.name}` : translate('新建 WireGuard 网络'), form);
+}
+function wireguardNodeForm(network, member, view) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  const taken = new Set(network.members.map(m => m.node_id));
+  const choices = member ? [[member.node_id, member.label]] : view.nodes.filter(n => n.key_reported && !taken.has(n.id)).map(n => [n.id, n.name]);
+  if (!choices.length) { modal(translate('加入节点'), empty(translate('没有可以加入的节点'), translate('节点的 Agent 报告公钥后才能加入。请在服务器安装 wireguard-tools 和授权文件 relay-agent-wireguard.conf，重启 Agent 后稍等片刻。'))); return; }
+  const node = select(grid, 'node_id', translate('节点'), choices, member?.node_id || choices[0][0]); node.disabled = !!member;
+  field(grid, 'endpoint', translate('公网端点（IP 或域名，可带端口；在 NAT 后留空）'), member?.endpoint || '', 'text', false).maxLength = 260;
+  const port = field(grid, 'listen_port', translate('本节点 UDP 端口（留空使用网络端口）'), member?.listen_port ?? '', 'number', false); port.min = 1; port.max = 65535;
+  form.append(grid, el('p', translate('填写公网端点的节点可以被其他成员直接连接，也能做中继和设备入口；需要在防火墙放行它的 UDP 端口。没有公网地址的节点留空，它会主动连接公网节点。'), 'fine'));
+  submit(form, member ? translate('保存节点') : translate('加入节点'), async data => {
+    const body = { kind: 'node', endpoint: String(data.get('endpoint')).trim() || null, listen_port: number(data, 'listen_port') };
+    if (member) await api(`/wireguard/members/${member.id}`, { method: 'PUT', body });
+    else await api(`/wireguard/networks/${network.id}/members`, { method: 'POST', body: { ...body, node_id: node.value } });
+    $('#dialog').close(); notify(translate('节点已保存。')); await renderWireguard();
+  });
+  modal(member ? msg`编辑节点 · ${member.label}` : msg`加入节点 · ${network.name}`, form);
+}
+function wireguardDeviceForm(network, member) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  const hubs = network.members.filter(m => m.kind === 'node' && m.endpoint);
+  if (!hubs.length) { modal(translate('添加设备'), empty(translate('还没有入口节点'), translate('设备需要连接一台有公网端点的节点。请先加入这样的节点。'))); return; }
+  field(grid, 'name', translate('设备名称'), member?.name || '').maxLength = 64;
+  select(grid, 'via', translate('入口节点'), member ? hubs.map(h => [h.id, h.label]) : [['', translate('自动（中继节点）')], ...hubs.map(h => [h.id, h.label])], member?.via || '');
+  if (!member) field(grid, 'public_key', translate('设备自己的公钥（可选，留空由面板生成密钥）'), '', 'text', false).maxLength = 44;
+  form.append(grid, el('p', translate('面板生成密钥时，配置和二维码只显示这一次，面板只保存公钥。用 WireGuard 应用扫描二维码或导入配置即可。'), 'fine'));
+  submit(form, member ? translate('保存设备') : translate('添加设备'), async data => {
+    const body = { kind: 'device', name: String(data.get('name')).trim(), via: data.get('via') || null };
+    if (member) { await api(`/wireguard/members/${member.id}`, { method: 'PUT', body }); $('#dialog').close(); notify(translate('设备已保存。入口节点改变后，请给设备生成新密钥并重新导入配置。')); }
+    else { const issued = await api(`/wireguard/networks/${network.id}/members`, { method: 'POST', body: { ...body, public_key: String(data.get('public_key')).trim() || null } }); $('#dialog').close(); showWireguardConfig(issued); }
+    await renderWireguard();
+  });
+  modal(member ? msg`编辑设备 · ${member.name}` : msg`添加设备 · ${network.name}`, form);
+}
+async function rekeyWireguard(member) {
+  if (!await confirmAction(msg`给「${member.label}」生成新密钥？旧配置会立即失效，需要在设备上重新导入。`)) return;
+  showWireguardConfig(await api(`/wireguard/members/${member.id}/rekey`, { method: 'POST' })); await renderWireguard();
+}
+function showWireguardConfig(issued) {
+  const body = el('div');
+  if (issued.qr_svg) { const qr = el('img', undefined, 'qr-code'); qr.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(issued.qr_svg)}`; qr.alt = translate('WireGuard 配置二维码'); body.append(el('p', translate('用手机上的 WireGuard 应用扫描二维码，或复制下面的配置导入电脑。配置包含私钥，只显示这一次，关闭后无法再次查看。')), qr); }
+  else body.append(el('p', translate('设备使用自己的密钥：把下面的配置填入设备，并把 PrivateKey 换成设备自己的私钥。')));
+  const config = el('pre', issued.config || '', 'secret-box mono');
+  const actions = el('div', undefined, 'dialog-actions'); actions.append(button(translate('复制配置'), async () => { await navigator.clipboard.writeText(issued.config || ''); notify(translate('配置已复制。')); }), button(translate('我已保存配置'), () => $('#dialog').close(), 'primary'));
+  body.append(config, actions);
+  modal(msg`设备配置 · ${issued.name}`, body);
+}
 // Optional features start switched off; their settings stay out of forms until a system administrator switches them on.
 const featureInfo = localize({
   mptcp: ['Linux MPTCP', '转发规则的入口或出口可以使用多路径 TCP（MPTCP）。两端都支持时，一条连接可以同时使用多条网络路径。', '开启后，规则编辑器显示“Linux MPTCP”设置。需要两端的 Linux 内核支持；要真正走多条路径，服务器还需要多个网卡或地址。'],
   'dns-health': ['DNS 健康摘除', '入口服务器失联或目标全部不可用时，自动从 DNS 移除它的解析记录，恢复后自动加回。', '开启后，DNS 记录表单显示健康摘除设置。只在“应用”模式的区域生效；剩余有效记录少于“最少保留”数量时，记录不会被移除。'],
   'budget-recovery': ['额度灾难恢复', '节点状态丢失或控制器从旧备份恢复后，核销无法再上报的预留，或结束旧备份留下的额度锁定。未知用量一律按已消耗计算。', '开启后，「恢复保护」页显示未结束的预留和恢复锁定。只有系统管理员可以操作，每次操作都写入审计日志。'],
   'mptcp-paths': ['MPTCP 额外路径', '为节点指定额外的本机地址，让 MPTCP 连接可以同时经过多块网卡或多个地址传输。', '开启后，节点资料显示“MPTCP 额外路径”。只有安装了授权文件的服务器才会真正修改 MPTCP 设置；服务器只有一个网卡和地址时没有效果。'],
+  wireguard: ['WireGuard 组网', '把节点和用户设备连进同一个私有网络：节点之间自动配置 WireGuard 隧道，两台都在 NAT 后面的节点经一台公网节点中继，设备扫码即可加入。', '开启后，左侧出现「WireGuard 组网」页。只有安装了授权文件 relay-agent-wireguard.conf 和 wireguard-tools 的服务器才会创建接口；它只管理名为 rwg-* 的接口，不改默认路由、防火墙或系统全局设置。'],
   'dns-authoritative': ['独立权威 DNS 池', '让你自己的节点直接应答一个域名的 DNS 查询，解析结果随入口健康实时变化，不需要 DNS 服务商 API。', '开启后，「DNS 管理」页显示权威 DNS 池。节点要监听 53 端口，需先在服务器安装授权文件 relay-agent-dns.conf 并放行防火墙；还要在域名注册商把域名委派给这些节点。'],
   'plan-entitlements': ['套餐权益', '支付成功的套餐订单自动变成购买者的流量额度：套餐流量加到额度上，到期后停止发放新流量，退款扣回该订单的流量和天数。', '开启后，「钱包与订单」显示“我的套餐”。开启前已经付款的订单不会补发。购买者还有运行中的规则时，需要先停用规则，额度才能创建。'],
 });
-const featureUsage = { mptcp: n => msg`${n} 条转发规则正在使用 MPTCP`, 'dns-health': n => msg`${n} 条 DNS 记录正在使用健康摘除`, 'plan-entitlements': n => msg`${n} 个套餐生效中或等待额度`, 'mptcp-paths': n => msg`${n} 个节点设置了 MPTCP 额外路径`, 'dns-authoritative': n => msg`${n} 个区域在权威 DNS 池中` };
+const featureUsage = { mptcp: n => msg`${n} 条转发规则正在使用 MPTCP`, 'dns-health': n => msg`${n} 条 DNS 记录正在使用健康摘除`, 'plan-entitlements': n => msg`${n} 个套餐生效中或等待额度`, 'mptcp-paths': n => msg`${n} 个节点设置了 MPTCP 额外路径`, 'dns-authoritative': n => msg`${n} 个区域在权威 DNS 池中`, wireguard: n => msg`${n} 个 WireGuard 网络` };
 const featureOn = id => !!state.features[id];
-async function loadFeatures() { const list = await api('/features'); state.features = Object.fromEntries(list.map(f => [f.id, f.enabled])); return list; }
+async function loadFeatures() { const list = await api('/features'); state.features = Object.fromEntries(list.map(f => [f.id, f.enabled])); document.querySelectorAll('[data-feature]').forEach(n => n.classList.toggle('feature-off', !featureOn(n.dataset.feature))); return list; }
 async function renderFeatures() {
   const actor = state.actor, list = await loadFeatures();
   if (state.view !== 'features' || state.actor !== actor) return;
@@ -2734,7 +2849,7 @@ async function renderFeatures() {
   p.append(body);
   $('#content').replaceChildren(p);
 }
-async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围', mptcp: '额外路径需服务器授权 · 公网多线路未验收', 'dns-authoritative-pool': '53 端口需服务器授权 · 需在注册商委派 · 公网委派未验收' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); const switchable = { 'mptcp-rule-transport': 'mptcp', 'dns-health-removal': 'dns-health', 'commerce-entitlements': 'plan-entitlements', 'budget-disaster-recovery': 'budget-recovery', mptcp: 'mptcp-paths', 'dns-authoritative-pool': 'dns-authoritative' }[key]; if (switchable) row.append(badge(featureOn(switchable) ? translate('已开启') : translate('未开启'), featureOn(switchable) ? 'green' : '')); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围', mptcp: '额外路径需服务器授权 · 公网多线路未验收', 'dns-authoritative-pool': '53 端口需服务器授权 · 需在注册商委派 · 公网委派未验收', wireguard: '需安装 wireguard-tools 并授予服务器权限 · 真实 NAT 与公网未验收' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); const switchable = { 'mptcp-rule-transport': 'mptcp', 'dns-health-removal': 'dns-health', 'commerce-entitlements': 'plan-entitlements', 'budget-disaster-recovery': 'budget-recovery', mptcp: 'mptcp-paths', 'dns-authoritative-pool': 'dns-authoritative', wireguard: 'wireguard' }[key]; if (switchable) row.append(badge(featureOn(switchable) ? translate('已开启') : translate('未开启'), featureOn(switchable) ? 'green' : '')); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'rules', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health', 'logs'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

@@ -5,6 +5,7 @@ export const pageInfo = localize({
   nodes: ['转发配置', 'STEP 1 · SERVERS', '第一步：接入服务器。管理每台服务器的位置、身份、默认地址与运行许可。', 'quickstart', 'server agent location 服务器 注册 位置'],
   topology: ['转发配置', 'STEP 2 · FORWARDING', '第二步：建立转发。每条转发从客户端出发，经过一台或多台服务器到达目标。', 'rules', 'chain route path forward 链路 路径 转发 多跳'],
   rules: ['转发配置', 'STEP 2 · FORWARDING', '同一份转发配置，按服务器列出它上面运行的监听端口和服务。', 'rules', 'proxy gateway vless reality tuic hysteria2 socks http2 代理 网关 节点规则'],
+  wireguard: ['转发配置', 'WIREGUARD NETWORKS', '把节点和设备连进同一个私有网络。没有公网地址的节点经中继节点互通，设备扫码加入。', 'rules', 'wireguard vpn mesh overlay nat relay device 组网 隧道 设备 中继'],
   templates: ['转发配置', 'REUSABLE TEMPLATES', '把常用的协议、目标和限制保存为模板，之后在任意服务器上一键创建规则。', 'rules', 'template 模板 模板库 端口'],
   health: ['监控与用量', 'TARGET HEALTH', '跟踪真实目标的探测结果，定位不可用的线路。', 'observability', 'latency failover 健康 延迟'],
   usage: ['监控与用量', 'TRAFFIC LEDGER', '按规则与周期查看已上报的流量，核对用量记录。', 'resources', 'traffic bandwidth 计量 流量'],
@@ -27,7 +28,7 @@ export const pageInfo = localize({
 });
 // "By server" is a tab of Forwarding rules, so the sidebar highlights that entry.
 export const navView = view => view === 'rules' ? 'topology' : view;
-const adminViews = new Set(['dns', 'audit', 'recovery', 'logs', 'diagnostics', 'features']);
+const adminViews = new Set(['dns', 'wireguard', 'audit', 'recovery', 'logs', 'diagnostics', 'features']);
 export function canVisit(view, actor) {
   return !!actor && Object.hasOwn(pageInfo, view) && (!adminViews.has(view) || actor.role === 'system_admin') && (!['alerts', 'templates'].includes(view) || actor.role !== 'viewer');
 }

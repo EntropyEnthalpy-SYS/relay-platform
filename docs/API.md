@@ -577,7 +577,7 @@ Allocation conservatively avoids configured listeners, disabled rules, ranges, g
 
 `GET /features` lists every optional feature as `{id, enabled, in_use}` for any signed-in role. `PUT /features/{id}` with `{"enabled": true|false}` switches one; it requires a system administrator session (API tokens are refused) and records `feature.enable` / `feature.disable` in the audit log. Unknown ids return 404. Switching off returns 409 while `in_use` is above 0.
 
-`plan-entitlements` turns paid plan orders into the buyer's user budget; see [COMMERCE.md](COMMERCE.md). `budget-recovery` enables the write-off and restore-lock actions in [BUDGET_RECOVERY.md](BUDGET_RECOVERY.md). `mptcp-paths` lets node profiles carry `settings.mptcp_paths` for agents whose server opted in; see [MPTCP.md](MPTCP.md). `dns-authoritative` enables the authoritative DNS pool below; it stays on while any pool zone exists. Every feature starts off on a new controller. While a feature is off, changes that need it return 409: `mptcp` covers rules with a non-off MPTCP mode, and `dns-health` covers DNS records with a health gate. A controller upgraded with such settings already in place has no stored switch and reports the feature as on, so working configuration keeps running. The switches change controller validation and panel forms only; they never change server system settings.
+`plan-entitlements` turns paid plan orders into the buyer's user budget; see [COMMERCE.md](COMMERCE.md). `budget-recovery` enables the write-off and restore-lock actions in [BUDGET_RECOVERY.md](BUDGET_RECOVERY.md). `mptcp-paths` lets node profiles carry `settings.mptcp_paths` for agents whose server opted in; see [MPTCP.md](MPTCP.md). `dns-authoritative` enables the authoritative DNS pool below; it stays on while any pool zone exists. `wireguard` enables the WireGuard networks below; it stays on while any network exists. Every feature starts off on a new controller. While a feature is off, changes that need it return 409: `mptcp` covers rules with a non-off MPTCP mode, and `dns-health` covers DNS records with a health gate. A controller upgraded with such settings already in place has no stored switch and reports the feature as on, so working configuration keeps running. The switches change controller validation and panel forms only; they never change server system settings.
 
 ## 0.137.0 Authoritative DNS pool
 
@@ -596,3 +596,20 @@ All routes need a system administrator session (API tokens are refused, as for e
 Member `state` is `serving`, `updating` (the agent still serves an older version), `error` (a listener failed; see `report.errors`), `waiting` (no report yet, possibly an agent older than 0.137.0) or `offline` (no report for 90 s). Record `served` lists the values answered now; `healthy` has one entry per value: `null` without a health gate, otherwise whether it passes.
 
 Agents receive their answers in the optional `SyncResponse.authoritative_dns` `{digest, listen:[addr], zones:[...]}` on every sync, empty for non-members or while the feature is off. They return `EngineStats.authoritative_dns` `{digest, listening, errors?, queries, nxdomain, refused, truncated, limited}` only to a controller that sent answers. See [DNS.md](DNS.md).
+
+## 0.138.0 WireGuard networking
+
+All routes need a system administrator session (API tokens are refused). Creating or changing networks and members returns 409 while `wireguard` is off; deletions always work. Validation errors return 400, conflicts 409 and unknown ids 404. Audit actions are `wireguard.network.*` and `wireguard.member.*` (create, update, delete, rekey).
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| GET | `/wireguard` | `{enabled, networks:[network + {interface, relay_in_use?, members:[member + {label, state, error?}], pairs:[{a, b, path, via?, handshake_age_s?, rx_bytes?, tx_bytes?}]}], nodes:[{id, name, key_reported, problem?}]}` |
+| POST | `/wireguard/networks` | `{name, cidr, listen_port?, mtu?}` |
+| PUT / DELETE | `/wireguard/networks/{id}` | `{name, cidr?, listen_port?, mtu?, relay?}`; `cidr` cannot change while members exist; DELETE also removes the members |
+| POST | `/wireguard/networks/{id}/members` | Node `{kind:"node", node_id, endpoint?, listen_port?, address?}` (409 until the node's agent reported a key) or device `{kind:"device", name, via?, public_key?, address?}`; a device reply adds `config` and, when the panel made the key, `qr_svg`, both shown only once |
+| PUT / DELETE | `/wireguard/members/{id}` | Same body; kind, node, address and key cannot change. A node that devices use, or the explicit relay, keeps its endpoint; deleting a node that devices use returns 409 |
+| POST | `/wireguard/members/{id}/rekey` | Devices only: a new key pair, returning `config` and `qr_svg` once |
+
+Node member `state` is `up`, `updating` (the agent has not applied the newest state), `error` (see `error`), `waiting` (no report yet, possibly an agent older than 0.138.0) or `offline` (no report for 90 s); devices are `connected` (handshake with the entry node within 180 s) or `idle`. Pair `path` is `direct`, `relayed` (through `via`) or `unreachable`.
+
+Agents receive `SyncResponse.wireguard` and return `EngineStats.wireguard` as described in [WIREGUARD.md](WIREGUARD.md).

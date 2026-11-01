@@ -203,6 +203,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     let path = path.strip_prefix("/api/v1/").unwrap_or(path);
     if path.starts_with("account/")
         || path.starts_with("dns/")
+        || path.starts_with("wireguard")
         || path.starts_with("commerce/")
         || path.starts_with("tickets")
         || path == "templates"
@@ -516,6 +517,24 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/dns/authoritative/records/{id}",
             axum::routing::put(update_authoritative_record).delete(delete_authoritative_record),
+        )
+        .route("/api/v1/wireguard", get(wireguard))
+        .route("/api/v1/wireguard/networks", post(create_wireguard_network))
+        .route(
+            "/api/v1/wireguard/networks/{id}",
+            axum::routing::put(update_wireguard_network).delete(delete_wireguard_network),
+        )
+        .route(
+            "/api/v1/wireguard/networks/{id}/members",
+            post(create_wireguard_member),
+        )
+        .route(
+            "/api/v1/wireguard/members/{id}",
+            axum::routing::put(update_wireguard_member).delete(delete_wireguard_member),
+        )
+        .route(
+            "/api/v1/wireguard/members/{id}/rekey",
+            post(rekey_wireguard_device),
         )
         .route("/api/v1/tenants", post(create_tenant))
         .route("/api/v1/usage", get(usage))
@@ -3609,11 +3628,104 @@ async fn set_feature(
         .await?,
     ))
 }
+async fn wireguard(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::wireguard::View> {
+    Ok(Json(
+        database(state.store, move |db| db.wireguard(&actor)).await?,
+    ))
+}
+async fn create_wireguard_network(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::wireguard::NetworkInput>,
+) -> ApiResult<crate::wireguard::Network> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_wireguard_network(&actor, input)
+        })
+        .await?,
+    ))
+}
+async fn update_wireguard_network(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::wireguard::NetworkInput>,
+) -> ApiResult<crate::wireguard::Network> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_wireguard_network(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_wireguard_network(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_wireguard_network(&actor, &id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn create_wireguard_member(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(network): Path<String>,
+    Json(input): Json<crate::wireguard::MemberInput>,
+) -> ApiResult<crate::wireguard::Issued> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_wireguard_member(&actor, &network, input)
+        })
+        .await?,
+    ))
+}
+async fn update_wireguard_member(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::wireguard::MemberInput>,
+) -> ApiResult<crate::wireguard::Member> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_wireguard_member(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_wireguard_member(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_wireguard_member(&actor, &id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn rekey_wireguard_device(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::wireguard::Issued> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.rekey_wireguard_device(&actor, &id)
+        })
+        .await?,
+    ))
+}
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery","dns-authoritative-pool"],
-        "pending":["wireguard","nat-traversal","dns-health-removal","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery","dns-authoritative-pool","wireguard"],
+        "pending":["nat-traversal","dns-health-removal","federation","postgresql-ha"]
     }))
 }
 

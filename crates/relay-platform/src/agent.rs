@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 mod budget_recovery;
 mod credentials;
 mod lease_client;
+mod wireguard;
 use credentials::SharedCredential;
 
 /// Agent metadata key of the user shares in force, restored after a restart.
@@ -197,6 +198,16 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     // Reported only to a controller that sent answers, as older ones reject
     // the unknown field.
     let mut dns_reporting = false;
+    let mut overlay = wireguard::Applier::new(
+        &store,
+        &format!(
+            "{}:{}",
+            base.host_str().unwrap_or_default(),
+            base.port_or_known_default().unwrap_or(443)
+        ),
+    )?;
+    // Reported only to a controller that sent a desired state.
+    let mut overlay_report: Option<crate::wireguard::Report> = None;
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
@@ -358,6 +369,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     stats.budget_recovery = budget_recovery.clone();
                     stats.mptcp_paths = mptcp_report.clone();
                     stats.authoritative_dns = dns_reporting.then(|| dns.report());
+                    stats.wireguard = overlay_report.clone();
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -375,6 +387,12 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                         && response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS)
                         || response.status().is_redirection() =>
                 {
+                    if matches!(
+                        response.status(),
+                        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+                    ) {
+                        overlay.remove_all().await;
+                    }
                     bail!(
                         "controller rejected agent with HTTP {}; forwarding stopped to protect identity and ledger consistency",
                         response.status()
@@ -387,6 +405,10 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                             log_cursor = synced.log_cursor;
                             mptcp_report = match &synced.mptcp_paths {
                                 Some(desired) => Some(mptcp_paths.reconcile(desired).await),
+                                None => None,
+                            };
+                            overlay_report = match &synced.wireguard {
+                                Some(desired) => Some(overlay.reconcile(&store, desired).await),
                                 None => None,
                             };
                             // An older controller sends none: stop answering.

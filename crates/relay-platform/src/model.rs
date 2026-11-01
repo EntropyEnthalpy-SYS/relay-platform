@@ -924,6 +924,9 @@ pub struct EngineStats {
     /// Sent only after the controller sent [`SyncResponse::authoritative_dns`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authoritative_dns: Option<crate::dns_authoritative::ServeStats>,
+    /// Sent only after the controller sent [`SyncResponse::wireguard`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard: Option<crate::wireguard::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1120,6 +1123,10 @@ pub struct SyncResponse {
     /// is in no zone or the feature is off. `None` from older controllers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authoritative_dns: Option<crate::dns_authoritative::Snapshot>,
+    /// The WireGuard interfaces this node should have; empty when it is in
+    /// no network or the feature is off. `None` from older controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard: Option<crate::wireguard::Desired>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
