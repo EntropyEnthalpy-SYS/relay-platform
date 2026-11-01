@@ -8,24 +8,28 @@ const titles = localize({ overview: '运行总览', nodes: '节点管理', rules
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
-// Appearance affects this browser only. Keep the existing paper/terracotta
-// default and semantic status colors regardless of the chosen brand accent.
+// Appearance affects this browser only. Dark with the ember accent is the
+// default; status colors stay fixed whichever brand accent is chosen.
 function readPreference(key, choices, fallback) {
   try { const value = localStorage.getItem(key); return choices.includes(value) ? value : fallback; }
   catch { return fallback; }
 }
 const themeMedia = matchMedia('(prefers-color-scheme: dark)');
-let themePreference = readPreference('relay-theme', ['light', 'dark', 'system'], 'light');
-let accentPreference = readPreference('relay-accent', ['terracotta', 'blue', 'green', 'violet'], 'terracotta');
+const accents = ['ember', 'cobalt', 'violet', 'emerald'];
+let themePreference = readPreference('relay-theme', ['light', 'dark', 'system'], 'dark');
+// Accents saved before 0.133.0 map to their closest new color.
+const legacyAccents = { terracotta: 'ember', blue: 'cobalt', green: 'emerald' };
+let accentPreference = readPreference('relay-accent', [...accents, ...Object.keys(legacyAccents)], 'ember');
+accentPreference = legacyAccents[accentPreference] || accentPreference;
 function applyTheme(theme, persist = true) {
-  themePreference = ['light', 'dark', 'system'].includes(theme) ? theme : 'light';
+  themePreference = ['light', 'dark', 'system'].includes(theme) ? theme : 'dark';
   const root = document.documentElement; root.classList.add('theme-switching');
   root.dataset.theme = themePreference === 'system' ? (themeMedia.matches ? 'dark' : 'light') : themePreference;
   if (persist) { try { localStorage.setItem('relay-theme', themePreference); } catch { /* Usable without storage. */ } }
   requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')));
 }
 function applyAccent(accent, persist = true) {
-  accentPreference = ['terracotta', 'blue', 'green', 'violet'].includes(accent) ? accent : 'terracotta';
+  accentPreference = accents.includes(accent) ? accent : 'ember';
   document.documentElement.dataset.accent = accentPreference;
   if (persist) { try { localStorage.setItem('relay-accent', accentPreference); } catch { /* Usable without storage. */ } }
 }
@@ -75,7 +79,7 @@ function loggedOut() { consoleUI.reset(); state.view = 'overview'; state.token =
 function modal(title, content) { $('#dialog-title').textContent = title; $('#dialog-body').replaceChildren(content); $('#dialog').showModal(); $('#dialog').scrollTop = 0; }
 function showAppearance() {
   const body = el('div', undefined, 'appearance-settings');
-  body.append(el('p', translate('保留工作空间主题，自选配色与显示方式。设置自动保存在当前浏览器。'), 'muted'));
+  body.append(el('p', translate('深色优先的工作空间，可自选主题、强调色与显示方式。设置自动保存在当前浏览器。'), 'muted'));
   function choices(name, title, options, current, change) {
     const group = el('fieldset'); group.dataset.preference = name; group.append(el('legend', title));
     const grid = el('div', undefined, 'appearance-options');
@@ -90,8 +94,8 @@ function showAppearance() {
     }
     group.append(grid); body.append(group);
   }
-  choices('theme', translate('界面主题'), [['light', translate('浅色')], ['dark', translate('深色')], ['system', translate('跟随系统')]], themePreference, applyTheme);
-  choices('accent', translate('强调色'), [['terracotta', translate('陶土色（默认）')], ['blue', translate('海洋蓝')], ['green', translate('森林绿')], ['violet', translate('鸢尾紫')]], accentPreference, applyAccent);
+  choices('theme', translate('界面主题'), [['dark', translate('深色（默认）')], ['light', translate('浅色')], ['system', translate('跟随系统')]], themePreference, applyTheme);
+  choices('accent', translate('强调色'), [['ember', translate('余烬橙（默认）')], ['cobalt', translate('钴蓝')], ['violet', translate('星云紫')], ['emerald', translate('翡翠绿')]], accentPreference, applyAccent);
   body.append(el('p', translate('强调色用于导航、主要操作和流量图；正常、警告与错误保留固定的状态色和文字。'), 'fine'));
   choices('layout', translate('总览显示模式'), [['monitoring', translate('展开总览'), translate('大图表、完整宽度的路径图和事件列表。')], ['workspace', translate('紧凑总览'), translate('较小的图表与摘要，适合日常管理。')]], overviewLayout, mode => {
     applyOverviewLayout(mode, true); if (state.view === 'overview') refresh().catch(e => notify(e.message, true));
