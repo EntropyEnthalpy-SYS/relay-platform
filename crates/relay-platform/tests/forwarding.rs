@@ -685,6 +685,7 @@ async fn a_user_limit_spans_nodes_and_follows_the_busy_one() {
                         .sync(
                             id,
                             SyncRequest {
+                                logs: None,
                                 lease: None,
                                 budget: None,
                                 ledger_id: ledger.clone(),

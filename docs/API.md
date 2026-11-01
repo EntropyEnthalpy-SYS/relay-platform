@@ -41,6 +41,8 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/metrics` | 认证的 Prometheus 文本：构建信息、恢复日志、预算额度、规则累计用量、HTTP 请求分类与延迟直方图、反向 mux 进程可用性/控制/流/字节、节点在线、应用/期望修订、配置同步、最后同步、活动 TCP/UDP、接纳/拒绝/失败/丢弃/预热计数、转发字节、应用错误、系统资源、计量/额度恢复、目标健康，以及多路径会话/路径/负载/失败计数。独立部署的 mux 指标由 `reverse-mux-server --metrics-listen` 提供；控制器中的 `relay_reverse_mux_process_available 0` 表示遥测不在该进程 |
 | GET | `/telemetry` | 可见节点最近 24 小时的逐次回报采样和事件，供总览页使用；见下文“0.19.0 遥测” |
 | GET | `/history?range=1h\|24h\|7d` | 可见节点的 7 天历史：回报汇总与逐段真实 TCP 连接结果；见下文“0.131.0 连接记录与 7 天历史” |
+| GET | `/logs?source=&after=` | 仅系统管理员；控制器和各节点最近的日志行，`source` 为节点 ID 或 `controller`，省略为全部；见下文“0.132.0 实时日志与诊断报告” |
+| GET | `/diagnostics/report` | 仅系统管理员；当前问题列表与节点、规则（不含凭据）、最近 1 小时逐段连接、事件和日志的快照 |
 | GET | `/alerts` | 系统管理员读取全部；租户管理员读取本租户通道、事件和发送记录；返回 `can_manage` |
 | PUT | `/alerts/settings` | `{maintenance_until_ms}`；仅系统管理员，登录会话 |
 | POST | `/alerts/channels` | `{name,enabled,min_severity,target,tenant_id?}`；仅系统管理员，登录会话 |
@@ -237,6 +239,31 @@ API 令牌使用同一个 `Authorization: Bearer` 头，格式为 `rpat_` 加 64
 
 采样和事件只保存在控制器内存，控制器重启后从空开始；不进入恢复日志，不作为计量、计费或配额依据。权限与 `/nodes` 相同：只读用户可查看本租户，系统管理员可查看全部。
 
+
+## 0.132.0 实时日志与诊断报告
+
+每个进程把通过日志过滤（默认 `info` 及以上）的日志行复制到内存中的环形缓冲，保留最近 2000 行，每行最多 1000 个字符。控制器在同步回复中返回 `log_cursor`（它持有的该节点最后一行：`stream` 为 Agent 本次运行的随机标识，`seq` 为行号），Agent 在下一次同步的 `logs` 中发送其后的行，每次最多 200 行、64 KiB。Agent 只在收到 `log_cursor` 之后才发送 `logs`，所以旧控制器不会收到这个字段，升级顺序不受限制；旧 Agent 忽略 `log_cursor`。
+
+```json
+{"logs": {"stream": "3f0c…", "lines": [
+  {"seq": 41, "at_ms": 0, "level": "warn", "text": "configuration rejected; retaining previous revision message=cannot stage TCP listener 127.0.0.1:9000"}]}}
+```
+
+控制器在内存中为每个节点和自己（来源 `controller`）各保留最近 2000 行，不写磁盘；控制器重启后从新的日志开始。重发的行按 `seq` 去重。`stream` 变化表示 Agent 重新启动，该来源的第一行带 `"restarted": true`；同一次运行中缺少的行（Agent 缓冲溢出）在下一行以 `"missing": N` 标出。系统日志（journalctl）仍是完整记录。
+
+`GET /logs?source=…&after=ID` 仅系统管理员可用（只读令牌须属于系统管理员），返回 `id` 大于 `after` 的行，按到达顺序，最多 500 行；更多时返回最新的 500 行并设 `truncated: true`。`id` 跨来源递增，面板以上次的 `latest_id` 作为下一次的 `after`。`latest_id` 变小表示控制器已重启。
+
+```json
+{"lines": [{"id": 1201, "source": "<node id>", "at_ms": 0, "level": "info", "text": "controller connection recovered"}],
+ "truncated": false, "latest_id": 1201,
+ "sources": [{"id": "controller", "name": "controller"}, {"id": "<node id>", "name": "hkg-entry-01", "enrolled": true}]}
+```
+
+`GET /diagnostics/report` 仅系统管理员可用，返回 `format: "relay-diagnostics/1"` 的 JSON：
+
+- `findings`：按严重程度排序的问题，每项含 `severity`（`critical` / `warning` / `info`）、`kind`、相关的 `node` / `rule`、数值 `facts` 和中文 `message`。`kind` 包括 `node_offline`（超过 30 秒无回报）、`node_never_reported`、`node_not_enrolled`、`config_rejected`、`config_pending`、`hop_failing`（最近 1 小时至少 5 次连接且成功率低于 90%，低于 50% 为 `critical`；`facts.cause` 为最多的失败原因）、`target_unhealthy`（探测不健康且该段没有 `hop_failing`；同一目标的 TCP / UDP 探测合并为一项，`facts.probes` 列出各协议的错误）、`high_cpu`（≥ 90%）、`low_memory`（可用低于 10%）、`log_errors`（最近 1 小时有错误行）和 `log_warnings`（最近 1 小时至少 10 条警告）。离线节点只报告离线，其他数据已过时。
+- `summary`、`nodes`（回报时间、修订、应用错误、系统资源、连接计数、目标探测）、`connections_last_hour`、`events`（最近 24 小时，最多 200 条）、`logs`（每个来源最近 300 行）。
+- `rules` 只包含 ID、名称、启用、协议、监听与公开地址、负载均衡、超时与限额，目标的地址、下一跳、权重、优先级以及 `tls` / `proxy_protocol` / `websocket` 是否启用；其他设置只列出字段名（`features`）。报告不包含密码、密钥、令牌、证书或所有者。日志行与服务器地址会出现在报告中。
 
 ## 0.131.0 连接记录与 7 天历史
 

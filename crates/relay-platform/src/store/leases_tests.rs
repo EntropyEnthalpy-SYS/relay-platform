@@ -101,6 +101,7 @@ fn status<T: std::fmt::Debug>(result: Result<T>, expected: u16) {
 }
 fn report(ledger: &str, proof: Option<LeaseProof>) -> SyncRequest {
     SyncRequest {
+        logs: None,
         lease: proof,
         budget: None,
         ledger_id: ledger.into(),

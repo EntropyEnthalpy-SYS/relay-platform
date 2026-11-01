@@ -4,7 +4,7 @@ import { createGlobe, cities, cityFor } from '/assets/globe.js';
 import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram, forwardingPathRoots } from '/assets/workflows.js';
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
-const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度', guide: '使用指南' });
+const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度', guide: '使用指南' });
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
@@ -300,7 +300,7 @@ async function navigate(view, options = {}) {
 async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedActor = state.actor, requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(), requestedOverviewLayout = overviewLayout; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
   catch (error) { if (state.actor === requestedActor && state.actor && state.view === requestedView && location.hash === requestedHash && $('#content .loading-state')) $('#content').replaceChildren(empty(translate('页面暂时无法加载'), error.message, button(translate('重新加载'), () => { $('#notification').classList.add('hidden'); return refresh(); }, 'primary'))); throw error; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.actor !== requestedActor || getLanguage() !== requestedLanguage || state.view !== requestedView || location.hash !== requestedHash || (state.view === 'overview' && requestedOverviewLayout !== overviewLayout) || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
@@ -514,7 +514,8 @@ async function renderOverview() {
       chartPanel(translate('平均会话'), msg`最近 ${rangeLabel} · 全部节点合计。`, trendChart(sessions, 'blue', v => String(Math.round(v)), past.end, null, past.span)),
       chartPanel(translate('探测往返（中位数）'), msg`最近 ${rangeLabel} · 各节点平均值的中位数。`, trendChart(latency, 'violet', millis, past.end, null, past.span)));
   }
-  const incidents = panel(translate('事件'), msg`最近 24 小时 · 共 ${events.length} 条`, events.length ? button(translate('全部事件'), () => modal(translate('全部事件'), eventTable(events, byId, now)), 'table-action') : undefined);
+  const eventActions = el('div', undefined, 'panel-actions'); if (state.actor.role === 'system_admin') eventActions.append(button(translate('诊断报告'), () => navigate('diagnostics'), 'table-action')); if (events.length) eventActions.append(button(translate('全部事件'), () => modal(translate('全部事件'), eventTable(events, byId, now)), 'table-action'));
+  const incidents = panel(translate('事件'), msg`最近 24 小时 · 共 ${events.length} 条`, eventActions.childElementCount ? eventActions : undefined);
   incidents.classList.add('incident-panel');
   // A problem stays open until a later event about the same node, subject and kind family
   // (target_*, config_*, node_*) recovers, removes or supersedes it.
@@ -2275,6 +2276,151 @@ function createApiToken() {
   modal(translate('创建 API 令牌'), form);
 }
 function newUser() { const form = el('form'); field(form, 'username', translate('用户名')).maxLength = 80; const p = field(form, 'password', translate('初始密码（至少 12 个字节）'), '', 'password'); p.minLength = 12; p.autocomplete = 'new-password'; const roles = [['viewer', translate('只读用户')], ['tenant_admin', translate('租户管理员')]]; if (state.actor.role === 'system_admin') roles.push(['system_admin', translate('系统管理员')]); select(form, 'role', translate('角色'), roles, 'viewer'); submit(form, translate('创建用户'), async data => { await api('/users', { method: 'POST', body: Object.fromEntries(data) }); $('#dialog').close(); await renderUsers(); }); modal(translate('添加用户'), form); }
+// Live logs: the latest lines of the controller and every node, newest at the bottom. Agents send
+// their lines with each report, so the page follows within one report interval.
+const LOG_LEVELS = { all: ['error', 'warn', 'info', 'debug', 'trace'], warn: ['error', 'warn'], error: ['error'] };
+const logSourceName = (sources, id) => id === 'controller' ? translate('控制器') : (sources || []).find(s => s.id === id)?.name || id;
+async function renderLogs() {
+  const actor = state.actor, view = state.logs ||= { source: '', level: 'all', query: '', paused: false, lines: [], after: 0, key: null };
+  const key = view.source, fresh = view.key !== key || view.language !== getLanguage() || !view.box?.isConnected || !$('#content').contains(view.box);
+  if (!fresh && view.paused) return;
+  if (fresh) Object.assign(view, { lines: [], after: 0, key, language: getLanguage() });
+  const data = await api(`/logs?after=${view.after}${key ? `&source=${encodeURIComponent(key)}` : ''}`);
+  if (state.view !== 'logs' || state.actor !== actor || view.key !== key) return;
+  // A restarted controller numbers lines from the start again.
+  if (data.latest_id < view.after) { view.key = null; return renderLogs(); }
+  if (data.truncated && !fresh && data.lines.length) view.lines.push({ gap: true, at_ms: data.lines[0].at_ms, id: data.lines[0].id - 0.5 });
+  view.sources = data.sources; view.after = data.latest_id; view.lines.push(...data.lines); view.lines.splice(0, Math.max(0, view.lines.length - 2000));
+  if (fresh) buildLogView(view); else drawLogLines(view);
+}
+function buildLogView(view) {
+  const toolbar = el('div', undefined, 'toolbar log-toolbar'), source = el('select'), sourceLabel = el('label', translate('来源'));
+  for (const [id, name] of [['', translate('全部来源')], ...view.sources.map(s => [s.id, logSourceName(view.sources, s.id)])]) { const option = el('option', name); option.value = id; source.append(option); }
+  source.value = view.source; source.onchange = () => { view.source = source.value; refresh().catch(e => notify(e.message, true)); }; sourceLabel.append(source);
+  const levels = el('div', undefined, 'mode-picker'); levels.setAttribute('aria-label', translate('级别'));
+  for (const [value, label] of [['all', translate('全部级别')], ['warn', translate('警告和错误')], ['error', translate('仅错误')]]) {
+    const choice = button(label, () => { view.level = value; [...levels.children].forEach(c => c.setAttribute('aria-pressed', String(c === choice))); drawLogLines(view, true); }); choice.setAttribute('aria-pressed', String(view.level === value)); levels.append(choice);
+  }
+  const search = el('input'); search.type = 'search'; search.value = view.query; search.placeholder = translate('筛选文字'); search.setAttribute('aria-label', translate('筛选文字')); search.oninput = () => { view.query = search.value; drawLogLines(view, true); };
+  const pause = button('', () => { view.paused = !view.paused; showPause(); drawLogLines(view); if (!view.paused) refresh().catch(e => notify(e.message, true)); });
+  const showPause = () => { pause.textContent = view.paused ? translate('继续') : translate('暂停'); pause.setAttribute('aria-pressed', String(view.paused)); }; showPause();
+  const download = button(translate('下载'), () => {
+    const shown = shownLogLines(view), stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const text = shown.filter(l => !l.gap).map(l => `${new Date(l.at_ms).toISOString()}  ${logSourceName(view.sources, l.source)}  ${l.level.toUpperCase()}  ${l.text}`).join('\n');
+    const link = el('a'); link.href = URL.createObjectURL(new Blob([text + '\n'], { type: 'text/plain' })); link.download = `relay-logs-${(view.source ? logSourceName(view.sources, view.source) : 'all').replace(/[^\w.-]+/g, '_')}-${stamp}.txt`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }, 'table-action');
+  toolbar.append(sourceLabel, levels, search, pause, download);
+  const p = panel(translate('最近的日志'), translate('服务器的新日志随每次回报送来，约 5 秒一次；控制器的日志直接读取。每个来源保留最近 2000 行，完整记录仍在服务器的系统日志（journalctl）中。'));
+  view.box = el('div', undefined, 'log-view'); view.box.setAttribute('role', 'log'); view.box.tabIndex = 0; view.foot = el('div', undefined, 'log-foot');
+  p.append(view.box, view.foot);
+  if (state.view === 'logs') $('#content').replaceChildren(toolbar, p);
+  drawLogLines(view, true);
+}
+function shownLogLines(view) {
+  const levels = LOG_LEVELS[view.level], query = view.query.trim().toLowerCase();
+  // Servers send their lines a few seconds late, so lines are shown in the order they were logged.
+  return view.lines.filter(l => l.gap || (levels.includes(l.level) && (!query || l.text.toLowerCase().includes(query) || logSourceName(view.sources, l.source).toLowerCase().includes(query)))).sort((a, b) => a.at_ms - b.at_ms || a.id - b.id);
+}
+function drawLogLines(view, jump) {
+  const box = view.box; if (!box?.isConnected) return;
+  const follow = jump || box.scrollHeight - box.scrollTop - box.clientHeight < 40, shown = shownLogLines(view), rows = [];
+  for (const l of shown) {
+    if (l.gap) { rows.push(el('div', translate('… 这段时间新日志太多，较早的一部分没有显示'), 'log-note')); continue; }
+    if (l.restarted) rows.push(el('div', msg`${logSourceName(view.sources, l.source)} 重新启动`, 'log-note'));
+    if (l.missing) rows.push(el('div', msg`… ${l.missing} 行没有送达`, 'log-note'));
+    const at = new Date(l.at_ms), row = el('div', undefined, `log-line ${l.level}`), time = el('time', at.toLocaleTimeString(getLanguage(), { hour12: false }));
+    time.dateTime = at.toISOString(); time.title = at.toLocaleString(getLanguage(), { hour12: false }); row.append(time);
+    if (!view.source) row.append(el('span', logSourceName(view.sources, l.source), 'log-source'));
+    row.append(el('span', l.level.toUpperCase(), 'log-level'), el('span', l.text, 'log-text')); rows.push(row);
+  }
+  if (!rows.length) rows.push(el('div', view.lines.length ? translate('没有符合筛选条件的日志。') : translate('还没有收到日志。服务器升级到 0.132.0 后，日志随每次回报送来；控制器重启后从新的日志开始显示。'), 'log-empty'));
+  const top = box.scrollTop; box.replaceChildren(...rows); box.scrollTop = follow ? box.scrollHeight : top;
+  const count = view.lines.filter(l => !l.gap).length;
+  view.foot.textContent = msg`显示 ${shown.filter(l => !l.gap).length} / ${count} 行` + (view.paused ? ` · ${translate('已暂停，新日志不会加载')}` : ` · ${translate('自动更新')}`);
+}
+function openLogs(source) { state.logs = { ...(state.logs || { level: 'all', query: '', paused: false }), source, key: null }; return navigate('logs'); }
+
+// Diagnostics: problems the controller finds in the current state, in plain words, with the full
+// report available as a JSON download for support or an AI assistant.
+const findingLevels = localize({ critical: ['严重', 'red'], warning: ['警告', 'orange'], info: ['提示', ''] });
+function durationText(s) { return s < 120 ? msg`${s} 秒` : s < 7200 ? msg`${Math.round(s / 60)} 分钟` : s < 172_800 ? msg`${Math.round(s / 3600)} 小时` : msg`${Math.round(s / 86_400)} 天`; }
+function findingText(f) {
+  const x = f.facts || {}, node = f.node || '', rule = f.rule || '', source = x.source === 'controller' ? translate('控制器') : node;
+  switch (f.kind) {
+    case 'node_not_enrolled': return msg`节点 ${node} 尚未接入`;
+    case 'node_never_reported': return msg`节点 ${node} 已接入但从未回报`;
+    case 'node_offline': return msg`节点 ${node} 已 ${durationText(x.seconds)} 无回报`;
+    case 'config_rejected': return msg`节点 ${node} 拒绝了修订 ${x.desired}，仍在运行修订 ${x.applied}`;
+    case 'config_pending': return msg`节点 ${node} 尚未应用修订 ${x.desired}（当前 ${x.applied}）`;
+    case 'hop_failing': return msg`${rule}：${x.from === '客户端' ? translate('客户端') : x.from} → ${x.to} 最近 1 小时 ${x.attempts} 次连接，成功 ${x.success_percent}%`;
+    case 'target_unhealthy': return msg`${rule}：节点 ${node} 的目标 ${x.target_address} 探测失败`;
+    case 'high_cpu': return msg`节点 ${node} CPU 使用率 ${x.cpu_percent}%`;
+    case 'low_memory': return msg`节点 ${node} 可用内存仅剩 ${x.available_percent}%`;
+    case 'log_errors': return msg`${source} 最近 1 小时记录了 ${x.count} 条错误`;
+    case 'log_warnings': return msg`${source} 最近 1 小时记录了 ${x.count} 条警告`;
+    default: return f.message;
+  }
+}
+function findingDetail(f) {
+  const x = f.facts || {};
+  switch (f.kind) {
+    case 'node_not_enrolled': return translate('在服务器上用注册令牌启动 Agent 后即可使用；不再需要时可以删除这个节点。');
+    case 'node_never_reported': return translate('在服务器上启动 Agent，并确认注册令牌和控制器地址正确。');
+    case 'node_offline': return translate('检查服务器是否开机、Agent 服务是否在运行，以及它能否连到控制器。');
+    case 'config_rejected': return x.error;
+    case 'config_pending': return translate('通常几秒内完成；一直不变时查看这个节点的日志。');
+    case 'hop_failing': return ({
+      refused: msg`主要原因：连接被拒绝（${x.cause_count} 次）。目标端口没有程序在监听，或防火墙拒绝了连接。`,
+      timeout: msg`主要原因：连接超时（${x.cause_count} 次）。目标或线路不通，或防火墙丢弃了连接。`,
+      dns: msg`主要原因：域名解析失败（${x.cause_count} 次）。检查目标域名和服务器的 DNS 设置。`,
+      closed: msg`主要原因：连接被对方关闭（${x.cause_count} 次）。检查下一跳的协议和加密设置是否一致。`,
+    })[x.cause] || msg`主要原因：其他错误（${x.cause_count} 次）。查看这台服务器的日志。`;
+    case 'target_unhealthy': return msg`探测结果：${(x.probes || []).map(p => `${String(p.protocol).toUpperCase()} ${probeErrors[p.error] || p.error || translate('未知')}`).join(' · ')}`;
+    case 'high_cpu': return translate('持续偏高会增加转发延迟；检查这台服务器上的其他程序，或提高配置。');
+    case 'low_memory': return translate('内存不足可能导致连接失败，或程序被系统结束。');
+    case 'log_errors': case 'log_warnings': return x.latest;
+    default: return '';
+  }
+}
+async function renderDiagnostics() {
+  const actor = state.actor, report = await api('/diagnostics/report');
+  if (state.view !== 'diagnostics' || state.actor !== actor) return;
+  const { summary, findings } = report, time = timestamp(report.generated_at_ms);
+  const download = button(translate('下载诊断报告'), () => {
+    const stamp = new Date(report.generated_at_ms).toISOString().replace(/[:.]/g, '-');
+    const link = el('a'); link.href = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2) + '\n'], { type: 'application/json' })); link.download = `relay-diagnostics-${stamp}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }, 'primary');
+  const copy = button(translate('复制摘要'), async () => {
+    const lines = [msg`Relay 诊断 · ${time} · 控制器 ${report.controller_version}`, msg`严重 ${summary.critical} · 警告 ${summary.warning} · 提示 ${summary.info} · 在线节点 ${summary.online} / ${summary.enrolled}`, ''];
+    for (const f of findings) { const detail = findingDetail(f); lines.push(`- [${findingLevels[f.severity]?.[0] || f.severity}] ${findingText(f)}${detail ? ` — ${detail}` : ''}`); }
+    if (!findings.length) lines.push(translate('没有发现问题。'));
+    await navigator.clipboard.writeText(lines.join('\n')); notify(translate('摘要已复制'));
+  });
+  const actions = el('div', undefined, 'panel-actions'); actions.append(button(translate('重新检查'), () => refresh()), copy, download);
+  const head = panel(translate('诊断报告'), msg`检查于 ${time} · 控制器 ${report.controller_version}`, actions);
+  const board = el('div', undefined, 'alert-status diagnostics-board');
+  for (const [label, value, color] of [[translate('严重'), summary.critical, summary.critical ? 'red' : 'green'], [translate('警告'), summary.warning, summary.warning ? 'orange' : 'green'], [translate('提示'), summary.info, ''], [translate('在线节点'), `${summary.online} / ${summary.enrolled}`, summary.online < summary.enrolled ? 'orange' : 'green']]) { const item = el('div', undefined, `alert-stat ${color}`); item.append(el('div', String(value), 'metric-value'), el('div', label, 'metric-label')); board.append(item); }
+  head.append(board);
+  const list = el('ol', undefined, 'incidents findings');
+  for (const f of findings) {
+    const item = el('li', undefined, `incident ${f.severity}`), text = el('div'), detail = findingDetail(f), [level] = findingLevels[f.severity] || [f.severity];
+    text.append(el('div', findingText(f), 'finding-title'));
+    if (detail) text.append(el('div', detail, ['config_rejected', 'log_errors', 'log_warnings'].includes(f.kind) ? 'finding-detail code' : 'finding-detail'));
+    const links = el('div', undefined, 'finding-links'), source = f.facts?.source || f.node_id;
+    links.append(el('span', [level, f.facts?.source === 'controller' ? translate('控制器') : f.node, f.rule].filter(Boolean).join(' · '), 'subline'));
+    if (source && f.kind !== 'node_not_enrolled') links.append(button(translate('查看日志'), () => openLogs(source), 'table-action'));
+    if (['hop_failing', 'target_unhealthy'].includes(f.kind)) links.append(button(translate('查看转发规则'), () => navigate('topology'), 'table-action'));
+    else if (f.node_id) links.append(button(translate('节点管理'), () => navigate('nodes'), 'table-action'));
+    text.append(links); item.append(el('i'), text); list.append(item);
+  }
+  if (!findings.length) list.append(el('li', translate('没有发现问题：已接入的节点都在回报，配置都已应用，最近 1 小时各段连接成功率不低于 90%，没有资源告急，也没有新的错误日志。'), 'incident-empty'));
+  head.append(list);
+  const about = panel(translate('报告里有什么'), translate('下载的 JSON 文件可以交给技术支持或 AI 助手分析，不用来回截图描述问题。'));
+  const items = el('ul', undefined, 'diagnostics-contents');
+  for (const line of [translate('上面的问题列表，以及每个节点的回报时间、配置修订、CPU / 内存和目标探测结果'), translate('每条规则的监听地址、目标地址和启用的功能名称；不包含密码、密钥、令牌和证书'), translate('最近 1 小时各段真实连接的成功与失败次数，以及最近 24 小时的事件'), translate('控制器和每台服务器最近 300 行日志')]) items.append(el('li', line));
+  about.append(items, el('p', translate('报告包含服务器地址和日志内容，只分享给你信任的人。'), 'diagnostics-note'));
+  if (state.view === 'diagnostics') $('#content').replaceChildren(head, about);
+}
 async function renderAudit() { const actor = state.actor; const rows = await api('/audit'); if (state.view !== 'audit' || !actor || state.actor !== actor) return; const p = panel(translate('操作审计'), translate('记录配置发布、节点注册、身份及会话操作。最近 200 条。')); p.append(table([translate('时间'), translate('操作者'), translate('操作'), translate('对象'), translate('详情')], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
 const alertKinds = localize({ smtp: 'Email / SMTP', webhook: 'Webhook', telegram: 'Telegram', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' });
 const alertFields = localize({ smtp: [], webhook: [['url', 'Webhook 地址'], ['secret', '签名密钥（可选，HMAC-SHA256）', true]], telegram: [['bot_token', 'Bot Token'], ['chat_id', 'Chat ID']], wecom: [['url', '群机器人 Webhook 地址']], feishu: [['url', '自定义机器人 Webhook 地址'], ['secret', '签名校验密钥（可选）', true]], dingtalk: [['url', '自定义机器人 Webhook 地址'], ['secret', '加签密钥（可选）', true]] });
@@ -2375,10 +2521,10 @@ function editAlertChannel(existing) {
   });
   modal(existing ? msg`编辑通知通道 · ${existing.name}` : translate('添加通知通道'), form);
 }
-async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
-setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'rules', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
+setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'rules', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health', 'logs'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
 if (state.token) { api('/session').then(user => { state.actor = user; return enter(); }).catch(e => { loggedOut(); $('#login-error').textContent = e.message; }); }
 
 const budgetScopeNames = localize({ user: '用户', tenant: '租户', node: '节点' });

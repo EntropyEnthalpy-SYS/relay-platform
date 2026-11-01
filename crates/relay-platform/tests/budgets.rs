@@ -113,6 +113,7 @@ impl Fixture {
     }
     fn request(&self, n: usize, exchange: BudgetExchange) -> SyncRequest {
         SyncRequest {
+            logs: None,
             lease: None,
             budget: Some(exchange),
             ledger_id: self.ledgers[n].clone(),

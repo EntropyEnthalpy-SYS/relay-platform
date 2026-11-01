@@ -8,7 +8,7 @@ const STATUS_REFRESH_MS: i64 = 60_000;
 /// Keep each request's atomic boundary while sharing one durable journal commit.
 /// Only expected input/auth conflicts are isolated; storage errors abort the batch.
 impl Store {
-    pub fn sync(&self, node: &str, request: SyncRequest) -> Result<SyncResponse> {
+    pub fn sync(&self, node: &str, mut request: SyncRequest) -> Result<SyncResponse> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         leases::validate(
@@ -18,10 +18,10 @@ impl Store {
             request.lease.as_ref(),
             request.budget.as_ref().map(|b| b.run_id.as_str()),
         )?;
-        let report = Report::of(&request);
-        let (response, stored_seen) = apply_sync(&tx, node, request, &self.6)?;
+        let report = Report::of(&mut request);
+        let (mut response, stored_seen) = apply_sync(&tx, node, request, &self.6)?;
         tx.commit()?;
-        report.record(&self.4, node, stored_seen);
+        response.log_cursor = Some(report.record(&self.4, node, stored_seen));
         Ok(response)
     }
 
@@ -37,7 +37,7 @@ impl Store {
         let tx = conn.transaction()?;
         let mut responses = Vec::with_capacity(inputs.len());
         let mut reports = vec![];
-        for (credential, input) in inputs {
+        for (credential, mut input) in inputs {
             tx.execute_batch("SAVEPOINT agent_sync_request")?;
             let result = (|| {
                 let node: Option<String> = tx
@@ -57,9 +57,9 @@ impl Store {
                     input.lease.as_ref(),
                     input.budget.as_ref().map(|b| b.run_id.as_str()),
                 )?;
-                let report = Report::of(&input);
+                let report = Report::of(&mut input);
                 let (response, stored_seen) = apply_sync(&tx, &node, input, &self.6)?;
-                reports.push((node, report, stored_seen));
+                reports.push((node, report, stored_seen, responses.len()));
                 Ok(response)
             })();
             if let Err(error) = &result {
@@ -72,28 +72,40 @@ impl Store {
             responses.push(result);
         }
         tx.commit()?;
-        for (node, report, stored_seen) in reports {
-            report.record(&self.4, &node, stored_seen);
+        for (node, report, stored_seen, index) in reports {
+            let cursor = report.record(&self.4, &node, stored_seen);
+            if let Ok(response) = &mut responses[index] {
+                response.log_cursor = Some(cursor);
+            }
         }
         Ok(responses)
     }
 }
 
 /// What the dashboard keeps from a report, recorded only once it is committed.
-struct Report(u64, Option<String>, EngineStats);
+struct Report(u64, Option<String>, EngineStats, Option<crate::logs::Batch>);
 
 impl Report {
-    fn of(request: &SyncRequest) -> Self {
+    /// Takes the log lines out of `request`; they are not part of the sync.
+    fn of(request: &mut SyncRequest) -> Self {
         Self(
             request.applied_revision,
             request.apply_error.clone(),
             request.stats.clone(),
+            request.logs.take(),
         )
     }
 
-    fn record(self, telemetry: &crate::telemetry::Telemetry, node: &str, stored_seen: Option<i64>) {
+    /// Returns where the controller's copy of the node's log now ends.
+    fn record(
+        self,
+        telemetry: &crate::telemetry::Telemetry,
+        node: &str,
+        stored_seen: Option<i64>,
+    ) -> crate::logs::Cursor {
         telemetry.record(node, self.0, self.1.as_deref(), &self.2);
         telemetry.keep_status(node, stored_seen, &self.2);
+        telemetry.add_logs(node, self.3)
     }
 }
 
@@ -220,6 +232,7 @@ fn apply_sync(
             config,
             acknowledgements,
             server_time_ms: now_ms(),
+            log_cursor: None,
         },
         stored_seen,
     ))

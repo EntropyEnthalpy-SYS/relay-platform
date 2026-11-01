@@ -447,6 +447,180 @@ async fn a_running_agent_takes_its_user_share_and_then_syncs_every_second() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_logs_and_the_diagnostic_report_show_a_refused_hop_without_secrets() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    control.set_kind("controller").unwrap();
+    control
+        .enable_history(&temp.path().join("history.sqlite"))
+        .unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    control
+        .create_user(
+            &admin,
+            "default",
+            "watcher",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (node, enrollment) = control
+        .create_node(&admin, "default", "logs-agent")
+        .unwrap();
+    control.create_node(&admin, "default", "spare").unwrap();
+    // Nothing listens at the target, so every connection is refused.
+    let closed = free_address();
+    let mut r = rule(closed, Protocol::Tcp);
+    r.owner_id = admin.id.clone();
+    let listen = r.listen;
+    control
+        .set_config(&admin, &node.id, 0, vec![r.clone()])
+        .unwrap();
+    let server_instance = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let origin = format!("http://{}", server_instance.address);
+    let secret_path = temp.path().join("enroll.secret");
+    write_secret(&secret_path, enrollment.as_bytes()).unwrap();
+    let agent_db = Store::open(&temp.path().join("agent.db")).unwrap();
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        agent_db,
+        options(&origin, &node.id, Some(secret_path)),
+        stop.clone(),
+    ));
+    wait_applied(&control, &admin, 1).await;
+    wait_listening(listen).await;
+    let marker = format!("diagnostics marker {}", node.id);
+    relay_platform::logs::record(relay_platform::logs::Level::Error, &marker);
+    for _ in 0..6 {
+        let mut client = TcpStream::connect(listen).await.unwrap();
+        let mut rest = vec![];
+        let _ = timeout(Duration::from_secs(3), client.read_to_end(&mut rest)).await;
+    }
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let (token, _) = control.login("admin", PASSWORD).unwrap();
+    let (viewer, _) = control.login("watcher", PASSWORD).unwrap();
+    let get = |path: String, bearer: String| {
+        let request = client.get(format!("{origin}{path}")).bearer_auth(bearer);
+        async move { request.send().await.unwrap() }
+    };
+    for path in ["/api/v1/logs", "/api/v1/diagnostics/report"] {
+        assert_eq!(get(path.into(), viewer.clone()).await.status(), 403);
+    }
+    // The agent sends the line with a following report.
+    let until = Instant::now() + Duration::from_secs(5);
+    let logs = loop {
+        let logs: Value = get(format!("/api/v1/logs?source={}", node.id), token.clone())
+            .await
+            .json()
+            .await
+            .unwrap();
+        if logs["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["text"] == marker.as_str())
+        {
+            break logs;
+        }
+        assert!(
+            Instant::now() < until,
+            "log line never reached the controller: {logs}"
+        );
+        sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        logs["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["source"] == node.id.as_str())
+    );
+    let latest = logs["latest_id"].as_u64().unwrap();
+    let newer: Value = get(format!("/api/v1/logs?after={latest}"), token.clone())
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        newer["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|l| l["id"].as_u64().unwrap() > latest)
+    );
+    // Six refused connections reach the report through the agent's counters.
+    let until = Instant::now() + Duration::from_secs(5);
+    let (report, text) = loop {
+        let response = get("/api/v1/diagnostics/report".into(), token.clone()).await;
+        assert_eq!(response.status(), 200);
+        let text = response.text().await.unwrap();
+        let report: Value = serde_json::from_str(&text).unwrap();
+        if report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "hop_failing")
+        {
+            break (report, text);
+        }
+        assert!(Instant::now() < until, "no failing hop in {report}");
+        sleep(Duration::from_millis(50)).await;
+    };
+    let findings = report["findings"].as_array().unwrap();
+    let hop = findings
+        .iter()
+        .find(|f| f["kind"] == "hop_failing")
+        .unwrap();
+    assert_eq!(hop["severity"], "critical");
+    assert_eq!(hop["rule"], "Test rule");
+    assert_eq!(hop["facts"]["from"], "logs-agent");
+    assert_eq!(hop["facts"]["to"], closed.to_string());
+    assert_eq!(hop["facts"]["cause"], "refused");
+    assert_eq!(hop["facts"]["success_percent"], 0);
+    assert!(hop["facts"]["attempts"].as_u64().unwrap() >= 6);
+    // The inbound side of the same rule succeeded and is not a finding.
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|f| f["kind"] == "hop_failing")
+            .count(),
+        1
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["kind"] == "node_not_enrolled" && f["node"] == "spare")
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f["kind"] == "log_errors" && f["node_id"] == node.id.as_str())
+    );
+    // Most severe first.
+    assert_eq!(findings[0]["severity"], "critical");
+    assert_eq!(report["summary"]["nodes"], 2);
+    let rule = &report["rules"][0];
+    assert_eq!(rule["node"], "logs-agent");
+    assert_eq!(rule["targets"][0]["address"], closed.to_string());
+    for secret in [
+        enrollment.as_str(),
+        token.as_str(),
+        PASSWORD,
+        "owner_id",
+        "meter_epoch",
+    ] {
+        assert!(!text.contains(secret), "report contains {secret}");
+    }
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    stop_server(server_instance).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rejected_config_keeps_the_running_user_share_on_a_managed_agent() {
     let temp = tempfile::tempdir().unwrap();
     let echo = tcp_echo().await;

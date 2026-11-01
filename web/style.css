@@ -1119,3 +1119,40 @@ body[data-overview-layout="workspace"] .globe-list { max-height: 310px; }
   .timeline { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .timeline-name { margin-top: 6px; }
 }
+
+/* Live logs and diagnostics (0.132.0) */
+.log-toolbar { flex-wrap: wrap; }
+.log-toolbar label { flex-direction: row; align-items: center; gap: 8px; margin: 0; white-space: nowrap; }
+.log-toolbar input[type="search"] { flex: 1; min-width: 160px; max-width: 320px; }
+.log-view { height: min(62vh, 640px); overflow: auto; padding: 8px 0; background: var(--surface-2); font-family: var(--mono); font-size: 12px; line-height: 1.6; }
+.log-view:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.log-line { display: grid; grid-template-columns: max-content max-content 5ch minmax(0, 1fr); gap: 12px; padding: 1px 22px; }
+.log-view:not(:has(.log-source)) .log-line { grid-template-columns: max-content 5ch minmax(0, 1fr); }
+.log-line:hover { background: var(--surface-3); }
+.log-line time, .log-source { color: var(--muted); white-space: nowrap; }
+.log-source { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; }
+.log-level { font-weight: 650; color: var(--muted); }
+.log-line.warn .log-level { color: var(--amber); }
+.log-line.error .log-level { color: var(--red); }
+.log-line.error .log-text { color: var(--red); }
+.log-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.log-note { margin: 6px 22px; padding: 3px 0; border-top: 1px dashed var(--line-strong); color: var(--muted); font-family: var(--sans); font-size: 11.5px; }
+.log-empty { padding: 48px 22px; font-family: var(--sans); font-size: 12.5px; line-height: 1.7; color: var(--muted); text-align: center; }
+.log-foot { padding: 10px 22px; border-top: 1px solid var(--line); font-size: 11.5px; color: var(--muted); }
+.diagnostics-board { grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
+.findings .incident { grid-template-columns: 8px minmax(0, 1fr); }
+.finding-title { font-size: 13px; font-weight: 600; line-height: 1.55; color: var(--text); overflow-wrap: anywhere; }
+.finding-detail { margin-top: 4px; font-size: 12.5px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; }
+.finding-detail.code { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; padding: 6px 10px; border-radius: 6px; background: var(--surface-2); font-family: var(--mono); font-size: 11.5px; }
+.finding-links { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 6px; }
+.finding-links .subline { margin: 0 6px 0 0; }
+.diagnostics-contents { margin: 0; padding: 16px 22px 4px 40px; font-size: 13px; line-height: 1.9; color: var(--text-2); }
+.diagnostics-note { margin: 0; padding: 4px 22px 18px; font-size: 12px; color: var(--muted); }
+@media (max-width: 640px) {
+  .log-view { height: 60vh; font-size: 11px; }
+  .log-toolbar label { width: 100%; }
+  .log-toolbar label select { flex: 1; max-width: none; }
+  .log-line, .log-view:not(:has(.log-source)) .log-line { display: flex; flex-wrap: wrap; gap: 0 8px; padding: 3px 14px; }
+  .log-text { flex-basis: 100%; }
+  .diagnostics-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}

@@ -390,12 +390,14 @@ fn retry_policy(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "relay=info,relay_platform=info".into()),
         )
-        .with_target(false)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(relay_platform::logs::Capture)
         .init();
     let cli = Cli::parse();
     let stop = CancellationToken::new();

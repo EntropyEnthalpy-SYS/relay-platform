@@ -85,7 +85,11 @@ struct Inner {
 }
 
 #[derive(Default)]
-pub struct Telemetry(Mutex<Inner>, std::sync::OnceLock<History>);
+pub struct Telemetry(
+    Mutex<Inner>,
+    std::sync::OnceLock<History>,
+    Mutex<crate::logs::Sources>,
+);
 
 impl Telemetry {
     pub fn record(&self, node: &str, applied: u64, apply_error: Option<&str>, stats: &EngineStats) {
@@ -354,6 +358,27 @@ impl Telemetry {
         inner.nodes.remove(node);
         inner.pending.nodes.retain(|(id, _), _| id != node);
         inner.pending.hops.retain(|(hop, _), _| hop.node_id != node);
+        self.2.lock().unwrap().forget(node);
+    }
+
+    /// Keeps a node's new log lines; returns where its copy now ends.
+    pub fn add_logs(&self, node: &str, batch: Option<crate::logs::Batch>) -> crate::logs::Cursor {
+        self.2.lock().unwrap().add(node, batch)
+    }
+
+    /// Log lines newer than `after` from `source` (every source when `None`),
+    /// including the controller's own, with whether older ones were left out
+    /// and the newest line id.
+    pub fn logs(
+        &self,
+        source: Option<&str>,
+        after: u64,
+        limit: usize,
+    ) -> (Vec<crate::logs::Kept>, bool, u64) {
+        let mut sources = self.2.lock().unwrap();
+        sources.add_own();
+        let (lines, truncated) = sources.read(source, after, limit);
+        (lines, truncated, sources.last_id())
     }
 
     /// Keeps seven days of buckets in the database at `path` from now on.

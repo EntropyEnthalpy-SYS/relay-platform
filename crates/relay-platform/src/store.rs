@@ -20,6 +20,7 @@ mod announcements;
 mod budgets;
 mod commerce;
 mod credentials;
+mod diagnostics;
 mod dns;
 mod endpoint_allocation;
 mod health;

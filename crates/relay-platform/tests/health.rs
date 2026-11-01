@@ -770,6 +770,7 @@ async fn controller_health_reports_are_scoped_validated_and_aged_without_changin
         )
         .unwrap();
     let request = |stats: EngineStats| SyncRequest {
+        logs: None,
         lease: None,
         budget: None,
         ledger_id: page.ledger_id.clone(),

@@ -109,6 +109,7 @@ impl Fixture {
                 .sync(
                     &config.node_id,
                     SyncRequest {
+                        logs: None,
                         lease: None,
                         budget: None,
                         ledger_id: page.ledger_id,
@@ -279,6 +280,7 @@ fn multipath_sessions_and_paths_must_drain_even_after_physical_tcp_count_reaches
             .sync(
                 &first.node_id,
                 SyncRequest {
+                    logs: None,
                     lease: None,
                     budget: None,
                     ledger_id: page.ledger_id.clone(),
@@ -766,6 +768,7 @@ fn topology_reactivation_waits_for_cancelled_probe_io_to_finish() {
         .sync(
             &first.node_id,
             SyncRequest {
+                logs: None,
                 lease: None,
                 budget: None,
                 ledger_id: page.ledger_id,

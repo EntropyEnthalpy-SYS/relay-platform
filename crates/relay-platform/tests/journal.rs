@@ -73,6 +73,7 @@ fn restore_replays_credentials_configuration_budgets_and_usage_after_an_old_back
     local.admit_batch(&[admission(1)]).unwrap();
     for bytes in [40, 0] {
         let request = SyncRequest {
+            logs: None,
             lease: None,
             ledger_id: page.ledger_id.clone(),
             budget: Some(local.budget_outbox(&run, true).unwrap()),

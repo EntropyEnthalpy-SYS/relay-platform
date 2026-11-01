@@ -17,6 +17,7 @@ fn sync(db: &Store, node: &str, ledger: &str, applied: u64, error: Option<String
     db.sync(
         node,
         SyncRequest {
+            logs: None,
             lease: None,
             budget: None,
             ledger_id: ledger.into(),

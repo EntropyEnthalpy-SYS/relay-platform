@@ -1081,6 +1081,10 @@ pub struct SyncRequest {
     pub apply_error: Option<String>,
     pub usage: Vec<Usage>,
     pub stats: EngineStats,
+    /// New log lines. Agents send them only after the controller asked with
+    /// [`SyncResponse::log_cursor`], so older controllers never receive them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logs: Option<crate::logs::Batch>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncResponse {
@@ -1097,6 +1101,10 @@ pub struct SyncResponse {
     /// older than cross-node limits, which agents treat as no limits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_rates: Option<Vec<UserShare>>,
+    /// The last log line the controller holds from this node; agents send
+    /// the lines after it with their next report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_cursor: Option<crate::logs::Cursor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

@@ -49,6 +49,7 @@ fn report(db: &Store, id: &str, ledger: &str, error: Option<&str>) {
     db.sync(
         id,
         SyncRequest {
+            logs: None,
             lease: None,
             budget: None,
             ledger_id: ledger.into(),

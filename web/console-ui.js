@@ -9,6 +9,8 @@ export const pageInfo = localize({
   health: ['监控与用量', 'TARGET HEALTH', '跟踪真实目标的探测结果，定位不可用的线路。', 'observability', 'latency failover 健康 延迟'],
   usage: ['监控与用量', 'TRAFFIC LEDGER', '按规则与周期查看已上报的流量，核对用量记录。', 'resources', 'traffic bandwidth 计量 流量'],
   budgets: ['监控与用量', 'SHARED BUDGETS', '在多个节点之间分配额度，追踪消费与尚未归还的预留。', 'resources', 'quota limit 配额 预算 限速'],
+  logs: ['监控与用量', 'LIVE LOGS', '在面板里查看控制器和每台服务器的最新日志，不用登录服务器。', 'observability', 'log journal tail error 日志 实时 错误'],
+  diagnostics: ['监控与用量', 'DIAGNOSTICS', '自动检查节点、配置、各段连接、资源和日志，列出问题并导出诊断报告。', 'observability', 'diagnose report troubleshoot export support 诊断 排障 报告 导出'],
   alerts: ['监控与用量', 'ALERTS & NOTIFICATIONS', '为需要关注的运行事件设置通知通道。', 'observability', 'smtp email telegram 邮件 告警'],
   subscriptions: ['客户与服务', 'CLIENT SUBSCRIPTIONS', '将兼容规则交付给客户端，管理订阅的预览、有效期与撤销。', 'clients', 'clash mihomo sing-box subscription 客户端'],
   dns: ['客户与服务', 'MANAGED DNS', '管理服务商与解析记录，先观察变更，再按需要应用。', 'operations', 'cloudflare 域名 解析'],
@@ -24,7 +26,7 @@ export const pageInfo = localize({
 });
 // "By server" is a tab of Forwarding rules, so the sidebar highlights that entry.
 export const navView = view => view === 'rules' ? 'topology' : view;
-const adminViews = new Set(['dns', 'audit', 'recovery']);
+const adminViews = new Set(['dns', 'audit', 'recovery', 'logs', 'diagnostics']);
 export function canVisit(view, actor) {
   return !!actor && Object.hasOwn(pageInfo, view) && (!adminViews.has(view) || actor.role === 'system_admin') && (!['alerts', 'templates'].includes(view) || actor.role !== 'viewer');
 }
@@ -46,6 +48,7 @@ export const guideArticles = localize([
     ['检查目标健康', '选择节点查看 TCP / UDP 目标探测、可选状态和失败原因。探测往返不包含客户端到入口的网络，不能直接解释为用户端延迟。'],
     ['看真实连接', '转发规则页每段箭头显示最近 1 小时真实 TCP 连接的成功率：第一段是入口的入站建立，之后是各服务器拨号到下一跳。展开路径可查看 24 小时或 7 天的逐段记录并导出 CSV；总览可把趋势切换为 24 小时或 7 天。'],
     ['定位配置问题', '检查节点的期望 / 已应用修订与应用错误，再查看运行诊断。控制在线、配置应用成功、目标可用是三个不同信号。'],
+    ['查看日志与诊断', '系统管理员可在「实时日志」查看控制器和每台服务器的最新日志，约 5 秒更新一次，不用登录服务器；「诊断报告」自动列出离线节点、被拒绝的配置、成功率低的连接段、资源紧张和近期错误，并可下载报告交给技术支持或 AI 助手分析。报告不包含密码、密钥和令牌。'],
     ['设置通知', '有管理权限的账号可配置通知通道与严重级别。SMTP 支持 TLS / STARTTLS；保存后使用测试通知验证目标收件端。'],
   ], note: '面板在部分运行页面每 5 秒刷新。输入筛选条件、打开对话框或切到后台时会暂停自动刷新，避免打断操作。' },
   { id: 'resources', title: '流量、额度与限速', subtitle: '理解消费、预留与可分配额度之间的关系。', icon: 'gauge', read: '3 分钟', target: 'budgets', steps: [
@@ -99,6 +102,7 @@ const paths = {
   users: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M17 3a4 4 0 0 1 0 8 M22 21v-2a4 4 0 0 0-4-4',
   shield: 'm12 2 9 4v6c0 5-9 10-9 10S3 17 3 12V6z m-4 10 3 3 5-6',
   list: 'M8 5h13 M8 12h13 M8 19h13 M3 5h.01 M3 12h.01 M3 19h.01',
+  terminal: 'M3 4h18v16H3z M7 9l3 3-3 3 M13 15h4', clipboard: 'M9 3h6v3H9z M7 5H5v16h14V5h-2 M8 14l3 3 5-6',
   restore: 'M3 11a9 9 0 1 1 3 8 M3 4v7h7 M12 7v5l3 2', check: 'm5 12 4 4L19 6 M21 12v8H3V3h13',
   book: 'M12 5C9 3 5 3 2 4v16c4-1 7-1 10 1 3-2 6-2 10-1V4c-3-1-7-1-10 1z M12 5v16',
   search: 'M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0 m-1 5 6 6',

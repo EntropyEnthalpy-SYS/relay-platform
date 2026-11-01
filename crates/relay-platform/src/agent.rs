@@ -188,6 +188,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     let mut connection_failed = false;
     let mut reconciled = false;
     let mut controller_instance: Option<String> = None;
+    let mut log_cursor: Option<crate::logs::Cursor> = None;
     // Long-polls the controller so a published revision wakes the sync loop
     // at once; the poll interval remains the fallback for older controllers.
     let published = tokio::sync::Notify::new();
@@ -340,6 +341,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     stats.system = Some(sampler.sample());
                     stats
                 },
+                logs: crate::logs::after(log_cursor.as_ref()),
             };
             let sent = tokio::time::Instant::now();
             let response = tokio::select! {
@@ -362,6 +364,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     match bounded_json::<SyncResponse>(response).await {
                         Ok(synced) => {
                             let rotation = synced.credential_rotation;
+                            log_cursor = synced.log_cursor;
                             lease.ensure_live()?;
                             ensure!(
                                 identifier(&synced.controller_instance),
@@ -576,6 +579,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 apply_error: apply_error.clone(),
                 usage,
                 stats: stopped_stats.clone(),
+                logs: None,
             };
             let response = credential
                 .send(client.post(base.join("api/v1/agent/sync")?).json(&request))

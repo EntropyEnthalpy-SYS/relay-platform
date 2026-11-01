@@ -331,6 +331,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/topology", get(topology))
         .route("/api/v1/telemetry", get(telemetry))
         .route("/api/v1/history", get(monitoring_history))
+        .route("/api/v1/logs", get(logs))
+        .route("/api/v1/diagnostics/report", get(diagnostic_report))
         .route("/api/v1/configurations/preview", post(preview_batch))
         .route(
             "/api/v1/configurations/allocate-endpoints",
@@ -862,6 +864,34 @@ async fn monitoring_history(
             db.monitoring_history(&actor, &query.range)
         })
         .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LogsQuery {
+    /// A node id or `controller`; every source when omitted.
+    source: Option<String>,
+    #[serde(default)]
+    after: u64,
+}
+async fn logs(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Query(query): Query<LogsQuery>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.logs(&actor, query.source.as_deref(), query.after)
+        })
+        .await?,
+    ))
+}
+async fn diagnostic_report(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<serde_json::Value> {
+    Ok(Json(
+        database(state.store, move |db| db.diagnostic_report(&actor)).await?,
     ))
 }
 async fn allocate_endpoints(
@@ -3356,7 +3386,7 @@ async fn dns_ddns(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
         "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
