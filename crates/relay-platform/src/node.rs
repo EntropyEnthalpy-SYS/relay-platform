@@ -169,6 +169,9 @@ pub struct NodeSettings {
     pub cost: Option<NodeCost>,
     pub enabled: bool,
     pub expires_at_ms: Option<i64>,
+    /// Extra MPTCP addresses the node's agent sets up when its server allows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mptcp_paths: Option<crate::mptcp::paths::Paths>,
 }
 impl Default for NodeSettings {
     fn default() -> Self {
@@ -182,6 +185,7 @@ impl Default for NodeSettings {
             cost: None,
             enabled: true,
             expires_at_ms: None,
+            mptcp_paths: None,
         }
     }
 }
@@ -204,6 +208,9 @@ impl NodeSettings {
     pub fn validate(&self) -> Result<()> {
         if let Some(forwarding) = &self.forwarding {
             forwarding.validate()?;
+        }
+        if let Some(paths) = &self.mptcp_paths {
+            paths.validate()?;
         }
         if self.kinds.len() > 5
             || self

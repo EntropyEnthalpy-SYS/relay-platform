@@ -271,3 +271,111 @@ mod linux {
         drop(echo);
     }
 }
+
+#[test]
+fn panel_mptcp_paths_need_their_switch_reach_the_node_and_show_its_report() {
+    use relay_platform::{
+        mptcp::paths::{Endpoint, Paths, Report},
+        node::{NodeSettings, NodeUpdate},
+        store::Rejection,
+    };
+    let rejection = |error: anyhow::Error| error.downcast_ref::<Rejection>().unwrap().status;
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let (node, _) = store.create_node(&admin, "default", "edge").unwrap();
+    let ledger = store
+        .reconcile(
+            &node.id,
+            ReconcileRequest {
+                lease: None,
+                ledger_id: None,
+                after: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap()
+        .ledger_id;
+    let paths = Paths {
+        endpoints: vec![Endpoint {
+            address: "192.0.2.10".parse().unwrap(),
+            interface: Some("eth1".into()),
+            signal: true,
+            subflow: false,
+            backup: false,
+        }],
+        subflows: Some(4),
+        add_addr_accepted: None,
+    };
+    let current = || {
+        store
+            .nodes(&admin)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == node.id)
+            .unwrap()
+    };
+    let update = |paths: Option<Paths>| {
+        let node = current();
+        NodeUpdate {
+            expected_revision: node.profile.revision,
+            name: node.name.clone(),
+            settings: NodeSettings {
+                mptcp_paths: paths,
+                ..node.profile.settings.clone()
+            },
+        }
+    };
+    let sync = |report: Option<Report>| {
+        store
+            .sync(
+                &node.id,
+                SyncRequest {
+                    logs: None,
+                    lease: None,
+                    budget: None,
+                    ledger_id: ledger.clone(),
+                    need_config: false,
+                    applied_revision: 0,
+                    apply_error: None,
+                    usage: vec![],
+                    stats: EngineStats {
+                        mptcp_paths: report,
+                        ..EngineStats::default()
+                    },
+                },
+            )
+            .unwrap()
+            .mptcp_paths
+    };
+    // Switched off: saving paths is refused and the node is told to keep none.
+    assert_eq!(
+        rejection(
+            store
+                .update_node(&admin, &node.id, update(Some(paths.clone())))
+                .unwrap_err()
+        ),
+        409
+    );
+    assert_eq!(sync(None), Some(Paths::default()));
+    store.set_feature(&admin, "mptcp-paths", true).unwrap();
+    store
+        .update_node(&admin, &node.id, update(Some(paths.clone())))
+        .unwrap();
+    assert_eq!(sync(None), Some(paths));
+    // A changed agent report is stored at once, not at the next status refresh.
+    let report = Report {
+        host_enabled: true,
+        applied: vec!["192.0.2.10".parse().unwrap()],
+        subflows: Some(4),
+        add_addr_accepted: Some(0),
+        error: None,
+    };
+    sync(Some(report.clone()));
+    assert_eq!(current().stats.mptcp_paths, Some(report));
+    assert_eq!(
+        rejection(store.set_feature(&admin, "mptcp-paths", false).unwrap_err()),
+        409
+    );
+}

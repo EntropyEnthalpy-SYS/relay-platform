@@ -242,6 +242,57 @@ fn retained_grants_report_unconfirmed_consumption_then_resume_without_stranding_
 }
 
 #[test]
+fn write_off_refuses_the_lease_holder_then_fences_a_replaced_run_without_attestation() {
+    let f = BudgetFixture::new(false);
+    f.allocate();
+    f.f.store
+        .set_feature(&f.f.admin, "budget-recovery", true)
+        .unwrap();
+    let input = |operation: &str| RunWriteOff {
+        operation_id: operation.into(),
+        run_id: f.proof.run_id.clone(),
+        reason: "node replaced".into(),
+        stopped_confirmed: false,
+    };
+    status(
+        f.f.store
+            .write_off_budget_run(&f.f.admin, &f.f.node.id, input("a")),
+        409,
+    );
+    // A replacement run holds the lease while the old run's window is still open.
+    expire(&f.f.store, &f.f.node.id);
+    f.f.claim("replacement-run");
+    f.f.store
+        .3
+        .lock()
+        .unwrap()
+        .nodes
+        .get_mut(&f.f.node.id)
+        .unwrap()
+        .recovery_until = Instant::now() + Duration::from_secs(30);
+    status(
+        f.f.store
+            .write_off_budget_run(&f.f.admin, &f.f.node.id, input("a")),
+        423,
+    );
+    f.f.store
+        .3
+        .lock()
+        .unwrap()
+        .nodes
+        .get_mut(&f.f.node.id)
+        .unwrap()
+        .recovery_until = Instant::now() - Duration::from_secs(1);
+    let receipt =
+        f.f.store
+            .write_off_budget_run(&f.f.admin, &f.f.node.id, input("a"))
+            .unwrap();
+    assert_eq!((receipt.reservations, receipt.bytes), (1, 64));
+    let budget = &f.f.store.budgets(&f.f.admin).unwrap().budgets[0];
+    assert_eq!((budget.consumed_bytes, budget.committed_bytes), (64, 64));
+}
+
+#[test]
 fn resume_recovers_a_lost_grant_reply_and_cancels_requests_never_allocated() {
     let mut f = BudgetFixture::new(true);
     f.admit(0);

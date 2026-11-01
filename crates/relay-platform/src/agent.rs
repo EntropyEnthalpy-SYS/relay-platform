@@ -189,6 +189,10 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     let mut reconciled = false;
     let mut controller_instance: Option<String> = None;
     let mut log_cursor: Option<crate::logs::Cursor> = None;
+    let mut mptcp_paths = crate::mptcp::paths::Applier::from_env();
+    // Reported only to a controller that sent desired paths, as older ones
+    // reject the unknown field.
+    let mut mptcp_report: Option<crate::mptcp::paths::Report> = None;
     // Long-polls the controller so a published revision wakes the sync loop
     // at once; the poll interval remains the fallback for older controllers.
     let published = tokio::sync::Notify::new();
@@ -338,6 +342,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 stats: {
                     let mut stats = engine.stats();
                     stats.budget_recovery = budget_recovery.clone();
+                    stats.mptcp_paths = mptcp_report.clone();
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -365,6 +370,10 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                         Ok(synced) => {
                             let rotation = synced.credential_rotation;
                             log_cursor = synced.log_cursor;
+                            mptcp_report = match &synced.mptcp_paths {
+                                Some(desired) => Some(mptcp_paths.reconcile(desired).await),
+                                None => None,
+                            };
                             lease.ensure_live()?;
                             ensure!(
                                 identifier(&synced.controller_instance),

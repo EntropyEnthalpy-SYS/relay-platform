@@ -26,6 +26,19 @@ pub(super) fn read(conn: &Connection, node: &str) -> Result<NodeProfile> {
     profile.settings.validate()?;
     Ok(profile)
 }
+/// Nodes whose profile sets MPTCP paths.
+pub(super) fn with_mptcp_paths(conn: &Connection) -> Result<usize> {
+    let mut q = conn.prepare("SELECT value FROM metadata WHERE key GLOB 'node_profile:*'")?;
+    let rows = q
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut count = 0;
+    for row in rows {
+        let profile: NodeProfile = serde_json::from_str(&row)?;
+        count += usize::from(profile.settings.mptcp_paths.is_some_and(|p| !p.is_empty()));
+    }
+    Ok(count)
+}
 pub(super) fn write(tx: &Transaction<'_>, node: &str, profile: &NodeProfile) -> Result<()> {
     tx.execute("INSERT INTO metadata(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key(node),serde_json::to_string(profile)?])?;
     Ok(())
@@ -99,6 +112,10 @@ impl Store {
                         entry.node_id
                     ),
                 );
+            }
+            let paths = entry.update.settings.mptcp_paths.as_ref();
+            if paths.is_some_and(|p| !p.is_empty()) && paths != old.settings.mptcp_paths.as_ref() {
+                features::require(&tx, "mptcp-paths", "MPTCP extra paths")?;
             }
             let lease = leases::status(&tx, &mut clocks, &entry.node_id)?;
             let now = clocks.policy_now_ms();

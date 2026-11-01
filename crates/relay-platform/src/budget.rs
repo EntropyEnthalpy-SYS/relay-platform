@@ -142,3 +142,84 @@ pub struct ReservationPage {
     pub reservations: Vec<ReservationView>,
     pub next: Option<String>,
 }
+
+/// Whether an open reservation run can still act on the controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunFence {
+    /// The run holds the node's execution lease; it is in use.
+    Current,
+    /// Another run took over, but the old run's window has not closed yet.
+    Waiting,
+    /// The run can no longer report or resume on its own.
+    Fenced,
+    /// The node has no execution lease, so only the operator can confirm the run stopped.
+    Unconfirmed,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StuckRun {
+    pub node_id: String,
+    pub node_name: String,
+    pub run_id: String,
+    pub reservations: u64,
+    pub outstanding_bytes: u64,
+    pub fence: RunFence,
+    pub wait_ms: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QuarantineBudget {
+    pub id: String,
+    pub name: String,
+    pub revision: u64,
+    pub limit_bytes: u64,
+    pub committed_bytes: u64,
+    /// Unknown use assumed when the restore lock ends: limit minus committed.
+    pub assumed_bytes: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryReceipt {
+    pub operation_id: String,
+    /// `write_off` or `quarantine_exit`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub reservations: u64,
+    pub bytes: u64,
+    pub reason: String,
+    pub actor_id: String,
+    pub at_ms: i64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BudgetRecoveryView {
+    pub enabled: bool,
+    pub allocation_paused: bool,
+    pub budgets: Vec<QuarantineBudget>,
+    pub runs: Vec<StuckRun>,
+    pub receipts: Vec<RecoveryReceipt>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunWriteOff {
+    pub operation_id: String,
+    pub run_id: String,
+    pub reason: String,
+    /// Required when the node has no execution lease.
+    #[serde(default)]
+    pub stopped_confirmed: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewedBudget {
+    pub id: String,
+    pub expected_revision: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuarantineExit {
+    pub operation_id: String,
+    pub reason: String,
+    /// Every budget at the revision the operator reviewed.
+    pub budgets: Vec<ReviewedBudget>,
+}

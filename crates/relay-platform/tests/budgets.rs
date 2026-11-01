@@ -795,6 +795,187 @@ fn restored_controller_cannot_reissue_reservations_forgotten_by_its_backup() {
 }
 
 #[test]
+fn written_off_run_counts_outstanding_bytes_once_and_late_reports_stay_bounded() {
+    let f = Fixture::new(100, 64, false);
+    let grant = f.sync(0).grants[0].clone();
+    let write_off = |operation: &str, confirmed: bool| RunWriteOff {
+        operation_id: operation.into(),
+        run_id: f.runs[0].clone(),
+        reason: "agent disk lost".into(),
+        stopped_confirmed: confirmed,
+    };
+    let viewer = Actor {
+        role: Role::Viewer,
+        ..f.admin.clone()
+    };
+    assert_eq!(
+        status(
+            f.control
+                .write_off_budget_run(&f.admin, &f.nodes[0], write_off("op-1", true))
+        ),
+        409,
+        "switched off"
+    );
+    f.control
+        .set_feature(&f.admin, "budget-recovery", true)
+        .unwrap();
+    assert_eq!(status(f.control.budget_recovery(&viewer)), 403);
+    let view = f.control.budget_recovery(&f.admin).unwrap();
+    let run = view.runs.iter().find(|r| r.run_id == f.runs[0]).unwrap();
+    assert_eq!(
+        (run.fence, run.outstanding_bytes),
+        (RunFence::Unconfirmed, 64)
+    );
+    // Without an execution lease only the operator can say the run stopped.
+    assert_eq!(
+        status(
+            f.control
+                .write_off_budget_run(&f.admin, &f.nodes[0], write_off("op-1", false))
+        ),
+        409
+    );
+    let receipt = f
+        .control
+        .write_off_budget_run(&f.admin, &f.nodes[0], write_off("op-1", true))
+        .unwrap();
+    assert_eq!((receipt.reservations, receipt.bytes), (1, 64));
+    assert_eq!(
+        (f.user().consumed_bytes, f.user().committed_bytes),
+        (64, 64)
+    );
+    // Replaying the operation returns the same receipt and counts nothing twice.
+    let replay = f
+        .control
+        .write_off_budget_run(&f.admin, &f.nodes[0], write_off("op-1", true))
+        .unwrap();
+    assert_eq!(replay.at_ms, receipt.at_ms);
+    assert_eq!(f.user().consumed_bytes, 64);
+    assert!(
+        !f.control
+            .budget_recovery(&f.admin)
+            .unwrap()
+            .runs
+            .iter()
+            .any(|r| r.run_id == f.runs[0])
+    );
+    // A leftover process reporting later is acknowledged inside the closed
+    // boundary; its own agent then refuses to keep spending the closed grant.
+    f.agents[0]
+        .admit_batch(&[admission(&f.rules[0], 25, false)])
+        .unwrap();
+    let report = f.agents[0].budget_outbox(&f.runs[0], false).unwrap();
+    let reply = f
+        .control
+        .sync(&f.nodes[0], f.request(0, report))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert!(
+        f.agents[0]
+            .accept_budget_reply(&f.runs[0], reply.clone())
+            .is_err()
+    );
+    let ack = reply
+        .acknowledgements
+        .iter()
+        .find(|a| a.grant_id == grant.grant_id)
+        .unwrap();
+    assert!(ack.surrender);
+    assert_eq!(ack.consumed_bytes, 64);
+    assert_eq!(f.user().consumed_bytes, 64);
+}
+
+#[test]
+fn ending_the_restore_lock_assumes_remaining_room_was_spent_then_allocation_resumes() {
+    let f = Fixture::new(100, 64, false);
+    let path = f.tmp.path().join("controller-backup.db");
+    f.control.backup(&path).unwrap();
+    f.sync(0);
+    let restored = Store::open(&path).unwrap();
+    restored
+        .set_feature(&f.admin, "budget-recovery", true)
+        .unwrap();
+    let view = restored.budget_recovery(&f.admin).unwrap();
+    assert!(view.allocation_paused);
+    let reviewed = |revision_offset: u64| QuarantineExit {
+        operation_id: "exit-1".into(),
+        reason: "restored from the nightly backup".into(),
+        budgets: view
+            .budgets
+            .iter()
+            .map(|b| ReviewedBudget {
+                id: b.id.clone(),
+                expected_revision: b.revision + revision_offset,
+            })
+            .collect(),
+    };
+    assert_eq!(
+        status(restored.exit_budget_quarantine(&f.admin, reviewed(1))),
+        409
+    );
+    let receipt = restored
+        .exit_budget_quarantine(&f.admin, reviewed(0))
+        .unwrap();
+    // The backup predates node 0's 64-byte reservation, so all 100 bytes are assumed spent.
+    assert_eq!(receipt.bytes, 100);
+    let budgets = restored.budgets(&f.admin).unwrap();
+    assert!(!budgets.allocation_paused);
+    let user = budgets
+        .budgets
+        .iter()
+        .find(|b| b.id == f.user_budget.id)
+        .unwrap()
+        .clone();
+    assert_eq!((user.committed_bytes, user.consumed_bytes), (100, 100));
+    assert_eq!(
+        restored
+            .exit_budget_quarantine(&f.admin, reviewed(0))
+            .unwrap()
+            .at_ms,
+        receipt.at_ms
+    );
+    // The lock stays off after reopening.
+    drop(restored);
+    let restored = Store::open(&path).unwrap();
+    assert!(!restored.budgets(&f.admin).unwrap().allocation_paused);
+    // Room returns only when an administrator raises the limit.
+    let exchange = f.agents[1].budget_outbox(&f.runs[1], true).unwrap();
+    let reply = restored
+        .sync(&f.nodes[1], f.request(1, exchange))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert!(reply.grants.is_empty());
+    restored
+        .update_budget(
+            &f.admin,
+            &user.id,
+            BudgetUpdate {
+                expected_revision: user.revision,
+                limit_bytes: 164,
+                quantum_bytes: 64,
+            },
+        )
+        .unwrap();
+    let exchange = f.agents[1].budget_outbox(&f.runs[1], true).unwrap();
+    let reply = restored
+        .sync(&f.nodes[1], f.request(1, exchange))
+        .unwrap()
+        .budget
+        .unwrap();
+    assert_eq!(reply.grants[0].bytes, 64);
+    // A reservation the backup forgot is still unknown.
+    f.agents[0]
+        .admit_batch(&[admission(&f.rules[0], 5, false)])
+        .unwrap();
+    let report = f.agents[0].budget_outbox(&f.runs[0], false).unwrap();
+    assert_eq!(
+        status(restored.sync(&f.nodes[0], f.request(0, report))),
+        409
+    );
+}
+
+#[test]
 fn datagram_larger_than_quantum_requests_enough_credit_without_partial_charges() {
     let f = Fixture::new(8192, 64, false);
     assert_eq!(

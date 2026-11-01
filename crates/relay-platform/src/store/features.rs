@@ -5,7 +5,13 @@
 use super::*;
 
 /// Every switchable feature, in the order the panel lists them.
-pub const FEATURES: &[&str] = &["mptcp", "dns-health", "plan-entitlements"];
+pub const FEATURES: &[&str] = &[
+    "mptcp",
+    "dns-health",
+    "plan-entitlements",
+    "budget-recovery",
+    "mptcp-paths",
+];
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FeatureState {
@@ -32,6 +38,7 @@ fn usage(conn: &Connection, id: &str) -> Result<usize> {
             |r| r.get(0),
         )?,
         "plan-entitlements" => commerce::live_count(conn)?,
+        "mptcp-paths" => node_profiles::with_mptcp_paths(conn)?,
         _ => 0,
     })
 }
@@ -42,6 +49,7 @@ fn users(id: &str) -> &'static str {
         "mptcp" => "forwarding rule(s) use MPTCP",
         "dns-health" => "DNS record(s) use health gating",
         "plan-entitlements" => "plan(s) are active or waiting for a budget",
+        "mptcp-paths" => "node(s) have MPTCP paths",
         _ => "setting(s) use this feature",
     }
 }

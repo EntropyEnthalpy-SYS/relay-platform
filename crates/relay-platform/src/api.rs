@@ -209,6 +209,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
         || path.starts_with("templates/")
         || path == "diagnostics/mptcp"
         || (path.starts_with("features/") && method != Method::GET)
+        || path.starts_with("recovery/")
         || path.contains("/templates/")
         || path.starts_with("api-tokens")
         || path.ends_with("/mfa/reset")
@@ -515,6 +516,15 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/recovery", get(recovery_status))
+        .route("/api/v1/recovery/budgets", get(budget_recovery))
+        .route(
+            "/api/v1/recovery/budgets/runs/{node}/write-off",
+            post(write_off_budget_run),
+        )
+        .route(
+            "/api/v1/recovery/budgets/quarantine/exit",
+            post(exit_budget_quarantine),
+        )
         .route("/api/v1/control/metrics", get(control_metrics))
         .route("/api/v1/metrics", get(prometheus_metrics))
         .route("/api/v1/capabilities", get(capabilities))
@@ -3459,8 +3469,8 @@ async fn set_feature(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
-        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery"],
+        "pending":["wireguard","nat-traversal","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
 
@@ -3504,6 +3514,39 @@ async fn budget_reservations(
     Ok(Json(
         database(state.store, move |db| {
             db.budget_reservations(&actor, &id, query.after.as_deref())
+        })
+        .await?,
+    ))
+}
+async fn budget_recovery(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::budget::BudgetRecoveryView> {
+    Ok(Json(
+        database(state.store, move |db| db.budget_recovery(&actor)).await?,
+    ))
+}
+async fn write_off_budget_run(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Json(input): Json<crate::budget::RunWriteOff>,
+) -> ApiResult<crate::budget::RecoveryReceipt> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.write_off_budget_run(&actor, &node, input)
+        })
+        .await?,
+    ))
+}
+async fn exit_budget_quarantine(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::budget::QuarantineExit>,
+) -> ApiResult<crate::budget::RecoveryReceipt> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.exit_budget_quarantine(&actor, input)
         })
         .await?,
     ))

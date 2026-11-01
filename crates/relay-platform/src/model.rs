@@ -917,6 +917,10 @@ pub struct EngineStats {
     pub mptcp: Option<crate::mptcp::Snapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_recovery: Option<crate::budget::BudgetRecoveryStats>,
+    /// Sent only after the controller sent [`SyncResponse::mptcp_paths`], so
+    /// older controllers never receive the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mptcp_paths: Option<crate::mptcp::paths::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1105,6 +1109,10 @@ pub struct SyncResponse {
     /// the lines after it with their next report.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_cursor: Option<crate::logs::Cursor>,
+    /// The MPTCP paths this node should have; empty when none are set or the
+    /// feature is off. `None` from controllers older than the feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mptcp_paths: Option<crate::mptcp::paths::Paths>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

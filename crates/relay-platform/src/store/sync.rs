@@ -201,8 +201,10 @@ fn apply_sync(
         || stored_seen.is_none_or(|seen| now.saturating_sub(seen) >= STATUS_REFRESH_MS)
         || serde_json::from_str::<EngineStats>(&stored_stats)
             .ok()
-            .is_none_or(|stored| quiet(&stored) != quiet(&request.stats))
-    {
+            .is_none_or(|stored| {
+                quiet(&stored) != quiet(&request.stats)
+                    || stored.mptcp_paths != request.stats.mptcp_paths
+            }) {
         tx.execute("UPDATE nodes SET applied_revision=?1,last_seen_ms=?2,apply_error=?3,stats_json=?4 WHERE id=?5",params![request.applied_revision,now,request.apply_error,serde_json::to_string(&request.stats)?,node])?;
         Some(now)
     } else {
@@ -223,8 +225,17 @@ fn apply_sync(
         node,
         &request.stats.user_rates,
     )?;
+    let mptcp_paths = if super::features::enabled(tx, "mptcp-paths")? {
+        super::node_profiles::read(tx, node)?
+            .settings
+            .mptcp_paths
+            .unwrap_or_default()
+    } else {
+        Default::default()
+    };
     Ok((
         SyncResponse {
+            mptcp_paths: Some(mptcp_paths),
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

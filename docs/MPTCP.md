@@ -90,3 +90,9 @@ Linux 上：
 - 单元测试确认平台字段、note、非 Linux 明确不支持；HTTP 测试确认管理员可读、viewer 403。
 - 未实现 MPTCP 端点配置、子流建立/观测、接口选择、路由策略、连接状态和普通 TCP 回退观测；模块 04 仍为部分实现。
 - 该报告不会改变任何规则、监听或转发路径；不能据此宣称 MPTCP 已可用。
+
+## MPTCP extra paths (0.136.0, optional feature, off by default)
+
+With `mptcp-paths` switched on in Optional features, a node's settings accept up to eight extra local addresses ("endpoints") with flags `signal` (announce the address to the peer, typical on the server side), `subflow` (open subflows from it, typical on the client side) and `backup`, plus optional server-wide limits for subflows and accepted addresses (0–8). The controller sends the desired list with each sync; it is empty while the feature is off.
+
+The agent applies the list only when its server opted in with the drop-in [`deploy/relay-agent-mptcp-paths.conf`](../deploy/relay-agent-mptcp-paths.conf) (`AmbientCapabilities=CAP_NET_ADMIN`, netlink, `RELAY_MPTCP_PATHS=1`). It runs `ip mptcp endpoint` and touches only endpoints with ids 200–207; an address an operator already configured by hand is reported as a conflict and left alone. Limits are set only when the panel gives them; clearing them keeps the server's current values. The agent rechecks once a minute and reports what is in place (or why not) in the node's stats, which the node settings dialog shows. Without the drop-in nothing changes on the server and the report says so. Verified against a Linux 6.1 kernel in a disposable network namespace: adds, flag changes, removals, conflicts with a hand-made endpoint and limits; a server with one interface and address gains no extra path from this feature, and WAN multi-link throughput remains unaccepted.

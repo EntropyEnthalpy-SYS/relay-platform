@@ -133,6 +133,7 @@ impl Counters {
             protocol_gateway: None,
             mptcp: self.mptcp.snapshot(),
             budget_recovery: None,
+            mptcp_paths: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),

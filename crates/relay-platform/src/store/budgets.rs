@@ -1,7 +1,8 @@
 use super::*;
 mod recovery;
+mod recovery_admin;
 use crate::budget::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 fn paused(conn: &Connection) -> Result<bool> {
     Ok(conn

@@ -919,10 +919,45 @@ function forwardingDefaultsEditor(parent, value = {}, prefix = 'forwarding') {
     return { host: host.value.trim(), listen_ip: listen.value.trim() || null, port_start: low, port_end: high, public_port_start: mapped };
   } };
 }
-function nodeSettingsEditor(form, settings = {}, strict = () => true) {
+const mptcpFlags = ['signal', 'subflow', 'backup'];
+function mptcpPathsStatus(report) {
+  if (!report.host_enabled) return translate('这台服务器尚未授权 Agent 管理 MPTCP 路径，设置暂不生效。');
+  const text = msg`服务器已授权 · 已生效 ${report.applied.length} 条路径 · 子流上限 ${report.subflows ?? '—'} · 接受地址上限 ${report.add_addr_accepted ?? '—'}`;
+  return report.error ? `${text} · ${report.error}` : text;
+}
+// Shown while the feature is on, or when the node already has paths so they stay editable.
+function mptcpPathsEditor(form, value, report) {
+  if (!featureOn('mptcp-paths') && !value) return { read: () => null };
+  form.append(el('h3', translate('MPTCP 额外路径')));
+  const text = (value?.endpoints || []).map(e => [e.address, e.interface, ...mptcpFlags.filter(flag => e[flag])].filter(Boolean).join(' ')).join('\n');
+  textarea(form, 'mptcp_paths', translate('每行一条路径：IP 地址、可选网卡名，再加 signal（告知对端此地址）、subflow（从此地址建立子流）或 backup（仅作备用）'), text).placeholder = '203.0.113.5 eth1 signal\n2001:db8::5 eth0 subflow backup';
+  const grid = el('div', undefined, 'form-grid');
+  const subflows = field(grid, 'mptcp_subflows', translate('每条连接最多子流数（0–8，留空保持服务器原值）'), value?.subflows ?? '', 'number', false);
+  const accepted = field(grid, 'mptcp_add_addr', translate('最多接受对端告知的地址数（0–8，留空保持服务器原值）'), value?.add_addr_accepted ?? '', 'number', false);
+  for (const input of [subflows, accepted]) { input.min = 0; input.max = 8; }
+  form.append(grid, el('p', translate('服务器需先安装授权文件 relay-agent-mptcp-paths.conf。Agent 只增删自己编号 200–207 的路径，不改动手动配置的路径；两个上限是整台服务器的设置，清空后保持当前值，不会自动还原。'), 'fine'));
+  if (report) form.append(el('p', mptcpPathsStatus(report), report.error || !report.host_enabled ? 'workflow-callout' : 'fine'));
+  return { read(data) {
+    const endpoints = String(data.get('mptcp_paths') || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean).map(line => {
+      const [address, ...words] = line.split(/\s+/), endpoint = { address, signal: false, subflow: false, backup: false };
+      for (const word of words) {
+        if (mptcpFlags.includes(word.toLowerCase())) endpoint[word.toLowerCase()] = true;
+        else if (!endpoint.interface) endpoint.interface = word;
+        else throw new Error(msg`无法识别的 MPTCP 路径：${line}`);
+      }
+      if (!endpoint.signal && !endpoint.subflow) throw new Error(msg`每条 MPTCP 路径需要 signal 或 subflow：${line}`);
+      return endpoint;
+    });
+    const limit = name => { const raw = String(data.get(name) ?? '').trim(); if (!raw) return null; const n = Number(raw); if (!Number.isInteger(n) || n < 0 || n > 8) throw new Error(translate('MPTCP 上限须为 0–8 的整数')); return n; };
+    const paths = { endpoints, subflows: limit('mptcp_subflows'), add_addr_accepted: limit('mptcp_add_addr') };
+    return endpoints.length || paths.subflows !== null || paths.add_addr_accepted !== null ? paths : null;
+  } };
+}
+function nodeSettingsEditor(form, settings = {}, strict = () => true, report = null) {
   form.append(el('h3', translate('新规则的连接默认值')));
   const forwarding = forwardingDefaultsEditor(form, settings.forwarding);
   form.append(el('p', translate('地址填写一次，新规则自动复用并分配端口。修改默认值不会改动已发布规则。'), 'fine'));
+  const paths = mptcpPathsEditor(form, settings.mptcp_paths, report);
   form.append(el('h3', translate('位置与资料')));
   const location = locationEditor(form, settings.location);
   const kinds = el('fieldset', undefined, 'target-editor'); kinds.append(el('legend', translate('节点类型（用途标注，可多选）')));
@@ -943,7 +978,7 @@ function nodeSettingsEditor(form, settings = {}, strict = () => true) {
     if (amount) { if (!/^\d+(\.\d{1,6})?$/.test(amount)) throw new Error(translate('成本必须为非负十进制数，最多 6 位小数')); const [whole, fraction = ''] = amount.split('.'), micros = BigInt(whole) * 1000000n + BigInt(fraction.padEnd(6, '0')); if (micros > 9000000000000000n) throw new Error(translate('成本超出可记录范围')); cost = { currency: String(data.get('cost_currency')).trim().toUpperCase(), amount_micros: Number(micros), period: data.get('cost_period') }; }
     let expires = null;
     if (strict() && expiry.value) { expires = expiry.value === originalExpiryText ? settings.expires_at_ms : new Date(expiry.value).getTime(); if (!Number.isSafeInteger(expires) || expires <= 0) throw new Error(translate('请输入有效的到期时间')); }
-    return { forwarding: forwarding.read(), location: location.read(), kinds: data.getAll('node_kind'), group: String(data.get('node_group') || '').trim() || null, tags: String(data.get('node_tags') || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean), notes: String(data.get('node_notes') || ''), cost, enabled: strict() ? enabled.value === 'true' : true, expires_at_ms: expires };
+    return { forwarding: forwarding.read(), mptcp_paths: paths.read(data), location: location.read(), kinds: data.getAll('node_kind'), group: String(data.get('node_group') || '').trim() || null, tags: String(data.get('node_tags') || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean), notes: String(data.get('node_notes') || ''), cost, enabled: strict() ? enabled.value === 'true' : true, expires_at_ms: expires };
   } };
 }
 // A listed city, or a named point; the overview globe draws the node there.
@@ -969,7 +1004,7 @@ function editNode(node) {
   const settings = node.profile.settings;
   if (!canWrite()) { const body = el('div'); body.append(table([translate('资料'), translate('当前记录')], [[translate('名称'), node.name], [translate('类型'), settings.kinds.map(k => nodeKindNames[k]).join('、') || translate('未标注')], [translate('分组'), settings.group || translate('未分组')], [translate('位置'), locationName(settings.location) || translate('未设置')], [translate('标签'), settings.tags.join('、') || translate('无')], [translate('成本'), costLabel(settings.cost)], [translate('到期时间'), settings.expires_at_ms ? timestamp(settings.expires_at_ms) : translate('未设置')]])); body.append(el('pre', settings.notes || translate('无备注'))); modal(translate('节点资料'), body); return; }
   const form = el('form'); field(form, 'node_name', translate('节点名称'), node.name).maxLength = 120;
-  const editor = nodeSettingsEditor(form, settings, () => !!node.lease.policy);
+  const editor = nodeSettingsEditor(form, settings, () => !!node.lease.policy, node.stats?.mptcp_paths);
   submit(form, translate('保存资料'), async data => { await api(`/nodes/${node.id}/profile`, { method: 'PUT', body: { expected_revision: node.profile.revision, name: String(data.get('node_name')).trim(), settings: editor.read(data) } }); $('#dialog').close(); await refresh(); notify(translate('节点资料已保存；转发配置保持原修订。')); }); modal(translate('编辑节点 · ') + node.name, form);
 }
 function filterNodes() {
@@ -2566,9 +2601,11 @@ function editAlertChannel(existing) {
 const featureInfo = localize({
   mptcp: ['Linux MPTCP', '转发规则的入口或出口可以使用多路径 TCP（MPTCP）。两端都支持时，一条连接可以同时使用多条网络路径。', '开启后，规则编辑器显示“Linux MPTCP”设置。需要两端的 Linux 内核支持；要真正走多条路径，服务器还需要多个网卡或地址。'],
   'dns-health': ['DNS 健康摘除', '入口服务器失联或目标全部不可用时，自动从 DNS 移除它的解析记录，恢复后自动加回。', '开启后，DNS 记录表单显示健康摘除设置。只在“应用”模式的区域生效；剩余有效记录少于“最少保留”数量时，记录不会被移除。'],
+  'budget-recovery': ['额度灾难恢复', '节点状态丢失或控制器从旧备份恢复后，核销无法再上报的预留，或结束旧备份留下的额度锁定。未知用量一律按已消耗计算。', '开启后，「恢复保护」页显示未结束的预留和恢复锁定。只有系统管理员可以操作，每次操作都写入审计日志。'],
+  'mptcp-paths': ['MPTCP 额外路径', '为节点指定额外的本机地址，让 MPTCP 连接可以同时经过多块网卡或多个地址传输。', '开启后，节点资料显示“MPTCP 额外路径”。只有安装了授权文件的服务器才会真正修改 MPTCP 设置；服务器只有一个网卡和地址时没有效果。'],
   'plan-entitlements': ['套餐权益', '支付成功的套餐订单自动变成购买者的流量额度：套餐流量加到额度上，到期后停止发放新流量，退款扣回该订单的流量和天数。', '开启后，「钱包与订单」显示“我的套餐”。开启前已经付款的订单不会补发。购买者还有运行中的规则时，需要先停用规则，额度才能创建。'],
 });
-const featureUsage = { mptcp: n => msg`${n} 条转发规则正在使用 MPTCP`, 'dns-health': n => msg`${n} 条 DNS 记录正在使用健康摘除`, 'plan-entitlements': n => msg`${n} 个套餐生效中或等待额度` };
+const featureUsage = { mptcp: n => msg`${n} 条转发规则正在使用 MPTCP`, 'dns-health': n => msg`${n} 条 DNS 记录正在使用健康摘除`, 'plan-entitlements': n => msg`${n} 个套餐生效中或等待额度`, 'mptcp-paths': n => msg`${n} 个节点设置了 MPTCP 额外路径` };
 const featureOn = id => !!state.features[id];
 async function loadFeatures() { const list = await api('/features'); state.features = Object.fromEntries(list.map(f => [f.id, f.enabled])); return list; }
 async function renderFeatures() {
@@ -2591,7 +2628,7 @@ async function renderFeatures() {
   p.append(body);
   $('#content').replaceChildren(p);
 }
-async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); const switchable = { 'mptcp-rule-transport': 'mptcp', 'dns-health-removal': 'dns-health', 'commerce-entitlements': 'plan-entitlements' }[key]; if (switchable) row.append(badge(featureOn(switchable) ? translate('已开启') : translate('未开启'), featureOn(switchable) ? 'green' : '')); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围', mptcp: '额外路径需服务器授权 · 公网多线路未验收' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); const switchable = { 'mptcp-rule-transport': 'mptcp', 'dns-health-removal': 'dns-health', 'commerce-entitlements': 'plan-entitlements', 'budget-disaster-recovery': 'budget-recovery', mptcp: 'mptcp-paths' }[key]; if (switchable) row.append(badge(featureOn(switchable) ? translate('已开启') : translate('未开启'), featureOn(switchable) ? 'green' : '')); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'rules', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health', 'logs'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
@@ -2668,9 +2705,55 @@ function editBudget(existing, users, nodes) {
   modal(existing ? translate('调整共享额度') : translate('创建共享额度'), form);
 }
 
+const runFences = localize({ current: ['使用中', 'green'], waiting: ['等待交接窗口', 'orange'], fenced: ['已停止', ''], unconfirmed: ['需要确认已停止', 'orange'] });
+const recoveryKinds = localize({ write_off: '核销运行', quarantine_exit: '结束恢复锁定' });
+function writeOffRun(run) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid'), operation = crypto.randomUUID();
+  form.append(el('p', msg`「${run.node_name}」的这次运行还有 ${run.reservations} 个未结束的预留，共 ${bytes(run.outstanding_bytes)} 未确认用量。核销后这些字节全部按已消耗计算，不会退回；之后由这台节点的新运行重新申请额度。`, 'workflow-callout'));
+  field(grid, 'reason', translate('原因（写入审计日志）'), '').maxLength = 500;
+  if (run.fence === 'unconfirmed') select(grid, 'stopped', translate('这台节点没有执行租约，面板无法确认旧进程已停止'), [['no', translate('请选择')], ['yes', translate('我确认这次运行的 Agent 进程已经停止')]], 'no');
+  form.append(grid);
+  submit(form, translate('核销并按已消耗计算'), async data => {
+    if (run.fence === 'unconfirmed' && data.get('stopped') !== 'yes') throw new Error(translate('请先确认这次运行的 Agent 进程已经停止'));
+    const receipt = await api(`/recovery/budgets/runs/${run.node_id}/write-off`, { method: 'POST', body: { operation_id: operation, run_id: run.run_id, reason: String(data.get('reason')).trim(), stopped_confirmed: data.get('stopped') === 'yes' } });
+    $('#dialog').close(); notify(msg`已核销 ${receipt.reservations} 个预留，共 ${bytes(receipt.bytes)}。`); await renderRecovery();
+  });
+  modal(msg`核销运行 · ${run.node_name}`, form);
+}
+function exitQuarantine(view) {
+  const form = el('form'), grid = el('div', undefined, 'form-grid'), operation = crypto.randomUUID(), total = view.budgets.reduce((sum, b) => sum + b.assumed_bytes, 0);
+  form.append(el('p', msg`备份之后发放的预留无法得知。结束锁定会把每个额度剩余的空间按已用计算，合计 ${bytes(total)}；之后需要更多额度时，在「共享额度」调高上限。`, 'workflow-callout'));
+  form.append(table([translate('额度'), translate('上限'), translate('已承诺'), translate('按已用计算')], view.budgets.map(b => [b.name, bytes(b.limit_bytes), bytes(b.committed_bytes), bytes(b.assumed_bytes)])));
+  field(grid, 'reason', translate('原因（写入审计日志）'), '').maxLength = 500;
+  form.append(grid);
+  submit(form, translate('结束锁定并按已用计算'), async data => {
+    const receipt = await api('/recovery/budgets/quarantine/exit', { method: 'POST', body: { operation_id: operation, reason: String(data.get('reason')).trim(), budgets: view.budgets.map(b => ({ id: b.id, expected_revision: b.revision })) } });
+    $('#dialog').close(); notify(msg`恢复锁定已结束，${bytes(receipt.bytes)} 按已用计算。`); await renderRecovery();
+  });
+  modal(translate('结束恢复锁定'), form);
+}
+function budgetRecoveryPanel(view) {
+  const p = panel(translate('额度灾难恢复'), translate('节点状态丢失或控制器从旧备份恢复后，在这里处理无法再上报的预留。未知用量一律按已消耗计算，不会退回；需要更多额度时由管理员调高上限。'));
+  const body = el('div', undefined, 'panel-body');
+  if (view.allocation_paused) {
+    const total = view.budgets.reduce((sum, b) => sum + b.assumed_bytes, 0), actions = el('div', undefined, 'panel-actions');
+    actions.append(button(translate('结束恢复锁定'), () => exitQuarantine(view), 'primary'));
+    body.append(el('p', msg`控制器从旧备份恢复，已暂停发放新额度。结束锁定会把剩余空间按已用计算（合计 ${bytes(total)}）。`, 'workflow-callout'), actions);
+  } else body.append(badge(translate('额度分配正常'), 'green'));
+  body.append(el('h3', translate('未结束的预留')), el('p', translate('每台节点的每次运行一行。“使用中”是正在工作的运行；节点换盘、重装或身份替换后留下的旧运行，可以在这里核销。'), 'fine'));
+  if (!view.runs.length) body.append(el('p', translate('没有未结束的预留。'), 'muted'));
+  else body.append(table([translate('节点'), translate('运行'), translate('预留'), translate('未确认用量'), translate('状态'), translate('操作')], view.runs.map(run => {
+    const [label, color] = runFences[run.fence] || [run.fence, ''], actions = el('div');
+    if (['fenced', 'unconfirmed'].includes(run.fence)) actions.append(button(translate('核销'), () => writeOffRun(run), 'table-action danger'));
+    return [run.node_name, el('span', run.run_id, 'mono'), String(run.reservations), bytes(run.outstanding_bytes), badge(run.fence === 'waiting' ? msg`${label} · ${Math.ceil(run.wait_ms / 1000)} 秒` : label, color), actions];
+  })));
+  if (view.receipts.length) body.append(el('h3', translate('恢复记录')), table([translate('时间'), translate('操作'), translate('对象'), translate('字节'), translate('原因')], view.receipts.map(r => [timestamp(r.at_ms), recoveryKinds[r.kind] || r.kind, r.node_id ? `${state.nodes.find(n => n.id === r.node_id)?.name || r.node_id} · ${r.run_id}` : msg`${r.reservations} 个额度`, bytes(r.bytes), r.reason])));
+  p.append(body);
+  return p;
+}
 async function renderRecovery() {
-  const actor = state.actor;
-  const [status, metrics] = await Promise.all([api('/recovery'), api('/control/metrics')]);
+  const actor = state.actor, recovering = featureOn('budget-recovery');
+  const [status, metrics, budgetView] = await Promise.all([api('/recovery'), api('/control/metrics'), recovering ? api('/recovery/budgets') : null]);
   if (state.view !== 'recovery' || !actor || state.actor !== actor) return;
   const p = panel(translate('控制器恢复保护'), translate('将数据库备份与最新恢复日志、进度清单一起保管。恢复会重放备份之后已经确认的变更。'));
   const body = el('div', undefined, 'panel-body');
@@ -2687,7 +2770,7 @@ async function renderRecovery() {
     [translate('最大合并请求数'), metrics.largest_batch], [translate('拥塞退回'), metrics.queue_full_rejections], [translate('提交失败'), metrics.failed_batches]
   ]));
   body.append(table([translate('同步阶段'), translate('采样数'), translate('平均 / ms'), translate('最大 / ms')], [timingRow(translate('排队与合并'), metrics.queue_time), timingRow(translate('数据库处理批次'), metrics.storage_batch_time), timingRow(translate('请求处理总时间'), metrics.request_time)]), el('p', translate('数据库阶段包含线程池、数据库锁、SQL 和恢复日志提交；总时间到持久化结果返回，不包含响应传输与 Agent 本地写入。失败的已处理请求也计入耗时，429 拥塞退回不计入。'), 'fine'));
-  p.append(body); if (state.view === 'recovery') $('#content').replaceChildren(p);
+  p.append(body); if (state.view === 'recovery') $('#content').replaceChildren(...(budgetView ? [budgetRecoveryPanel(budgetView), p] : [p]));
 }
 
 const topologyKey = ref => `${ref.node_id}/${ref.rule_id}`;
