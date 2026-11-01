@@ -23,6 +23,7 @@ mod credentials;
 mod diagnostics;
 mod dns;
 mod endpoint_allocation;
+mod features;
 mod health;
 mod leases;
 mod node_profiles;
@@ -40,6 +41,7 @@ pub use accounts::{
 };
 pub use alert_config::AlertNode;
 pub use dns::{DnsRecordPatch, NewDnsRecord};
+pub use features::{FEATURES, FeatureState};
 pub use reservations::MeterFlush;
 pub use user_rates::{MAX_USER_RATE, MIN_USER_RATE, UserRateView};
 

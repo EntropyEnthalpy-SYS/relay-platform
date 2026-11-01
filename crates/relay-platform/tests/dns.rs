@@ -394,23 +394,32 @@ async fn dns_health_gate_removes_an_entry_and_restores_it_after_recovery() {
     let zone = store
         .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Apply, 0)
         .unwrap();
-    let record = store
-        .create_dns_record(
-            &admin,
-            &zone.id,
-            relay_platform::store::NewDnsRecord {
-                name: "edge.example.com".into(),
-                record_type: RecordType::A,
-                content: "203.0.113.40".into(),
-                ttl: 300,
-                proxied: false,
-                health: Some(HealthGate {
-                    node_id: node.id.clone(),
-                    rule_id: "entry".into(),
-                }),
-            },
-        )
-        .unwrap();
+    let gated = || relay_platform::store::NewDnsRecord {
+        name: "edge.example.com".into(),
+        record_type: RecordType::A,
+        content: "203.0.113.40".into(),
+        ttl: 300,
+        proxied: false,
+        health: Some(HealthGate {
+            node_id: node.id.clone(),
+            rule_id: "entry".into(),
+        }),
+    };
+    // Health gating is an optional feature: refused until switched on.
+    assert!(!store.feature_enabled("dns-health").unwrap());
+    assert_eq!(
+        rejection(
+            store
+                .create_dns_record(&admin, &zone.id, gated())
+                .unwrap_err()
+        ),
+        409
+    );
+    store.set_feature(&admin, "dns-health", true).unwrap();
+    let record = store.create_dns_record(&admin, &zone.id, gated()).unwrap();
+    // A gated record keeps the feature on until it is removed.
+    store.set_feature(&admin, "dns-health", false).unwrap_err();
+    assert!(store.feature_enabled("dns-health").unwrap());
     let http = reqwest::Client::new();
     // No fresh observation: the gate fails closed and creates nothing.
     let cold = dns::reconcile(&store, &http, &zone.id).await.unwrap();

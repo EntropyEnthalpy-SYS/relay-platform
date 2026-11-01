@@ -533,6 +533,67 @@ fn graceful_surrender_returns_only_unused_bytes_and_duplicate_surrender_is_idemp
 }
 
 #[test]
+fn expired_plan_budget_stays_closed_after_reservations_return_and_renewal_reopens_it() {
+    let f = Fixture::new(100, 64, false);
+    f.control
+        .set_feature(&f.admin, "plan-entitlements", true)
+        .unwrap();
+    let plan = f
+        .control
+        .create_commerce_plan(
+            &f.admin,
+            relay_platform::commerce::PlanInput {
+                name: "Monthly".into(),
+                description: String::new(),
+                price_cents: 0,
+                duration_days: 30,
+                traffic_bytes: Some(1_000),
+                enabled: true,
+            },
+        )
+        .unwrap();
+    let buy = || {
+        let order = f.control.create_order(&f.admin, &plan.id).unwrap();
+        f.control.pay_order(&f.admin, &order.id).unwrap();
+    };
+    // The existing user budget is adopted: its own allowance plus the plan.
+    buy();
+    assert_eq!(f.user().limit_bytes, 1_100);
+    assert_eq!(f.sync(0).grants[0].bytes, 64);
+    // Expire the plan: the limit freezes at what is committed.
+    let key = format!("entitlement:{}", f.admin.id);
+    rusqlite::Connection::open(f.tmp.path().join("control.db"))
+        .unwrap()
+        .execute(
+            "UPDATE metadata SET value=json_set(value,'$.expires_at_ms',1) WHERE key=?1",
+            [&key],
+        )
+        .unwrap();
+    assert_eq!(f.control.sweep_entitlements().unwrap(), 1);
+    assert_eq!(f.user().limit_bytes, 64);
+    // Returning unused bytes lowers committed below the frozen limit, yet
+    // nothing new is issued for an expired plan.
+    f.agents[0]
+        .admit_batch(&[admission(&f.rules[0], 25, false)])
+        .unwrap();
+    f.agents[0].seal_budget_run(&f.runs[0]).unwrap();
+    let closing = f.agents[0].budget_outbox(&f.runs[0], false).unwrap();
+    let reply = f
+        .control
+        .sync(&f.nodes[0], f.request(0, closing))
+        .unwrap()
+        .budget
+        .unwrap();
+    f.agents[0].accept_budget_reply(&f.runs[0], reply).unwrap();
+    assert_eq!(f.user().committed_bytes, 25);
+    assert!(f.sync(1).grants.is_empty());
+    // A renewal starts from what was used; the expired plan's traffic does not return.
+    buy();
+    assert_eq!(f.user().limit_bytes, 1_025);
+    assert_eq!(f.sync(1).grants[0].bytes, 64);
+}
+
+#[test]
 fn restart_and_old_snapshot_never_reuse_an_older_runs_unspent_grant() {
     let f = Fixture::new(150, 100, false);
     let old_grant = f.sync(0).grants[0].grant_id.clone();

@@ -116,6 +116,13 @@ fn prepare(
             rate_bytes_per_sec: update.rate_bytes_per_sec.unwrap_or(old.rate_bytes_per_sec),
         };
         config.validate().map_err(bad_input)?;
+        if config
+            .rules
+            .iter()
+            .any(|rule| rule.mptcp.is_some_and(|m| m != Default::default()))
+        {
+            features::require(conn, "mptcp", "MPTCP")?;
+        }
         for rule in &mut config.rules {
             credentials::require_meter_period(conn, &config.node_id, rule)?;
             if rule.tenant_id != tenant {

@@ -162,6 +162,47 @@ fn draining_a_node_marks_every_route_into_it_without_tripping_the_rewire_barrier
 }
 
 #[test]
+fn mptcp_rules_wait_for_the_optional_feature_which_then_stays_on() {
+    use relay_platform::mptcp::{Config, Mode};
+    let mut f = Fixture::new();
+    f.publish();
+    let node = f.configs[2].node_id.clone();
+    let mut rules = f.configs[2].rules.clone();
+    rules[0].mptcp = Some(Config {
+        inbound: Mode::Off,
+        outbound: Mode::Prefer,
+    });
+    assert!(!f.store.feature_enabled("mptcp").unwrap());
+    assert_eq!(
+        rejection(f.store.set_config(&f.admin, &node, 1, rules.clone())),
+        409
+    );
+    let viewer = Actor {
+        role: Role::Viewer,
+        ..f.admin.clone()
+    };
+    assert_eq!(rejection(f.store.set_feature(&viewer, "mptcp", true)), 403);
+    assert_eq!(rejection(f.store.set_feature(&f.admin, "nope", true)), 404);
+    f.store.set_feature(&f.admin, "mptcp", true).unwrap();
+    f.store.set_config(&f.admin, &node, 1, rules).unwrap();
+    assert_eq!(
+        rejection(f.store.set_feature(&f.admin, "mptcp", false)),
+        409
+    );
+    // A controller upgraded with MPTCP rules already published has no stored
+    // switch; the feature counts as on so those rules keep working.
+    rusqlite::Connection::open(f._temp.path().join("controller.db"))
+        .unwrap()
+        .execute("DELETE FROM metadata WHERE key='feature:mptcp'", [])
+        .unwrap();
+    assert!(f.store.feature_enabled("mptcp").unwrap());
+    let state = f.store.features(&viewer).unwrap();
+    let mptcp = state.iter().find(|s| s.id == "mptcp").unwrap();
+    assert!(mptcp.enabled);
+    assert_eq!(mptcp.in_use, 1);
+}
+
+#[test]
 fn node_rate_survives_publishes_that_omit_it_and_null_clears_it() {
     let mut f = Fixture::new();
     f.publish();

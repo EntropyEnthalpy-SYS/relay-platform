@@ -3,8 +3,8 @@ import { createConsoleUI, canVisit, parseRoute, navView } from '/assets/console-
 import { createGlobe, cities, cityFor } from '/assets/globe.js';
 import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram, forwardingPathRoots } from '/assets/workflows.js';
 const $ = (s, root = document) => root.querySelector(s);
-const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, busy: false };
-const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', capabilities: '功能进度', guide: '使用指南' });
+const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, features: {}, busy: false };
+const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', features: '可选功能', capabilities: '功能进度', guide: '使用指南' });
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
@@ -286,6 +286,7 @@ async function enter() {
   $('#identity').textContent = $('#identity').title = `${state.actor.username} · ${roleNames[state.actor.role]}`;
   document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin'));
   document.querySelectorAll('.tenant-admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role === 'viewer'));
+  await loadFeatures();
   const route = parseRoute(location.hash); await navigate(route.view, { topic: route.topic, history: false });
 }
 async function navigate(view, options = {}) {
@@ -304,7 +305,7 @@ async function navigate(view, options = {}) {
 async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedActor = state.actor, requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(), requestedOverviewLayout = overviewLayout; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, features: renderFeatures, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
   catch (error) { if (state.actor === requestedActor && state.actor && state.view === requestedView && location.hash === requestedHash && $('#content .loading-state')) $('#content').replaceChildren(empty(translate('页面暂时无法加载'), error.message, button(translate('重新加载'), () => { $('#notification').classList.add('hidden'); return refresh(); }, 'primary'))); throw error; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.actor !== requestedActor || getLanguage() !== requestedLanguage || state.view !== requestedView || location.hash !== requestedHash || (state.view === 'overview' && requestedOverviewLayout !== overviewLayout) || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
@@ -1177,7 +1178,7 @@ function mptcpConfig(inbound, outbound, protocol) {
   return { inbound, outbound };
 }
 function mptcpEditor(value) {
-  const box = el('details'); box.append(el('summary', 'Linux MPTCP'));
+  const box = el('details', undefined, featureOn('mptcp') || (value && (value.inbound !== 'off' || value.outbound !== 'off')) ? '' : 'hidden'); box.append(el('summary', 'Linux MPTCP'));
   const options = [['off', translate('普通 TCP')], ['prefer', translate('优先 MPTCP · 允许 TCP 回退')], ['require', translate('必须协商 MPTCP · 否则拒绝')]];
   const inbound = select(box, 'mptcp_inbound', translate('入口传输'), options, value?.inbound || 'off');
   const outbound = select(box, 'mptcp_outbound', translate('出口传输'), options, value?.outbound || 'off');
@@ -1722,10 +1723,34 @@ const orderStatuses = localize({ pending: '待支付', paid: '已支付', refund
 const orderChannels = localize({ wallet: '钱包', external: '外部支付' });
 const ledgerKinds = localize({ adjustment: '调整', credit: '充值', purchase: '购买', refund: '退款' });
 function money(cents) { return `¥${(cents / 100).toFixed(2)}`; }
+const entitlementStates = localize({ active: ['生效中', 'green'], awaiting_budget: ['等待额度', 'orange'], lapsed: ['已到期', ''] });
+function entitlementBadge(value) { const [label, color] = entitlementStates[value] || [value, '']; return badge(label, color); }
+function planUsage(budget) {
+  if (!budget) return '—';
+  const unlimited = budget.limit_bytes >= 9223372036854775807;
+  return meter(unlimited ? 0 : budget.consumed_bytes / Math.max(1, budget.limit_bytes), `${bytes(budget.consumed_bytes)} / ${unlimited ? translate('不限') : bytes(budget.limit_bytes)}`);
+}
+async function activatePlan(user) { await api(`/commerce/entitlements/${user}/activate`, { method: 'POST' }); notify(translate('套餐已生效。')); await renderCommerce(); }
+function myPlanPanel(item) {
+  const p = panel(translate('我的套餐'), translate('购买的套餐会把流量和天数加到你的流量额度。续费会叠加流量并顺延到期时间；到期后不再发放新流量。'));
+  if (!item) { p.append(empty(translate('还没有生效的套餐'), translate('从下方选择套餐购买，付款后自动生效。'))); return p; }
+  const board = el('div', undefined, 'alert-status diagnostics-board'), budget = item.budget, unlimited = budget && budget.limit_bytes >= 9223372036854775807;
+  const [label, color] = entitlementStates[item.state] || [item.state, ''];
+  for (const [name, value, tone] of [[translate('状态'), label, color], [translate('到期'), new Date(item.expires_at_ms).toLocaleDateString(getLanguage()), ''], [translate('已用'), budget ? bytes(budget.consumed_bytes) : '—', ''], [translate('额度'), !budget ? '—' : unlimited ? translate('不限') : bytes(budget.limit_bytes), '']]) { const tile = el('div', undefined, `alert-stat ${tone}`); tile.append(el('div', value, 'metric-value'), el('div', name, 'metric-label')); board.append(tile); }
+  p.append(board);
+  if (item.state === 'awaiting_budget') {
+    const note = el('div', undefined, 'panel-body'), actions = el('div', undefined, 'panel-actions');
+    actions.append(button(translate('立即生效'), () => activatePlan(item.user_id), 'primary'));
+    note.append(el('p', translate('已付款，但你还有运行中的转发规则，流量额度暂时不能创建。请先停用自己的规则，等服务器确认后点击“立即生效”（也会在一分钟内自动重试），然后再启用规则。'), 'workflow-callout'), actions);
+    p.append(note);
+  }
+  return p;
+}
 async function renderCommerce() {
   const actor = state.actor; if (state.view !== 'commerce' || !actor) return;
   const admin = actor.role === 'system_admin';
-  const [wallet, plans, orders, webhook, coupons, gifts] = await Promise.all([api('/commerce/wallet'), api('/commerce/plans'), api('/commerce/orders'), admin ? api('/commerce/webhook') : null, admin ? api('/commerce/coupons') : [], admin ? api('/commerce/gift-codes') : []]);
+  const entitled = featureOn('plan-entitlements');
+  const [wallet, plans, orders, webhook, coupons, gifts, mine, entitlements] = await Promise.all([api('/commerce/wallet'), api('/commerce/plans'), api('/commerce/orders'), admin ? api('/commerce/webhook') : null, admin ? api('/commerce/coupons') : [], admin ? api('/commerce/gift-codes') : [], entitled ? api('/commerce/entitlement') : null, entitled && admin ? api('/commerce/entitlements') : []]);
   if (state.view !== 'commerce' || state.actor !== actor) return;
   const walletActions = el('div'); walletActions.append(button(translate('兑换礼品码'), redeemGift, 'primary'));
   if (state.actor.role === 'system_admin') walletActions.append(button(translate('调整用户钱包'), adjustWallet, 'table-action'));
@@ -1739,7 +1764,7 @@ async function renderCommerce() {
     if (state.actor.role === 'system_admin') actions.append(button(translate('编辑'), () => planForm(plan), 'table-action'), button(translate('删除'), () => deletePlan(plan), 'table-action danger'));
     return [namedCell(plan.name, plan.id), plan.description || '—', money(plan.price_cents), msg`${plan.duration_days} 天`, plan.traffic_bytes ? bytes(plan.traffic_bytes) : translate('不限'), actions];
   })));
-  const ordersPanel = panel(translate('订单'), translate('订单只记录计费结果；套餐权益的自动发放/到期执行仍未实现。'), null);
+  const ordersPanel = panel(translate('订单'), entitled ? translate('支付成功的订单会自动把套餐的流量和天数加到购买者的流量额度；退款会扣回该订单的流量和天数，已用的流量不退回。') : translate('订单只记录计费结果。系统管理员在「可选功能」中开启“套餐权益”后，支付成功的订单会自动发放套餐的流量和天数。'), null);
   if (!orders.length) ordersPanel.append(empty(translate('还没有订单'), translate('选择套餐购买后会生成订单。')));
   else ordersPanel.append(table([translate('套餐'), translate('金额'), translate('状态'), translate('通道'), translate('创建'), translate('支付/退款'), translate('操作')], orders.map(order => {
     const actions = el('div');
@@ -1747,7 +1772,16 @@ async function renderCommerce() {
     if (order.status === 'paid' && order.channel === 'wallet' && state.actor.role === 'system_admin') actions.append(button(translate('退款'), async () => { if (!await confirmAction(msg`退款 ${money(order.amount_cents)} 到用户钱包？`)) return; await api(`/commerce/orders/${order.id}/refund`, { method: 'POST' }); notify(translate('订单已退款。')); await renderCommerce(); }, 'table-action danger'));
     return [order.plan_name, money(order.amount_cents), badge(orderStatuses[order.status] || order.status, order.status === 'paid' ? 'green' : order.status === 'refunded' ? 'orange' : ''), orderChannels[order.channel] || order.channel || translate('钱包'), timestamp(order.created_at_ms), order.paid_at_ms ? timestamp(order.paid_at_ms) : order.refunded_at_ms ? timestamp(order.refunded_at_ms) : '—', actions];
   })));
-  const panels = [p, plansPanel, ordersPanel];
+  const panels = [p, ...(entitled ? [myPlanPanel(mine)] : []), plansPanel, ordersPanel];
+  if (entitled && admin) {
+    const e = panel(translate('套餐权益'), translate('每位购买者一行。等待额度表示已付款，但购买者仍有运行中的规则，暂停规则后会在一分钟内自动生效。'));
+    if (!entitlements.length) e.append(empty(translate('还没有套餐权益'), translate('开启后支付成功的订单会出现在这里。')));
+    else e.append(table([translate('用户'), translate('状态'), translate('到期'), translate('已用 / 额度'), translate('订单'), translate('操作')], entitlements.map(item => {
+      const actions = el('div'); if (item.state === 'awaiting_budget') actions.append(button(translate('立即生效'), () => activatePlan(item.user_id), 'table-action'));
+      return [namedCell(item.username || item.user_id, item.user_id), entitlementBadge(item.state), timestamp(item.expires_at_ms), planUsage(item.budget), String(item.grants.filter(g => !g.revoked_at_ms).length), actions];
+    })));
+    panels.push(e);
+  }
   if (state.actor.role === 'system_admin') {
     const g = panel(translate('礼品码'), translate('用户兑换后直接增加钱包余额；同一用户同一码只能兑换一次，次数上限和窗口仍然生效。'), button(translate('＋ 新建礼品码'), () => giftForm(null), 'primary'));
     if (!gifts.length) g.append(empty(translate('还没有礼品码'), translate('创建后可让用户兑换。')));
@@ -2024,10 +2058,13 @@ function dnsRecordForm(zone, record, nodes) {
   field(grid, 'content', translate('内容（IP 或 CNAME）'), record?.content || '').maxLength = 253;
   const ttl = field(grid, 'ttl', translate('TTL（秒）'), record?.ttl ?? 300, 'number'); ttl.min = 1; ttl.max = 86400;
   select(grid, 'proxied', translate('Cloudflare 代理'), [['no', translate('不代理')], ['yes', translate('代理')]], record?.proxied ? 'yes' : 'no');
-  select(grid, 'health_node', translate('入口健康摘除节点'), [['', translate('不启用')], ...nodes.map(node => [node.id, node.name])], record?.health?.node_id || '');
-  field(grid, 'health_rule', translate('健康摘除规则 ID（可选）'), record?.health?.rule_id || '').maxLength = 128;
-  if (record?.health) select(grid, 'health_clear', translate('健康摘除设置'), [['no', translate('保留现有设置')], ['yes', translate('清除健康摘除')]], 'no');
-  form.append(grid, el('p', translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。填写节点和规则 ID 后，节点心跳超过 90 秒或没有健康目标时，应用模式会摘除该记录；恢复后自动重建。'), 'fine'));
+  const gating = featureOn('dns-health') || !!record?.health;
+  if (gating) {
+    select(grid, 'health_node', translate('入口健康摘除节点'), [['', translate('不启用')], ...nodes.map(node => [node.id, node.name])], record?.health?.node_id || '');
+    field(grid, 'health_rule', translate('健康摘除规则 ID（可选）'), record?.health?.rule_id || '').maxLength = 128;
+    if (record?.health) select(grid, 'health_clear', translate('健康摘除设置'), [['no', translate('保留现有设置')], ['yes', translate('清除健康摘除')]], 'no');
+  }
+  form.append(grid, el('p', gating ? translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。填写节点和规则 ID 后，节点心跳超过 90 秒或没有健康目标时，应用模式会摘除该记录；恢复后自动重建。') : translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。需要按入口健康自动摘除记录时，请系统管理员在「可选功能」中开启 DNS 健康摘除。'), 'fine'));
   submit(form, record ? translate('保存记录') : translate('添加记录'), async data => {
     const body = { name: String(data.get('name')).trim(), type: data.get('type'), content: String(data.get('content')).trim(), ttl: number(data, 'ttl'), proxied: data.get('proxied') === 'yes' };
     const healthNode = String(data.get('health_node') || ''), healthRule = String(data.get('health_rule') || '').trim();
@@ -2525,7 +2562,36 @@ function editAlertChannel(existing) {
   });
   modal(existing ? msg`编辑通知通道 · ${existing.name}` : translate('添加通知通道'), form);
 }
-async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+// Optional features start switched off; their settings stay out of forms until a system administrator switches them on.
+const featureInfo = localize({
+  mptcp: ['Linux MPTCP', '转发规则的入口或出口可以使用多路径 TCP（MPTCP）。两端都支持时，一条连接可以同时使用多条网络路径。', '开启后，规则编辑器显示“Linux MPTCP”设置。需要两端的 Linux 内核支持；要真正走多条路径，服务器还需要多个网卡或地址。'],
+  'dns-health': ['DNS 健康摘除', '入口服务器失联或目标全部不可用时，自动从 DNS 移除它的解析记录，恢复后自动加回。', '开启后，DNS 记录表单显示健康摘除设置。只在“应用”模式的区域生效；剩余有效记录少于“最少保留”数量时，记录不会被移除。'],
+  'plan-entitlements': ['套餐权益', '支付成功的套餐订单自动变成购买者的流量额度：套餐流量加到额度上，到期后停止发放新流量，退款扣回该订单的流量和天数。', '开启后，「钱包与订单」显示“我的套餐”。开启前已经付款的订单不会补发。购买者还有运行中的规则时，需要先停用规则，额度才能创建。'],
+});
+const featureUsage = { mptcp: n => msg`${n} 条转发规则正在使用 MPTCP`, 'dns-health': n => msg`${n} 条 DNS 记录正在使用健康摘除`, 'plan-entitlements': n => msg`${n} 个套餐生效中或等待额度` };
+const featureOn = id => !!state.features[id];
+async function loadFeatures() { const list = await api('/features'); state.features = Object.fromEntries(list.map(f => [f.id, f.enabled])); return list; }
+async function renderFeatures() {
+  const actor = state.actor, list = await loadFeatures();
+  if (state.view !== 'features' || state.actor !== actor) return;
+  const p = panel(translate('可选功能'), translate('这些功能默认关闭。开启后，相关设置才会出现在面板里；关闭前需要先移除正在使用它的设置。这里的开关只改变面板，不会修改服务器的系统设置。'));
+  const body = el('div', undefined, 'feature-list');
+  for (const f of list) {
+    const [name, about, effect] = featureInfo[f.id] || [f.id, '', ''], row = el('article', undefined, `feature-row${f.enabled ? ' on' : ''}`), text = el('div', undefined, 'feature-text'), title = el('h3', name);
+    title.append(badge(f.enabled ? translate('已开启') : translate('未开启'), f.enabled ? 'green' : ''));
+    text.append(title, el('p', about), el('p', effect, 'fine'));
+    if (f.in_use) text.append(el('p', featureUsage[f.id]?.(f.in_use) ?? String(f.in_use), 'feature-usage'));
+    const toggle = button(f.enabled ? translate('关闭此功能') : translate('开启此功能'), async () => {
+      await api(`/features/${f.id}`, { method: 'PUT', body: { enabled: !f.enabled } });
+      notify(f.enabled ? msg`已关闭「${name}」` : msg`已开启「${name}」`); await renderFeatures();
+    }, f.enabled ? 'subtle' : 'primary');
+    toggle.setAttribute('aria-label', `${f.enabled ? translate('关闭此功能') : translate('开启此功能')} ${name}`);
+    row.append(text, toggle); body.append(row);
+  }
+  p.append(body);
+  $('#content').replaceChildren(p);
+}
+async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); const switchable = { 'mptcp-rule-transport': 'mptcp', 'dns-health-removal': 'dns-health', 'commerce-entitlements': 'plan-entitlements' }[key]; if (switchable) row.append(badge(featureOn(switchable) ? translate('已开启') : translate('未开启'), featureOn(switchable) ? 'green' : '')); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'rules', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health', 'logs'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);

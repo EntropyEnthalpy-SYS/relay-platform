@@ -208,6 +208,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
         || path == "templates"
         || path.starts_with("templates/")
         || path == "diagnostics/mptcp"
+        || (path.starts_with("features/") && method != Method::GET)
         || path.contains("/templates/")
         || path.starts_with("api-tokens")
         || path.ends_with("/mfa/reset")
@@ -433,6 +434,12 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(update_commerce_plan).delete(delete_commerce_plan),
         )
         .route("/api/v1/commerce/wallet", get(commerce_wallet))
+        .route("/api/v1/commerce/entitlement", get(own_entitlement))
+        .route("/api/v1/commerce/entitlements", get(entitlements))
+        .route(
+            "/api/v1/commerce/entitlements/{user}/activate",
+            post(activate_entitlement),
+        )
         .route(
             "/api/v1/commerce/wallets/{user}/adjust",
             post(adjust_wallet),
@@ -511,6 +518,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/control/metrics", get(control_metrics))
         .route("/api/v1/metrics", get(prometheus_metrics))
         .route("/api/v1/capabilities", get(capabilities))
+        .route("/api/v1/features", get(features))
+        .route("/api/v1/features/{id}", axum::routing::put(set_feature))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,
@@ -2757,6 +2766,35 @@ async fn commerce_wallet(
         database(state.store, move |db| db.wallet(&actor, &user)).await?,
     ))
 }
+async fn own_entitlement(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Option<crate::commerce::EntitlementView>> {
+    let user = actor.id.clone();
+    Ok(Json(
+        database(state.store, move |db| db.entitlement(&actor, &user)).await?,
+    ))
+}
+async fn entitlements(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::commerce::EntitlementView>> {
+    Ok(Json(
+        database(state.store, move |db| db.entitlements(&actor)).await?,
+    ))
+}
+async fn activate_entitlement(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+) -> ApiResult<crate::commerce::EntitlementView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.activate_entitlement(&actor, &user)
+        })
+        .await?,
+    ))
+}
 async fn adjust_wallet(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -3392,11 +3430,37 @@ async fn dns_ddns(
     Ok(Json(result))
 }
 
+async fn features(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::store::FeatureState>> {
+    Ok(Json(
+        database(state.store, move |db| db.features(&actor)).await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeatureSwitch {
+    enabled: bool,
+}
+async fn set_feature(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<FeatureSwitch>,
+) -> ApiResult<crate::store::FeatureState> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.set_feature(&actor, &id, input.enabled)
+        })
+        .await?,
+    ))
+}
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
-        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","commerce-entitlements","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log"],
+        "pending":["mptcp","budget-disaster-recovery","wireguard","nat-traversal","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
     }))
 }
 

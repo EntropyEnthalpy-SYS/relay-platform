@@ -33,7 +33,7 @@ async function lateResponse(name, view, transition) {
   const forbidden = () => { throw new Error(`${name} rendered a response after ${transition}`); };
   const request = () => new Promise(resolve => pending.push(resolve));
   // History is fetched through a cache; the 24-hour range makes Overview request it too.
-  const context = { state, URLSearchParams, api: request, monitoringHistory: request, readOverviewRange: () => '24h', $: forbidden, panel: forbidden, translate: value => value };
+  const context = { state, URLSearchParams, api: request, loadFeatures: request, featureOn: () => true, monitoringHistory: request, readOverviewRange: () => '24h', $: forbidden, panel: forbidden, translate: value => value };
   vm.createContext(context);
   vm.runInContext(`${definition(name)}\nthis.run = ${name};`, context);
   const result = context.run();
@@ -58,7 +58,7 @@ async function expiredResponse(replaced, path = '/nodes') {
   assert.equal(logouts, replaced || path === '/auth/login' ? 0 : 1, 'an old request must not sign out a new session');
 }
 (async () => {
-  for (const [name, view] of [['renderOverview', 'overview'], ['renderNodes', 'nodes'], ['renderTemplates', 'templates'], ['renderSubscriptions', 'subscriptions'], ['renderUsage', 'usage'], ['renderUsers', 'users'], ['renderAccount', 'account'], ['renderAudit', 'audit'], ['renderAlerts', 'alerts'], ['renderCapabilities', 'capabilities'], ['renderBudgets', 'budgets'], ['renderRecovery', 'recovery'], ['renderTopology', 'topology'], ['renderRules', 'rules'], ['renderHealth', 'health'], ['renderTickets', 'tickets'], ['renderCommerce', 'commerce'], ['renderAnnouncements', 'announcements'], ['renderDns', 'dns']]) {
+  for (const [name, view] of [['renderOverview', 'overview'], ['renderNodes', 'nodes'], ['renderTemplates', 'templates'], ['renderSubscriptions', 'subscriptions'], ['renderUsage', 'usage'], ['renderUsers', 'users'], ['renderAccount', 'account'], ['renderAudit', 'audit'], ['renderAlerts', 'alerts'], ['renderCapabilities', 'capabilities'], ['renderFeatures', 'features'], ['renderBudgets', 'budgets'], ['renderRecovery', 'recovery'], ['renderTopology', 'topology'], ['renderRules', 'rules'], ['renderHealth', 'health'], ['renderTickets', 'tickets'], ['renderCommerce', 'commerce'], ['renderAnnouncements', 'announcements'], ['renderDns', 'dns']]) {
     for (const transition of ['navigation', 'logout', 'account change']) await lateResponse(name, view, transition);
   }
   await expiredResponse(false); await expiredResponse(true); await expiredResponse(false, '/auth/login');

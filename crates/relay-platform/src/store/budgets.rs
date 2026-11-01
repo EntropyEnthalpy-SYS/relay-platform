@@ -61,6 +61,55 @@ fn applies(scope: &BudgetScope, id: &str, node: &str, rule: &Rule) -> bool {
         BudgetScope::Node => node == id,
     }
 }
+/// Creates a budget; the caller has checked the actor may manage `tenant`.
+pub(super) fn insert_budget(
+    tx: &Transaction<'_>,
+    tenant: &str,
+    input: &NewBudget,
+    actor_id: &str,
+) -> Result<Budget> {
+    if paused(tx)? {
+        return reject(
+            409,
+            "restored controller is quarantined for budget allocation; authoritative reservation recovery is required",
+        );
+    }
+    if tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM budgets WHERE scope=?1 AND scope_id=?2)",
+        params![input.scope.as_str(), input.scope_id],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return reject(
+            409,
+            "scope already has a budget; update its limit without resetting usage",
+        );
+    }
+    require_quiescent(tx, &input.scope, &input.scope_id)?;
+    let id = Uuid::new_v4().to_string();
+    tx.execute("INSERT INTO budgets(id,tenant_id,scope,scope_id,name,limit_bytes,quantum_bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,tenant,input.scope.as_str(),input.scope_id,input.name,input.limit_bytes,input.quantum_bytes])?;
+    audit(
+        tx,
+        actor_id,
+        "budget.create",
+        &id,
+        &serde_json::to_string(input)?,
+    )?;
+    Ok(tx.query_row(&format!("{BUDGET_SELECT} WHERE b.id=?1"), [&id], budget_row)?)
+}
+pub(super) fn user_budget(conn: &Connection, user: &str) -> Result<Option<Budget>> {
+    Ok(conn
+        .query_row(
+            &format!("{BUDGET_SELECT} WHERE b.scope='user' AND b.scope_id=?1"),
+            [user],
+            budget_row,
+        )
+        .optional()?)
+}
+pub(super) fn budget(conn: &Connection, id: &str) -> Result<Option<Budget>> {
+    Ok(conn
+        .query_row(&format!("{BUDGET_SELECT} WHERE b.id=?1"), [id], budget_row)
+        .optional()?)
+}
 fn require_quiescent(conn: &Connection, scope: &BudgetScope, id: &str) -> Result<()> {
     let mut q=conn.prepare("SELECT n.id,n.desired_revision,n.applied_revision,n.apply_error FROM nodes n WHERE (?1='node' AND n.id=?2) OR (?1='tenant' AND n.tenant_id=?2) OR (?1='user' AND EXISTS(SELECT 1 FROM rule_bindings b WHERE b.node_id=n.id AND b.owner_id=?2))")?;
     let nodes = q
@@ -133,33 +182,7 @@ impl Store {
         if !actor.permits_tenant(&tenant) {
             return reject(403, "budget belongs to another tenant");
         }
-        if paused(&tx)? {
-            return reject(
-                409,
-                "restored controller is quarantined for budget allocation; authoritative reservation recovery is required",
-            );
-        }
-        if tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM budgets WHERE scope=?1 AND scope_id=?2)",
-            params![input.scope.as_str(), input.scope_id],
-            |r| r.get::<_, bool>(0),
-        )? {
-            return reject(
-                409,
-                "scope already has a budget; update its limit without resetting usage",
-            );
-        }
-        require_quiescent(&tx, &input.scope, &input.scope_id)?;
-        let id = Uuid::new_v4().to_string();
-        tx.execute("INSERT INTO budgets(id,tenant_id,scope,scope_id,name,limit_bytes,quantum_bytes) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![id,tenant,input.scope.as_str(),input.scope_id,input.name,input.limit_bytes,input.quantum_bytes])?;
-        audit(
-            &tx,
-            &actor.id,
-            "budget.create",
-            &id,
-            &serde_json::to_string(&input)?,
-        )?;
-        let result = tx.query_row(&format!("{BUDGET_SELECT} WHERE b.id=?1"), [&id], budget_row)?;
+        let result = insert_budget(&tx, &tenant, &input, &actor.id)?;
         tx.commit()?;
         Ok(result)
     }
@@ -185,6 +208,12 @@ impl Store {
         if old.revision != input.expected_revision || old.revision >= MAX_COUNTER {
             return reject(409, "budget changed; reload before saving");
         }
+        if super::commerce::plan_managed(&tx, id)? {
+            return reject(
+                409,
+                "budget is managed by an active plan; it follows the plan's traffic and expiry",
+            );
+        }
         if input.limit_bytes < old.committed_bytes {
             return reject(
                 409,
@@ -195,6 +224,7 @@ impl Store {
             "UPDATE budgets SET limit_bytes=?1,quantum_bytes=?2,revision=revision+1 WHERE id=?3",
             params![input.limit_bytes, input.quantum_bytes, id],
         )?;
+        super::commerce::clear_lapse(&tx, id)?;
         audit(
             &tx,
             &actor.id,
@@ -548,7 +578,9 @@ pub(super) fn exchange(
             result.cancelled_requests.push(request.request_id);
             continue;
         }
-        if result.allocation_paused {
+        // An expired plan's budget issues nothing new, even when returned
+        // reservations lower its committed bytes below the frozen limit.
+        if result.allocation_paused || super::commerce::plan_lapsed(tx, &budget.id)? {
             continue;
         }
         let bytes = (budget.limit_bytes - budget.committed_bytes)

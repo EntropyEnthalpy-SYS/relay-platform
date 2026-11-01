@@ -16,17 +16,18 @@ export const pageInfo = localize({
   dns: ['客户与服务', 'MANAGED DNS', '管理服务商与解析记录，先观察变更，再按需要应用。', 'operations', 'cloudflare 域名 解析'],
   announcements: ['客户与服务', 'ANNOUNCEMENTS', '向工作空间与租户发布有明确生效时间的消息。', 'operations', '公告 消息'],
   tickets: ['客户与服务', 'SUPPORT DESK', '将问题、回复与处理状态放在同一条记录中。', 'operations', 'support 工单 支持'],
-  commerce: ['客户与服务', 'WALLET & ORDERS', '查看现有钱包、套餐与订单记录；支付集成不在本轮交付范围。', 'operations', 'wallet order 钱包 订单'],
+  commerce: ['客户与服务', 'WALLET & ORDERS', '查看钱包、套餐与订单记录；开启“套餐权益”后，付款的套餐自动变成流量额度。', 'operations', 'wallet order 钱包 订单'],
   users: ['系统与帮助', 'PEOPLE & PERMISSIONS', '管理账号与租户，按角色分配工作空间访问权限。', 'security', 'tenant role user 租户 用户 权限'],
   account: ['系统与帮助', 'ACCOUNT SECURITY', '管理登录保护、两步验证与自己的 API 令牌。', 'security', 'totp token password 安全 密码 令牌'],
   audit: ['系统与帮助', 'AUDIT LOG', '追踪操作发生的时间、执行者与对象。', 'security', 'audit history 审计 日志'],
   recovery: ['系统与帮助', 'RECOVERY & CONTINUITY', '检查恢复日志、备份与额度对账，保留系统的连续记录。', 'operations', 'backup restore 备份 恢复'],
+  features: ['系统与帮助', 'OPTIONAL FEATURES', '按需开启 MPTCP、DNS 健康摘除、套餐权益等可选功能。默认全部关闭，开启后相关设置才会出现。', 'operations', 'feature toggle switch mptcp dns health 开关 可选 功能'],
   capabilities: ['系统与帮助', 'DELIVERY STATUS', '区分已实现的能力与仍在开发、等待验收的部分。', 'operations', 'features roadmap 功能 进度'],
   guide: ['系统与帮助', 'THE RELAY HANDBOOK', '从第一次连接到日常运维，在操作旁边找到答案。', 'quickstart', 'docs documentation help 文档 指南 帮助'],
 });
 // "By server" is a tab of Forwarding rules, so the sidebar highlights that entry.
 export const navView = view => view === 'rules' ? 'topology' : view;
-const adminViews = new Set(['dns', 'audit', 'recovery', 'logs', 'diagnostics']);
+const adminViews = new Set(['dns', 'audit', 'recovery', 'logs', 'diagnostics', 'features']);
 export function canVisit(view, actor) {
   return !!actor && Object.hasOwn(pageInfo, view) && (!adminViews.has(view) || actor.role === 'system_admin') && (!['alerts', 'templates'].includes(view) || actor.role !== 'viewer');
 }

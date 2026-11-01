@@ -360,6 +360,9 @@ impl Store {
         crate::dns::validate_health(input.health.as_ref())?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        if input.health.is_some() {
+            features::require(&tx, "dns-health", "DNS health gating")?;
+        }
         let zone = read_zone(&tx, zone_id)?.context("DNS zone not found")?;
         read_provider(&tx, &zone.provider_id)?.context("DNS provider not found")?;
         let record = Record {
@@ -410,6 +413,7 @@ impl Store {
         if patch.clear_health {
             record.health = None;
         } else if let Some(value) = patch.health {
+            features::require(&tx, "dns-health", "DNS health gating")?;
             record.health = Some(value);
         }
         crate::dns::validate_record(

@@ -245,6 +245,127 @@ async fn external_payment_webhook_is_signed_idempotent_and_not_wallet_refundable
 }
 
 #[test]
+fn plan_entitlements_grant_stack_and_refund_only_when_switched_on() {
+    use relay_platform::{budget::BudgetUpdate, commerce::EntitlementState};
+    const DAY: i64 = 86_400_000;
+    let gib = 1024u64.pow(3);
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("controller.db");
+    let store = Store::open(&path).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    let user = store
+        .create_user(
+            &admin,
+            "default",
+            "buyer",
+            PASSWORD,
+            relay_platform::store::Role::Viewer,
+        )
+        .unwrap();
+    let (_, buyer) = store.login("buyer", PASSWORD).unwrap();
+    let plan = store
+        .create_commerce_plan(&admin, plan_input(1_000))
+        .unwrap();
+    store
+        .adjust_wallet(&admin, &user.id, 10_000, "topup-plans", "test")
+        .unwrap();
+    let paid = |actor| {
+        let order = store.create_order(&buyer, &plan.id).unwrap();
+        store.pay_order(actor, &order.id).unwrap()
+    };
+    let view = || {
+        store
+            .entitlement(&buyer, &user.id)
+            .unwrap()
+            .expect("entitlement")
+    };
+
+    // Switched off: paying moves money only.
+    paid(&buyer);
+    assert!(store.entitlement(&buyer, &user.id).unwrap().is_none());
+    assert!(store.budgets(&admin).unwrap().budgets.is_empty());
+    assert_eq!(
+        rejection(store.activate_entitlement(&buyer, &user.id).unwrap_err()),
+        409
+    );
+
+    // Switched on: an administrator paying the buyer's order grants the buyer.
+    store
+        .set_feature(&admin, "plan-entitlements", true)
+        .unwrap();
+    let before = now_ms();
+    let second = paid(&admin);
+    let first_window = view();
+    assert_eq!(first_window.entitlement.state, EntitlementState::Active);
+    let budget = first_window.budget.unwrap();
+    assert_eq!(budget.scope_id, user.id);
+    assert_eq!(budget.tenant_id, "default");
+    assert_eq!(budget.limit_bytes, 100 * gib);
+    let expiry = first_window.entitlement.expires_at_ms;
+    assert!(expiry >= before + 30 * DAY && expiry <= now_ms() + 30 * DAY);
+    assert_eq!(rejection(store.entitlements(&buyer).unwrap_err()), 403);
+
+    // A renewal adds its traffic and extends the current expiry, not today's date.
+    let third = paid(&buyer);
+    let renewed = view();
+    assert_eq!(renewed.budget.as_ref().unwrap().limit_bytes, 200 * gib);
+    assert_eq!(renewed.entitlement.expires_at_ms, expiry + 30 * DAY);
+    let revision = renewed.budget.unwrap().revision;
+    assert_eq!(
+        rejection(
+            store
+                .update_budget(
+                    &admin,
+                    &budget.id,
+                    BudgetUpdate {
+                        expected_revision: revision,
+                        limit_bytes: 300 * gib,
+                        quantum_bytes: budget.quantum_bytes,
+                    },
+                )
+                .unwrap_err()
+        ),
+        409,
+        "a plan's budget follows the plan"
+    );
+
+    // A refund after use removes the order's traffic and days, but never
+    // below the bytes already committed.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute(
+            "UPDATE budgets SET committed_bytes=?1,consumed_bytes=?1 WHERE id=?2",
+            rusqlite::params![150 * gib, budget.id],
+        )
+        .unwrap();
+    store.refund_order(&admin, &third.id).unwrap();
+    let refunded = view();
+    assert_eq!(refunded.entitlement.state, EntitlementState::Active);
+    assert_eq!(refunded.budget.unwrap().limit_bytes, 150 * gib);
+    assert_eq!(refunded.entitlement.expires_at_ms, expiry);
+    assert_eq!(
+        rejection(
+            store
+                .set_feature(&admin, "plan-entitlements", false)
+                .unwrap_err()
+        ),
+        409
+    );
+    store.refund_order(&admin, &second.id).unwrap();
+    let lapsed = view();
+    assert_eq!(lapsed.entitlement.state, EntitlementState::Lapsed);
+    assert_eq!(lapsed.budget.unwrap().limit_bytes, 150 * gib);
+    assert_eq!(
+        store.wallet(&buyer, &user.id).unwrap().wallet.balance_cents,
+        9_000
+    );
+    store
+        .set_feature(&admin, "plan-entitlements", false)
+        .unwrap();
+}
+
+#[test]
 fn coupons_discount_orders_and_enforce_limits() {
     let temp = tempfile::tempdir().unwrap();
     let store = Store::open(&temp.path().join("controller.db")).unwrap();

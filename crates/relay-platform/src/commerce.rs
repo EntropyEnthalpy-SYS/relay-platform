@@ -1,6 +1,7 @@
 //! Minimal commerce core: plans, a single-currency wallet ledger, orders paid
-//! from the wallet, and refunds. Payment-provider callbacks, coupons,
-//! commissions, taxes and service-entitlement enforcement are not implemented.
+//! from the wallet, refunds, and (optional feature) plan entitlements that turn
+//! a paid order into the buyer's traffic budget. Commissions and taxes are not
+//! implemented.
 use crate::model::now_ms;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -172,6 +173,49 @@ pub struct Order {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refunded_at_ms: Option<i64>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntitlementState {
+    /// The plan's traffic and days apply to the buyer's user budget.
+    Active,
+    /// Paid, but the user budget cannot be created until the buyer's rules are paused.
+    AwaitingBudget,
+    /// Expired or fully refunded: the budget issues no new traffic.
+    Lapsed,
+}
+/// One paid order's contribution to an entitlement, copied from the order.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EntitlementGrant {
+    pub order_id: String,
+    pub plan_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_bytes: Option<u64>,
+    pub duration_days: u32,
+    pub granted_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at_ms: Option<i64>,
+}
+/// A user's plan window. Renewals stack: traffic adds up and days extend the expiry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Entitlement {
+    pub user_id: String,
+    pub state: EntitlementState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_id: Option<String>,
+    /// Allowance outside the plans: an adopted budget's limit, or the bytes
+    /// already committed when a lapsed plan is renewed.
+    pub base_bytes: u64,
+    pub expires_at_ms: i64,
+    pub grants: Vec<EntitlementGrant>,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct EntitlementView {
+    #[serde(flatten)]
+    pub entitlement: Entitlement,
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<crate::budget::Budget>,
+}
 #[derive(Clone, Debug, Serialize)]
 pub struct WalletView {
     pub wallet: Wallet,
@@ -320,4 +364,28 @@ pub fn validate_adjustment(delta_cents: i64, reference: &str, description: &str)
 }
 pub fn now() -> i64 {
     now_ms()
+}
+
+/// Expires plans whose days have run out and retries plans waiting for their
+/// budget, once per `tick`.
+pub async fn run_entitlements(
+    store: crate::store::Store,
+    tick: std::time::Duration,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    let mut interval = tokio::time::interval(tick);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = interval.tick() => {}
+        }
+        let db = store.clone();
+        match tokio::task::spawn_blocking(move || db.sweep_entitlements()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "plan entitlement sweep failed"),
+            Err(_) => return,
+        }
+    }
 }

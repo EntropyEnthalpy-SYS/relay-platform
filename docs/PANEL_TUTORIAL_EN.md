@@ -239,6 +239,7 @@ Each hop maintains its own metering. Do not assume that a multi-hop path is coun
 - **IPv6:** `[::]:PORT` is IPv6-only in this implementation. Create a separate IPv4 listener if you need both families.
 - **Reboot persistence:** the enabled systemd service restarts the Agent. Keep its original state directory and node identity.
 - **Saved templates:** after a rule works, use **Save as template** in Node rules. It appears below the built-ins in Templates. **Use this template** asks for the destination VPS, a new name, listener and reachable address, then previews the change. It preserves targets and policies while creating a fresh rule identity and metering period.
+- **Optional features:** MPTCP and DNS health gating start off. A system administrator turns them on in **System & help → Optional features**; their settings then appear in the rule editor and DNS record form. A feature cannot be turned off while a rule or record still uses it. The switches never change server system settings.
 - **Upgrades:** back up state, upgrade the controller before Agents, and follow [LINUX_DEPLOYMENT.md](LINUX_DEPLOYMENT.md). Updating source on GitHub does not itself deploy a binary to a VPS.
 
 ## 10. Troubleshooting

@@ -19,7 +19,7 @@ async function serialize(existing) {
     TextEncoder, Uint8Array, Uint32Array, btoa, crypto: require('node:crypto').webcrypto,
     document: { createTextNode: text => text },
     FormData: class { constructor(element) { this.values = new Map(element.querySelectorAll().filter(c => c.name && !c.disabled && (c.type !== 'checkbox' || c.checked)).map(c => [c.name, c.type === 'checkbox' ? 'on' : c.value])); } get(key) { return this.values.get(key) ?? null; } },
-    forwardingPathView: () => ({ box: new Element(), update() {} }),
+    forwardingPathView: () => ({ box: new Element(), update() {} }), featureOn: () => false,
     state: { config: { node_id: 'node', revision: 3, rules: [existing] }, nodes: [node], actor: { id: 'owner' } },
     api: async () => ({ configs: [], nodes: [] }), el: tag => new Element(tag),
     field(parent, name, _label, value = '', type = 'text') { const label = new Element('label'), input = new Element('input'); Object.assign(input, { name, value: String(value ?? ''), type }); label.append(input); parent.append(label); return input; },

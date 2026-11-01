@@ -1086,6 +1086,11 @@ async fn main() -> Result<()> {
                 Duration::from_secs(2),
                 stop.clone(),
             ));
+            tokio::spawn(relay_platform::commerce::run_entitlements(
+                store.clone(),
+                Duration::from_secs(60),
+                stop.clone(),
+            ));
             let history = tokio::spawn(relay_platform::history::run(
                 store.clone(),
                 Duration::from_secs(60),

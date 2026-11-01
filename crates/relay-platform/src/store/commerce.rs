@@ -1,12 +1,14 @@
 //! Commerce persistence in metadata. Money moves only inside a SQLite
 //! transaction together with its ledger entry and order/wallet state.
 use super::*;
+mod entitlements;
 use crate::commerce::{
     CURRENCY, Coupon, CouponInput, GiftCode, GiftCodeInput, LedgerEntry, LedgerKind, Order,
     OrderStatus, Payment, PaymentChannel, PaymentStatus, Plan, PlanInput, Wallet, WalletView,
     WebhookView, discount_for, validate_adjustment, validate_coupon, validate_gift_code,
     validate_plan,
 };
+pub(super) use entitlements::{clear_lapse, live_count, plan_lapsed, plan_managed};
 
 fn plan_key(id: &str) -> String {
     format!("commerce_plan:{id}")
@@ -427,6 +429,7 @@ impl Store {
         order.status = OrderStatus::Paid;
         order.paid_at_ms = Some(now_ms());
         write_order(&tx, &order)?;
+        entitlements::grant(&tx, &order, &actor.id)?;
         audit(&tx, &actor.id, "commerce.order.pay", &order.id, "{}")?;
         tx.commit()?;
         Ok(order)
@@ -465,6 +468,7 @@ impl Store {
         order.status = OrderStatus::Refunded;
         order.refunded_at_ms = Some(now_ms());
         write_order(&tx, &order)?;
+        entitlements::revoke(&tx, &order, &actor.id)?;
         audit(&tx, &actor.id, "commerce.order.refund", &order.id, "{}")?;
         tx.commit()?;
         Ok(order)
@@ -783,6 +787,7 @@ impl Store {
             order.channel = PaymentChannel::External;
             order.paid_at_ms = Some(now_ms());
             write_order(&tx, &order)?;
+            entitlements::grant(&tx, &order, "webhook")?;
         }
         audit(
             &tx,
