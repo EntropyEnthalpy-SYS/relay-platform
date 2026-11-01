@@ -320,6 +320,33 @@ function targetHealth(topology) {
   for (const n of topology.nodes) for (const h of n.stats?.target_health || []) { const key = `${n.id}/${h.rule_id}/${h.target_index}`; health.set(key, [...(health.get(key) || []), h]); }
   return health;
 }
+// Real TCP connection outcomes from /history, summed over each hop's bins. A hop is a
+// rule's inbound side (`${node}/${rule}/in`) or one target (`${node}/${rule}/${index}/${address}`).
+const COUNTS = ['attempts', 'connected', 'timeout', 'refused', 'dns', 'closed', 'other', 'connect_us'];
+const failureNames = localize({ timeout: '超时', refused: '被拒绝', dns: '域名解析失败', closed: '对端断开', other: '其他错误' });
+function hopKey(node, rule, index = null, address = '') { return index == null ? `${node}/${rule}/in` : `${node}/${rule}/${index}/${address}`; }
+function addCounts(sum, c) { for (const k of COUNTS) sum[k] = (sum[k] || 0) + (c[k] || 0); return sum; }
+function hopTotals(history) {
+  const totals = new Map();
+  for (const h of history?.hops || []) { const key = hopKey(h.node_id, h.rule_id, h.target_index, h.target_address); totals.set(key, h.bins.reduce(addCounts, totals.get(key) || {})); }
+  return totals;
+}
+// Pages refresh every 5 seconds; a history answer is reused for 15 seconds (last hour) or a minute.
+const historyCache = new Map();
+async function monitoringHistory(range) {
+  const hit = historyCache.get(range), now = Date.now();
+  if (hit && hit.actor === state.actor && now - hit.at < (range === '1h' ? 15_000 : 60_000)) return hit.data;
+  const data = await api(`/history?range=${range}`).catch(() => null);
+  historyCache.set(range, { at: now, actor: state.actor, data }); return data;
+}
+function connState(c) { const r = c.connected / c.attempts; return r >= 0.99 ? 'up' : r >= 0.9 ? 'partial' : 'down'; }
+// Rounded down, so any failure keeps the rate below 100%.
+function successRate(c) { const p = 100 * c.connected / c.attempts; return p === 100 || p === 0 ? `${p}%` : `${(Math.floor(p * 10) / 10).toFixed(1)}%`; }
+function connSummary(c) {
+  const failed = COUNTS.slice(2, 7).filter(k => c[k]).map(k => `${failureNames[k]} ${c[k]}`).join(getLanguage() === 'en' ? ', ' : '、');
+  const n = v => v.toLocaleString(getLanguage());
+  return [msg`${n(c.attempts)} 次连接，成功 ${n(c.connected)} 次`, failed && msg`失败：${failed}`, c.connected && msg`平均建立 ${millis(c.connect_us / c.connected)}`].filter(Boolean).join(' · ');
+}
 // One probe report as a link colour: removed targets are down; passing targets that recently lost probes are partial.
 function probeState(r) { return r.status === 'healthy' ? (r.selection_reason === 'degraded' ? 'partial' : 'up') : r.status === 'recovering' ? 'partial' : r.status === 'unhealthy' ? 'down' : 'unknown'; }
 function median(values) { const v = values.filter(x => x != null).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : null; }
@@ -346,7 +373,7 @@ function currentRate(samples) {
   if (!last || first === last || last.at_ms <= first.at_ms || last.forwarded_bytes < first.forwarded_bytes) return null;
   return (last.forwarded_bytes - first.forwarded_bytes) / ((last.at_ms - first.at_ms) / 1000);
 }
-function sumBins(list) { return Array.from({ length: BINS }, (_, i) => { const v = list.map(s => s[i]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; }); }
+function sumBins(list) { return Array.from({ length: list[0]?.length ?? BINS }, (_, i) => { const v = list.map(s => s[i]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; }); }
 function spark(values, cls, width = 160, height = 44, ceiling = null) {
   const box = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, `spark ${cls}`);
   const top = ceiling ?? (Math.max(0, ...values.filter(v => v != null)) || 1), x = i => i / (values.length - 1) * width, y = v => height - 2 - v / top * (height - 6);
@@ -407,12 +434,13 @@ function columnChart(columns, parts, format) {
   }
   frame.append(axis, plot, el('span'), labels); box.append(frame); return box;
 }
-// A 15-minute line with a value axis, built on the overview sparkline.
-function trendChart(values, cls, format, now, ceiling = null) {
+// A line over `span` ending at `now` (15 minutes unless given) with a value axis, built on the overview sparkline.
+function trendChart(values, cls, format, now, ceiling = null, span = SPAN_MS) {
   const frame = el('div', undefined, 'chart-frame trend-chart'), axis = el('div', undefined, 'chart-axis'), labels = el('div', undefined, 'chart-labels');
   const top = ceiling ?? Math.max(0, ...values.filter(v => v != null));
   axis.append(el('span', top ? format(top) : '—'), el('span', top ? format(top / 2) : ''), el('span', format(0)));
-  labels.append(el('span', clock(now - SPAN_MS)), el('span', clock(now - SPAN_MS / 2)), el('span', clock(now)));
+  const at = ms => span > 86_400_000 ? shortTime(ms, true) : clock(ms);
+  labels.append(el('span', at(now - span)), el('span', at(now - span / 2)), el('span', at(now)));
   frame.append(axis, spark(values, cls, 600, 150, ceiling), el('span'), labels); return frame;
 }
 function chartPanel(title, description, chart) { const p = panel(title, description); const body = el('div', undefined, 'panel-body chart-body'); body.append(chart); p.append(body); return p; }
@@ -426,19 +454,45 @@ function overviewStatus(node, latest) {
   if (node.applied_revision !== node.desired_revision) return [translate('等待节点应用'), 'orange', 'partial'];
   return [translate('控制在线'), 'green', 'up'];
 }
+// /history bins as overview series: per node like nodeSeries, plus the success of
+// real connections to targets summed over every node. The last bin is still filling.
+function historySeries(history) {
+  const { start_ms: start, end_ms: end, step_ms: step } = history, count = Math.round((end - start) / step);
+  const index = at => Math.round((at - start) / step), blank = () => Array(count).fill(null);
+  const seconds = i => Math.max(1, Math.min(step, history.generated_at_ms - (start + i * step)) / 1000);
+  const nodes = new Map(history.nodes.map(n => {
+    const s = { rate: blank(), sessions: blank(), latency: Array.from({ length: count }, () => []), available: blank() };
+    for (const b of n.bins) {
+      const i = index(b.at_ms); if (i < 0 || i >= count) continue;
+      s.rate[i] = b.forwarded_bytes / seconds(i); s.sessions[i] = b.sessions_sum / b.reports;
+      if (b.latency_count) s.latency[i].push(b.latency_sum_us / b.latency_count); if (b.probed_sum) s.available[i] = b.healthy_sum / b.probed_sum;
+    }
+    return [n.id, s];
+  }));
+  const totals = Array.from({ length: count }, () => ({}));
+  for (const h of history.hops) if (h.target_index != null) for (const b of h.bins) { const i = index(b.at_ms); if (i >= 0 && i < count) addCounts(totals[i], b); }
+  return { nodes, count, span: end - start, end, connections: totals.reduce(addCounts, {}), success: totals.map(t => t.attempts ? t.connected / t.attempts : null) };
+}
+const overviewRanges = localize([['15m', '15 分钟'], ['24h', '24 小时'], ['7d', '7 天']]);
+function readOverviewRange() { try { const r = localStorage.getItem('relay-overview-range'); return overviewRanges.some(([v]) => v === r) ? r : '15m'; } catch { return '15m'; } }
 async function renderOverview() {
   const actor = state.actor;
-  const [telemetry, nodes, topology] = await Promise.all([api('/telemetry'), api('/nodes'), api('/topology')]);
+  const range = readOverviewRange();
+  const [telemetry, nodes, topology, recent, history] = await Promise.all([api('/telemetry'), api('/nodes'), api('/topology'), monitoringHistory('1h'), range === '15m' ? null : monitoringHistory(range)]);
   if (state.view !== 'overview' || !actor || state.actor !== actor) return;
-  const now = telemetry.generated_at_ms, byId = new Map(nodes.map(n => [n.id, n]));
-  const rows = telemetry.nodes.filter(t => byId.has(t.id)).map(t => { const node = byId.get(t.id), latest = online(node) ? t.samples.at(-1) : null; return { node, samples: t.samples, latest, series: nodeSeries(t.samples, now), rate: online(node) ? currentRate(t.samples) : null, status: overviewStatus(node, latest) }; });
+  const now = telemetry.generated_at_ms, byId = new Map(nodes.map(n => [n.id, n])), past = history && historySeries(history), conns = hopTotals(recent);
+  const noData = () => ({ rate: Array(past.count).fill(null), sessions: Array(past.count).fill(null), latency: Array.from({ length: past.count }, () => []), available: Array(past.count).fill(null) });
+  const rows = telemetry.nodes.filter(t => byId.has(t.id)).map(t => { const node = byId.get(t.id), latest = online(node) ? t.samples.at(-1) : null; return { node, samples: t.samples, latest, series: past ? past.nodes.get(t.id) || noData() : nodeSeries(t.samples, now), rate: online(node) ? currentRate(t.samples) : null, status: overviewStatus(node, latest) }; });
   const live = rows.filter(r => r.latest), enrolled = rows.filter(r => r.node.enrolled);
   const rate = sumBins(rows.map(r => r.series.rate)), sessions = sumBins(rows.map(r => r.series.sessions));
-  const latency = Array.from({ length: BINS }, (_, i) => median(rows.flatMap(r => r.series.latency[i])));
+  const latency = Array.from({ length: past ? past.count : BINS }, (_, i) => median(rows.flatMap(r => r.series.latency[i])));
   const healthy = live.reduce((s, r) => s + r.latest.healthy_targets, 0), probed = live.reduce((s, r) => s + r.latest.probed_targets, 0);
   const measuredRates = rate.filter(Number.isFinite), liveRates = live.map(r => r.rate).filter(Number.isFinite);
   const peak = measuredRates.length ? Math.max(...measuredRates) : null;
   const fleet = el('div', undefined, 'fleet-bar'); enrolled.forEach(r => fleet.append(el('i', undefined, r.status[2])));
+  const rangeLabel = overviewRanges.find(([v]) => v === range)[1], ranges = el('div', undefined, 'overview-range'), picker = el('div', undefined, 'mode-picker');
+  for (const [value, label] of overviewRanges) { const choice = button(label, async () => { try { localStorage.setItem('relay-overview-range', value); } catch { /* Still switches without storage. */ } await renderOverview(); }); choice.setAttribute('aria-pressed', String(range === value)); picker.append(choice); }
+  ranges.append(el('span', translate('趋势范围'), 'fine'), picker);
   const kpis = el('div', undefined, 'kpis');
   kpis.append(
     kpi(translate('实时吞吐'), liveRates.length ? bits(liveRates.reduce((sum, value) => sum + value, 0)) : '—', msg`多跳流量逐跳计入 · 峰值 ${peak == null ? '—' : bits(peak)}`, spark(rate, 'accent')),
@@ -449,8 +503,17 @@ async function renderOverview() {
   const pill = $('#status-pill'); pill.className = `status-pill ${rows.some(r => r.status[2] === 'down') ? 'red' : attention ? 'orange' : 'green'}`;
   pill.textContent = !enrolled.length ? translate('等待节点注册') : !live.length ? translate('等待节点回报') : attention ? msg`${attention} 个节点需要关注` : msg`控制在线 · ${live.length} 个节点`;
   if (!live.length) pill.className = 'status-pill neutral';
-  const graphPanel = panel(translate('转发链路'), translate('按规则声明的下一跳绘制；连线颜色为该段目标的最新探测结果，点击节点查看规则。'), legend());
-  graphPanel.classList.add('graph-panel'); graphPanel.append(chainGraph(topology, byId));
+  const graphPanel = panel(translate('转发链路'), translate('按规则声明的下一跳绘制；连线颜色取该段最新探测结果与最近 1 小时真实连接中较差的一项，标注为探测往返与连接成功率。点击节点查看规则。'), legend());
+  graphPanel.classList.add('graph-panel'); graphPanel.append(chainGraph(topology, byId, conns));
+  let trends = null;
+  if (past) {
+    const c = past.connections, percent = v => `${+(v * 100).toFixed(1)}%`;
+    trends = el('div', undefined, 'chart-grid overview-trends');
+    trends.append(chartPanel(translate('吞吐'), msg`最近 ${rangeLabel} · 全部节点合计，多跳流量逐跳计入。`, trendChart(rate, 'accent', bits, past.end, null, past.span)),
+      chartPanel(translate('真实连接成功率'), c.attempts ? msg`最近 ${rangeLabel} · ${connSummary(c)}。只计 TCP 到目标的连接。` : msg`最近 ${rangeLabel}没有到目标的 TCP 连接。`, trendChart(past.success, 'up', percent, past.end, 1, past.span)),
+      chartPanel(translate('平均会话'), msg`最近 ${rangeLabel} · 全部节点合计。`, trendChart(sessions, 'blue', v => String(Math.round(v)), past.end, null, past.span)),
+      chartPanel(translate('探测往返（中位数）'), msg`最近 ${rangeLabel} · 各节点平均值的中位数。`, trendChart(latency, 'violet', millis, past.end, null, past.span)));
+  }
   const incidents = panel(translate('事件'), msg`最近 24 小时 · 共 ${events.length} 条`, events.length ? button(translate('全部事件'), () => modal(translate('全部事件'), eventTable(events, byId, now)), 'table-action') : undefined);
   incidents.classList.add('incident-panel');
   // A problem stays open until a later event about the same node, subject and kind family
@@ -474,7 +537,7 @@ async function renderOverview() {
   const search = el('input'); search.type = 'search'; search.placeholder = translate('按名称、ID 或分组筛选'); search.value = state.overviewFilter || ''; search.setAttribute('aria-label', translate('筛选节点'));
   const nodePanel = panel(translate('中转节点'), msg`${enrolled.length} 个已注册 · 采样来自每次节点回报`, search);
   // Related readings share a cell (status with its report age, CPU with memory) so the table fits a laptop screen.
-  const t = table([translate('节点'), translate('状态 / 最近回报'), translate('探测往返'), translate('吞吐（15 分钟）'), translate('CPU / 内存'), translate('会话'), translate('配置修订'), ''], rows.map(r => {
+  const t = table([translate('节点'), translate('状态 / 最近回报'), translate('探测往返'), msg`吞吐（${rangeLabel}）`, translate('CPU / 内存'), translate('会话'), translate('配置修订'), ''], rows.map(r => {
     const { node, latest } = r, memory = latest?.memory_total_bytes ? 1 - latest.memory_available_bytes / latest.memory_total_bytes : null;
     const throughput = el('div', undefined, 'throughput'); throughput.append(spark(r.series.rate, 'accent'), el('span', r.rate == null ? '—' : bits(r.rate)));
     const status = el('div'); status.append(badge(r.status[0], r.status[1]), el('div', node.last_seen_ms ? ago(node.last_seen_ms, now) : translate('尚未回报'), 'subline'));
@@ -489,7 +552,7 @@ async function renderOverview() {
   const filter = () => { state.overviewFilter = search.value; const q = search.value.trim().toLowerCase(); trs.forEach((tr, i) => tr.classList.toggle('hidden', !!q && !keys[i].includes(q))); };
   search.addEventListener('input', filter); filter();
   nodePanel.append(rows.length ? t : empty(translate('还没有节点'), translate('注册节点并启动 Agent 后，这里会显示实时吞吐、资源和事件。'), button(translate('前往节点管理'), () => navigate('nodes'))));
-  if (state.view === 'overview') $('#content').replaceChildren(...(!live.length ? [waiting] : []), kpis, ...(globe ? [globe] : []), middle, nodePanel);
+  if (state.view === 'overview') $('#content').replaceChildren(...(!live.length ? [waiting] : []), ranges, kpis, ...(trends ? [trends] : []), ...(globe ? [globe] : []), middle, nodePanel);
 }
 function locationName(location) { const city = cityFor(location); return city ? (getLanguage() === 'en' ? city[2] : city[1]) : location?.name || ''; }
 // One globe per page load: it keeps its rotation and selection across the 5-second refreshes.
@@ -554,27 +617,29 @@ function eventTable(events, byId, now) {
 }
 // One edge per node pair from enabled rules: client → entry nodes, node → next
 // hop (`via`), and node → 'sink' for external targets and proxy services.
-function chainEdges(topology) {
+// `conns` adds real connection outcomes (hopTotals) to each edge.
+function chainEdges(topology, conns = new Map()) {
   const health = targetHealth(topology), edges = new Map(), referenced = new Set(), ruleCount = new Map();
-  const addEdge = (from, to, reports) => {
-    const key = `${from}>${to}`, e = edges.get(key) || { from, to, states: [], latency: [] }; edges.set(key, e);
+  const addEdge = (from, to, reports, counts) => {
+    const key = `${from}>${to}`, e = edges.get(key) || { from, to, states: [], latency: [], counts: {} }; edges.set(key, e);
     e.states.push(!reports.length ? 'unknown' : reports.every(h => h.eligible) ? 'up' : reports.some(h => h.eligible) ? 'partial' : 'down');
     e.latency.push(...reports.filter(h => h.eligible).map(h => h.latency_ewma_us));
+    if (counts) addCounts(e.counts, counts);
   };
   for (const config of topology.configs || []) for (const rule of config.rules) {
     if (!rule.enabled) continue; ruleCount.set(config.node_id, (ruleCount.get(config.node_id) || 0) + 1);
     if (serviceKind(rule) !== 'forward') addEdge(config.node_id, 'sink', []);
-    rule.targets.forEach((target, i) => { if (target.via) referenced.add(`${target.via.node_id}/${target.via.rule_id}`); addEdge(config.node_id, target.via ? target.via.node_id : 'sink', health.get(`${config.node_id}/${rule.id}/${i}`) || []); });
+    rule.targets.forEach((target, i) => { if (target.via) referenced.add(`${target.via.node_id}/${target.via.rule_id}`); addEdge(config.node_id, target.via ? target.via.node_id : 'sink', health.get(`${config.node_id}/${rule.id}/${i}`) || [], conns.get(hopKey(config.node_id, rule.id, i, target.address))); });
   }
-  for (const config of topology.configs || []) if (config.rules.some(rule => rule.enabled && !referenced.has(`${config.node_id}/${rule.id}`))) addEdge('client', config.node_id, []);
+  for (const config of topology.configs || []) for (const rule of config.rules) if (rule.enabled && !referenced.has(`${config.node_id}/${rule.id}`)) addEdge('client', config.node_id, [], conns.get(hopKey(config.node_id, rule.id)));
   return { edges, ruleCount };
 }
 // A link is up only if every probed target is, and down only if none is; unprobed targets do not count.
 function linkState(states) { const known = states.filter(s => s !== 'unknown'); return !known.length ? 'unknown' : known.every(s => s === 'up') ? 'up' : known.every(s => s === 'down') ? 'down' : 'partial'; }
 // Columns follow the longest declared path from an entry node; external
 // targets share one sink so each node shows one summarized outgoing link.
-function chainGraph(topology, byId) {
-  const { edges, ruleCount } = chainEdges(topology), labels = [];
+function chainGraph(topology, byId, conns) {
+  const { edges, ruleCount } = chainEdges(topology, conns), labels = [];
   const ids = topology.nodes.map(n => n.id), depth = new Map();
   const depthOf = (id, seen = new Set()) => { if (depth.has(id)) return depth.get(id); if (seen.has(id)) return 1; seen.add(id); const parents = [...edges.values()].filter(e => e.to === id && e.from !== 'client').map(e => depthOf(e.from, seen)); const d = parents.length ? Math.max(...parents) + 1 : 1; depth.set(id, d); return d; };
   ids.forEach(id => depthOf(id));
@@ -589,7 +654,8 @@ function chainGraph(topology, byId) {
   const box = svg('svg', { viewBox: `0 0 ${W} ${H}`, role: 'group', 'aria-label': translate('转发链路图') }, 'chain');
   for (const e of edges.values()) {
     const a = pos.get(e.from), b = pos.get(e.to); if (!a || !b) continue;
-    const x1 = a[0] + a[2], y1 = a[1] + bh / 2, x2 = b[0], y2 = b[1] + bh / 2, dx = (x2 - x1) / 2, state = e.from === 'client' ? 'client' : linkState(e.states);
+    const used = e.counts.attempts > 0, probed = linkState(e.states), worst = used ? ['down', 'partial', 'up', 'unknown'].find(s => s === probed || s === connState(e.counts)) : probed;
+    const x1 = a[0] + a[2], y1 = a[1] + bh / 2, x2 = b[0], y2 = b[1] + bh / 2, dx = (x2 - x1) / 2, state = e.from === 'client' ? 'client' : worst;
     const fromColumn = e.from === 'client' ? 0 : depth.get(e.from), toColumn = e.to === 'sink' ? last : depth.get(e.to);
     const bypass = toColumn - fromColumn !== 1, laneY = e.from === 'client' ? 18 : H - 18;
     // Keep direct and bypass connections outside intervening VPS cards. A
@@ -597,8 +663,10 @@ function chainGraph(topology, byId) {
     const d = bypass ? `M${x1} ${y1}C${x1 + 24} ${y1} ${x1 + 24} ${laneY} ${x1 + 48} ${laneY}L${x2 - 48} ${laneY}C${x2 - 24} ${laneY} ${x2 - 24} ${y2} ${x2} ${y2}` : `M${x1} ${y1}C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}`;
     const edge = svg('path', { d }, `edge ${state}`), title = svg('title');
     const name = id => id === 'client' ? translate('客户端') : id === 'sink' ? translate('目标服务') : byId.get(id)?.name || id;
-    title.textContent = `${name(e.from)} → ${name(e.to)}`; edge.append(title); box.append(edge);
-    const lat = median(e.latency); if (lat != null) { const label = svg('text', { x: (x1 + x2) / 2, y: (bypass ? laneY : (y1 + y2) / 2) - 7, 'text-anchor': 'middle' }, 'edge-label'); label.textContent = millis(lat); labels.push(label); }
+    title.textContent = [`${name(e.from)} → ${name(e.to)}`, used ? msg`最近 1 小时真实 TCP 连接：${connSummary(e.counts)}` : ''].filter(Boolean).join('\n'); edge.append(title); box.append(edge);
+    // Client links carry the entry's inbound setup, shown in the tooltip only: their lanes run together.
+    const lat = median(e.latency), text = [lat != null ? millis(lat) : '', used && e.from !== 'client' ? successRate(e.counts) : ''].filter(Boolean).join(' · ');
+    if (text) { const label = svg('text', { x: (x1 + x2) / 2, y: (bypass ? laneY : (y1 + y2) / 2) - 7, 'text-anchor': 'middle' }, `edge-label${used ? ` ${connState(e.counts)}` : ''}`); label.textContent = text; labels.push(label); }
   }
   for (const [id, [x, y, w]] of pos) {
     const g = svg('g', { transform: `translate(${x} ${y})` }), node = byId.get(id);
@@ -2307,7 +2375,7 @@ function editAlertChannel(existing) {
   });
   modal(existing ? msg`编辑通知通道 · ${existing.name}` : translate('添加通知通道'), form);
 }
-async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'rules', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
@@ -2508,9 +2576,9 @@ async function editDiagramRule(ref) {
 }
 async function renderTopology() {
   const actor = state.actor;
-  const snapshot = await api('/topology');
+  const [snapshot, recent] = await Promise.all([api('/topology'), monitoringHistory('1h')]);
   if (state.view !== 'topology' || !actor || state.actor !== actor) return;
-  const names = new Map(snapshot.nodes.map(node => [node.id, node.name])), byId = new Map(snapshot.nodes.map(node => [node.id, node])), health = targetHealth(snapshot);
+  const names = new Map(snapshot.nodes.map(node => [node.id, node.name])), byId = new Map(snapshot.nodes.map(node => [node.id, node])), health = targetHealth(snapshot), conns = hopTotals(recent);
   const rules = new Map(snapshot.configs.flatMap(config => config.rules.map(rule => [`${config.node_id}/${rule.id}`, rule])));
   const roots = forwardingPathRoots(snapshot), ids = new Set();
   const actions = el('div');
@@ -2539,11 +2607,14 @@ async function renderTopology() {
     const path = shadowsocksPath(snapshot, root);
     if (path) tools.append(button(translate('客户端链接'), () => shareShadowsocks(path.exit, path.entry, path.hops.map(hop => names.get(hop.node_id)).join(' → ')), 'table-action'));
     if (canWrite()) tools.append(button(rule?.enabled ? translate('停用') : translate('启用'), () => changeTopologyComponent(snapshot, key, !rule?.enabled), 'table-action'));
-    head.append(title, tools); card.append(head, routeChips(model, health, byId));
+    head.append(title, tools); card.append(head, routeChips(model, health, byId, conns));
     const details = el('details', undefined, 'path-details'); details.open = open.has(key);
     details.addEventListener('toggle', () => details.open ? open.add(key) : open.delete(key));
     details.append(el('summary', translate('路径图、检查项与各段规则')));
     const view = forwardingPathView({ onSelect: canWrite() ? editDiagramRule : null }); view.update(model, 'saved'); details.append(view.box);
+    // Loaded when the row is first opened, then on each refresh while it stays open.
+    const historyBox = el('div', undefined, 'hop-history-box'), loadHistory = () => { if (details.open) hopHistory(historyBox, model, rule?.name).catch(error => historyBox.replaceChildren(el('p', error.message, 'fine'))); };
+    details.addEventListener('toggle', loadHistory); loadHistory(); details.append(historyBox);
     const nodeActions = el('div', undefined, 'path-node-actions');
     nodeActions.append(el('span', translate('按服务器查看各段规则：'), 'fine'));
     for (const id of nodeIds) nodeActions.append(button(names.get(id) || id, async () => { state.selectedNode = id; await navigate('rules'); }, 'subtle'));
@@ -2561,24 +2632,32 @@ async function renderTopology() {
   if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, ...(roots.length ? [status] : []));
 }
 // One line per path: client, each server with its connect address, then the target.
-// The arrow after a server shows that server's latest probe of the next hop; several
-// targets are listed by priority (lower first) with their selection state.
-function routeChips(model, health = new Map(), nodes = new Map()) {
+// The arrow after a server shows that server's latest probe of the next hop and the
+// success of its real connections there in the last hour; the client arrow shows the
+// entry's inbound setup. Several targets are listed by priority (lower first).
+function routeChips(model, health = new Map(), nodes = new Map(), conns = new Map()) {
   const line = el('div', undefined, 'route-chips'), arrow = () => el('span', '→', 'route-arrow');
   const services = { ss: 'Shadowsocks', socks5: 'SOCKS5', http: 'HTTP CONNECT', h2: 'HTTP/2 CONNECT', gateway: translate('受管协议') };
-  const probe = reports => {
-    const state = linkState(reports.map(probeState)), label = el('span', undefined, `route-probe ${state}`);
+  const worse = (a, b) => ['down', 'partial', 'up', 'unknown'].find(s => s === a || s === b);
+  const probe = (reports, counts, inbound = false) => {
+    const used = counts?.attempts > 0, probed = linkState(reports.map(probeState));
+    const state = used ? worse(probed, connState(counts)) : probed, label = el('span', undefined, `route-probe ${state}`);
     const checks = reports.reduce((n, r) => n + r.window_checks, 0), failures = reports.reduce((n, r) => n + r.window_failures, 0);
     const failed = reports.find(r => r.status === 'unhealthy' && r.last_error), time = millis(median(reports.map(r => r.latency_ewma_us)));
-    label.textContent = !reports.length ? translate('未探测') : state === 'unknown' ? translate('等待探测确认') : state === 'down' ? (failed ? probeErrors[failed.last_error] : translate('不可用'))
+    const text = !reports.length ? (used ? '' : translate('未探测')) : probed === 'unknown' ? translate('等待探测确认') : probed === 'down' ? (failed ? probeErrors[failed.last_error] : translate('不可用'))
       : checks ? msg`${time} · 丢包 ${Math.round(100 * failures / checks)}%` : time;
-    label.title = reports.map(r => [r.protocol.toUpperCase(), selectionReasons[r.selection_reason] || r.selection_reason, millis(r.latency_ewma_us), r.last_error ? probeErrors[r.last_error] : ''].filter(Boolean).join(' · ')).join('\n');
+    if (text) label.append(text);
+    if (used) label.append(el('span', inbound ? msg`入站 ${successRate(counts)}` : msg`成功 ${successRate(counts)}`, `route-conn ${connState(counts)}`));
+    label.title = [...reports.map(r => [r.protocol.toUpperCase(), selectionReasons[r.selection_reason] || r.selection_reason, millis(r.latency_ewma_us), r.last_error ? probeErrors[r.last_error] : ''].filter(Boolean).join(' · ')),
+      used ? (inbound ? msg`最近 1 小时入站 TCP 连接建立（TLS、PROXY、WebSocket）：${connSummary(counts)}` : msg`最近 1 小时真实 TCP 连接：${connSummary(counts)}`) : ''].filter(Boolean).join('\n');
     return label;
   };
+  const link = (reports, counts, inbound) => { const box = el('span', undefined, 'route-link'); box.append(probe(reports, counts, inbound), arrow()); return box; };
   line.append(el('span', translate('客户端'), 'route-chip route-end'));
-  let reports = null;
+  const entry = model.root.kind === 'node' && conns.get(hopKey(model.root.node_id, model.root.rule_id));
+  let next = entry?.attempts ? [[], entry, true] : null;
   for (let item = model.root; item;) {
-    if (reports) { const link = el('span', undefined, 'route-link'); link.append(probe(reports), arrow()); line.append(link); } else line.append(arrow());
+    line.append(next ? link(...next) : arrow());
     if (item.kind === 'target') { line.append(el('span', item.address || translate('待填写'), 'route-chip route-end mono')); break; }
     if (item.kind !== 'node') { line.append(el('span', item.name || translate('待选择'), 'route-chip route-warning')); break; }
     const chip = el('span', undefined, 'route-chip'), node = nodes.get(item.node_id); chip.append(el('strong', item.name), el('span', item.endpoint || item.listen || translate('待填写'), 'mono'));
@@ -2587,23 +2666,67 @@ function routeChips(model, health = new Map(), nodes = new Map()) {
     else if (node && !online(node)) chip.append(el('span', translate(node.enrolled ? '离线' : '待注册'), 'route-note'));
     line.append(chip);
     if (item.service !== 'forward') { line.append(arrow(), el('span', translate('客户端请求的网站 / 服务'), 'route-chip route-end')); break; }
-    const key = i => `${item.node_id}/${item.rule_id}/${i}`;
+    const key = i => `${item.node_id}/${item.rule_id}/${i}`, counts = (child, i) => conns.get(hopKey(item.node_id, item.rule_id, i, child.address));
     if (item.children.length > 1) {
       const list = el('span', undefined, 'route-chip route-candidates');
       // Array sort is stable, so targets of one priority keep their configured order.
-      item.children.map((child, i) => ({ child, reports: health.get(key(i)) || [] })).sort((a, b) => a.child.priority - b.child.priority).forEach(({ child, reports }) => {
+      item.children.map((child, i) => ({ child, reports: health.get(key(i)) || [], counts: counts(child, i) })).sort((a, b) => a.child.priority - b.child.priority).forEach(({ child, reports, counts }) => {
         // TCP and UDP are selected separately; name the protocol only when their roles differ.
         const reason = r => selectionReasons[r.selection_reason] || r.selection_reason, same = new Set(reports.map(reason)).size === 1;
         const row = el('span', undefined, 'route-candidate'), roles = same ? [reason(reports[0])] : reports.map(r => `${r.protocol.toUpperCase()} ${reason(r)}`);
         row.append(el('span', child.next.kind === 'node' ? child.next.name : child.address || translate('待填写'), child.next.kind === 'node' ? 'route-candidate-name' : 'route-candidate-name mono'));
         if (roles.length) row.append(el('span', roles.join(' / '), 'route-role'));
-        row.append(probe(reports)); list.append(row);
+        row.append(probe(reports, counts)); list.append(row);
       });
       line.append(arrow(), list); break;
     }
-    reports = health.get(key(0)) || []; item = item.children[0]?.next;
+    next = item.children.length ? [health.get(key(0)) || [], counts(item.children[0], 0)] : null; item = item.children[0]?.next;
   }
   return line;
+}
+// Every hop of a path in order: the entry's inbound side, then each server's targets.
+function pathHops(model) {
+  const hops = [];
+  if (model.root.kind === 'node') hops.push({ label: msg`客户端 → ${model.root.name}`, key: hopKey(model.root.node_id, model.root.rule_id), node: model.root.node_id, rule: model.root.rule_id, target: translate('入口') });
+  (function walk(item) {
+    if (item?.kind !== 'node' || item.service !== 'forward') return;
+    item.children.forEach((child, i) => {
+      hops.push({ label: `${item.name} → ${child.next.kind === 'node' ? child.next.name : child.address}`, key: hopKey(item.node_id, item.rule_id, i, child.address), node: item.node_id, rule: item.rule_id, target: child.address });
+      walk(child.next);
+    });
+  })(model.root);
+  return hops;
+}
+function shortTime(ms, days) { return new Date(ms).toLocaleString(getLanguage(), days ? { month: 'numeric', day: 'numeric' } : { hour: '2-digit', minute: '2-digit', hour12: false }); }
+// One strip per hop, one cell per bin, coloured by the share of real connections that succeeded.
+async function hopHistory(box, model, name) {
+  const range = state.hopRange || '24h', history = await monitoringHistory(range);
+  if (!history) { box.replaceChildren(el('p', translate('控制器没有返回连接记录。'), 'fine')); return; }
+  const { start_ms: start, end_ms: end, step_ms: step } = history, count = Math.round((end - start) / step), days = range === '7d';
+  const byKey = new Map(history.hops.map(h => [hopKey(h.node_id, h.rule_id, h.target_index, h.target_address), h])), hops = pathHops(model);
+  const head = el('div', undefined, 'hop-history-head'), title = el('div'), picker = el('div', undefined, 'mode-picker');
+  title.append(el('strong', translate('真实连接记录')), el('span', days ? translate('最近 7 天 · 每格 1 小时 · 仅 TCP') : translate('最近 24 小时 · 每格 15 分钟 · 仅 TCP'), 'fine'));
+  for (const [value, label] of [['24h', translate('24 小时')], ['7d', translate('7 天')]]) {
+    const choice = button(label, async () => { state.hopRange = value; await hopHistory(box, model, name); }); choice.setAttribute('aria-pressed', String(range === value)); picker.append(choice);
+  }
+  const csv = button(translate('导出 CSV'), () => {
+    const quote = v => /[",\n]/.test(String(v)) ? `"${String(v).replaceAll('"', '""')}"` : String(v);
+    const lines = [['start', 'hop', 'node_id', 'rule_id', 'target', ...COUNTS.slice(0, 7), 'avg_connect_ms'].join(',')];
+    for (const hop of hops) for (const b of byKey.get(hop.key)?.bins || []) lines.push([new Date(b.at_ms).toISOString(), hop.label, hop.node, hop.rule, hop.target, ...COUNTS.slice(0, 7).map(k => b[k]), b.connected ? (b.connect_us / b.connected / 1000).toFixed(2) : ''].map(quote).join(','));
+    const link = el('a'); link.href = URL.createObjectURL(new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv' })); link.download = `relay-connections-${(name || 'path').replace(/[^\w.-]+/g, '_')}-${range}.csv`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  }, 'table-action');
+  head.append(title, picker, csv);
+  const grid = el('div', undefined, 'hop-history');
+  for (const hop of hops) {
+    const bins = new Map((byKey.get(hop.key)?.bins || []).map(b => [Math.round((b.at_ms - start) / step), b])), total = [...bins.values()].reduce(addCounts, {});
+    const strip = el('div', undefined, 'uptime'); strip.style.setProperty('--bins', count);
+    for (let i = 0; i < count; i++) { const b = bins.get(i), cell = el('i', undefined, b?.attempts ? connState(b) : 'none'); cell.title = `${shortTime(start + i * step, days)} – ${shortTime(start + (i + 1) * step, days)}\n${b?.attempts ? connSummary(b) : translate('没有连接')}`; strip.append(cell); }
+    const sum = el('span', total.attempts ? `${successRate(total)} · ${total.attempts.toLocaleString(getLanguage())}` : translate('没有连接'), `hop-history-total ${total.attempts ? connState(total) : ''}`); sum.title = total.attempts ? connSummary(total) : '';
+    grid.append(el('span', hop.label, 'hop-history-label'), strip, sum);
+  }
+  const axis = el('div', undefined, 'hop-history-axis'); axis.append(el('span', shortTime(start, days)), el('span', translate('现在')));
+  grid.append(el('span'), axis, el('span'));
+  box.replaceChildren(head, grid);
 }
 async function previewTopology(snapshot, input, summary = '', back = null, diagramRoots = [], editHop = null) {
   const preview = await api('/configurations/preview', { method: 'POST', body: input });

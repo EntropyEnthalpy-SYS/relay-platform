@@ -1,9 +1,12 @@
 //! Controller-side recent history: one sample per node report and incidents
 //! derived from changes between reports. Kept in memory for the dashboard, so
 //! a controller restart starts empty; the usage ledger stays authoritative.
+//! With [`crate::history`] enabled, report figures and connection outcomes
+//! are also summed into buckets that are written there every minute.
 use crate::{
     health::Status,
-    model::{EngineStats, now_ms},
+    history::{Buckets, History, HopKey, NodeBucket},
+    model::{ConnectionCounts, EngineStats, now_ms},
 };
 use serde::Serialize;
 use std::{
@@ -68,6 +71,8 @@ struct Track {
     /// it was committed against; sync rewrites that row only on changes or
     /// once a minute.
     status: Option<(Option<i64>, String)>,
+    /// The latest report's connection counters, for the change since.
+    connections: HashMap<(String, Option<usize>, String), ConnectionCounts>,
 }
 
 #[derive(Default)]
@@ -75,10 +80,12 @@ struct Inner {
     nodes: HashMap<String, Track>,
     events: VecDeque<Event>,
     next_id: u64,
+    /// Bucket sums not yet written to the history database.
+    pending: Buckets,
 }
 
 #[derive(Default)]
-pub struct Telemetry(Mutex<Inner>);
+pub struct Telemetry(Mutex<Inner>, std::sync::OnceLock<History>);
 
 impl Telemetry {
     pub fn record(&self, node: &str, applied: u64, apply_error: Option<&str>, stats: &EngineStats) {
@@ -98,6 +105,7 @@ impl Telemetry {
             nodes,
             events,
             next_id,
+            pending,
         } = &mut *inner;
         let track = nodes.entry(node.to_owned()).or_default();
         let mut emit = |severity, kind, subject: String, message: String| {
@@ -231,7 +239,7 @@ impl Telemetry {
         track.targets = current;
         latencies.sort_unstable();
         let system = stats.system.as_ref().filter(|s| s.plausible());
-        track.samples.push_back(Sample {
+        let sample = Sample {
             at_ms,
             forwarded_bytes: stats
                 .forwarded_upload_bytes
@@ -246,7 +254,59 @@ impl Telemetry {
             probe_latency_us: latencies.get(latencies.len() / 2).copied(),
             healthy_targets: healthy,
             probed_targets: stats.target_health.len() as u32,
-        });
+        };
+        if self.1.get().is_some() {
+            let at = crate::history::bucket(at_ms);
+            // Counters restart from zero with the agent. Without an earlier
+            // report since this controller started, the change is unknown.
+            let bytes = track.samples.back().map_or(0, |p| {
+                sample
+                    .forwarded_bytes
+                    .checked_sub(p.forwarded_bytes)
+                    .unwrap_or(sample.forwarded_bytes)
+            });
+            pending
+                .nodes
+                .entry((node.to_owned(), at))
+                .or_default()
+                .add(&NodeBucket {
+                    reports: 1,
+                    forwarded_bytes: bytes,
+                    sessions_sum: sample.active_sessions,
+                    sessions_max: sample.active_sessions,
+                    latency_sum_us: sample.probe_latency_us.unwrap_or(0),
+                    latency_count: sample.probe_latency_us.is_some().into(),
+                    healthy_sum: sample.healthy_targets.into(),
+                    probed_sum: sample.probed_targets.into(),
+                    cpu_sum: sample.cpu_percent.map_or(0.0, f64::from),
+                    cpu_count: sample.cpu_percent.is_some().into(),
+                });
+            let mut current = HashMap::new();
+            for report in &stats.connections {
+                let key = (
+                    report.rule_id.clone(),
+                    report.target_index,
+                    report.target_address.clone(),
+                );
+                let change = match track.connections.get(&key) {
+                    Some(earlier) => report.counts.since(earlier),
+                    None if seen_before => report.counts,
+                    None => ConnectionCounts::default(),
+                };
+                if change.attempts > 0 {
+                    let hop = HopKey {
+                        node_id: node.to_owned(),
+                        rule_id: key.0.clone(),
+                        target_index: key.1,
+                        target_address: key.2.clone(),
+                    };
+                    pending.hops.entry((hop, at)).or_default().add(&change);
+                }
+                current.insert(key, report.counts);
+            }
+            track.connections = current;
+        }
+        track.samples.push_back(sample);
         while track.samples.len() > MAX_SAMPLES
             || track
                 .samples
@@ -290,7 +350,54 @@ impl Telemetry {
 
     /// Drops the history of a deleted node.
     pub fn forget(&self, node: &str) {
-        self.0.lock().unwrap().nodes.remove(node);
+        let mut inner = self.0.lock().unwrap();
+        inner.nodes.remove(node);
+        inner.pending.nodes.retain(|(id, _), _| id != node);
+        inner.pending.hops.retain(|(hop, _), _| hop.node_id != node);
+    }
+
+    /// Keeps seven days of buckets in the database at `path` from now on.
+    pub fn enable_history(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let history = History::open(path)?;
+        anyhow::ensure!(self.1.set(history).is_ok(), "history already enabled");
+        Ok(())
+    }
+
+    /// Writes and clears the pending buckets.
+    pub fn flush_history(&self) -> anyhow::Result<()> {
+        let Some(history) = self.1.get() else {
+            return Ok(());
+        };
+        let pending = std::mem::take(&mut self.0.lock().unwrap().pending);
+        history.write(&pending, now_ms())
+    }
+
+    /// Stored and pending buckets of `nodes` from `since_ms` on, or `None`
+    /// when history is not enabled.
+    pub fn history(&self, nodes: &[String], since_ms: i64) -> anyhow::Result<Option<Buckets>> {
+        let Some(history) = self.1.get() else {
+            return Ok(None);
+        };
+        let mut buckets = history.read(nodes, since_ms)?;
+        let inner = self.0.lock().unwrap();
+        let wanted = |id: &String, at: i64| at >= since_ms && nodes.contains(id);
+        buckets.merge(Buckets {
+            nodes: inner
+                .pending
+                .nodes
+                .iter()
+                .filter(|((id, at), _)| wanted(id, *at))
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            hops: inner
+                .pending
+                .hops
+                .iter()
+                .filter(|((hop, at), _)| wanted(&hop.node_id, *at))
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+        });
+        Ok(Some(buckets))
     }
 
     /// Every event newer than `after`, oldest first, regardless of tenant.
@@ -493,5 +600,97 @@ mod tests {
         // The first gap is over the threshold; the second is exactly at it.
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "node_reconnected");
+    }
+
+    fn traffic(bytes: u64, hops: &[(Option<usize>, u64, u64, u64)]) -> EngineStats {
+        let connections = hops
+            .iter()
+            .map(
+                |&(index, attempts, connected, timeout)| crate::model::ConnectionReport {
+                    rule_id: "web".into(),
+                    target_index: index,
+                    target_address: index.map_or(String::new(), |i| format!("10.0.0.{i}:443")),
+                    counts: ConnectionCounts {
+                        attempts,
+                        connected,
+                        timeout,
+                        ..Default::default()
+                    },
+                },
+            )
+            .collect();
+        EngineStats {
+            forwarded_upload_bytes: bytes,
+            connections,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn history_sums_changes_between_reports_and_survives_a_controller_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.sqlite");
+        let t = Telemetry::default();
+        t.enable_history(&path).unwrap();
+        let at = crate::history::bucket(now_ms());
+        // Before a first report the counters' starting point is unknown.
+        t.record_at(at, "a", 1, None, &traffic(1_000, &[(Some(0), 10, 9, 1)]));
+        t.record_at(
+            at + 1,
+            "a",
+            1,
+            None,
+            &traffic(1_500, &[(Some(0), 15, 13, 2)]),
+        );
+        t.flush_history().unwrap();
+        // The agent restarted: its counters start again from zero, and a hop
+        // seen for the first time counts in full.
+        t.record_at(
+            at + 2,
+            "a",
+            1,
+            None,
+            &traffic(200, &[(Some(0), 3, 3, 0), (None, 2, 2, 0)]),
+        );
+        t.record_at(at + 3, "b", 1, None, &traffic(0, &[]));
+        t.record_at(at + 4, "b", 1, None, &traffic(9, &[(Some(0), 4, 4, 0)]));
+        let hop = |b: &Buckets, index: Option<usize>| {
+            let found: Vec<_> = b
+                .hops
+                .iter()
+                .filter(|((h, _), _)| h.target_index == index)
+                .collect();
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].0.0.node_id, "a");
+            *found[0].1
+        };
+        let both = t.history(&["a".into()], at).unwrap().unwrap();
+        let target = hop(&both, Some(0));
+        assert_eq!(
+            (target.attempts, target.connected, target.timeout),
+            (8, 7, 1)
+        );
+        assert_eq!(hop(&both, None).attempts, 2);
+        assert_eq!(both.nodes.len(), 1);
+        let node = both.nodes[&("a".to_owned(), at)];
+        assert_eq!((node.reports, node.forwarded_bytes), (3, 700));
+        // A restarted controller reads what was written; the rest was pending.
+        let again = Telemetry::default();
+        again.enable_history(&path).unwrap();
+        let stored = again.history(&["a".into()], at).unwrap().unwrap();
+        let target = hop(&stored, Some(0));
+        assert_eq!(
+            (target.attempts, target.connected, target.timeout),
+            (5, 4, 1)
+        );
+        assert_eq!(stored.nodes[&("a".to_owned(), at)].forwarded_bytes, 500);
+        assert!(
+            again
+                .history(&["a".into()], at + crate::history::BUCKET_MS)
+                .unwrap()
+                .unwrap()
+                .nodes
+                .is_empty()
+        );
     }
 }

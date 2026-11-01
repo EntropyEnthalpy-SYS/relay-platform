@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     fmt, fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -799,6 +800,99 @@ impl Store {
             "nodes": nodes,
             "events": events,
         }))
+    }
+    /// Bucketed report figures and per-hop connection outcomes of the nodes
+    /// the actor can see. Bins of `step_ms` cover `range` and end with the
+    /// current five-minute bucket, so the last bin is still filling.
+    pub fn monitoring_history(&self, actor: &Actor, range: &str) -> Result<serde_json::Value> {
+        use crate::history::{BUCKET_MS, NodeBucket};
+        const HOUR: i64 = 3_600_000;
+        let (range_ms, step_ms) = match range {
+            "1h" => (HOUR, HOUR),
+            "24h" => (24 * HOUR, HOUR / 4),
+            "7d" => (7 * 24 * HOUR, HOUR),
+            _ => return reject(400, "range must be 1h, 24h or 7d"),
+        };
+        let nodes: Vec<(String, String)> = {
+            let conn = self.0.lock().unwrap();
+            let mut q = conn.prepare("SELECT id,name FROM nodes WHERE (?1='system_admin' OR tenant_id=?2) ORDER BY name,id")?;
+            q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        let ids: Vec<String> = nodes.iter().map(|n| n.0.clone()).collect();
+        let now = now_ms();
+        let end = crate::history::bucket(now) + BUCKET_MS;
+        let start = end - range_ms;
+        let Some(buckets) = self.4.history(&ids, start)? else {
+            return reject(404, "history is kept by the controller service only");
+        };
+        let bin = |at: i64| start + (at - start) / step_ms * step_ms;
+        let mut by_node: BTreeMap<&str, BTreeMap<i64, NodeBucket>> = BTreeMap::new();
+        for ((id, at), b) in &buckets.nodes {
+            by_node
+                .entry(id)
+                .or_default()
+                .entry(bin(*at))
+                .or_default()
+                .add(b);
+        }
+        let mut by_hop: BTreeMap<_, BTreeMap<i64, ConnectionCounts>> = BTreeMap::new();
+        for ((hop, at), c) in &buckets.hops {
+            by_hop
+                .entry(hop)
+                .or_default()
+                .entry(bin(*at))
+                .or_default()
+                .add(c);
+        }
+        let nodes: Vec<_> = nodes
+            .iter()
+            .map(|(id, name)| {
+                let bins: Vec<_> = by_node
+                    .get(id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .map(|(at, b)| {
+                        let mut v = serde_json::to_value(b).unwrap_or_default();
+                        v["at_ms"] = (*at).into();
+                        v
+                    })
+                    .collect();
+                serde_json::json!({"id": id, "name": name, "bins": bins})
+            })
+            .collect();
+        let hops: Vec<_> = by_hop
+            .into_iter()
+            .map(|(hop, bins)| {
+                let bins: Vec<_> = bins
+                    .into_iter()
+                    .map(|(at, c)| {
+                        let mut v = serde_json::to_value(c).unwrap_or_default();
+                        v["at_ms"] = at.into();
+                        v
+                    })
+                    .collect();
+                let mut v = serde_json::to_value(hop).unwrap_or_default();
+                v["bins"] = bins.into();
+                v
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "generated_at_ms": now,
+            "start_ms": start,
+            "end_ms": end,
+            "step_ms": step_ms,
+            "nodes": nodes,
+            "hops": hops,
+        }))
+    }
+    pub fn flush_history(&self) -> Result<()> {
+        self.4.flush_history()
+    }
+    pub fn enable_history(&self, path: &Path) -> Result<()> {
+        self.4.enable_history(path)
     }
     pub fn config(&self, actor: &Actor, node: &str, revision: Option<u64>) -> Result<NodeConfig> {
         let conn = self.0.lock().unwrap();

@@ -944,6 +944,91 @@ pub struct EngineStats {
     /// empty so controllers older than this field accept the stats.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_rates: Vec<UserRateReport>,
+    /// Real TCP connection outcomes per rule hop since the agent started.
+    /// Omitted when empty so controllers older than this field accept the stats.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<ConnectionReport>,
+}
+/// Completed attempts on one hop of a rule: its inbound side (`target_index`
+/// is `None`: TLS, PROXY and WebSocket setup of accepted connections) or one
+/// configured target (dials, including hedged dials that finished).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionReport {
+    pub rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_index: Option<usize>,
+    /// The configured target address; empty for the inbound side.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_address: String,
+    pub counts: ConnectionCounts,
+}
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionCounts {
+    pub attempts: u64,
+    pub connected: u64,
+    /// Failures by cause; their sum is `attempts - connected`.
+    pub timeout: u64,
+    pub refused: u64,
+    pub dns: u64,
+    /// The peer closed or reset the connection during setup.
+    pub closed: u64,
+    pub other: u64,
+    /// Setup time of the connected attempts, summed.
+    pub connect_us: u64,
+}
+impl ConnectionCounts {
+    pub fn failed(&self) -> u64 {
+        self.timeout + self.refused + self.dns + self.closed + self.other
+    }
+    fn fields(&self) -> [u64; 8] {
+        [
+            self.attempts,
+            self.connected,
+            self.timeout,
+            self.refused,
+            self.dns,
+            self.closed,
+            self.other,
+            self.connect_us,
+        ]
+    }
+    fn from_fields(f: [u64; 8]) -> Self {
+        let [
+            attempts,
+            connected,
+            timeout,
+            refused,
+            dns,
+            closed,
+            other,
+            connect_us,
+        ] = f;
+        Self {
+            attempts,
+            connected,
+            timeout,
+            refused,
+            dns,
+            closed,
+            other,
+            connect_us,
+        }
+    }
+    /// What happened since `earlier`. Counters restart from zero with the
+    /// agent, so when any went backwards the current values are the change.
+    pub fn since(&self, earlier: &Self) -> Self {
+        let (now, then) = (self.fields(), earlier.fields());
+        if now.iter().zip(&then).any(|(a, b)| a < b) {
+            return *self;
+        }
+        Self::from_fields(std::array::from_fn(|i| now[i] - then[i]))
+    }
+    pub fn add(&mut self, other: &Self) {
+        let (a, b) = (self.fields(), other.fields());
+        *self = Self::from_fields(std::array::from_fn(|i| a[i].saturating_add(b[i])));
+    }
 }
 /// An agent's counters for one user under a cross-node speed limit.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

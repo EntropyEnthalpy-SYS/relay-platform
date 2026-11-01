@@ -31,7 +31,9 @@ assert.ok(telemetry.nodeSeries([first, sample(next.at_ms, 1)], now).rate.every(v
 async function lateResponse(name, view, transition) {
   const actor = { id: 'original', role: 'system_admin' }, state = { actor, view, nodes: [], nodeFilter: {} }, pending = [];
   const forbidden = () => { throw new Error(`${name} rendered a response after ${transition}`); };
-  const context = { state, URLSearchParams, api: () => new Promise(resolve => pending.push(resolve)), $: forbidden, panel: forbidden, translate: value => value };
+  const request = () => new Promise(resolve => pending.push(resolve));
+  // History is fetched through a cache; the 24-hour range makes Overview request it too.
+  const context = { state, URLSearchParams, api: request, monitoringHistory: request, readOverviewRange: () => '24h', $: forbidden, panel: forbidden, translate: value => value };
   vm.createContext(context);
   vm.runInContext(`${definition(name)}\nthis.run = ${name};`, context);
   const result = context.run();

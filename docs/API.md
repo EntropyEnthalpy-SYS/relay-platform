@@ -40,6 +40,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/control/metrics` | 仅系统管理员；返回本次控制器运行的节点同步统计 |
 | GET | `/metrics` | 认证的 Prometheus 文本：构建信息、恢复日志、预算额度、规则累计用量、HTTP 请求分类与延迟直方图、反向 mux 进程可用性/控制/流/字节、节点在线、应用/期望修订、配置同步、最后同步、活动 TCP/UDP、接纳/拒绝/失败/丢弃/预热计数、转发字节、应用错误、系统资源、计量/额度恢复、目标健康，以及多路径会话/路径/负载/失败计数。独立部署的 mux 指标由 `reverse-mux-server --metrics-listen` 提供；控制器中的 `relay_reverse_mux_process_available 0` 表示遥测不在该进程 |
 | GET | `/telemetry` | 可见节点最近 24 小时的逐次回报采样和事件，供总览页使用；见下文“0.19.0 遥测” |
+| GET | `/history?range=1h\|24h\|7d` | 可见节点的 7 天历史：回报汇总与逐段真实 TCP 连接结果；见下文“0.131.0 连接记录与 7 天历史” |
 | GET | `/alerts` | 系统管理员读取全部；租户管理员读取本租户通道、事件和发送记录；返回 `can_manage` |
 | PUT | `/alerts/settings` | `{maintenance_until_ms}`；仅系统管理员，登录会话 |
 | POST | `/alerts/channels` | `{name,enabled,min_severity,target,tenant_id?}`；仅系统管理员，登录会话 |
@@ -236,6 +237,40 @@ API 令牌使用同一个 `Authorization: Bearer` 头，格式为 `rpat_` 加 64
 
 采样和事件只保存在控制器内存，控制器重启后从空开始；不进入恢复日志，不作为计量、计费或配额依据。权限与 `/nodes` 相同：只读用户可查看本租户，系统管理员可查看全部。
 
+
+## 0.131.0 连接记录与 7 天历史
+
+Agent 在同步的 `stats.connections` 中按规则逐段报告真实 TCP 连接的结果，数值为 Agent 进程启动以来的累计，没有记录时省略：
+
+- 省略 `target_index`：规则的入站一侧。被接受的连接完成入站 TLS、PROXY、WebSocket 设置记一次成功，期间失败记一次失败；被来源 ACL 拒绝的连接、规则更新时取消的连接不计。预热连接在客户端到达之前的等待不计。
+- `target_index` 为数字：拨号到该目标，`target_address` 为配置中的地址。每次完成的拨号记一次，包括并行补拨中先完成的一次；因另一目标先连通而被取消的补拨不计。没有可选目标、因而没有拨号的连接不出现在这里，其原因见目标探测。
+
+```json
+{"rule_id": "web", "target_index": 0, "target_address": "203.0.113.7:443",
+ "counts": {"attempts": 120, "connected": 118, "timeout": 1, "refused": 1, "dns": 0,
+            "closed": 0, "other": 0, "connect_us": 2360000}}
+```
+
+失败原因之和等于 `attempts - connected`：`timeout` 超时，`refused` 被拒绝，`dns` 域名解析失败，`closed` 建立过程中被对端关闭或重置，`other` 其他（TLS、协议或策略错误）。`connect_us` 是成功拨号的建立耗时之和。UDP 不计。目标地址修改或规则删除后，对应计数从报告中移除。`EngineStats` 拒绝未知字段，旧控制器会拒绝带此字段的同步：先升级控制器再升级 Agent，回退时先回退 Agent。
+
+控制器把相邻两次回报的差值和每次回报的吞吐、会话、探测往返、CPU 累加到 5 分钟桶，每分钟写入状态目录下的 `history.sqlite`（权限 0600），保留 7 天。该文件独立于 `controller.sqlite`，不进入备份和恢复日志，丢失只影响图表。控制器启动后每个节点的第一次回报只作为基准；计数回退视为 Agent 重启，按从零开始计算。服务正常停止时会写入最后一分钟，异常退出最多丢失 1 分钟。
+
+`GET /history?range=…` 的权限与 `/telemetry` 相同，只读令牌可用。`1h` 合并为一格，`24h` 每 15 分钟一格，`7d` 每小时一格；区间结束于当前 5 分钟桶的末尾，所以最后一格仍在累计。
+
+```json
+{
+  "generated_at_ms": 0, "start_ms": 0, "end_ms": 0, "step_ms": 900000,
+  "nodes": [{"id": "…", "name": "…", "bins": [
+    {"at_ms": 0, "reports": 180, "forwarded_bytes": 0, "sessions_sum": 0, "sessions_max": 0,
+     "latency_sum_us": 0, "latency_count": 180, "healthy_sum": 0, "probed_sum": 0,
+     "cpu_sum": 0.0, "cpu_count": 180}]}],
+  "hops": [{"node_id": "…", "rule_id": "web", "target_index": 0, "target_address": "203.0.113.7:443",
+    "bins": [{"at_ms": 0, "attempts": 120, "connected": 118, "timeout": 1, "refused": 1,
+              "dns": 0, "closed": 0, "other": 0, "connect_us": 2360000}]}]
+}
+```
+
+节点格是格内各次回报的和：平均会话为 `sessions_sum / reports`，平均探测往返为 `latency_sum_us / latency_count`，`forwarded_bytes` 是格内转发的字节。没有数据的格不返回。只由控制器服务保存历史；其他方式打开的数据库返回 404。
 
 ## 0.19.0 告警通知
 

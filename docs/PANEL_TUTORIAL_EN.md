@@ -187,6 +187,8 @@ curl --fail --max-time 10 http://ENTRY_VPS_IP:18081/
 
 Expected output: `relay-forwarding-ok`. Check the panel's usage and diagnostics for the corresponding rule; a short request may finish before a live connections widget refreshes. Traffic in both directions contributes to the rule's usage.
 
+On **Forwarding rules**, the arrows of this path now show real traffic: the arrow from Client shows the entry's inbound setup ("Inbound 100%") and the arrow after the server shows how many of its connections to the target succeeded in the last hour ("Success 100%"), next to the health probe result when one is configured. Hover an arrow for counts and failure causes. Expand the path for a 24-hour or 7-day strip per hop, one cell per 15 minutes or hour, and **Export CSV**. Only TCP is counted.
+
 After the demo, disable the rule and stop the temporary HTTP server with Ctrl+C. To keep a real application available, manage that application as a persistent service as well as the Agent.
 
 ## 7. Forward to an application on another VPS
@@ -247,6 +249,7 @@ Each hop maintains its own metering. Do not assume that a multi-hop path is coun
 | Service is active but node is offline | Agent logs, DNS resolution, outbound HTTPS, clock and certificate validity, and whether credentials were revoked. |
 | Desired revision differs from applied | Read the application error; check occupied ports, unavailable local bind addresses, missing TLS profiles, or unsupported configuration. |
 | Node online but client times out | Provider firewall, host firewall, actual Agent listener, source ACL, destination reachability from that VPS, quota and expiry. |
+| One arrow on a path shows a low success rate | Hover it for the failure cause: *Refused* means nothing listens at that address (check the next hop's applied revision), *Timed out* points to firewalls or routing between the two servers, *Closed by peer* often means a TLS or WebSocket mismatch. The expanded path's 7-day strip shows when it started. |
 | Address already in use | Use `ss -lntp` or `ss -lnup` to identify the existing listener; choose an unused port. |
 | Works locally but not from another machine | Loopback-only listener, firewall, source ACL, incorrect public IP, or missing provider/NAT port mapping. |
 | HTTPS certificate or website mismatch | Check the client hostname/SNI and Host header. Raw TCP forwarding does not replace certificates or rewrite HTTP. |

@@ -1066,6 +1066,7 @@ async fn main() -> Result<()> {
             store
                 .enable_recovery_log(&recovery_log.unwrap_or_else(|| state.join("recovery.log")))?;
             store.set_kind("controller")?;
+            store.enable_history(&state.join("history.sqlite"))?;
             if store.needs_bootstrap()? {
                 let password_path =
                     admin_password_file.unwrap_or_else(|| state.join("admin-password.secret"));
@@ -1083,6 +1084,11 @@ async fn main() -> Result<()> {
                 Duration::from_secs(2),
                 stop.clone(),
             ));
+            let history = tokio::spawn(relay_platform::history::run(
+                store.clone(),
+                Duration::from_secs(60),
+                stop.clone(),
+            ));
             axum::serve(
                 listener,
                 api::router(
@@ -1092,8 +1098,11 @@ async fn main() -> Result<()> {
                 )
                 .into_make_service_with_connect_info::<SocketAddr>(),
             )
-            .with_graceful_shutdown(stop.cancelled_owned())
+            .with_graceful_shutdown(stop.clone().cancelled_owned())
             .await?;
+            // The last minute of buckets is written once the listener stops.
+            stop.cancel();
+            let _ = history.await;
         }
         Command::Restore {
             backup,

@@ -65,8 +65,69 @@ struct Counters {
     forwarded_upload_bytes: AtomicU64,
     forwarded_download_bytes: AtomicU64,
     prewarmed_connections: AtomicU64,
+    /// Connection outcomes by rule, target index (`None` for the inbound
+    /// side) and configured target address.
+    hops: StdMutex<HopCounters>,
+}
+type HopCounters = HashMap<(String, Option<usize>, String), ConnectionCounts>;
+/// Why a connection could not be set up, as counted per hop.
+#[derive(Clone, Copy, Debug)]
+enum SetupFailure {
+    Timeout,
+    Refused,
+    Dns,
+    Closed,
+    Other,
+}
+impl SetupFailure {
+    fn of(error: &anyhow::Error) -> Self {
+        for cause in error.chain() {
+            if cause.is::<tokio::time::error::Elapsed>() {
+                return Self::Timeout;
+            }
+            if let Some(error) = cause.downcast_ref::<io::Error>() {
+                return match error.kind() {
+                    io::ErrorKind::TimedOut => Self::Timeout,
+                    io::ErrorKind::ConnectionRefused => Self::Refused,
+                    io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::NotConnected => Self::Closed,
+                    _ => Self::Other,
+                };
+            }
+        }
+        Self::Other
+    }
 }
 impl Counters {
+    fn record_hop(
+        &self,
+        rule: &str,
+        target: Option<(usize, &str)>,
+        outcome: std::result::Result<Duration, SetupFailure>,
+    ) {
+        let key = (
+            rule.to_owned(),
+            target.map(|(index, _)| index),
+            target.map_or_else(String::new, |(_, address)| address.to_owned()),
+        );
+        let mut hops = self.hops.lock().unwrap();
+        let counts = hops.entry(key).or_default();
+        counts.attempts += 1;
+        match outcome {
+            Ok(took) => {
+                counts.connected += 1;
+                counts.connect_us += took.as_micros().min(u128::from(u64::MAX)) as u64;
+            }
+            Err(SetupFailure::Timeout) => counts.timeout += 1,
+            Err(SetupFailure::Refused) => counts.refused += 1,
+            Err(SetupFailure::Dns) => counts.dns += 1,
+            Err(SetupFailure::Closed) => counts.closed += 1,
+            Err(SetupFailure::Other) => counts.other += 1,
+        }
+    }
     fn snapshot(&self) -> EngineStats {
         EngineStats {
             protocol_gateway: None,
@@ -88,6 +149,20 @@ impl Counters {
             forwarded_download_bytes: self.forwarded_download_bytes.load(Ordering::Relaxed),
             prewarmed_connections: self.prewarmed_connections.load(Ordering::Relaxed),
             user_rates: vec![],
+            connections: self
+                .hops
+                .lock()
+                .unwrap()
+                .iter()
+                .map(
+                    |((rule_id, target_index, target_address), counts)| ConnectionReport {
+                        rule_id: rule_id.clone(),
+                        target_index: *target_index,
+                        target_address: target_address.clone(),
+                        counts: *counts,
+                    },
+                )
+                .collect(),
         }
     }
 }
@@ -1990,6 +2065,22 @@ impl Engine {
             .collect();
         health_runtimes.sort_by(|a, b| a.spec.id.cmp(&b.spec.id));
         *self.health_runtimes.lock().unwrap() = health_runtimes;
+        // Counters of removed rules or changed targets would only grow the report.
+        self.stats
+            .hops
+            .lock()
+            .unwrap()
+            .retain(|(rule, index, address), _| {
+                rules.get(rule).is_some_and(|runtime| {
+                    index.is_none_or(|i| {
+                        runtime
+                            .spec
+                            .targets
+                            .get(i)
+                            .is_some_and(|t| t.address == *address)
+                    })
+                })
+            });
         inner.rules = rules;
         inner.resolvers = resolvers;
         inner.config = Some(config);
@@ -2214,8 +2305,16 @@ async fn tcp_listener(
         let stats = stats.clone();
         let session_tasks = tasks.clone();
         tasks.spawn(async move {
-            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,inlet,rule.clone(),meter,stats.clone(),guard,session_tasks)=>result};
-            if let Err(error)=outcome {stats.failed_connections.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%rule.spec.id,%error,"TCP session ended");}
+            // A session that fails while this is unset counts as an inbound
+            // setup failure; cancelled sessions count as neither.
+            let settled = AtomicBool::new(false);
+            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,inlet,rule.clone(),meter,stats.clone(),guard,session_tasks,&settled)=>result};
+            if let Err(error)=outcome {
+                if !settled.load(Ordering::Relaxed) {
+                    stats.record_hop(&rule.spec.id, None, Err(SetupFailure::of(&error)));
+                }
+                stats.failed_connections.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%rule.spec.id,%error,"TCP session ended");
+            }
         });
     }
 }
@@ -2509,17 +2608,23 @@ async fn try_target(
     inlet: ListenerKey,
     stats: &Counters,
     deadline: Instant,
-) -> Result<(BoxStream, LoopGuard), String> {
+) -> Result<(BoxStream, LoopGuard), (SetupFailure, String)> {
     let mut last = None;
     let target = rule
         .spec
         .target_address(index, inlet.address.port())
-        .map_err(|error| error.to_string())?;
-    let addresses = match timeout_at(deadline, resolve_destination(rule, &target)).await {
-        Ok(Ok(addresses)) => addresses,
-        Ok(Err(error)) => return Err(error.to_string()),
-        Err(_) => return Err("target resolution timed out".into()),
+        .map_err(|error| (SetupFailure::Other, error.to_string()))?;
+    let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
+        Ok(Ok(addresses)) => rule
+            .destination
+            .filter_sockets(destination_acl::host_from_endpoint(&target), addresses),
+        Ok(Err(error)) => return Err((SetupFailure::Dns, error.to_string())),
+        Err(_) => return Err((SetupFailure::Timeout, "target resolution timed out".into())),
     };
+    if addresses.is_empty() {
+        let error = format!("destination denied by rule policy: {target}");
+        return Err((SetupFailure::Other, error));
+    }
     if let Some(dialed) = rule
         .prewarm
         .as_ref()
@@ -2528,15 +2633,23 @@ async fn try_target(
     {
         // A pre-warmed connection that fails to activate falls back to a fresh dial.
         if !rule.destination.permits_socket(dialed.address) {
-            last = Some("pre-warmed destination denied by rule policy".into());
+            last = Some((
+                SetupFailure::Other,
+                "pre-warmed destination denied by rule policy".into(),
+            ));
         } else {
             match timeout_at(deadline, activate_target(rule, index, dialed, Some(info))).await {
                 Ok(Ok(dialed)) => {
                     stats.prewarmed_connections.fetch_add(1, Ordering::Relaxed);
                     return Ok(dialed);
                 }
-                Ok(Err(error)) => last = Some(error.to_string()),
-                Err(_) => last = Some("pre-warmed connection timed out".into()),
+                Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string())),
+                Err(_) => {
+                    last = Some((
+                        SetupFailure::Timeout,
+                        "pre-warmed connection timed out".into(),
+                    ))
+                }
             }
         }
     }
@@ -2548,11 +2661,13 @@ async fn try_target(
         .await
         {
             Ok(Ok(dialed)) => return Ok(dialed),
-            Ok(Err(error)) => last = Some(error.to_string()),
-            Err(_) => return Err("target connection timed out".into()),
+            Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string())),
+            Err(_) => {
+                return Err((SetupFailure::Timeout, "target connection timed out".into()));
+            }
         }
     }
-    Err(last.unwrap_or_default())
+    Err(last.unwrap_or((SetupFailure::Other, String::new())))
 }
 
 /// Dials targets in order. A target that has not connected within its hedge
@@ -2586,9 +2701,10 @@ async fn connect_tcp(
                 let share = now + (deadline - now) / (order.len() - position) as u32;
                 next_at = Some((now + hedge_delay(rule, index, inlet)).min(share));
                 in_flight.push(index);
+                let started = Instant::now();
                 running.push(
                     try_target(rule, index, info, inlet, stats, deadline)
-                        .map(move |result| (index, guard, result)),
+                        .map(move |result| (index, guard, started, result)),
                 );
                 break;
             }
@@ -2603,8 +2719,11 @@ async fn connect_tcp(
             }
         };
         tokio::select! {
-            Some((index, guard, result)) = running.next() => {
+            Some((index, guard, started, result)) = running.next() => {
                 in_flight.retain(|&other| other != index);
+                let address = &rule.spec.targets[index].address;
+                let outcome = result.as_ref().map(|_| started.elapsed()).map_err(|(kind, _)| *kind);
+                stats.record_hop(&rule.spec.id, Some((index, address)), outcome);
                 match result {
                     Ok((stream, route)) => {
                         // Without health probes, a target that lost the race
@@ -2616,7 +2735,7 @@ async fn connect_tcp(
                         }
                         return Ok((stream, guard, route));
                     }
-                    Err(error) => {
+                    Err((_, error)) => {
                         last = Some(error);
                         rule.cool(index);
                         next_at = Some(Instant::now());
@@ -3076,6 +3195,7 @@ fn configure_http2_socket(stream: &TcpStream, rule: &RuntimeRule) -> Result<()> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn tcp_session(
     mut client: TcpStream,
     inlet: ListenerKey,
@@ -3084,7 +3204,9 @@ async fn tcp_session(
     stats: Arc<Counters>,
     guard: CountGuard,
     tasks: TaskTracker,
+    settled: &AtomicBool,
 ) -> Result<()> {
+    let mut began = Instant::now();
     client.set_nodelay(true)?;
     let mptcp = rule
         .mptcp
@@ -3101,6 +3223,9 @@ async fn tcp_session(
     // A pre-warmed connection idles until the upstream has a client for it;
     // the remaining setup then gets the usual connect timeout.
     let prewarmed = policy.is_some_and(|p| p.accept_prewarmed);
+    // A pre-warmed connection is not a setup attempt until its client arrives:
+    // one the upstream closes unused is normal.
+    settled.store(prewarmed, Ordering::Relaxed);
     let header_deadline = if prewarmed {
         Instant::now() + Duration::from_millis(PREWARM_WAIT_MS)
     } else {
@@ -3116,6 +3241,8 @@ async fn tcp_session(
         .context("inbound PROXY header timed out")??;
         if prewarmed {
             handshake_deadline = Instant::now() + setup;
+            began = Instant::now();
+            settled.store(false, Ordering::Relaxed);
         }
     }
     let (mut client, certificate) =
@@ -3131,6 +3258,8 @@ async fn tcp_session(
         .context("inbound PROXY header timed out")??;
         if prewarmed {
             handshake_deadline = Instant::now() + setup;
+            began = Instant::now();
+            settled.store(false, Ordering::Relaxed);
         }
     }
     if !rule.accepts(info.source) {
@@ -3152,6 +3281,8 @@ async fn tcp_session(
         client
     };
     let client = transport::hold(client, (guard, mptcp));
+    settled.store(true, Ordering::Relaxed);
+    stats.record_hop(&rule.spec.id, None, Ok(began.elapsed()));
     if let Some(config) = rule.spec.inbound_http2_connect.clone() {
         let dial_rule = rule.clone();
         let dial_stats = stats.clone();

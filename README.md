@@ -1,5 +1,7 @@
 # Relay 独立转发平台
 
+0.131.0 counts real TCP connections on every hop: agents report each rule's inbound setup and each dial to a target with its failure cause, and the controller keeps seven days of five-minute buckets in its own `history.sqlite`. Forwarding rules shows each arrow's success rate for the last hour, an expanded path shows a 24-hour or 7-day strip per hop with CSV export, and Overview can switch its trends to 24 hours or 7 days. `GET /api/v1/history` serves the same data to read-only tokens. Upgrade the controller before agents; roll agents back first.
+
 0.130.0 shows each hop's health on Forwarding rules: the arrow after a server carries the latest probe of the next hop (round trip and loss, or the failure reason when it is down), paths with several targets list each one by priority with its selection role, and a server whose configuration was rejected is marked Apply failed on the path. Overview's Events panel opens with counts of problems still open, new problems and recoveries, and lists open problems first.
 
 0.129.0 adds chart views to Target health, Traffic ledger, Shared budgets and Alerts & notifications; each page opens as charts and keeps a Table view one click away. Overview's globe explains itself when no node has a location, and a Set locations dialog saves every node's city in one step.
@@ -24,7 +26,7 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.130.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.131.0 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
 
 0.117.0 新增登录页与控制台 English / 中文切换，覆盖页面、编辑器、校验提示和七篇指南；保存浏览器偏好，切换时保留会话和当前页面。此前 0.116.0 重整控制台界面：分组导航、页面与指南本地搜索、七篇内嵌操作指南、浅色 / 深色主题、移动端抽屉与可分享页面链接。现有规则、协议、计量和权限流程保留，详见 [UI workspace guide](docs/UI_WORKSPACE_EN.md)。
 

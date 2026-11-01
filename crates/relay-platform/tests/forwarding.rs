@@ -1011,14 +1011,40 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             draining: false,
         },
     ];
+    let refused_address = c.rules[0].targets[0].address.clone();
     engine.apply(c).await.unwrap();
-    let mut s = TcpStream::connect(address).await.unwrap();
-    let mut m = [0];
-    timeout(Duration::from_secs(1), s.read_exact(&mut m))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(m[0], b'B');
+    // Two connections: round robin starts one of them at the refused target.
+    for _ in 0..2 {
+        let mut s = TcpStream::connect(address).await.unwrap();
+        let mut m = [0];
+        timeout(Duration::from_secs(1), s.read_exact(&mut m))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m[0], b'B');
+    }
+    // Each hop counts its own outcomes: the target whose address changed
+    // starts over, the unchanged one keeps its earlier connections.
+    let hops = engine.stats().connections;
+    let hop = |index: Option<usize>| {
+        let found: Vec<_> = hops.iter().filter(|h| h.target_index == index).collect();
+        assert_eq!(found.len(), 1, "one report for {index:?}: {hops:?}");
+        found[0].clone()
+    };
+    let refused = hop(Some(0));
+    assert_eq!(refused.target_address, refused_address);
+    assert!(refused.counts.attempts >= 1);
+    assert_eq!(refused.counts.refused, refused.counts.attempts);
+    assert_eq!(refused.counts.connected, 0);
+    let fallback = hop(Some(1));
+    assert_eq!(fallback.target_address, b.address.to_string());
+    assert_eq!(
+        (fallback.counts.attempts, fallback.counts.connected),
+        (4, 4)
+    );
+    let inbound = hop(None);
+    assert_eq!((inbound.counts.attempts, inbound.counts.connected), (8, 8));
+    assert_eq!(inbound.target_address, "");
     engine.shutdown().await.unwrap();
 }
 
