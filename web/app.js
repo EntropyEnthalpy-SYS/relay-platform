@@ -312,6 +312,16 @@ function svg(tag, attrs = {}, cls) { const n = document.createElementNS('http://
 function bits(bytesPerSecond) { let n = bytesPerSecond * 8, i = 0; const u = ['bit/s', 'Kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s']; while (n >= 1000 && i < u.length - 1) { n /= 1000; i++; } return `${n.toFixed(i === 0 || n >= 100 ? 0 : n >= 10 ? 1 : 2)} ${u[i]}`; }
 function millis(us) { if (us == null) return '—'; const n = us / 1000; return `${n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0)} ms`; }
 function ago(at, now) { const s = Math.max(0, Math.round((now - at) / 1000)); return s < 60 ? msg`${s} 秒前` : s < 3600 ? msg`${Math.floor(s / 60)} 分钟前` : msg`${Math.floor(s / 3600)} 小时前`; }
+const probeErrors = localize({ dns: '域名解析失败', transport: '连接、握手或路径检查失败', timeout: '探测超时', io: '收发失败', unexpected_response: '回复不符或提前关闭', expired: '规则已到期' });
+const selectionReasons = localize({ eligible: '参与优先池', standby: '后备候选', unknown: '等待探测确认', unhealthy: '故障排除', recovering: '等待持续成功', stale: '等待新结果', at_capacity: '会话已满', expired: '规则已到期', degraded: '丢包降级', draining: '维护排空' });
+// Probe reports by `${node_id}/${rule_id}/${target_index}`; a TCP + UDP rule can report each protocol separately.
+function targetHealth(topology) {
+  const health = new Map();
+  for (const n of topology.nodes) for (const h of n.stats?.target_health || []) { const key = `${n.id}/${h.rule_id}/${h.target_index}`; health.set(key, [...(health.get(key) || []), h]); }
+  return health;
+}
+// One probe report as a link colour: removed targets are down; passing targets that recently lost probes are partial.
+function probeState(r) { return r.status === 'healthy' ? (r.selection_reason === 'degraded' ? 'partial' : 'up') : r.status === 'recovering' ? 'partial' : r.status === 'unhealthy' ? 'down' : 'unknown'; }
 function median(values) { const v = values.filter(x => x != null).sort((a, b) => a - b); return v.length ? v[Math.floor(v.length / 2)] : null; }
 // Each report's byte delta is spread over the bins its interval covers.
 // Counters restart with the agent process, so a falling counter contributes nothing.
@@ -443,10 +453,17 @@ async function renderOverview() {
   graphPanel.classList.add('graph-panel'); graphPanel.append(chainGraph(topology, byId));
   const incidents = panel(translate('事件'), msg`最近 24 小时 · 共 ${events.length} 条`, events.length ? button(translate('全部事件'), () => modal(translate('全部事件'), eventTable(events, byId, now)), 'table-action') : undefined);
   incidents.classList.add('incident-panel');
+  // A problem stays open until a later event about the same node, subject and kind family
+  // (target_*, config_*, node_*) recovers, removes or supersedes it.
+  const latest = new Map(); for (const e of events) { const k = `${e.node_id}/${e.subject}/${e.kind.split('_')[0]}`; if (!latest.has(k)) latest.set(k, e); }
+  const problem = e => e.severity === 'warning' || e.severity === 'critical', day = events.filter(e => e.at_ms >= now - 86_400_000);
+  const open = [...latest.values()].filter(problem), problems = day.filter(problem).length;
+  const board = el('div', undefined, 'alert-status event-board');
+  for (const [label, value, color] of [[translate('仍未恢复'), open.length, open.length ? 'red' : 'green'], [translate('新问题'), problems, problems ? 'orange' : 'green'], [translate('已恢复'), day.filter(e => e.severity === 'recovered').length, '']]) { const item = el('div', undefined, `alert-stat ${color}`); item.append(el('div', String(value), 'metric-value'), el('div', label, 'metric-label')); board.append(item); }
   const list = el('ol', undefined, 'incidents');
   if (!events.length) list.append(el('li', translate('最近 24 小时没有目标故障、配置拒绝或节点离线。'), 'incident-empty'));
-  events.slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', eventMessage(e), 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
-  incidents.append(list);
+  [...open, ...events.filter(e => !open.includes(e))].slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', eventMessage(e), 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
+  incidents.append(board, list);
   const middle = el('div', undefined, 'overview-grid'); middle.append(graphPanel, incidents);
   const globe = rows.length ? globePanel(rows, topology, now) : null;
   const waiting = el('div', undefined, 'overview-waiting');
@@ -538,8 +555,7 @@ function eventTable(events, byId, now) {
 // One edge per node pair from enabled rules: client → entry nodes, node → next
 // hop (`via`), and node → 'sink' for external targets and proxy services.
 function chainEdges(topology) {
-  const health = new Map(), edges = new Map(), referenced = new Set(), ruleCount = new Map();
-  for (const n of topology.nodes) for (const h of n.stats?.target_health || []) { const key = `${n.id}/${h.rule_id}/${h.target_index}`; health.set(key, [...(health.get(key) || []), h]); }
+  const health = targetHealth(topology), edges = new Map(), referenced = new Set(), ruleCount = new Map();
   const addEdge = (from, to, reports) => {
     const key = `${from}>${to}`, e = edges.get(key) || { from, to, states: [], latency: [] }; edges.set(key, e);
     e.states.push(!reports.length ? 'unknown' : reports.every(h => h.eligible) ? 'up' : reports.some(h => h.eligible) ? 'partial' : 'down');
@@ -2494,7 +2510,7 @@ async function renderTopology() {
   const actor = state.actor;
   const snapshot = await api('/topology');
   if (state.view !== 'topology' || !actor || state.actor !== actor) return;
-  const names = new Map(snapshot.nodes.map(node => [node.id, node.name]));
+  const names = new Map(snapshot.nodes.map(node => [node.id, node.name])), byId = new Map(snapshot.nodes.map(node => [node.id, node])), health = targetHealth(snapshot);
   const rules = new Map(snapshot.configs.flatMap(config => config.rules.map(rule => [`${config.node_id}/${rule.id}`, rule])));
   const roots = forwardingPathRoots(snapshot), ids = new Set();
   const actions = el('div');
@@ -2523,7 +2539,7 @@ async function renderTopology() {
     const path = shadowsocksPath(snapshot, root);
     if (path) tools.append(button(translate('客户端链接'), () => shareShadowsocks(path.exit, path.entry, path.hops.map(hop => names.get(hop.node_id)).join(' → ')), 'table-action'));
     if (canWrite()) tools.append(button(rule?.enabled ? translate('停用') : translate('启用'), () => changeTopologyComponent(snapshot, key, !rule?.enabled), 'table-action'));
-    head.append(title, tools); card.append(head, routeChips(model));
+    head.append(title, tools); card.append(head, routeChips(model, health, byId));
     const details = el('details', undefined, 'path-details'); details.open = open.has(key);
     details.addEventListener('toggle', () => details.open ? open.add(key) : open.delete(key));
     details.append(el('summary', translate('路径图、检查项与各段规则')));
@@ -2545,20 +2561,47 @@ async function renderTopology() {
   if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, ...(roots.length ? [status] : []));
 }
 // One line per path: client, each server with its connect address, then the target.
-function routeChips(model) {
+// The arrow after a server shows that server's latest probe of the next hop; several
+// targets are listed by priority (lower first) with their selection state.
+function routeChips(model, health = new Map(), nodes = new Map()) {
   const line = el('div', undefined, 'route-chips'), arrow = () => el('span', '→', 'route-arrow');
   const services = { ss: 'Shadowsocks', socks5: 'SOCKS5', http: 'HTTP CONNECT', h2: 'HTTP/2 CONNECT', gateway: translate('受管协议') };
+  const probe = reports => {
+    const state = linkState(reports.map(probeState)), label = el('span', undefined, `route-probe ${state}`);
+    const checks = reports.reduce((n, r) => n + r.window_checks, 0), failures = reports.reduce((n, r) => n + r.window_failures, 0);
+    const failed = reports.find(r => r.status === 'unhealthy' && r.last_error), time = millis(median(reports.map(r => r.latency_ewma_us)));
+    label.textContent = !reports.length ? translate('未探测') : state === 'unknown' ? translate('等待探测确认') : state === 'down' ? (failed ? probeErrors[failed.last_error] : translate('不可用'))
+      : checks ? msg`${time} · 丢包 ${Math.round(100 * failures / checks)}%` : time;
+    label.title = reports.map(r => [r.protocol.toUpperCase(), selectionReasons[r.selection_reason] || r.selection_reason, millis(r.latency_ewma_us), r.last_error ? probeErrors[r.last_error] : ''].filter(Boolean).join(' · ')).join('\n');
+    return label;
+  };
   line.append(el('span', translate('客户端'), 'route-chip route-end'));
+  let reports = null;
   for (let item = model.root; item;) {
-    line.append(arrow());
+    if (reports) { const link = el('span', undefined, 'route-link'); link.append(probe(reports), arrow()); line.append(link); } else line.append(arrow());
     if (item.kind === 'target') { line.append(el('span', item.address || translate('待填写'), 'route-chip route-end mono')); break; }
     if (item.kind !== 'node') { line.append(el('span', item.name || translate('待选择'), 'route-chip route-warning')); break; }
-    const chip = el('span', undefined, 'route-chip'); chip.append(el('strong', item.name), el('span', item.endpoint || item.listen || translate('待填写'), 'mono'));
+    const chip = el('span', undefined, 'route-chip'), node = nodes.get(item.node_id); chip.append(el('strong', item.name), el('span', item.endpoint || item.listen || translate('待填写'), 'mono'));
     if (item.service !== 'forward') chip.append(el('span', services[item.service], 'route-service'));
+    if (node?.apply_error) { const note = el('span', translate('应用失败'), 'route-note down'); note.title = node.apply_error; chip.classList.add('route-failed'); chip.append(note); }
+    else if (node && !online(node)) chip.append(el('span', translate(node.enrolled ? '离线' : '待注册'), 'route-note'));
     line.append(chip);
     if (item.service !== 'forward') { line.append(arrow(), el('span', translate('客户端请求的网站 / 服务'), 'route-chip route-end')); break; }
-    if (item.children.length > 1) { line.append(arrow(), el('span', msg`${item.children.length} 个候选目标`, 'route-chip route-end')); break; }
-    item = item.children[0]?.next;
+    const key = i => `${item.node_id}/${item.rule_id}/${i}`;
+    if (item.children.length > 1) {
+      const list = el('span', undefined, 'route-chip route-candidates');
+      // Array sort is stable, so targets of one priority keep their configured order.
+      item.children.map((child, i) => ({ child, reports: health.get(key(i)) || [] })).sort((a, b) => a.child.priority - b.child.priority).forEach(({ child, reports }) => {
+        // TCP and UDP are selected separately; name the protocol only when their roles differ.
+        const reason = r => selectionReasons[r.selection_reason] || r.selection_reason, same = new Set(reports.map(reason)).size === 1;
+        const row = el('span', undefined, 'route-candidate'), roles = same ? [reason(reports[0])] : reports.map(r => `${r.protocol.toUpperCase()} ${reason(r)}`);
+        row.append(el('span', child.next.kind === 'node' ? child.next.name : child.address || translate('待填写'), child.next.kind === 'node' ? 'route-candidate-name' : 'route-candidate-name mono'));
+        if (roles.length) row.append(el('span', roles.join(' / '), 'route-role'));
+        row.append(probe(reports)); list.append(row);
+      });
+      line.append(arrow(), list); break;
+    }
+    reports = health.get(key(0)) || []; item = item.children[0]?.next;
   }
   return line;
 }
@@ -2847,8 +2890,7 @@ async function renderHealth() {
   const panelHealth = panel(translate('目标观测与选路'), translate('TCP 与 UDP 独立判断；同优先级按规则的均衡策略分配，低优先级目标作为候选后备。已有 TCP 不会因单次健康状态变化被强制迁移。丢包与抖动按每个端点最近 20 次探测计算；“最低延迟”选路把丢包计入耗时。'));
   const kinds = { tcp_connect: translate('传输建立'), tcp_exchange: translate('TCP 响应前缀'), udp_exchange: translate('UDP 完整回复') };
   const statuses = { unknown: translate('尚未确认'), healthy: translate('探测通过'), unhealthy: translate('已摘除'), recovering: translate('恢复观察'), stale: translate('结果过期') };
-  const reasons = { eligible: translate('参与优先池'), standby: translate('后备候选'), unknown: translate('等待探测确认'), unhealthy: translate('故障排除'), recovering: translate('等待持续成功'), stale: translate('等待新结果'), at_capacity: translate('会话已满'), expired: translate('规则已到期'), degraded: translate('丢包降级'), draining: translate('维护排空') };
-  const errors = { dns: translate('域名解析失败'), transport: translate('连接、握手或路径检查失败'), timeout: translate('探测超时'), io: translate('收发失败'), unexpected_response: translate('回复不符或提前关闭'), expired: translate('规则已到期') };
+  const reasons = selectionReasons, errors = probeErrors;
   const info = el('div', undefined, 'panel-body health-summary'); info.append(el('p', msg`最近节点回报：${timestamp(snapshot.last_seen_ms)} · ${snapshot.reports.length} / ${snapshot.expected_endpoints} 个配置端点有记录 · 当前探测 ${snapshot.active_probes} 个`)); if (snapshot.apply_error) info.append(el('p', msg`配置应用失败：${snapshot.apply_error}`, 'error')); panelHealth.append(info);
   if (!snapshot.reports.length) panelHealth.append(empty(translate('暂无目标探测结果'), snapshot.expected_endpoints ? translate('节点尚未上报这些端点的结果，不能视为健康。') : translate('在规则编辑器启用健康探测，填写对应业务的成功条件。')));
   else if (charts) {

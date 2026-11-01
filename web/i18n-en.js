@@ -1931,7 +1931,6 @@ export default {
   "v{0} → 当前 v{1}": "v{0} → current v{1}",
   "{0} / {1} 个节点已标注位置": "{0} / {1} nodes have a location",
   "{0} 上运行的规则": "Rules running on {0}",
-  "{0} 个候选目标": "{0} candidate targets",
   "{0} 个目标": "{0} targets",
   "{0} 会话": "Sessions {0}",
   "{0} 的监听地址": "Listen address on {0}",
@@ -2094,5 +2093,7 @@ export default {
   "还没有节点设置位置": "No node has a location yet",
   "送达 {0} / 共 {1}": "Delivered {0} of {1}",
   "选择每个节点所在的城市，保存后显示在总览地球上。列表中没有的城市，可在节点资料中手动填写坐标。": "Choose the city each node is in; saved nodes appear on the Overview globe. For a city not in the list, enter coordinates in the node's profile.",
-  "无响应": "No response"
+  "无响应": "No response",
+  "新问题": "New problems",
+  "已恢复": "Recovered"
 };
