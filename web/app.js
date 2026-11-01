@@ -4,7 +4,7 @@ import { createGlobe, cities, cityFor } from '/assets/globe.js';
 import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram, forwardingPathRoots } from '/assets/workflows.js';
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, features: {}, busy: false };
-const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', wireguard: 'WireGuard 组网', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', features: '可选功能', capabilities: '功能进度', guide: '使用指南' });
+const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', wireguard: 'WireGuard 组网', federation: '跨面板共享', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', features: '可选功能', capabilities: '功能进度', guide: '使用指南' });
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
@@ -305,7 +305,7 @@ async function navigate(view, options = {}) {
 async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedActor = state.actor, requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(), requestedOverviewLayout = overviewLayout; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, wireguard: renderWireguard, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, features: renderFeatures, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, wireguard: renderWireguard, federation: renderFederation, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, features: renderFeatures, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
   catch (error) { if (state.actor === requestedActor && state.actor && state.view === requestedView && location.hash === requestedHash && $('#content .loading-state')) $('#content').replaceChildren(empty(translate('页面暂时无法加载'), error.message, button(translate('重新加载'), () => { $('#notification').classList.add('hidden'); return refresh(); }, 'primary'))); throw error; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.actor !== requestedActor || getLanguage() !== requestedLanguage || state.view !== requestedView || location.hash !== requestedHash || (state.view === 'overview' && requestedOverviewLayout !== overviewLayout) || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
@@ -1116,7 +1116,7 @@ async function renderRules() {
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p);
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -2821,6 +2821,172 @@ function showWireguardConfig(issued) {
   body.append(config, actions);
   modal(msg`设备配置 · ${issued.name}`, body);
 }
+const fedStates = localize({ active: '使用中', paused: '已暂停', revoked: '已撤销' });
+const fedStateColors = { active: 'green', paused: 'orange', revoked: '' };
+const fedKinds = localize({ forward: '端口转发', shadowsocks: 'Shadowsocks' });
+const fedProtocols = localize({ tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' });
+function fedLimits(s) {
+  const parts = [s.kinds.map(k => fedKinds[k] || k).join(' / '), msg`规则 ${s.rules.length}/${s.max_rules}`, s.rate_bytes_per_sec ? msg`带宽 ${mbit(s.rate_bytes_per_sec)}` : translate('不限速'), s.quota_bytes ? msg`流量 ${bytes(s.quota_bytes)}` : translate('不限流量'), s.expires_at_ms ? msg`到期 ${timestamp(s.expires_at_ms)}` : translate('长期有效')];
+  if (s.allow_sources?.length) parts.push(msg`来源 ${s.allow_sources.join(', ')}`);
+  return parts.join(' · ');
+}
+function fedUsage(statement, quota) {
+  const up = statement?.upload_bytes || 0, down = statement?.download_bytes || 0;
+  return namedCell(quota ? `${bytes(up + down)} / ${bytes(quota)}` : bytes(up + down), `↑ ${bytes(up)} · ↓ ${bytes(down)}`);
+}
+async function renderFederation() {
+  const actor = state.actor;
+  if (!featureOn('federation')) { $('#content').replaceChildren(empty(translate('跨面板共享未开启'), translate('系统管理员可以在「可选功能」中开启。开启后，可以把节点上的一段端口共享给另一个面板，也可以接收其他面板共享的端口。'), button(translate('前往可选功能'), () => navigate('features'), 'primary'))); return; }
+  const view = await api('/federation');
+  if (state.view !== 'federation' || state.actor !== actor) return;
+  const given = panel(translate('共享给其他面板'), translate('把一台节点上的一段端口交给另一个面板使用。对方只能在这段端口里建规则；带宽、流量、到期时间和允许的来源由你决定。规则由本面板生成，对方无法放宽。'), button(translate('＋ 新建共享'), () => federationGrantForm(null), 'primary'));
+  if (!view.grants.length) given.append(empty(translate('还没有共享'), translate('新建共享，选择节点和端口范围，再把邀请码发给对方面板的管理员。')));
+  else { const body = el('div', undefined, 'panel-body'); body.append(table([translate('共享'), translate('节点与端口'), translate('限制'), translate('对方'), translate('已用流量'), translate('操作')], view.grants.map(federationGrantRow))); given.append(body); }
+  const received = panel(translate('其他面板共享给我'), translate('输入对方面板给的邀请码即可接入。你可以在共享的端口范围内建规则；规则运行在对方的节点上，流量由对方计量。'), button(translate('＋ 输入邀请码'), federationRemoteForm, 'primary'));
+  if (!view.remotes.length) received.append(empty(translate('还没有收到共享'), translate('对方面板在「跨面板共享」中新建共享并生成邀请码后，把邀请码粘贴到这里。')));
+  $('#content').replaceChildren(given, received, ...view.remotes.map(federationRemotePanel));
+}
+function federationGrantRow(view) {
+  // The share's own fields sit beside the node name and statement.
+  const g = view, actions = el('div');
+  if (g.state !== 'revoked') {
+    if (!g.link) actions.append(button(translate('邀请码'), () => inviteFederation(g), 'table-action'));
+    actions.append(button(translate('编辑'), () => federationGrantForm(view), 'table-action'));
+    actions.append(g.state === 'active'
+      ? button(translate('暂停'), () => federationGrantAction(g, 'pause', msg`暂停「${g.name}」？对方的规则会停用，直到你恢复。`, translate('共享已暂停。')), 'table-action')
+      : button(translate('恢复'), () => federationGrantAction(g, 'resume', null, translate('共享已恢复。')), 'table-action'));
+    actions.append(button(translate('撤销'), () => federationGrantAction(g, 'revoke', msg`撤销「${g.name}」？节点会删除对方的全部规则，对方的密钥立即失效。撤销后不能恢复，只能新建共享。`, translate('共享已撤销。')), 'table-action danger'));
+  } else actions.append(button(translate('删除'), () => federationGrantAction(g, null, msg`删除已撤销的共享「${g.name}」？流量记录会保留。`, translate('共享已删除。')), 'table-action danger'));
+  const peer = g.link ? namedCell(msg`面板 ${g.link.panel_id.slice(0, 8)}`, g.link.last_seen_ms ? msg`最近访问 ${ago(g.link.last_seen_ms, Date.now())}` : '')
+    : g.invite && g.invite.expires_at_ms > Date.now() ? namedCell(translate('等待对方接入'), msg`邀请码有效至 ${timestamp(g.invite.expires_at_ms)}`) : el('span', translate('尚未邀请'), 'muted');
+  const ports = el('div'); ports.append(el('strong', view.node_name), el('div', `${g.listen_ip}:${g.port_start}–${g.port_end}`, 'subline mono'), ...(g.rules.length ? g.rules.map(r => el('div', `${r.name} :${r.port}`, 'fine')) : [el('div', translate('对方还没有建规则'), 'fine')]));
+  const share = namedCell(g.name, g.public_host), status = el('div', undefined, 'badge-row');
+  status.append(badge(fedStates[g.state] || g.state, fedStateColors[g.state] || ''));
+  if (!view.applied) status.append(badge(translate('节点更新中'), 'orange'));
+  share.append(status);
+  if (view.ack_mismatch) share.append(el('span', translate('对方确认过的流量比这里记录的多：本面板的数据可能是从旧备份恢复的。'), 'wrap error-text'));
+  return [share, ports, el('span', fedLimits(g), 'wrap fine'), peer, fedUsage(view.statement, g.quota_bytes), actions];
+}
+async function federationGrantAction(g, action, question, done) {
+  if (question && !await confirmAction(question)) return;
+  if (action) await api(`/federation/grants/${g.id}/${action}`, { method: 'POST' });
+  else await api(`/federation/grants/${g.id}`, { method: 'DELETE' });
+  notify(done); await renderFederation();
+}
+async function inviteFederation(g) {
+  const issued = await api(`/federation/grants/${g.id}/invite`, { method: 'POST', body: { owner_url: `${location.origin}/` } });
+  const body = el('div');
+  body.append(el('p', msg`把邀请码发给对方面板的管理员，对方在「跨面板共享 → 输入邀请码」中粘贴即可接入。邀请码只能使用一次，有效至 ${timestamp(issued.expires_at_ms)}。关闭后无法再次查看，需要时可以重新生成。`), el('pre', issued.code, 'secret-box mono'), el('p', msg`对方面板会通过 ${location.origin} 访问本面板，这个地址需要能从对方的服务器用 HTTPS 访问。`, 'fine'));
+  const actions = el('div', undefined, 'dialog-actions'); actions.append(button(translate('复制邀请码'), async () => { await navigator.clipboard.writeText(issued.code); notify(translate('邀请码已复制。')); }), button(translate('完成'), () => $('#dialog').close(), 'primary'));
+  body.append(actions);
+  modal(msg`邀请码 · ${g.name}`, body);
+  await renderFederation();
+}
+async function federationGrantForm(view) {
+  const g = view, nodes = g ? [] : await api('/nodes');
+  if (!g && !nodes.length) { modal(translate('新建共享'), empty(translate('还没有节点'), translate('先在「节点管理」接入一台服务器。'))); return; }
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', translate('共享名称（对方能看到）'), g?.name || '').maxLength = 64;
+  const node = select(grid, 'node_id', translate('节点'), g ? [[g.node_id, view.node_name]] : nodes.map(n => [n.id, n.name]), g?.node_id || nodes[0].id); node.disabled = !!g;
+  field(grid, 'public_host', translate('对方用户连接的地址（节点的公网 IP 或域名）'), g?.public_host || '').maxLength = 253;
+  field(grid, 'listen_ip', translate('节点监听地址（留空为全部地址）'), g && g.listen_ip !== '0.0.0.0' ? g.listen_ip : '', 'text', false).maxLength = 45;
+  const start = field(grid, 'port_start', translate('起始端口'), g?.port_start ?? 20000, 'number'); start.min = 1; start.max = 65535;
+  const end = field(grid, 'port_end', translate('结束端口'), g?.port_end ?? 20009, 'number'); end.min = 1; end.max = 65535;
+  const max = field(grid, 'max_rules', translate('对方最多可建的规则数'), g?.max_rules ?? 5, 'number'); max.min = 1; max.max = 32;
+  const rate = field(grid, 'mbit', translate('总带宽 / Mbit/s（留空不限速）'), g?.rate_bytes_per_sec ? +(g.rate_bytes_per_sec * 8 / 1e6).toFixed(3) : '', 'number', false); rate.min = 0.009; rate.step = 'any';
+  const quota = field(grid, 'gib', translate('总流量 / GiB（留空不限；建好后只能修改，不能取消或新加）'), g?.quota_bytes ? +(g.quota_bytes / 2 ** 30).toFixed(3) : '', 'number', false); quota.min = 0.001; quota.step = 'any';
+  if (g && !g.quota_bytes) { quota.disabled = true; quota.title = translate('这个共享建立时没有流量限制'); }
+  field(grid, 'expires', translate('到期时间（本地，留空长期有效）'), g?.expires_at_ms ? announcementDateTime(g.expires_at_ms) : '', 'datetime-local', false);
+  form.append(grid);
+  const kinds = el('fieldset', undefined, 'target-editor'); kinds.append(el('legend', translate('允许对方建的规则类型')));
+  for (const [value, label] of Object.entries(fedKinds)) { const item = el('label', label, 'inline-check'), input = el('input'); input.type = 'checkbox'; input.name = 'kinds'; input.value = value; input.checked = g ? g.kinds.includes(value) : value === 'shadowsocks'; item.prepend(input); kinds.append(item); }
+  form.append(kinds);
+  const lists = el('div', undefined, 'form-grid');
+  textarea(lists, 'allow_sources', translate('允许连接的来源 IP 或网段（每行一个；端口转发必填，留空表示任何来源）'), (g?.allow_sources || []).join('\n'));
+  textarea(lists, 'deny_destinations', translate('禁止访问的目的地（每行一个域名、IP 或网段，可选）'), (g?.deny_destinations || []).join('\n'));
+  textarea(lists, 'allow_destinations', translate('只允许访问的目的地（每行一个，留空不限制）'), (g?.allow_destinations || []).join('\n'));
+  form.append(lists);
+  const privateTargets = checkbox(form, 'allow_private_destinations', translate('允许访问节点本机和内网地址（默认禁止）'));
+  privateTargets.checked = !!g?.allow_private_destinations; privateTargets.parentElement.classList.add('inline-check');
+  form.append(el('p', translate('对方的规则都由本面板按这些限制生成。端口范围不能和节点上已有的规则或其他共享重叠；修改后节点会自动更新。'), 'fine'));
+  submit(form, g ? translate('保存共享') : translate('新建共享'), async data => {
+    const lines = key => String(data.get(key) || '').split('\n').map(s => s.trim()).filter(Boolean);
+    const mbitText = String(data.get('mbit') || '').trim(), gibText = String(data.get('gib') || '').trim(), expires = String(data.get('expires') || '').trim();
+    const body = { name: String(data.get('name')).trim(), public_host: String(data.get('public_host')).trim(), listen_ip: String(data.get('listen_ip') || '').trim() || null, port_start: number(data, 'port_start'), port_end: number(data, 'port_end'), max_rules: number(data, 'max_rules'), kinds: data.getAll('kinds'), rate_bytes_per_sec: mbitText ? Math.round(Number(mbitText) * 1e6 / 8) : null, quota_bytes: gibText ? Math.round(Number(gibText) * 2 ** 30) : g?.quota_bytes ?? null, expires_at_ms: expires ? new Date(expires).getTime() : null, allow_sources: lines('allow_sources'), allow_destinations: lines('allow_destinations'), deny_destinations: lines('deny_destinations'), allow_private_destinations: data.get('allow_private_destinations') === 'on' };
+    if (g) await api(`/federation/grants/${g.id}`, { method: 'PUT', body });
+    else await api('/federation/grants', { method: 'POST', body: { ...body, node_id: node.value } });
+    $('#dialog').close(); notify(translate('共享已保存。')); await renderFederation();
+  });
+  modal(g ? msg`编辑共享 · ${g.name}` : translate('新建共享'), form);
+}
+function federationRemoteForm() {
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  textarea(grid, 'invite', translate('邀请码（以 relay-invite:v1: 开头）'), '', true);
+  field(grid, 'label', translate('名称（可选，默认用对方起的名字）'), '', 'text', false).maxLength = 64;
+  form.append(grid, el('p', translate('本面板会用邀请码向对方面板换取自己的密钥。邀请码只能使用一次。'), 'fine'));
+  submit(form, translate('接入'), async data => {
+    await api('/federation/remotes', { method: 'POST', body: { invite: String(data.get('invite')).trim(), label: String(data.get('label')).trim() } });
+    $('#dialog').close(); notify(translate('已接入共享。')); await renderFederation();
+  });
+  modal(translate('输入邀请码'), form);
+}
+function federationRemotePanel(remote) {
+  const s = remote.shared, open = !remote.revoked && s?.state === 'active';
+  const actions = el('div', undefined, 'panel-actions');
+  if (open) actions.append(button(translate('＋ 规则'), () => federationRuleForm(remote), 'primary'));
+  actions.append(button(translate('立即同步'), async () => { await api(`/federation/remotes/${remote.id}/sync`, { method: 'POST' }); notify(translate('已同步。')); await renderFederation(); }), button(translate('移除'), async () => {
+    if (!await confirmAction(msg`移除「${remote.label}」？本面板会删除这个共享和它的密钥；对方节点上的规则不受影响，需要对方撤销。`)) return;
+    await api(`/federation/remotes/${remote.id}`, { method: 'DELETE' }); notify(translate('已移除。')); await renderFederation();
+  }, 'subtle danger'));
+  const p = panel(msg`收到的共享 · ${remote.label}`, s ? msg`来自 ${remote.owner_url} · 连接 ${s.public_host} 端口 ${s.port_start}–${s.port_end}` : remote.owner_url, actions), body = el('div', undefined, 'panel-body');
+  const status = el('div', undefined, 'badge-row');
+  if (remote.revoked) status.append(badge(translate('对方已撤销'), 'red'));
+  else if (s) status.append(badge(fedStates[s.state] || s.state, fedStateColors[s.state] || ''), badge(s.applied ? translate('对方节点已生效') : translate('对方节点更新中'), s.applied ? 'green' : 'orange'));
+  if (remote.rollback) status.append(badge(translate('对方报告的流量变少了'), 'red'));
+  body.append(status);
+  if (remote.rollback) body.append(el('p', msg`对方报告的流量低于之前确认过的 ${bytes(remote.high.upload_bytes + remote.high.download_bytes)}，对方面板可能从旧备份恢复了数据。请和对方核对。`, 'error-text'));
+  if (remote.last_error) body.append(el('p', remote.last_error, 'error-text'));
+  if (s) {
+    const host = s.public_host.includes(':') ? `[${s.public_host}]` : s.public_host;
+    body.append(el('p', fedLimits(s), 'fine'));
+    const usage = s.statement.upload_bytes + s.statement.download_bytes;
+    body.append(el('p', s.quota_bytes ? msg`已用流量 ${bytes(usage)} · 额度已用 ${bytes(s.quota_used_bytes || 0)} / ${bytes(s.quota_bytes)}` : msg`已用流量 ${bytes(usage)}（上传 ${bytes(s.statement.upload_bytes)} · 下载 ${bytes(s.statement.download_bytes)}）`, 'fine'));
+    if (!s.rules.length) body.append(el('p', open ? translate('还没有规则。点「＋ 规则」在共享的端口里建一条。') : translate('没有规则。'), 'muted'));
+    else body.append(table([translate('名称'), translate('类型'), translate('连接地址'), translate('目标'), translate('操作')], s.rules.map(rule => {
+      const ops = el('div');
+      if (rule.kind === 'shadowsocks' && rule.password && !remote.revoked) ops.append(button(translate('复制链接'), async () => { await navigator.clipboard.writeText(shadowsocksLink({ method: '2022-blake3-aes-128-gcm', password: rule.password }, s.public_host, rule.port, rule.name)); notify(translate('链接已复制。')); }, 'table-action'));
+      if (open) ops.append(button(translate('删除'), () => federationRules(remote, s.rules.filter(r => r.id !== rule.id), msg`删除规则「${rule.name}」？`), 'table-action danger'));
+      return [rule.name, `${fedKinds[rule.kind] || rule.kind} · ${fedProtocols[rule.protocol] || rule.protocol}`, `${host}:${rule.port}`, (rule.targets || []).join(', ') || translate('由客户端决定'), ops];
+    })));
+  }
+  body.append(el('p', remote.last_synced_ms ? msg`最近同步 ${timestamp(remote.last_synced_ms)}，每分钟自动同步。` : translate('每分钟自动同步。'), 'fine'));
+  p.append(body);
+  return p;
+}
+async function federationRules(remote, rules, question) {
+  if (question && !await confirmAction(question)) return;
+  await api(`/federation/remotes/${remote.id}/rules`, { method: 'PUT', body: { expected_revision: remote.shared.revision, rules: rules.map(r => ({ id: r.id, name: r.name, kind: r.kind, protocol: r.protocol, port: r.port, targets: r.targets || [] })) } });
+  notify(translate('规则已提交，对方节点会自动更新。')); await renderFederation();
+}
+function federationRuleForm(remote) {
+  const s = remote.shared, used = new Set(s.rules.map(r => r.port));
+  if (s.rules.length >= s.max_rules) { modal(translate('添加规则'), empty(translate('规则数已达上限'), msg`这个共享最多 ${s.max_rules} 条规则。删除一条，或请对方提高上限。`)); return; }
+  let free = s.port_start; while (used.has(free) && free < s.port_end) free++;
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'name', translate('规则名称'), '').maxLength = 64;
+  const kind = select(grid, 'kind', translate('类型'), s.kinds.map(k => [k, fedKinds[k] || k]), s.kinds[0]);
+  select(grid, 'protocol', translate('协议'), Object.entries(fedProtocols), 'tcp');
+  const port = field(grid, 'port', msg`端口（${s.port_start}–${s.port_end}）`, free, 'number'); port.min = s.port_start; port.max = s.port_end;
+  const targets = textarea(grid, 'targets', translate('目标地址（每行一个，主机:端口）'), '');
+  const show = () => { targets.required = kind.value === 'forward'; targets.closest('label').hidden = kind.value !== 'forward'; }; kind.addEventListener('change', show); show();
+  form.append(grid, el('p', translate('Shadowsocks 规则的密钥由对方面板生成；保存后可以复制 ss:// 链接给客户端。'), 'fine'));
+  submit(form, translate('提交规则'), async data => {
+    const rule = { name: String(data.get('name')).trim(), kind: kind.value, protocol: data.get('protocol'), port: number(data, 'port'), targets: kind.value === 'forward' ? String(data.get('targets') || '').split('\n').map(t => t.trim()).filter(Boolean) : [] };
+    await api(`/federation/remotes/${remote.id}/rules`, { method: 'PUT', body: { expected_revision: s.revision, rules: [...s.rules.map(r => ({ id: r.id, name: r.name, kind: r.kind, protocol: r.protocol, port: r.port, targets: r.targets || [] })), rule] } });
+    $('#dialog').close(); notify(translate('规则已提交，对方节点会自动更新。')); await renderFederation();
+  });
+  modal(msg`添加规则 · ${remote.label}`, form);
+}
 // Optional features start switched off; their settings stay out of forms until a system administrator switches them on.
 const featureInfo = localize({
   mptcp: ['Linux MPTCP', '转发规则的入口或出口可以使用多路径 TCP（MPTCP）。两端都支持时，一条连接可以同时使用多条网络路径。', '开启后，规则编辑器显示“Linux MPTCP”设置。需要两端的 Linux 内核支持；要真正走多条路径，服务器还需要多个网卡或地址。'],
@@ -2828,11 +2994,12 @@ const featureInfo = localize({
   'budget-recovery': ['额度灾难恢复', '节点状态丢失或控制器从旧备份恢复后，核销无法再上报的预留，或结束旧备份留下的额度锁定。未知用量一律按已消耗计算。', '开启后，「恢复保护」页显示未结束的预留和恢复锁定。只有系统管理员可以操作，每次操作都写入审计日志。'],
   'mptcp-paths': ['MPTCP 额外路径', '为节点指定额外的本机地址，让 MPTCP 连接可以同时经过多块网卡或多个地址传输。', '开启后，节点资料显示“MPTCP 额外路径”。只有安装了授权文件的服务器才会真正修改 MPTCP 设置；服务器只有一个网卡和地址时没有效果。'],
   wireguard: ['WireGuard 组网', '把节点和用户设备连进同一个私有网络：节点之间自动配置 WireGuard 隧道，两台都在 NAT 后面的节点经一台公网节点中继，设备扫码即可加入。', '开启后，左侧出现「WireGuard 组网」页。只有安装了授权文件 relay-agent-wireguard.conf 和 wireguard-tools 的服务器才会创建接口；它只管理名为 rwg-* 的接口，不改默认路由、防火墙或系统全局设置。'],
+  federation: ['跨面板共享', '把一台节点上的一段端口共享给另一个 Relay 面板，或接收其他面板共享的端口。对方用一次性邀请码接入，得到自己的密钥；带宽、流量、到期时间和允许的来源由共享方决定，对方无法放宽。', '开启后，左侧出现「跨面板共享」页。共享方的节点会多出由共享生成的规则，这些规则只能在共享页修改；撤销后节点立即删除它们，对方的密钥失效。接收方每分钟向共享方同步一次。'],
   'nat-traversal': ['NAT 穿透', '两台都在 NAT 后面的 WireGuard 节点先尝试直接连接（打洞）。成功后它们之间的流量不再经过中继；尝试失败或直连中断时自动回到中继，并显示原因。', '需要先开启「WireGuard 组网」。开启后，「WireGuard 组网」页的连接表显示每对节点是直连、正在尝试还是经中继。只对两端都没有公网端点的节点生效，不修改服务器的防火墙或系统设置。对方的 NAT 为每个目标换端口（对称型 NAT）时无法直连，会继续经中继。'],
   'dns-authoritative': ['独立权威 DNS 池', '让你自己的节点直接应答一个域名的 DNS 查询，解析结果随入口健康实时变化，不需要 DNS 服务商 API。', '开启后，「DNS 管理」页显示权威 DNS 池。节点要监听 53 端口，需先在服务器安装授权文件 relay-agent-dns.conf 并放行防火墙；还要在域名注册商把域名委派给这些节点。'],
   'plan-entitlements': ['套餐权益', '支付成功的套餐订单自动变成购买者的流量额度：套餐流量加到额度上，到期后停止发放新流量，退款扣回该订单的流量和天数。', '开启后，「钱包与订单」显示“我的套餐”。开启前已经付款的订单不会补发。购买者还有运行中的规则时，需要先停用规则，额度才能创建。'],
 });
-const featureUsage = { mptcp: n => msg`${n} 条转发规则正在使用 MPTCP`, 'dns-health': n => msg`${n} 条 DNS 记录正在使用健康摘除`, 'plan-entitlements': n => msg`${n} 个套餐生效中或等待额度`, 'mptcp-paths': n => msg`${n} 个节点设置了 MPTCP 额外路径`, 'dns-authoritative': n => msg`${n} 个区域在权威 DNS 池中`, wireguard: n => msg`${n} 个 WireGuard 网络` };
+const featureUsage = { mptcp: n => msg`${n} 条转发规则正在使用 MPTCP`, 'dns-health': n => msg`${n} 条 DNS 记录正在使用健康摘除`, 'plan-entitlements': n => msg`${n} 个套餐生效中或等待额度`, 'mptcp-paths': n => msg`${n} 个节点设置了 MPTCP 额外路径`, 'dns-authoritative': n => msg`${n} 个区域在权威 DNS 池中`, wireguard: n => msg`${n} 个 WireGuard 网络`, federation: n => msg`${n} 个共享（给出未撤销的和收到的）` };
 const featureOn = id => !!state.features[id];
 async function loadFeatures() { const list = await api('/features'); state.features = Object.fromEntries(list.map(f => [f.id, f.enabled])); document.querySelectorAll('[data-feature]').forEach(n => n.classList.toggle('feature-off', !featureOn(n.dataset.feature))); return list; }
 async function renderFeatures() {
@@ -2855,7 +3022,7 @@ async function renderFeatures() {
   p.append(body);
   $('#content').replaceChildren(p);
 }
-async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围', mptcp: '额外路径需服务器授权 · 公网多线路未验收', 'dns-authoritative-pool': '53 端口需服务器授权 · 需在注册商委派 · 公网委派未验收', wireguard: '需安装 wireguard-tools 并授予服务器权限 · 真实 NAT 与公网未验收', 'nat-traversal': '需先开启 WireGuard 组网 · 对称型 NAT 无法直连 · 真实 NAT 未验收' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); const switchable = { 'mptcp-rule-transport': 'mptcp', 'dns-health-removal': 'dns-health', 'commerce-entitlements': 'plan-entitlements', 'budget-disaster-recovery': 'budget-recovery', mptcp: 'mptcp-paths', 'dns-authoritative-pool': 'dns-authoritative', wireguard: 'wireguard', 'nat-traversal': 'nat-traversal' }[key]; if (switchable) row.append(badge(featureOn(switchable) ? translate('已开启') : translate('未开启'), featureOn(switchable) ? 'green' : '')); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
+async function renderCapabilities() { const actor = state.actor; const c = await api('/capabilities'); if (state.view !== 'capabilities' || !actor || state.actor !== actor) return; const names = { 'two-factor-login': translate('两步验证登录'), 'scoped-api-tokens': translate('带权限范围的 API 令牌'), 'node-identity-revocation-replacement': translate('节点身份撤销与替换'), 'node-credential-rotation': translate('节点凭据轮换'), announcements: translate('公告'), ddns: 'DDNS', tcp: translate('TCP 转发'), udp: translate('UDP 转发'), ipv4: 'IPv4', ipv6: 'IPv6', 'dns-targets': translate('域名目标'), 'port-ranges': translate('端口段与偏移映射'), 'outbound-binding': translate('业务出口 IP / 网卡绑定'), 'dns-ttl-cache': translate('目标 DNS TTL 缓存'), 'node-local-loop-protection': translate('节点内监听环路检查'), 'proxy-protocol-tcp-v1-v2': 'TCP PROXY v1 / v2', 'proxy-protocol-udp-v2': 'UDP PROXY v2', 'udp-destination-tracking': translate('UDP 通配监听真实目标地址'), 'weighted-round-robin': translate('加权轮询'), 'source-hash': translate('来源 IP 哈希'), 'least-connections': translate('最少连接'), 'source-cidr-acl': translate('来源网段 ACL'), 'per-rule-quota': translate('规则共享配额'), 'per-rule-bandwidth': translate('规则共享速率'), 'durable-usage': translate('持久化流量账本'), 'config-revisions': translate('版本与回滚'), 'tenant-isolation': translate('租户隔离'), 'session-revocation': translate('会话撤销'), 'tls-data-transport': translate('TLS 数据传输'), 'mutual-tls': translate('TLS 双向证书认证'), 'backup-reconciliation': translate('旧备份用量对账'), websocket: translate('WebSocket 流隧道（v1）'), 'secure-websocket': translate('WSS 与双向证书验证'), 'declared-multi-node-topology': translate('跨节点多跳引用与环路检查'), 'atomic-config-batch': translate('多节点配置预览与事务发布'), 'target-health-checks': translate('目标探测与故障恢复'), 'priority-capacity-selection': translate('优先级与目标容量选路'), 'lowest-latency-selection': translate('按探测耗时自动选择最快目标'), 'node-telemetry': translate('节点资源、吞吐与事件历史'), 'connection-history': translate('逐段真实连接与 7 天历史'), 'live-logs': translate('实时日志'), 'diagnostic-report': translate('诊断报告与问题检查'), 'connection-prewarm': translate('中转间预热连接'), 'alert-notifications': translate('告警通知（Webhook / Telegram / 企业微信 / 飞书 / 钉钉）'), 'smtp-alerts': translate('Email / SMTP 告警（TLS / STARTTLS）'), 'tenant-alerts': translate('按租户隔离通知与事件'), mptcp: 'MPTCP', 'node-execution-leases': translate('节点执行租约'), 'node-inventory-lifecycle': translate('节点资料、批量编辑与暂停到期'), 'durable-budget-run-recovery': translate('原状态额度恢复与预留诊断'), 'multipath-aggregation': translate('单连接多路径聚合（自有 v1）'), 'global-user-budgets': translate('跨节点用户总额度'), 'hierarchical-budgets': translate('租户 / 节点分层额度'), 'budget-reservation-return': translate('空闲预留归还'), 'controller-recovery-log': translate('控制器恢复日志'), 'budget-disaster-recovery': translate('预算完整灾难恢复'), 'global-rate-limits': translate('跨节点总限速'), wireguard: translate('WireGuard 组网'), 'nat-traversal': translate('NAT 穿透'), commerce: translate('套餐与交易'), tickets: translate('支持工单'), 'commerce-wallet': translate('钱包与资金流水'), 'commerce-orders': translate('订单与退款'), 'commerce-payments': translate('支付网关与回调验签'), 'commerce-coupons': translate('优惠码'), 'commerce-gifts': translate('礼品码'), 'http-connect': translate('HTTP CONNECT 入站'), 'http2-connect-managed': translate('HTTP/2 CONNECT · 计量 / ACL / 限速 / Bearer'), 'protocol-gateways': translate('受管 VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess'), 'protocol-client-exports': translate('sing-box / mihomo 协议订阅'), 'destination-acl': translate('目的地 ACL'), 'config-templates': translate('规则模板'), 'mptcp-diagnostics': translate('MPTCP 能力观测'), 'mptcp-rule-transport': translate('MPTCP 规则传输与连接观测'), 'nat-pmp': translate('NAT-PMP 端口映射'), 'pcp': translate('PCP 端口映射'), 'upnp': translate('UPnP 端口映射'), 'commerce-entitlements': translate('套餐权益执行'), 'client-subscriptions': translate('客户端订阅'), announcements: translate('公告'), 'dns-records': translate('DNS 托管记录与 DDNS'), 'dns-health-removal': translate('DNS 健康摘除'), 'dns-authoritative-pool': translate('独立权威 DNS 池'), 'dns-management': translate('DNS 管理'), federation: translate('跨面板共享'), 'postgresql-ha': translate('PostgreSQL 与控制面高可用') }; const deliveryNotes = localize({ 'nat-pmp': 'CLI 工具 · 需要网关支持', pcp: 'CLI 工具 · 需要网关支持', upnp: 'CLI 工具 · 需要网关支持', 'protocol-gateways': '需在节点预装协议引擎', 'tls-data-transport': '需在节点配置证书', 'mutual-tls': '需在两端配置证书', 'smtp-alerts': '需配置并验证 SMTP', 'commerce-payments': '支付不在本轮交付范围', mptcp: '额外路径需服务器授权 · 公网多线路未验收', 'dns-authoritative-pool': '53 端口需服务器授权 · 需在注册商委派 · 公网委派未验收', wireguard: '需安装 wireguard-tools 并授予服务器权限 · 真实 NAT 与公网未验收', 'nat-traversal': '需先开启 WireGuard 组网 · 对称型 NAT 无法直连 · 真实 NAT 未验收', federation: '共享方面板需能被对方用 HTTPS 访问 · 两个真实面板之间未验收' }); const grid = el('div', undefined, 'capabilities'); for (const [title, list, status, color] of [[translate('已接入开发版本'), c.available, translate('已实现'), 'green'], [translate('后续完整范围'), c.pending, translate('待完成或验收'), '']]) { const p = panel(title, translate('最终验收以源码中的完整清单和测试证据为准。')), body = el('div', undefined, 'panel-body'); for (const key of list) { const row = el('div', undefined, 'capability'); row.append(el('span', names[key] || key), badge(key === 'commerce-payments' ? translate('本轮不含') : status, key === 'commerce-payments' ? '' : color)); const switchable = { 'mptcp-rule-transport': 'mptcp', 'dns-health-removal': 'dns-health', 'commerce-entitlements': 'plan-entitlements', 'budget-disaster-recovery': 'budget-recovery', mptcp: 'mptcp-paths', 'dns-authoritative-pool': 'dns-authoritative', wireguard: 'wireguard', 'nat-traversal': 'nat-traversal', federation: 'federation' }[key]; if (switchable) row.append(badge(featureOn(switchable) ? translate('已开启') : translate('未开启'), featureOn(switchable) ? 'green' : '')); if (deliveryNotes[key]) row.append(el('span', deliveryNotes[key], 'fine')); body.append(row); } p.append(body); grid.append(p); } if (state.view === 'capabilities') $('#content').replaceChildren(grid); }
 
 // Skip while typing in the page so a re-render does not take the input away.
 setInterval(() => { const typing = $('#content').contains(document.activeElement) && document.activeElement.matches('input, select, textarea'); if (state.actor && !document.hidden && !typing && !document.querySelector('dialog[open]') && !document.body.classList.contains('nav-open') && ['overview', 'nodes', 'rules', 'usage', 'budgets', 'alerts', 'recovery', 'topology', 'health', 'logs'].includes(state.view)) refresh().catch(e => notify(e.message, true)); }, 5000);
@@ -3097,6 +3264,7 @@ async function editDiagramRule(ref) {
   const [nodes, config] = await Promise.all([api('/nodes'), api(`/nodes/${ref.node_id}/config`)]);
   const rule = config.rules.find(rule => rule.id === ref.rule_id);
   if (!rule || !nodes.some(node => node.id === ref.node_id)) throw new Error(translate('此规则已变化，请刷新路径后重试。'));
+  if (rule.id.startsWith('fed-')) throw new Error(translate('这条规则由跨面板共享生成，请在「跨面板共享」页管理。'));
   state.nodes = nodes; state.selectedNode = ref.node_id; state.config = config;
   await editRule(rule);
 }

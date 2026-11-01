@@ -115,6 +115,7 @@ fn prepare(
             rules: update.rules,
             rate_bytes_per_sec: update.rate_bytes_per_sec.unwrap_or(old.rate_bytes_per_sec),
         };
+        federation::merge(conn, &config.node_id, &tenant, &mut config.rules)?;
         config.validate().map_err(bad_input)?;
         if config
             .rules
@@ -191,6 +192,49 @@ fn prepare(
     topology::validate(&current.into_values().collect::<Vec<_>>()).map_err(bad_input)?;
     Ok(BatchResult { configs, changes })
 }
+/// Publishes `batch` inside `tx`; the caller commits and wakes agent watches.
+pub(super) fn publish_in(
+    tx: &Transaction<'_>,
+    clocks: &mut leases::LeaseClocks,
+    actor: &Actor,
+    batch: ConfigBatch,
+) -> Result<BatchResult> {
+    let result = prepare(tx, clocks, actor, batch)?;
+    for config in &result.configs {
+        for rule in &config.rules {
+            tx.execute("INSERT OR IGNORE INTO rule_bindings(rule_id,node_id,tenant_id,owner_id) VALUES(?1,?2,?3,?4)",params![rule.id,config.node_id,rule.tenant_id,rule.owner_id])?;
+            tx.execute(
+                "INSERT OR IGNORE INTO rule_epochs(rule_id,meter_epoch) VALUES(?1,?2)",
+                params![rule.id, rule.meter_epoch],
+            )?;
+        }
+        if tx.execute(
+            "UPDATE nodes SET desired_revision=?1 WHERE id=?2 AND desired_revision=?3",
+            params![config.revision, config.node_id, config.revision - 1],
+        )? != 1
+        {
+            return reject(409, "configuration changed; reload before saving");
+        }
+        tx.execute("INSERT INTO config_history(node_id,revision,config_json,actor_id,created_at_ms) VALUES(?1,?2,?3,?4,?5)",params![config.node_id,config.revision,serde_json::to_string(config)?,actor.id,now_ms()])?;
+        audit(
+            tx,
+            &actor.id,
+            "config.publish",
+            &config.node_id,
+            &serde_json::json!({"revision":config.revision,"rules":config.rules.len()}).to_string(),
+        )?;
+    }
+    if result.configs.len() > 1 {
+        audit(
+            tx,
+            &actor.id,
+            "config.batch_publish",
+            "nodes",
+            &serde_json::to_string(&result.changes.iter().map(|c|serde_json::json!({"node_id":c.node_id,"from_revision":c.from_revision,"to_revision":c.to_revision,"added":c.added,"removed":c.removed,"modified":c.modified})).collect::<Vec<_>>())?,
+        )?;
+    }
+    Ok(result)
+}
 impl Store {
     pub fn preview_configs(&self, actor: &Actor, batch: ConfigBatch) -> Result<BatchResult> {
         let conn = self.0.lock().unwrap();
@@ -199,41 +243,7 @@ impl Store {
     pub fn publish_configs(&self, actor: &Actor, batch: ConfigBatch) -> Result<BatchResult> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
-        let result = prepare(&tx, &mut self.3.lock().unwrap(), actor, batch)?;
-        for config in &result.configs {
-            for rule in &config.rules {
-                tx.execute("INSERT OR IGNORE INTO rule_bindings(rule_id,node_id,tenant_id,owner_id) VALUES(?1,?2,?3,?4)",params![rule.id,config.node_id,rule.tenant_id,rule.owner_id])?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO rule_epochs(rule_id,meter_epoch) VALUES(?1,?2)",
-                    params![rule.id, rule.meter_epoch],
-                )?;
-            }
-            if tx.execute(
-                "UPDATE nodes SET desired_revision=?1 WHERE id=?2 AND desired_revision=?3",
-                params![config.revision, config.node_id, config.revision - 1],
-            )? != 1
-            {
-                return reject(409, "configuration changed; reload before saving");
-            }
-            tx.execute("INSERT INTO config_history(node_id,revision,config_json,actor_id,created_at_ms) VALUES(?1,?2,?3,?4,?5)",params![config.node_id,config.revision,serde_json::to_string(config)?,actor.id,now_ms()])?;
-            audit(
-                &tx,
-                &actor.id,
-                "config.publish",
-                &config.node_id,
-                &serde_json::json!({"revision":config.revision,"rules":config.rules.len()})
-                    .to_string(),
-            )?;
-        }
-        if result.configs.len() > 1 {
-            audit(
-                &tx,
-                &actor.id,
-                "config.batch_publish",
-                "nodes",
-                &serde_json::to_string(&result.changes.iter().map(|c|serde_json::json!({"node_id":c.node_id,"from_revision":c.from_revision,"to_revision":c.to_revision,"added":c.added,"removed":c.removed,"modified":c.modified})).collect::<Vec<_>>())?,
-            )?;
-        }
+        let result = publish_in(&tx, &mut self.3.lock().unwrap(), actor, batch)?;
         tx.commit()?;
         self.2.config.notify_waiters();
         Ok(result)

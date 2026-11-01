@@ -14,6 +14,7 @@ pub const FEATURES: &[&str] = &[
     "dns-authoritative",
     "wireguard",
     "nat-traversal",
+    "federation",
 ];
 
 /// Features that work only on top of another one.
@@ -47,6 +48,7 @@ fn usage(conn: &Connection, id: &str) -> Result<usize> {
         "mptcp-paths" => node_profiles::with_mptcp_paths(conn)?,
         "dns-authoritative" => dns_authoritative::zone_count(conn)?,
         "wireguard" => wireguard::network_count(conn)?,
+        "federation" => federation::active_count(conn)?,
         _ => 0,
     })
 }
@@ -60,6 +62,7 @@ fn users(id: &str) -> &'static str {
         "mptcp-paths" => "node(s) have MPTCP paths",
         "dns-authoritative" => "zone(s) are in the authoritative DNS pool",
         "wireguard" => "WireGuard network(s) exist",
+        "federation" => "share(s) are given (not revoked) or received",
         _ => "setting(s) use this feature",
     }
 }

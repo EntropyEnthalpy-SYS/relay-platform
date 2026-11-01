@@ -1091,6 +1091,11 @@ async fn main() -> Result<()> {
                 Duration::from_secs(60),
                 stop.clone(),
             ));
+            tokio::spawn(relay_platform::federation::run(
+                store.clone(),
+                Duration::from_secs(60),
+                stop.clone(),
+            ));
             let history = tokio::spawn(relay_platform::history::run(
                 store.clone(),
                 Duration::from_secs(60),

@@ -615,3 +615,30 @@ Node member `state` is `up`, `updating` (the agent has not applied the newest st
 Agents from 0.139.0 add `probes: true` to `EngineStats.wireguard`; only pairs where both agents send it are tried. `GET /agent/watch` (node credential) also returns early with `wireguard_changed: true` once when NAT traversal changed the node's interfaces since its last sync; agents from 0.139.0 sync at once, older agents ignore the field. `PUT /features/nat-traversal` returns 409 while `wireguard` is off, and `PUT /features/wireguard {enabled:false}` returns 409 while `nat-traversal` is on.
 
 Agents receive `SyncResponse.wireguard` and return `EngineStats.wireguard` as described in [WIREGUARD.md](WIREGUARD.md).
+
+## 0.140.0 Cross-panel sharing
+
+Administration routes need a system administrator session (API tokens are refused). Creating, changing, inviting, pausing and resuming return 409 while `federation` is off; revoking and deleting always work. See [FEDERATION.md](FEDERATION.md).
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| GET | `/federation` | `{enabled, panel_id, grants:[share + {node_name, statement, quota_used_bytes?, applied, ack_mismatch}], remotes:[received share]}`; secrets and secret hashes are never included |
+| POST | `/federation/grants` | `{name, node_id, public_host, listen_ip?, port_start, port_end, max_rules, kinds:["forward"\|"shadowsocks"], rate_bytes_per_sec?, quota_bytes?, expires_at_ms?, allow_sources, allow_destinations?, deny_destinations?, allow_private_destinations?}`; 409 when the ports overlap another rule or share on the node |
+| PUT / DELETE | `/federation/grants/{id}` | Same body (`node_id` cannot change; `quota_bytes` can change but not be added or removed); DELETE only after revoke |
+| POST | `/federation/grants/{id}/invite` | `{owner_url}` (this panel's origin) → `{code, expires_at_ms}`, shown once; 409 once redeemed |
+| POST | `/federation/grants/{id}/pause`, `/resume`, `/revoke` | The share; each republishes the node when the share has rules |
+| POST | `/federation/remotes` | `{invite, label?}`: redeems the code at the owner and stores the received share. Owner refusals come back as 400, 403 or 409 (a 401 from the owner becomes 409), an unreachable owner as 502 |
+| PUT | `/federation/remotes/{id}/rules` | `{expected_revision, rules:[{id?, name, kind, protocol, port, targets?}]}`: the whole rule list, sent to the owner; returns the updated received share |
+| POST | `/federation/remotes/{id}/sync` | Pulls the share now and confirms its statement |
+| DELETE | `/federation/remotes/{id}` | Forgets the received share on this panel only |
+
+Public routes the receiving panel calls on the owner (`Authorization: Bearer <64-hex secret>` except redeem):
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| POST | `/federation/peer/redeem` | `{invite_id, invite_secret, panel_id}` → `{secret, shared}`; 401 for an unknown, wrong or expired invite, 409 once used |
+| GET | `/federation/peer/grant` | `shared`: `{grant_id, owner_panel_id, name, public_host, port_start, port_end, max_rules, kinds, rate_bytes_per_sec?, quota_bytes?, quota_used_bytes?, expires_at_ms?, allow_sources, state, revision, rules:[{id, name, kind, protocol, port, targets?, password?}], applied, statement:{as_of_ms, upload_bytes, download_bytes}}` |
+| PUT | `/federation/peer/grant/rules` | `{expected_revision, rules}` → `shared`; 403 when a request is wider than the share, 400 when malformed, 409 when paused, expired or the revision is stale |
+| POST | `/federation/peer/grant/ack` | `statement` the receiver saw → `{ok:true}` |
+
+A revoked share or an unknown secret returns 401; all peer routes return 409 while the owner's `federation` switch is off. `PUT /features/federation {enabled:false}` returns 409 while any share is not revoked or any received share is kept.

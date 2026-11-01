@@ -8,7 +8,7 @@ use std::collections::HashMap;
 pub const MIN_USER_RATE: u64 = 1024;
 pub const MAX_USER_RATE: u64 = 1 << 40;
 
-fn rate_key(user: &str) -> String {
+pub(super) fn rate_key(user: &str) -> String {
     format!("user_rate:{user}")
 }
 

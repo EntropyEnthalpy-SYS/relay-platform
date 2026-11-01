@@ -204,6 +204,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     if path.starts_with("account/")
         || path.starts_with("dns/")
         || path.starts_with("wireguard")
+        || path.starts_with("federation")
         || path.starts_with("commerce/")
         || path.starts_with("tickets")
         || path == "templates"
@@ -572,6 +573,41 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/control/metrics", get(control_metrics))
         .route("/api/v1/metrics", get(prometheus_metrics))
         .route("/api/v1/capabilities", get(capabilities))
+        .route("/api/v1/federation", get(federation))
+        .route("/api/v1/federation/grants", post(create_federation_grant))
+        .route(
+            "/api/v1/federation/grants/{id}",
+            axum::routing::put(update_federation_grant).delete(delete_federation_grant),
+        )
+        .route(
+            "/api/v1/federation/grants/{id}/invite",
+            post(invite_federation_grant),
+        )
+        .route(
+            "/api/v1/federation/grants/{id}/pause",
+            post(pause_federation_grant),
+        )
+        .route(
+            "/api/v1/federation/grants/{id}/resume",
+            post(resume_federation_grant),
+        )
+        .route(
+            "/api/v1/federation/grants/{id}/revoke",
+            post(revoke_federation_grant),
+        )
+        .route("/api/v1/federation/remotes", post(add_federation_remote))
+        .route(
+            "/api/v1/federation/remotes/{id}",
+            delete(delete_federation_remote),
+        )
+        .route(
+            "/api/v1/federation/remotes/{id}/rules",
+            axum::routing::put(federation_remote_rules),
+        )
+        .route(
+            "/api/v1/federation/remotes/{id}/sync",
+            post(sync_federation_remote),
+        )
         .route("/api/v1/features", get(features))
         .route("/api/v1/features/{id}", axum::routing::put(set_feature))
         .route_layer(middleware::from_fn_with_state(
@@ -595,6 +631,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/agent/reconcile", post(reconcile))
         .route("/api/v1/agent/sync", post(sync))
         .route("/api/v1/agent/watch", get(watch_config))
+        .route("/api/v1/federation/peer/redeem", post(peer_redeem))
+        .route("/api/v1/federation/peer/grant", get(peer_grant))
+        .route(
+            "/api/v1/federation/peer/grant/rules",
+            axum::routing::put(peer_rules),
+        )
+        .route("/api/v1/federation/peer/grant/ack", post(peer_ack))
         .route(
             "/",
             get(|| async { Html(include_str!("../../../web/index.html")) }),
@@ -3723,11 +3766,257 @@ async fn rekey_wireguard_device(
         .await?,
     ))
 }
+async fn federation(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::federation::View> {
+    Ok(Json(
+        database(state.store, move |db| db.federation(&actor)).await?,
+    ))
+}
+async fn create_federation_grant(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::federation::GrantInput>,
+) -> ApiResult<crate::federation::Grant> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_federation_grant(&actor, input)
+        })
+        .await?,
+    ))
+}
+async fn update_federation_grant(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::federation::GrantInput>,
+) -> ApiResult<crate::federation::Grant> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_federation_grant(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_federation_grant(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_federation_grant(&actor, &id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InviteInput {
+    /// This panel's address as other panels reach it.
+    owner_url: String,
+}
+async fn invite_federation_grant(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<InviteInput>,
+) -> ApiResult<crate::federation::Issued> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.invite_federation_grant(&actor, &id, &input.owner_url)
+        })
+        .await?,
+    ))
+}
+async fn grant_state(
+    state: AppState,
+    actor: Actor,
+    id: String,
+    next: crate::federation::State,
+) -> ApiResult<crate::federation::Grant> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.set_federation_grant_state(&actor, &id, next)
+        })
+        .await?,
+    ))
+}
+async fn pause_federation_grant(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::federation::Grant> {
+    grant_state(state, actor, id, crate::federation::State::Paused).await
+}
+async fn resume_federation_grant(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::federation::Grant> {
+    grant_state(state, actor, id, crate::federation::State::Active).await
+}
+async fn revoke_federation_grant(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::federation::Grant> {
+    grant_state(state, actor, id, crate::federation::State::Revoked).await
+}
+/// The owner panel's refusal, passed on. A 401 would sign the administrator
+/// out of this panel, so it becomes a 409.
+fn peer_failure(error: crate::federation::PeerError) -> ApiError {
+    let status = match error.status {
+        Some(status @ (400 | 403 | 409)) => status,
+        Some(401) => 409,
+        _ => 502,
+    };
+    ApiError(
+        Rejection {
+            status,
+            message: error.message,
+        }
+        .into(),
+    )
+}
+async fn add_federation_remote(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::federation::RemoteInput>,
+) -> ApiResult<crate::federation::Remote> {
+    let (owner, invite_id, invite_secret) = crate::federation::parse_invite(&input.invite)
+        .map_err(|e| {
+            ApiError(
+                Rejection {
+                    status: 400,
+                    message: format!("{e:#}"),
+                }
+                .into(),
+            )
+        })?;
+    let checker = actor.clone();
+    let label = input.label.clone();
+    let panel_id = database(state.store.clone(), move |db| {
+        db.prepare_federation_remote(&checker, &label)
+    })
+    .await?;
+    let request = crate::federation::RedeemRequest {
+        invite_id,
+        invite_secret,
+        panel_id,
+    };
+    let redeemed =
+        crate::federation::redeem(&crate::federation::client(), owner.as_str(), &request)
+            .await
+            .map_err(peer_failure)?;
+    Ok(Json(
+        database(state.store, move |db| {
+            db.add_federation_remote(&actor, owner.as_str(), &input.label, redeemed)
+        })
+        .await?,
+    ))
+}
+async fn delete_federation_remote(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_federation_remote(&actor, &id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn federation_remote_rules(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::federation::RulesRequest>,
+) -> ApiResult<crate::federation::Remote> {
+    let remote_id = id.clone();
+    let remote = database(state.store.clone(), move |db| {
+        db.federation_remote(&actor, &remote_id)
+    })
+    .await?;
+    let outcome =
+        crate::federation::put_rules(&crate::federation::client(), &remote, &request).await;
+    let failure = outcome.as_ref().err().cloned();
+    // A refusal of the rules changes nothing; only success or revocation is kept.
+    if failure.as_ref().is_some_and(|e| !e.revoked) {
+        return Err(peer_failure(failure.unwrap()));
+    }
+    let recorded = database(state.store, move |db| {
+        db.record_federation_remote(&id, outcome)
+    })
+    .await?;
+    match failure {
+        Some(error) => Err(peer_failure(error)),
+        None => Ok(Json(recorded)),
+    }
+}
+async fn sync_federation_remote(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::federation::Remote> {
+    let remote_id = id.clone();
+    database(state.store.clone(), move |db| {
+        db.federation_remote(&actor, &remote_id)
+    })
+    .await?;
+    Ok(Json(
+        crate::federation::sync(&state.store, &crate::federation::client(), &id)
+            .await
+            .map_err(ApiError)?,
+    ))
+}
+async fn peer_redeem(
+    State(state): State<AppState>,
+    Json(request): Json<crate::federation::RedeemRequest>,
+) -> ApiResult<crate::federation::Redeemed> {
+    Ok(Json(
+        database(state.store, move |db| db.redeem_federation_invite(request)).await?,
+    ))
+}
+async fn peer_grant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<crate::federation::Shared> {
+    let secret = bearer(&headers)?;
+    Ok(Json(
+        database(state.store, move |db| db.peer_federation_grant(&secret)).await?,
+    ))
+}
+async fn peer_rules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<crate::federation::RulesRequest>,
+) -> ApiResult<crate::federation::Shared> {
+    let secret = bearer(&headers)?;
+    Ok(Json(
+        database(state.store, move |db| {
+            db.peer_federation_rules(&secret, request)
+        })
+        .await?,
+    ))
+}
+async fn peer_ack(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(statement): Json<crate::federation::Statement>,
+) -> ApiResult<serde_json::Value> {
+    let secret = bearer(&headers)?;
+    database(state.store, move |db| {
+        db.peer_federation_ack(&secret, statement)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery","dns-authoritative-pool","wireguard","nat-traversal"],
-        "pending":["dns-health-removal","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery","dns-authoritative-pool","wireguard","nat-traversal","federation"],
+        "pending":["dns-health-removal","postgresql-ha"]
     }))
 }
 

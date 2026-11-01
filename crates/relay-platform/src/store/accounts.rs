@@ -474,6 +474,16 @@ impl Store {
                 "delete this user's subscriptions before deleting the account",
             );
         }
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM metadata WHERE key GLOB 'federation_grant:*' AND json_extract(value,'$.user_id')=?1)",
+            [&target.id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return reject(
+                409,
+                "this account belongs to a cross-panel share; it stays with the share",
+            );
+        }
         accounts::end_credentials(&tx, &target.id)?;
         tx.execute(
             "DELETE FROM metadata WHERE key IN (?1,?2)",

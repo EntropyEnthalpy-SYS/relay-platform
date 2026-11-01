@@ -11,6 +11,7 @@ pub mod dns;
 pub mod dns_authoritative;
 pub mod email;
 pub mod engine;
+pub mod federation;
 pub mod health;
 pub mod history;
 pub mod http2_connect;

@@ -25,6 +25,7 @@ mod dns;
 mod dns_authoritative;
 mod endpoint_allocation;
 mod features;
+mod federation;
 mod health;
 mod leases;
 mod node_profiles;
