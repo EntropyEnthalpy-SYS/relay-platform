@@ -599,6 +599,15 @@ pub fn router(state: AppState) -> Router {
                 )
             }),
         )
+        .route(
+            "/assets/inter.woff2",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "font/woff2")],
+                    include_bytes!("../../../web/fonts/InterVariable-latin.woff2").as_slice(),
+                )
+            }),
+        )
         .fallback(|| async {
             (
                 StatusCode::NOT_FOUND,

@@ -172,7 +172,7 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
   }
   $('#context-help').onclick = () => { const article = guideArticles.find(a => a.id === (getView() === 'guide' ? parseRoute(location.hash).topic : pageInfo[getView()][3])); modal(article.title, articleBody(article, true)); };
   function sync(view) {
-    const info = pageInfo[view]; $('#breadcrumb-group').textContent = info[0]; $('#breadcrumb-current').textContent = titles[view]; $('#page-kicker').textContent = info[1]; $('#view-description').textContent = info[2];
+    const info = pageInfo[view]; $('#breadcrumb-group').textContent = info[0]; $('#breadcrumb-current').textContent = titles[view]; $('#view-description').textContent = info[2];
     document.title = `${titles[view]} · Relay`; $('#console-tab').classList.toggle('active', view !== 'guide'); $('#guide-tab').classList.toggle('active', view === 'guide');
     document.querySelectorAll('[data-view]').forEach(n => { if (n.dataset.view === navView(view)) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current'); });
     drawer(false); $('#main-content').dataset.view = view;

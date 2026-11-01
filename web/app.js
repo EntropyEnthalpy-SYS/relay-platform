@@ -8,18 +8,18 @@ const titles = localize({ overview: '运行总览', nodes: '节点管理', rules
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
-// Appearance affects this browser only. Dark with the ember accent is the
+// Appearance affects this browser only. Dark with the indigo accent is the
 // default; status colors stay fixed whichever brand accent is chosen.
 function readPreference(key, choices, fallback) {
   try { const value = localStorage.getItem(key); return choices.includes(value) ? value : fallback; }
   catch { return fallback; }
 }
 const themeMedia = matchMedia('(prefers-color-scheme: dark)');
-const accents = ['ember', 'cobalt', 'violet', 'emerald'];
+const accents = ['indigo', 'cyan', 'emerald', 'ember'];
 let themePreference = readPreference('relay-theme', ['light', 'dark', 'system'], 'dark');
-// Accents saved before 0.133.0 map to their closest new color.
-const legacyAccents = { terracotta: 'ember', blue: 'cobalt', green: 'emerald' };
-let accentPreference = readPreference('relay-accent', [...accents, ...Object.keys(legacyAccents)], 'ember');
+// Accents saved by earlier versions map to their closest current color.
+const legacyAccents = { terracotta: 'ember', blue: 'indigo', cobalt: 'indigo', violet: 'indigo', green: 'emerald' };
+let accentPreference = readPreference('relay-accent', [...accents, ...Object.keys(legacyAccents)], 'indigo');
 accentPreference = legacyAccents[accentPreference] || accentPreference;
 function applyTheme(theme, persist = true) {
   themePreference = ['light', 'dark', 'system'].includes(theme) ? theme : 'dark';
@@ -29,7 +29,7 @@ function applyTheme(theme, persist = true) {
   requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')));
 }
 function applyAccent(accent, persist = true) {
-  accentPreference = accents.includes(accent) ? accent : 'ember';
+  accentPreference = accents.includes(accent) ? accent : 'indigo';
   document.documentElement.dataset.accent = accentPreference;
   if (persist) { try { localStorage.setItem('relay-accent', accentPreference); } catch { /* Usable without storage. */ } }
 }
@@ -95,7 +95,7 @@ function showAppearance() {
     group.append(grid); body.append(group);
   }
   choices('theme', translate('界面主题'), [['dark', translate('深色（默认）')], ['light', translate('浅色')], ['system', translate('跟随系统')]], themePreference, applyTheme);
-  choices('accent', translate('强调色'), [['ember', translate('余烬橙（默认）')], ['cobalt', translate('钴蓝')], ['violet', translate('星云紫')], ['emerald', translate('翡翠绿')]], accentPreference, applyAccent);
+  choices('accent', translate('强调色'), [['indigo', translate('靛蓝（默认）')], ['cyan', translate('湖青')], ['emerald', translate('翡翠绿')], ['ember', translate('余烬橙')]], accentPreference, applyAccent);
   body.append(el('p', translate('强调色用于导航、主要操作和流量图；正常、警告与错误保留固定的状态色和文字。'), 'fine'));
   choices('layout', translate('总览显示模式'), [['monitoring', translate('展开总览'), translate('大图表、完整宽度的路径图和事件列表。')], ['workspace', translate('紧凑总览'), translate('较小的图表与摘要，适合日常管理。')]], overviewLayout, mode => {
     applyOverviewLayout(mode, true); if (state.view === 'overview') refresh().catch(e => notify(e.message, true));

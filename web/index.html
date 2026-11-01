@@ -9,7 +9,7 @@
 <div id="login-screen" class="login-screen">
   <button id="login-language-toggle" class="language-toggle login-language-toggle" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button>
   <form id="login-form" class="login-card">
-    <a class="brand login-brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>Relay<span class="brand-sub">YOUR NETWORK, CONNECTED.</span></span></a>
+    <a class="brand login-brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>Relay<span class="brand-sub">Your network, connected.</span></span></a>
     <p class="eyebrow">WELCOME TO YOUR WORKSPACE</p><h1>让网络有序，<br>让管理从容。</h1>
     <p class="muted">登录控制台，连接你的节点、规则与每一条线路。</p>
     <label>用户名<input name="username" value="admin" autocomplete="username" required maxlength="80"></label>
@@ -31,10 +31,10 @@
 <div id="application" class="application hidden">
   <a href="#main-content" class="skip-link">跳到主要内容</a>
   <div class="topbar">
-    <div class="topbar-brand"><button id="menu-toggle" class="icon-control mobile-only" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button><a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true"></span><span>Relay<span class="brand-sub">NETWORK WORKSPACE</span></span></a></div>
+    <div class="topbar-brand"><button id="menu-toggle" class="icon-control mobile-only" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button><a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true"></span><span>Relay<span class="brand-sub">Network workspace</span></span></a></div>
     <div class="topbar-tabs" aria-label="工作空间入口"><button id="console-tab" class="topbar-tab active">控制台</button><button id="guide-tab" class="topbar-tab">使用指南 <span aria-hidden="true">↗</span></button></div>
     <button id="command-open" class="search-trigger" aria-label="搜索页面与指南"><span data-icon="search"></span><span>搜索页面与指南…</span><kbd>⌘ K</kbd></button>
-    <div class="topbar-actions"><span class="build-badge">DEV 0.133.0</span><button id="language-toggle" class="language-toggle" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button><button id="theme" class="subtle appearance-trigger" type="button" aria-label="外观与布局" title="外观与布局" aria-haspopup="dialog"><span data-icon="sliders"></span><span class="appearance-label">外观</span></button><span id="identity" class="identity"></span></div>
+    <div class="topbar-actions"><span class="build-badge">DEV 0.134.0</span><button id="language-toggle" class="language-toggle" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button><button id="theme" class="subtle appearance-trigger" type="button" aria-label="外观与布局" title="外观与布局" aria-haspopup="dialog"><span data-icon="sliders"></span><span class="appearance-label">外观</span></button><span id="identity" class="identity"></span></div>
   </div>
   <button id="nav-backdrop" class="nav-backdrop" aria-label="关闭导航" tabindex="-1" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="工作空间导航">
@@ -76,7 +76,7 @@
   </aside>
   <main id="main-content" tabindex="-1">
     <div class="page-breadcrumb"><span data-icon="home"></span><span>Relay</span><span aria-hidden="true">/</span><span id="breadcrumb-group">总览</span><span aria-hidden="true">/</span><span id="breadcrumb-current">运行总览</span></div>
-    <header class="page-header"><div><p id="page-kicker" class="eyebrow">NETWORK OVERVIEW</p><h1 id="view-title">运行总览</h1><p id="view-description" class="view-description"></p></div><div class="header-right"><button id="context-help" class="subtle" type="button"><span data-icon="book"></span>页面指南</button><button id="refresh" class="subtle" type="button"><span data-icon="refresh"></span>刷新</button></div></header>
+    <header class="page-header"><div><h1 id="view-title">运行总览</h1><p id="view-description" class="view-description"></p></div><div class="header-right"><button id="context-help" class="subtle" type="button"><span data-icon="book"></span>页面指南</button><button id="refresh" class="subtle" type="button"><span data-icon="refresh"></span>刷新</button></div></header>
     <div class="page-meta"><span id="status-pill" class="status-pill" role="status"></span><span class="data-note"><span class="live-dot"></span>当前工作空间<span class="meta-separator">/</span><span id="refreshed">等待数据</span></span></div>
     <div id="overview-controls" class="overview-controls hidden"><div class="overview-layout-picker" role="group" aria-label="总览显示模式"><button id="overview-monitoring" type="button" aria-pressed="true" aria-controls="content">展开总览</button><button id="overview-workspace" type="button" aria-pressed="false" aria-controls="content">紧凑总览</button></div><span>同一份实时数据 · 仅切换显示布局</span></div>
     <div id="notification" class="notification hidden" role="status"></div><div id="content"></div>
