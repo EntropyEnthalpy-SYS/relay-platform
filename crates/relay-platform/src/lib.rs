@@ -8,6 +8,7 @@ pub mod credential;
 mod datagram;
 pub mod destination_acl;
 pub mod dns;
+pub mod dns_authoritative;
 pub mod email;
 pub mod engine;
 pub mod health;

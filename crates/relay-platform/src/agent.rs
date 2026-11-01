@@ -16,6 +16,9 @@ use credentials::SharedCredential;
 
 /// Agent metadata key of the user shares in force, restored after a restart.
 const USER_SHARES: &str = "agent_user_shares";
+/// Agent metadata key of the authoritative DNS answers last received, served
+/// again after a restart while the controller is unreachable.
+const AUTHORITATIVE_DNS: &str = "agent_authoritative_dns";
 
 pub struct AgentOptions {
     pub controller: String,
@@ -183,6 +186,17 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     if let Ok(shares) = serde_json::from_str::<Vec<UserShare>>(&saved_shares) {
         engine.restore_user_shares(&shares);
     }
+    let mut dns = crate::dns_authoritative::Responder::default();
+    let mut saved_dns = String::new();
+    if let Some(saved) = store.metadata(AUTHORITATIVE_DNS)?
+        && let Ok(snapshot) = serde_json::from_str::<crate::dns_authoritative::Snapshot>(&saved)
+    {
+        dns.apply(&snapshot);
+        saved_dns = snapshot.digest;
+    }
+    // Reported only to a controller that sent answers, as older ones reject
+    // the unknown field.
+    let mut dns_reporting = false;
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
@@ -343,6 +357,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     let mut stats = engine.stats();
                     stats.budget_recovery = budget_recovery.clone();
                     stats.mptcp_paths = mptcp_report.clone();
+                    stats.authoritative_dns = dns_reporting.then(|| dns.report());
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -374,6 +389,17 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                 Some(desired) => Some(mptcp_paths.reconcile(desired).await),
                                 None => None,
                             };
+                            // An older controller sends none: stop answering.
+                            dns_reporting = synced.authoritative_dns.is_some();
+                            let served = synced.authoritative_dns.unwrap_or_default();
+                            dns.apply(&served);
+                            if served.digest != saved_dns {
+                                store.set_metadata(
+                                    AUTHORITATIVE_DNS,
+                                    &serde_json::to_string(&served)?,
+                                )?;
+                                saved_dns = served.digest;
+                            }
                             lease.ensure_live()?;
                             ensure!(
                                 identifier(&synced.controller_instance),

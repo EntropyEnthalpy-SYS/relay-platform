@@ -83,7 +83,7 @@ impl RecordType {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct HealthGate {
     pub node_id: String,
     pub rule_id: String,

@@ -492,6 +492,31 @@ pub fn router(state: AppState) -> Router {
                 .delete(delete_dns_record),
         )
         .route("/api/v1/dns/records/{id}/ddns", post(dns_ddns))
+        .route("/api/v1/dns/authoritative", get(authoritative_dns))
+        .route(
+            "/api/v1/dns/authoritative/zones",
+            post(create_authoritative_zone),
+        )
+        .route(
+            "/api/v1/dns/authoritative/zones/{id}",
+            axum::routing::put(update_authoritative_zone).delete(delete_authoritative_zone),
+        )
+        .route(
+            "/api/v1/dns/authoritative/zones/{id}/members",
+            post(create_authoritative_member),
+        )
+        .route(
+            "/api/v1/dns/authoritative/members/{id}",
+            axum::routing::put(update_authoritative_member).delete(delete_authoritative_member),
+        )
+        .route(
+            "/api/v1/dns/authoritative/zones/{id}/records",
+            post(create_authoritative_record),
+        )
+        .route(
+            "/api/v1/dns/authoritative/records/{id}",
+            axum::routing::put(update_authoritative_record).delete(delete_authoritative_record),
+        )
         .route("/api/v1/tenants", post(create_tenant))
         .route("/api/v1/usage", get(usage))
         .route("/api/v1/budgets", get(budgets).post(create_budget))
@@ -3286,6 +3311,124 @@ async fn delete_dns_zone(
     database(state.store, move |db| db.delete_dns_zone(&actor, &id)).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
+async fn authoritative_dns(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<crate::dns_authoritative::PoolView> {
+    Ok(Json(
+        database(state.store, move |db| db.authoritative_dns(&actor)).await?,
+    ))
+}
+async fn create_authoritative_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::dns_authoritative::ZoneInput>,
+) -> ApiResult<crate::dns_authoritative::Zone> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_authoritative_zone(&actor, input)
+        })
+        .await?,
+    ))
+}
+async fn update_authoritative_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::dns_authoritative::ZoneInput>,
+) -> ApiResult<crate::dns_authoritative::Zone> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_authoritative_zone(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_authoritative_zone(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_authoritative_zone(&actor, &id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn create_authoritative_member(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(zone): Path<String>,
+    Json(input): Json<crate::dns_authoritative::MemberInput>,
+) -> ApiResult<crate::dns_authoritative::Member> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_authoritative_member(&actor, &zone, input)
+        })
+        .await?,
+    ))
+}
+async fn update_authoritative_member(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::dns_authoritative::MemberInput>,
+) -> ApiResult<crate::dns_authoritative::Member> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_authoritative_member(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_authoritative_member(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_authoritative_member(&actor, &id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn create_authoritative_record(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(zone): Path<String>,
+    Json(input): Json<crate::dns_authoritative::RecordInput>,
+) -> ApiResult<crate::dns_authoritative::Record> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_authoritative_record(&actor, &zone, input)
+        })
+        .await?,
+    ))
+}
+async fn update_authoritative_record(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::dns_authoritative::RecordInput>,
+) -> ApiResult<crate::dns_authoritative::Record> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_authoritative_record(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_authoritative_record(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_authoritative_record(&actor, &id)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
 async fn dns_records(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -3469,8 +3612,8 @@ async fn set_feature(
 async fn capabilities() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "version":env!("CARGO_PKG_VERSION"),"stage":"development","database":"sqlite-single-controller",
-        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery"],
-        "pending":["wireguard","nat-traversal","dns-health-removal","dns-authoritative-pool","federation","postgresql-ha"]
+        "available":["two-factor-login","scoped-api-tokens","client-subscriptions","dns-records","ddns","announcements","commerce-wallet","commerce-orders","commerce-payments","commerce-coupons","commerce-gifts","http-connect","http2-connect-managed","protocol-gateways","protocol-client-exports","destination-acl","config-templates","mptcp-diagnostics","mptcp-rule-transport","mptcp","nat-pmp","pcp","upnp","tickets","node-identity-revocation-replacement","node-credential-rotation","node-inventory-lifecycle","durable-budget-run-recovery","node-execution-leases","commerce-entitlements","tcp","udp","ipv4","ipv6","dns-targets","port-ranges","outbound-binding","dns-ttl-cache","node-local-loop-protection","proxy-protocol-tcp-v1-v2","proxy-protocol-udp-v2","udp-destination-tracking","websocket","secure-websocket","declared-multi-node-topology","atomic-config-batch","target-health-checks","priority-capacity-selection","lowest-latency-selection","node-telemetry","connection-history","live-logs","diagnostic-report","connection-prewarm","alert-notifications","smtp-alerts","tenant-alerts","multipath-aggregation","weighted-round-robin","source-hash","least-connections","source-cidr-acl","per-rule-quota","per-rule-bandwidth","durable-usage","config-revisions","tenant-isolation","session-revocation","tls-data-transport","mutual-tls","backup-reconciliation","global-user-budgets","global-rate-limits","hierarchical-budgets","budget-reservation-return","controller-recovery-log","budget-disaster-recovery","dns-authoritative-pool"],
+        "pending":["wireguard","nat-traversal","dns-health-removal","federation","postgresql-ha"]
     }))
 }
 

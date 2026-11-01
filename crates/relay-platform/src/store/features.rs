@@ -11,6 +11,7 @@ pub const FEATURES: &[&str] = &[
     "plan-entitlements",
     "budget-recovery",
     "mptcp-paths",
+    "dns-authoritative",
 ];
 
 #[derive(Clone, Debug, Serialize)]
@@ -39,6 +40,7 @@ fn usage(conn: &Connection, id: &str) -> Result<usize> {
         )?,
         "plan-entitlements" => commerce::live_count(conn)?,
         "mptcp-paths" => node_profiles::with_mptcp_paths(conn)?,
+        "dns-authoritative" => dns_authoritative::zone_count(conn)?,
         _ => 0,
     })
 }
@@ -50,6 +52,7 @@ fn users(id: &str) -> &'static str {
         "dns-health" => "DNS record(s) use health gating",
         "plan-entitlements" => "plan(s) are active or waiting for a budget",
         "mptcp-paths" => "node(s) have MPTCP paths",
+        "dns-authoritative" => "zone(s) are in the authoritative DNS pool",
         _ => "setting(s) use this feature",
     }
 }

@@ -22,6 +22,7 @@ mod commerce;
 mod credentials;
 mod diagnostics;
 mod dns;
+mod dns_authoritative;
 mod endpoint_allocation;
 mod features;
 mod health;

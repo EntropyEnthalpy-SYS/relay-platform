@@ -921,6 +921,9 @@ pub struct EngineStats {
     /// older controllers never receive the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mptcp_paths: Option<crate::mptcp::paths::Report>,
+    /// Sent only after the controller sent [`SyncResponse::authoritative_dns`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoritative_dns: Option<crate::dns_authoritative::ServeStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1113,6 +1116,10 @@ pub struct SyncResponse {
     /// feature is off. `None` from controllers older than the feature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mptcp_paths: Option<crate::mptcp::paths::Paths>,
+    /// What this node answers for the authoritative DNS pool; empty when it
+    /// is in no zone or the feature is off. `None` from older controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoritative_dns: Option<crate::dns_authoritative::Snapshot>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

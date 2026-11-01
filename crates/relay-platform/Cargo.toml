@@ -18,6 +18,7 @@ clap = { version = "4", features = ["derive"] }
 ipnet = { version = "2", features = ["serde"] }
 if-addrs = "0.15.0"
 hickory-resolver = "0.26.1"
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 socket2 = { version = "0.6.5", features = ["all"] }
 crc32c = "0.6"
 futures-util = { version = "0.3", features = ["sink"] }

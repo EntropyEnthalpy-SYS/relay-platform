@@ -97,6 +97,41 @@ fn all<T: serde::de::DeserializeOwned>(conn: &Connection, prefix: &str) -> Resul
         .map(|value| serde_json::from_str(&value).context("invalid stored DNS record"))
         .collect()
 }
+/// Health gate: a record is active only while its linked node has a fresh
+/// applied observation with at least one eligible healthy target for the
+/// rule. Unknown, stale, disabled or absent nodes fail closed.
+pub(super) fn health_ok(
+    conn: &Connection,
+    telemetry: &crate::telemetry::Telemetry,
+    gate: &HealthGate,
+) -> Result<bool> {
+    let row: Option<(Option<i64>, String)> = conn
+        .query_row(
+            "SELECT last_seen_ms,COALESCE(stats_json,'{}') FROM nodes WHERE id=?1",
+            [&gate.node_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((last_seen, stats)) = row else {
+        return Ok(false);
+    };
+    let (last_seen, stats) = telemetry.current(&gate.node_id, last_seen, stats);
+    if super::node_profiles::read(conn, &gate.node_id)?
+        .settings
+        .lifecycle(now_ms())
+        != crate::node::NodeLifecycle::Active
+        || last_seen.is_none_or(|seen| now_ms().saturating_sub(seen) > 90_000)
+    {
+        return Ok(false);
+    }
+    let stats: EngineStats =
+        serde_json::from_str(&stats).context("invalid node health statistics")?;
+    Ok(stats.target_health.iter().any(|report| {
+        report.rule_id == gate.rule_id
+            && report.eligible
+            && report.status == crate::health::Status::Healthy
+    }))
+}
 #[derive(Clone, Debug)]
 pub struct NewDnsRecord {
     pub name: String,
@@ -440,37 +475,8 @@ impl Store {
         tx.commit()?;
         Ok(record)
     }
-    /// Health gate: a record is active only while its linked node has a fresh
-    /// applied observation with at least one eligible healthy target for the
-    /// rule. Unknown, stale, disabled or absent nodes fail closed.
     pub(crate) fn dns_health_ok(&self, gate: &HealthGate) -> Result<bool> {
-        let conn = self.0.lock().unwrap();
-        let row: Option<(Option<i64>, String)> = conn
-            .query_row(
-                "SELECT last_seen_ms,COALESCE(stats_json,'{}') FROM nodes WHERE id=?1",
-                [&gate.node_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((last_seen, stats)) = row else {
-            return Ok(false);
-        };
-        let (last_seen, stats) = self.4.current(&gate.node_id, last_seen, stats);
-        if super::node_profiles::read(&conn, &gate.node_id)?
-            .settings
-            .lifecycle(now_ms())
-            != crate::node::NodeLifecycle::Active
-            || last_seen.is_none_or(|seen| now_ms().saturating_sub(seen) > 90_000)
-        {
-            return Ok(false);
-        }
-        let stats: EngineStats =
-            serde_json::from_str(&stats).context("invalid node health statistics")?;
-        Ok(stats.target_health.iter().any(|report| {
-            report.rule_id == gate.rule_id
-                && report.eligible
-                && report.status == crate::health::Status::Healthy
-        }))
+        health_ok(&self.0.lock().unwrap(), &self.4, gate)
     }
     pub fn dns_record_synced(
         &self,

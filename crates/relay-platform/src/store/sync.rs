@@ -22,6 +22,8 @@ impl Store {
         let (mut response, stored_seen) = apply_sync(&tx, node, request, &self.6)?;
         tx.commit()?;
         response.log_cursor = Some(report.record(&self.4, node, stored_seen));
+        response.authoritative_dns =
+            Some(super::dns_authoritative::snapshot(&conn, &self.4, node)?);
         Ok(response)
     }
 
@@ -76,6 +78,8 @@ impl Store {
             let cursor = report.record(&self.4, &node, stored_seen);
             if let Ok(response) = &mut responses[index] {
                 response.log_cursor = Some(cursor);
+                response.authoritative_dns =
+                    Some(super::dns_authoritative::snapshot(&conn, &self.4, &node)?);
             }
         }
         Ok(responses)
@@ -236,6 +240,8 @@ fn apply_sync(
     Ok((
         SyncResponse {
             mptcp_paths: Some(mptcp_paths),
+            // Rendered after the commit, from the newest health reports.
+            authoritative_dns: None,
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

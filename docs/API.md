@@ -577,4 +577,22 @@ Allocation conservatively avoids configured listeners, disabled rules, ranges, g
 
 `GET /features` lists every optional feature as `{id, enabled, in_use}` for any signed-in role. `PUT /features/{id}` with `{"enabled": true|false}` switches one; it requires a system administrator session (API tokens are refused) and records `feature.enable` / `feature.disable` in the audit log. Unknown ids return 404. Switching off returns 409 while `in_use` is above 0.
 
-`plan-entitlements` turns paid plan orders into the buyer's user budget; see [COMMERCE.md](COMMERCE.md). `budget-recovery` enables the write-off and restore-lock actions in [BUDGET_RECOVERY.md](BUDGET_RECOVERY.md). `mptcp-paths` lets node profiles carry `settings.mptcp_paths` for agents whose server opted in; see [MPTCP.md](MPTCP.md). Every feature starts off on a new controller. While a feature is off, changes that need it return 409: `mptcp` covers rules with a non-off MPTCP mode, and `dns-health` covers DNS records with a health gate. A controller upgraded with such settings already in place has no stored switch and reports the feature as on, so working configuration keeps running. The switches change controller validation and panel forms only; they never change server system settings.
+`plan-entitlements` turns paid plan orders into the buyer's user budget; see [COMMERCE.md](COMMERCE.md). `budget-recovery` enables the write-off and restore-lock actions in [BUDGET_RECOVERY.md](BUDGET_RECOVERY.md). `mptcp-paths` lets node profiles carry `settings.mptcp_paths` for agents whose server opted in; see [MPTCP.md](MPTCP.md). `dns-authoritative` enables the authoritative DNS pool below; it stays on while any pool zone exists. Every feature starts off on a new controller. While a feature is off, changes that need it return 409: `mptcp` covers rules with a non-off MPTCP mode, and `dns-health` covers DNS records with a health gate. A controller upgraded with such settings already in place has no stored switch and reports the feature as on, so working configuration keeps running. The switches change controller validation and panel forms only; they never change server system settings.
+
+## 0.137.0 Authoritative DNS pool
+
+All routes need a system administrator session (API tokens are refused, as for every `/dns/` route). Creating or changing zones, name servers and records returns 409 while `dns-authoritative` is off; deletions always work. Validation errors return 400, conflicts 409 and unknown ids 404. Audit actions are `dns.authoritative.zone.*`, `dns.authoritative.member.*` and `dns.authoritative.record.*`.
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| GET | `/dns/authoritative` | `{enabled, zones:[zone + {members:[member + {node_name, nameserver, state, report?}], records:[record + {served, healthy}]}]}` |
+| POST | `/dns/authoritative/zones` | `{name, hostmaster?, ttl?, negative_ttl?, min_keep?}` |
+| PUT / DELETE | `/dns/authoritative/zones/{id}` | Same body as create; DELETE also removes the zone's name servers and records |
+| POST | `/dns/authoritative/zones/{id}/members` | `{node_id, listen:[ip], label?, advertise?, port?}` |
+| PUT / DELETE | `/dns/authoritative/members/{id}` | Same body as create |
+| POST | `/dns/authoritative/zones/{id}/records` | `{name, type: A\|AAAA\|CNAME\|TXT, ttl?, values:[{content, health?:{node_id, rule_id}}]}` |
+| PUT / DELETE | `/dns/authoritative/records/{id}` | Same body as create |
+
+Member `state` is `serving`, `updating` (the agent still serves an older version), `error` (a listener failed; see `report.errors`), `waiting` (no report yet, possibly an agent older than 0.137.0) or `offline` (no report for 90 s). Record `served` lists the values answered now; `healthy` has one entry per value: `null` without a health gate, otherwise whether it passes.
+
+Agents receive their answers in the optional `SyncResponse.authoritative_dns` `{digest, listen:[addr], zones:[...]}` on every sync, empty for non-members or while the feature is off. They return `EngineStats.authoritative_dns` `{digest, listening, errors?, queries, nxdomain, refused, truncated, limited}` only to a controller that sent answers. See [DNS.md](DNS.md).
