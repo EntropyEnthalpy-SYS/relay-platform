@@ -47,11 +47,8 @@ function applyOverviewLayout(layout = overviewLayout, persist = false) {
   const visible = !!state.actor && state.view === 'overview';
   if (visible) document.body.dataset.overviewLayout = overviewLayout;
   else delete document.body.dataset.overviewLayout;
-  $('#overview-controls').classList.toggle('hidden', !visible);
-  for (const mode of ['monitoring', 'workspace']) $('#overview-' + mode).setAttribute('aria-pressed', String(overviewLayout === mode));
   if (persist) { try { localStorage.setItem('relay-overview-layout', overviewLayout); } catch { /* Switching still works without storage. */ } }
 }
-for (const mode of ['monitoring', 'workspace']) $('#overview-' + mode).onclick = () => { applyOverviewLayout(mode, true); refresh().catch(e => notify(e.message, true)); };
 applyOverviewLayout();
 function el(tag, text, cls) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (cls) n.className = cls; return n; }
 function notify(message, failure = false) { const n = $('#notification'); n.textContent = message; n.classList.remove('hidden'); n.classList.toggle('failure', failure); }
@@ -68,7 +65,7 @@ async function api(path, options = {}) {
 }
 setupLanguageSwitcher(() => {
   if (!state.actor) { document.title = translate('Relay · 独立转发平台'); return; }
-  $('#identity').textContent = $('#identity').title = `${state.actor.username} · ${roleNames[state.actor.role]}`;
+  showIdentity();
   $('#view-title').textContent = titles[state.view];
   $('#notification').classList.add('hidden');
   consoleUI.sync(state.view);
@@ -76,7 +73,9 @@ setupLanguageSwitcher(() => {
 });
 const consoleUI = createConsoleUI({ navigate, getActor: () => state.actor, getView: () => state.view, el, button, modal, titles });
 function loggedOut() { consoleUI.reset(); state.view = 'overview'; state.token = null; state.actor = null; applyOverviewLayout(); state.nodes = []; state.nodeFilter = {}; state.selectedNodes.clear(); sessionStorage.removeItem('relay-session'); resetSecondFactor(); $('#application').classList.add('hidden'); $('#login-screen').classList.remove('hidden'); $('#dialog').close(); state.config = null; state.selectedNode = null; $('#content').replaceChildren(); $('#identity').textContent = ''; $('#status-pill').textContent = ''; document.title = translate('Relay · 独立转发平台'); window.scrollTo({ top: 0 }); $('#login-form [name=username]').focus(); }
-function modal(title, content) { $('#dialog-title').textContent = title; $('#dialog-body').replaceChildren(content); $('#dialog').showModal(); $('#dialog').scrollTop = 0; }
+// Editing and details open as a sheet on the right; short confirmations stay centered.
+function modal(title, content, variant = 'sheet') { const dialog = $('#dialog'); $('#dialog-title').textContent = title; $('#dialog-body').replaceChildren(content); dialog.className = variant; if (!dialog.open) dialog.showModal(); dialog.scrollTop = 0; }
+function showIdentity() { const { username, role } = state.actor; $('#identity-name').textContent = username; $('#identity-role').textContent = roleNames[role]; $('#identity-avatar').textContent = username.slice(0, 1).toUpperCase(); $('.identity').title = `${username} · ${roleNames[role]}`; }
 function showAppearance() {
   const body = el('div', undefined, 'appearance-settings');
   body.append(el('p', translate('深色优先的工作空间，可自选主题、强调色与显示方式。设置自动保存在当前浏览器。'), 'muted'));
@@ -119,7 +118,7 @@ function panelQuestion(message, initial, promptMode) {
     if (promptMode) input = field(form, 'answer', message, initial || '', 'text', false);
     else form.append(el('p', message, 'workflow-callout'));
     submit(form, promptMode ? translate('继续') : translate('确认操作'), () => finish(promptMode ? input.value : true));
-    modal(promptMode ? translate('输入信息') : translate('确认操作'), form);
+    modal(promptMode ? translate('输入信息') : translate('确认操作'), form, 'confirm');
     if (input) input.focus();
   });
 }
@@ -129,6 +128,8 @@ $('#dialog-close').onclick = () => { $('#dialog').close(); $('#dialog-body').rep
 // The close event is queued; a follow-up modal may already have reopened the dialog with new content.
 $('#dialog').addEventListener('close', () => { if (!$('#dialog').open) $('#dialog-body').replaceChildren(); });
 function panel(title, description, action) { const n = el('section', undefined, 'panel'); const head = el('div', undefined, 'panel-head'); const info = el('div'); info.append(el('h2', title)); if (description) info.append(el('p', description)); head.append(info); if (action) head.append(action); n.append(head); return n; }
+// Two related panels side by side on wide screens, stacked on narrow ones.
+function pair(...items) { const n = el('div', undefined, 'panel-pair'); n.append(...items); return n; }
 function empty(title, description, action) { const n = el('div', undefined, 'empty'); n.append(el('div', '◇', 'empty-symbol'), el('h2', title), el('p', description)); if (action) n.append(action); return n; }
 function table(headers, rows) { const wrap = el('div', undefined, 'table-wrap'), t = el('table'), head = el('thead'), tr = el('tr'), body = el('tbody'); wrap.tabIndex = 0; wrap.setAttribute('role', 'region'); wrap.setAttribute('aria-label', msg`数据表：${headers.filter(h => typeof h === 'string' && h).slice(0, 3).join(' / ')}；可横向滚动`); headers.forEach(h => { const cell = el('th', h); cell.scope = 'col'; tr.append(cell); }); head.append(tr); rows.forEach(values => { const row = el('tr'); values.forEach(value => { const cell = el('td'); value instanceof Node ? cell.append(value) : cell.textContent = value; row.append(cell); }); body.append(row); }); t.append(head, body); wrap.append(t); return wrap; }
 function namedCell(name, detail) { const n = el('div'); n.append(el('strong', name), el('div', detail, 'subline mono')); return n; }
@@ -283,7 +284,7 @@ $('#refresh').onclick = () => refresh().catch(e => notify(e.message, true));
 document.querySelectorAll('[data-view]').forEach(n => n.addEventListener('click', () => navigate(n.dataset.view)));
 async function enter() {
   $('#login-screen').classList.add('hidden'); $('#application').classList.remove('hidden');
-  $('#identity').textContent = $('#identity').title = `${state.actor.username} · ${roleNames[state.actor.role]}`;
+  showIdentity();
   document.querySelectorAll('.admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role !== 'system_admin'));
   document.querySelectorAll('.tenant-admin-only').forEach(n => n.classList.toggle('hidden', state.actor.role === 'viewer'));
   await loadFeatures();
@@ -297,7 +298,7 @@ async function navigate(view, options = {}) {
   if (location.hash !== hash) window.history[options.history === false ? 'replaceState' : 'pushState'](null, '', hash);
   state.view = view; applyOverviewLayout(); $('#notification').classList.add('hidden');
   document.querySelectorAll('[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === navView(view)));
-  $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview');
+  $('#view-title').textContent = titles[view]; $('#status-pill').classList.toggle('hidden', view !== 'overview'); $('#page-tools').replaceChildren();
   consoleUI.sync(view); $('#content').replaceChildren(el('p', translate('正在加载…'), 'loading-state')); window.scrollTo({ top: 0 });
   $('#main-content').focus({ preventScroll: true });
   try { await refresh(); } catch (e) { notify(e.message, true); }
@@ -495,9 +496,9 @@ async function renderOverview() {
   const measuredRates = rate.filter(Number.isFinite), liveRates = live.map(r => r.rate).filter(Number.isFinite);
   const peak = measuredRates.length ? Math.max(...measuredRates) : null;
   const fleet = el('div', undefined, 'fleet-bar'); enrolled.forEach(r => fleet.append(el('i', undefined, r.status[2])));
-  const rangeLabel = overviewRanges.find(([v]) => v === range)[1], ranges = el('div', undefined, 'overview-range'), picker = el('div', undefined, 'mode-picker');
+  const rangeLabel = overviewRanges.find(([v]) => v === range)[1], picker = el('div', undefined, 'mode-picker');
+  picker.setAttribute('role', 'group'); picker.setAttribute('aria-label', translate('趋势范围'));
   for (const [value, label] of overviewRanges) { const choice = button(label, async () => { try { localStorage.setItem('relay-overview-range', value); } catch { /* Still switches without storage. */ } await renderOverview(); }); choice.setAttribute('aria-pressed', String(range === value)); picker.append(choice); }
-  ranges.append(el('span', translate('趋势范围'), 'fine'), picker);
   const kpis = el('div', undefined, 'kpis');
   kpis.append(
     kpi(translate('实时吞吐'), liveRates.length ? bits(liveRates.reduce((sum, value) => sum + value, 0)) : '—', msg`多跳流量逐跳计入 · 峰值 ${peak == null ? '—' : bits(peak)}`, spark(rate, 'accent')),
@@ -533,8 +534,8 @@ async function renderOverview() {
   if (!events.length) list.append(el('li', translate('最近 24 小时没有目标故障、配置拒绝或节点离线。'), 'incident-empty'));
   [...open, ...events.filter(e => !open.includes(e))].slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', eventMessage(e), 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
   incidents.append(board, list);
-  const middle = el('div', undefined, 'overview-grid'); middle.append(graphPanel, incidents);
-  const globe = rows.length ? globePanel(rows, topology, now) : null;
+  // The map sits beside what needs attention; without nodes the path graph takes its place.
+  const globe = rows.length ? globePanel(rows, topology, now) : null, bento = el('div', undefined, 'overview-bento'); bento.append(globe || graphPanel, incidents);
   const waiting = el('div', undefined, 'overview-waiting');
   if (!live.length) {
     const copy = el('div'); copy.append(el('strong', translate('等待实时数据')), el('p', translate('尚无近期 Agent 回报。注册并启动节点，或检查已有 Agent 的连接；发布启用的规则后显示期望转发路径。')));
@@ -558,7 +559,7 @@ async function renderOverview() {
   const filter = () => { state.overviewFilter = search.value; const q = search.value.trim().toLowerCase(); trs.forEach((tr, i) => tr.classList.toggle('hidden', !!q && !keys[i].includes(q))); };
   search.addEventListener('input', filter); filter();
   nodePanel.append(rows.length ? t : empty(translate('还没有节点'), translate('注册节点并启动 Agent 后，这里会显示实时吞吐、资源和事件。'), button(translate('前往节点管理'), () => navigate('nodes'))));
-  if (state.view === 'overview') $('#content').replaceChildren(...(!live.length ? [waiting] : []), ranges, kpis, ...(trends ? [trends] : []), ...(globe ? [globe] : []), middle, nodePanel);
+  if (state.view === 'overview') { $('#page-tools').replaceChildren(picker); $('#content').replaceChildren(...(!live.length ? [waiting] : []), kpis, bento, ...(globe ? [graphPanel] : []), ...(trends ? [trends] : []), nodePanel); }
 }
 function locationName(location) { const city = cityFor(location); return city ? (getLanguage() === 'en' ? city[2] : city[1]) : location?.name || ''; }
 // One globe per page load: it keeps its rotation and selection across the 5-second refreshes.
@@ -709,17 +710,31 @@ async function renderNodes() {
   state.selectedNodes = new Set([...state.selectedNodes].filter(id => nodes.some(n => n.id === id)));
   const metric = el('div', undefined, 'metrics');
   [[translate('节点数量'), nodes.length, query ? translate('当前筛选范围') : translate('当前账号可见的节点')], [translate('控制在线'), nodes.filter(online).length, translate('最近 30 秒收到心跳')], [translate('活跃连接'), nodes.some(online) ? nodes.filter(online).reduce((s,n) => s+n.stats.active_tcp+n.stats.active_udp,0) : '—', translate('当前范围的 TCP + UDP 会话')], [translate('近期上报负载'), bytes(usage.reduce((s,u) => s+u.upload_bytes+u.download_bytes,0)), translate('全部可见节点最近 2,000 个计量周期')]].forEach(([title,value,foot]) => { const n=el('div',undefined,'metric'); n.append(el('div',title,'metric-label'),el('div',String(value),'metric-value'),el('div',foot,'metric-foot'));metric.append(n); });
-  const controls=el('div',undefined,'toolbar node-tools'); controls.append(button(translate('筛选节点'),filterNodes));
-  if(query) controls.append(button(translate('清除筛选'),async()=>{state.nodeFilter={};state.selectedNodes.clear();await renderNodes();}));
-  if(canWrite()) controls.append(button(translate('选择 / 取消本页'),async()=>{if(nodes.every(n=>state.selectedNodes.has(n.id)))state.selectedNodes.clear();else nodes.forEach(n=>state.selectedNodes.add(n.id));await renderNodes();}),button(translate('批量编辑已选节点'),batchNodeProfiles),button(translate('＋ 注册节点'),newNode,'primary'));
-  const p=panel(translate('节点'),translate('管理资料、运行许可与实际回报分别显示。'),controls); p.classList.add('node-panel');
-  if(!nodes.length) p.append(empty(query?translate('没有匹配的节点'):translate('接入你的第一个节点'),query?translate('调整筛选条件后重试。'):translate('注册后启动 Agent，再配置转发。')));
-  else p.append(table([translate('选择'),translate('节点 / 位置'),translate('状态'),translate('用途 / 分组 / 成本'),translate('活跃会话'),translate('操作')],nodes.map(node=>{
-    let choice='—';if(canWrite()){choice=el('input');choice.className='node-choice';choice.type='checkbox';choice.checked=state.selectedNodes.has(node.id);choice.setAttribute('aria-label',translate('选择 ')+node.name);choice.onchange=()=>choice.checked?state.selectedNodes.add(node.id):state.selectedNodes.delete(node.id);}
-    const id=el('div');id.append(el('strong',node.name),el('div',locationName(node.profile.settings.location)||translate('未设置位置'),'subline'),el('div',node.id.slice(0,8)+'…','subline mono'));id.title=node.id;
-    return [choice,id,nodeStatusCell(node),nodeInventoryCell(node),nodeSessionsCell(node),nodeActions(node)];
-  })));
-  if(state.view==='nodes') $('#content').replaceChildren(metric,p);
+  // Tabs split the list by what each node needs; selecting "this page" covers the nodes the tab shows.
+  const counts = { all: nodes.length, online: 0, attention: 0, awaiting: 0 }; nodes.forEach(n => counts[nodeGroup(n)]++);
+  const tab = Object.hasOwn(counts, state.nodeTab) ? state.nodeTab : 'all', shown = tab === 'all' ? nodes : nodes.filter(n => nodeGroup(n) === tab);
+  const bar = el('div', undefined, 'page-tabs'), tabs = el('div', undefined, 'page-tab-list'); tabs.setAttribute('aria-label', translate('节点'));
+  for (const [id, label] of [['all', translate('全部')], ['online', translate('在线')], ['attention', translate('需要关注')], ['awaiting', translate('待注册')]]) { const choice = button(label, async () => { state.nodeTab = id; await renderNodes(); }, 'page-tab'); choice.append(el('span', String(counts[id]), 'tab-count')); if (id === tab) choice.setAttribute('aria-current', 'page'); tabs.append(choice); }
+  const controls = el('div', undefined, 'toolbar node-tools'); controls.append(button(translate('筛选节点'), filterNodes));
+  if (query) controls.append(button(translate('清除筛选'), async () => { state.nodeFilter = {}; state.selectedNodes.clear(); await renderNodes(); }));
+  if (canWrite()) controls.append(button(translate('选择 / 取消本页'), async () => { if (shown.every(n => state.selectedNodes.has(n.id))) shown.forEach(n => state.selectedNodes.delete(n.id)); else shown.forEach(n => state.selectedNodes.add(n.id)); await renderNodes(); }), button(translate('批量编辑已选节点'), batchNodeProfiles), button(translate('＋ 注册节点'), newNode, 'primary'));
+  bar.append(tabs, controls);
+  const p = el('section', undefined, 'panel node-panel');
+  if (!shown.length) p.append(empty(query || tab !== 'all' ? translate('没有匹配的节点') : translate('接入你的第一个节点'), query || tab !== 'all' ? translate('调整筛选条件后重试。') : translate('注册后启动 Agent，再配置转发。')));
+  else {
+    p.append(table([translate('选择'), translate('节点 / 位置'), translate('状态'), translate('用途 / 分组 / 成本'), translate('活跃会话'), translate('配置修订'), ''], shown.map(node => {
+      let choice = '—'; if (canWrite()) { choice = el('input'); choice.className = 'node-choice'; choice.type = 'checkbox'; choice.checked = state.selectedNodes.has(node.id); choice.setAttribute('aria-label', translate('选择 ') + node.name); choice.onchange = () => choice.checked ? state.selectedNodes.add(node.id) : state.selectedNodes.delete(node.id); }
+      const id = el('div'); id.append(el('strong', node.name), el('div', locationName(node.profile.settings.location) || translate('未设置位置'), 'subline'), el('div', node.id.slice(0, 8) + '…', 'subline mono')); id.title = node.id;
+      const [text, color] = nodeBadge(node), status = el('div'); status.append(badge(text, color), el('div', node.last_seen_ms ? ago(node.last_seen_ms, Date.now()) : translate('尚未回报'), 'subline'));
+      if (node.lifecycle !== 'active') status.append(el('div', nodeLifecycleText(node), 'subline warning'));
+      const revision = node.apply_error ? namedCell(`v${node.applied_revision} / v${node.desired_revision}`, translate('应用失败')) : `v${node.applied_revision} / v${node.desired_revision}`;
+      if (node.apply_error) revision.querySelector('.subline').className = 'subline error';
+      return [choice, id, status, nodeInventoryCell(node), nodeSessionsCell(node), revision, nodeActions(node)];
+    })));
+    // Clicking anywhere on a row except its own controls opens the node's details.
+    p.querySelectorAll('tbody tr').forEach((tr, i) => { tr.classList.add('row-link'); tr.tabIndex = 0; tr.addEventListener('click', event => { if (!event.target.closest('button, input, a, label, summary')) nodeInspector(shown[i]); }); tr.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target === tr) nodeInspector(shown[i]); }); });
+  }
+  if (state.view === 'nodes') $('#content').replaceChildren(metric, bar, p);
 }
 function nodeLeaseText(node) {
   const lease = node.lease;
@@ -728,15 +743,44 @@ function nodeLeaseText(node) {
   if (lease.recovery_wait_ms > 0) return translate('严格租约 · 恢复等待');
   return lease.active ? translate('严格租约 · 有效') : translate('严格租约 · 未持有');
 }
-// Control connection first; permission, protection and configuration revision underneath.
-function nodeStatusCell(node) {
-  const cell = el('div'), names = { active: translate('允许运行'), disabled: translate('已暂停'), expired: translate('已到期') };
-  const [text, color] = node.credential_phase === 'revoked' ? [translate('身份已撤销'), 'red'] : node.credential_phase === 'replacement_pending' ? [translate('等待替换注册'), 'orange'] : !node.enrolled ? [translate('待注册'), ''] : online(node) ? [translate('控制在线'), 'green'] : [translate('无近期回报'), 'orange'];
-  cell.append(badge(text, color), el('div', node.last_seen_ms ? msg`最近回报 ${timestamp(node.last_seen_ms)}` : translate('尚未回报'), 'subline'));
-  cell.append(el('div', [names[node.lifecycle], node.profile.settings.expires_at_ms ? msg`到期 ${timestamp(node.profile.settings.expires_at_ms)}` : '', nodeLeaseText(node)].filter(Boolean).join(' · '), node.lifecycle === 'active' ? 'subline' : 'subline warning'));
-  if (node.lifecycle !== 'active' && node.lease.active) cell.append(el('div', translate('现有租约尚在收敛'), 'subline'));
-  cell.append(el('div', node.apply_error ? msg`配置 v${node.applied_revision} / v${node.desired_revision} · 应用失败：${node.apply_error}` : msg`配置 v${node.applied_revision} / v${node.desired_revision}`, node.apply_error ? 'subline error' : 'subline'));
-  return cell;
+// The control connection decides the badge; permission, protection and revision are listed in the details.
+function nodeBadge(node) {
+  return node.credential_phase === 'revoked' ? [translate('身份已撤销'), 'red'] : node.credential_phase === 'replacement_pending' ? [translate('等待替换注册'), 'orange'] : !node.enrolled ? [translate('待注册'), ''] : online(node) ? (node.apply_error ? [translate('配置错误'), 'orange'] : [translate('控制在线'), 'green']) : [translate('无近期回报'), 'orange'];
+}
+function nodeGroup(node) {
+  if (['revoked', 'replacement_pending'].includes(node.credential_phase) || node.apply_error || node.lifecycle !== 'active' || (node.enrolled && !online(node))) return 'attention';
+  return node.enrolled ? 'online' : 'awaiting';
+}
+function nodeLifecycleText(node) {
+  const names = { active: translate('允许运行'), disabled: translate('已暂停'), expired: translate('已到期') };
+  return [names[node.lifecycle], node.profile.settings.expires_at_ms ? msg`到期 ${timestamp(node.profile.settings.expires_at_ms)}` : ''].filter(Boolean).join(' · ');
+}
+// Everything about one node in a side sheet: live state, profile, then each less frequent task with what it does.
+function nodeInspector(node) {
+  const body = el('div', undefined, 'inspector'), head = el('div', undefined, 'inspector-head'), [text, color] = nodeBadge(node), s = node.profile.settings, inbound = state.inbound?.[node.id];
+  head.append(badge(text, color), el('span', node.id, 'mono'));
+  const actions = el('div', undefined, 'inspector-actions');
+  actions.append(button(translate('管理规则 →'), async () => { $('#dialog').close(); state.selectedNode = node.id; await navigate('rules'); }, 'primary'), button(canWrite() ? translate('编辑资料') : translate('查看资料'), () => editNode(node)));
+  body.append(head);
+  const facts = (title, rows) => { const section = el('section', undefined, 'inspector-section'), list = el('dl', undefined, 'facts'); section.append(el('h3', title)); for (const [label, value, cls] of rows.filter(Boolean)) list.append(el('dt', label), el('dd', value, cls)); section.append(list); body.append(section); };
+  facts(translate('运行状态'), [
+    [translate('最近回报'), node.last_seen_ms ? `${ago(node.last_seen_ms, Date.now())} · ${timestamp(node.last_seen_ms)}` : translate('尚未回报')],
+    [translate('运行许可'), nodeLifecycleText(node), node.lifecycle === 'active' ? '' : 'warning'],
+    [translate('运行保护'), nodeLeaseText(node) + (node.lifecycle !== 'active' && node.lease?.active ? ` · ${translate('现有租约尚在收敛')}` : '')],
+    [translate('配置修订'), `v${node.applied_revision} / v${node.desired_revision}`],
+    node.apply_error && [translate('应用失败'), node.apply_error, 'error'],
+    [translate('活跃会话'), online(node) ? `${node.stats.active_tcp} TCP / ${node.stats.active_udp} UDP` : '—'],
+    inbound?.total && [translate('上游目标'), inbound.draining ? `${inbound.total} · ${translate('维护中 · 不接新连接')}` : String(inbound.total), inbound.draining ? 'warning' : ''],
+  ]);
+  facts(translate('资料'), [
+    [translate('位置'), locationName(s.location) || translate('未设置位置')],
+    [translate('用途'), s.kinds.map(k => nodeKindNames[k]).join(' / ') || translate('未标注')],
+    [translate('分组'), [s.group || translate('未分组'), ...s.tags].join(' · ')],
+    [translate('成本'), costLabel(s.cost)],
+  ]);
+  const more = el('section', undefined, 'inspector-section'); more.append(el('h3', translate('更多操作')), nodeMoreList(node)); body.append(more);
+  body.insertBefore(actions, head.nextSibling);
+  modal(node.name, body);
 }
 function timingRow(label, value) {
   if (!value) return [label, translate('未提供'), '—', '—'];
@@ -754,17 +798,17 @@ async function drainNode(node, draining) {
 }
 function nodeActions(node) {
   const actions = el('div', undefined, 'node-actions');
-  actions.append(button(translate('管理规则 →'), async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button(canWrite() ? translate('编辑资料') : translate('查看资料'), () => editNode(node), 'table-action'), button(translate('更多…'), () => nodeMore(node), 'table-action'));
+  actions.append(button(translate('管理规则 →'), async () => { state.selectedNode = node.id; await navigate('rules'); }, 'table-action'), button(translate('详情'), () => nodeInspector(node), 'table-action'));
   return actions;
 }
 // Less frequent node tasks, each with what it does, so the table row stays short.
-function nodeMore(node) {
+function nodeMoreList(node) {
   const body = el('div', undefined, 'action-list'), inbound = state.inbound?.[node.id];
   const add = (title, text, handler, cls = 'subtle') => { const row = el('div', undefined, 'action-row'), copy = el('div'); copy.append(el('strong', title), el('p', text, 'fine')); row.append(copy, button(title, () => { $('#dialog').close(); return handler(); }, cls)); body.append(row); };
   add(translate('运行诊断'), translate('查看连接、计时、队列与资源回报。'), () => nodeDiagnostics(node));
   if (canWrite() && inbound?.total) add(inbound.draining ? translate('结束维护') : translate('维护排空'), inbound.draining ? translate('恢复上游按原优先级和权重分配新连接。') : translate('新连接改走其他目标，已有连接继续到结束，便于安全重启或升级。'), () => drainNode(node, !inbound.draining));
   add(translate('节点身份'), translate('查看注册状态；轮换、撤销或替换节点凭据，或删除节点。'), () => nodeCredential(node));
-  modal(msg`更多操作 · ${node.name}`, body);
+  return body;
 }
 async function nodeCredential(node) {
   node = (await api('/nodes')).find(n=>n.id===node.id) || node;
@@ -2339,11 +2383,11 @@ async function renderUsage() {
     grid.append(chartPanel(translate('按规则'), byRule.length > 12 ? msg`流量最多的 12 条规则，共 ${byRule.length} 条。多跳转发在经过的每台服务器上各计一次。` : translate('各规则累计的上行与下行。多跳转发在经过的每台服务器上各计一次。'), barChart(byRule.slice(0, 12).map(([rule, v]) => row(rule, v)), parts)),
       chartPanel(translate('按节点'), msg`合计 ${bytes(all)}`, barChart(byNode.map(([id, v]) => row(names.get(id) || id, v, names.has(id) ? id.slice(0, 8) : '')), parts)));
     if (byMonth.length > 1) grid.append(chartPanel(translate('按计量月份'), translate('每个月的上行与下行合计。'), columnChart(byMonth.map(([month, [up, down]]) => ({ label: month, values: [up, down], title: msg`${month} · 上行 ${bytes(up)} · 下行 ${bytes(down)}` })), parts, bytes)));
-    if (state.view === 'usage') $('#content').replaceChildren(toolbar, grid);
+    if (state.view === 'usage') { $('#page-tools').replaceChildren(...toolbar.childNodes); $('#content').replaceChildren(grid); }
     return;
   }
   p.append(table([translate('规则 / 周期'), translate('节点'), translate('上行'), translate('下行'), translate('序号'), translate('最近上报')], records.map(r => [namedCell(r.rule_id, r.meter_epoch), names.has(r.node_id) ? namedCell(names.get(r.node_id), r.node_id.slice(0, 8)) : r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)])));
-  if (state.view === 'usage') $('#content').replaceChildren(toolbar, p);
+  if (state.view === 'usage') { $('#page-tools').replaceChildren(...toolbar.childNodes); $('#content').replaceChildren(p); }
 }
 async function renderUsers() { const actor = state.actor; const users = await api('/users'); if (state.view !== 'users' || !actor || state.actor !== actor) return; const p = panel(translate('用户与会话'), translate('权限由服务端校验；撤销、停用、改密或删除后，该用户已有的 Web 会话和 API 令牌立即失效。'), canWrite() ? button(translate('＋ 添加用户'), newUser, 'primary') : null); p.append(table([translate('账号'), translate('角色'), translate('租户'), translate('状态'), translate('两步验证'), translate('跨节点总限速'), translate('操作')], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.disabled ? badge(translate('已停用'), 'red') : badge(translate('启用'), 'green'), u.mfa_enabled ? badge(translate('已启用'), 'green') : badge(translate('未启用')), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge(translate('不限速')), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
 function userActions(u) {
@@ -2420,7 +2464,7 @@ async function renderAccount() {
   const keys = panel(translate('API 令牌'), translate('供脚本和自动化调用 API。令牌权限是所选范围与你的角色权限的交集；令牌不能创建令牌或修改两步验证。'), button(translate('＋ 创建令牌'), createApiToken, 'primary'));
   if (!tokens.length) keys.append(empty(translate('尚无 API 令牌'), translate('令牌创建后只显示一次，到期后自动失效。')));
   else keys.append(table([translate('名称'), translate('权限范围'), translate('创建时间'), translate('到期时间'), translate('操作')], tokens.map(t => [namedCell(t.name, t.id), t.scopes.map(scope => scopeNames[scope] || scope).join('、'), timestamp(t.created_at_ms), t.expires_at_ms <= Date.now() ? badge(translate('已过期'), 'red') : timestamp(t.expires_at_ms), button(translate('撤销'), async () => { if (!await confirmAction(msg`撤销令牌“${t.name}”？使用它的脚本将立即失效。`)) return; await api(`/api-tokens/${t.id}`, { method: 'DELETE' }); notify(translate('令牌已撤销。')); await renderAccount(); }, 'table-action danger')])));
-  const page = el('div'); page.append(password, security, keys);
+  const page = el('div'); page.append(pair(password, security), keys);
   if (state.view === 'account') $('#content').replaceChildren(page);
 }
 function setupSecondFactor() {
@@ -2662,7 +2706,7 @@ async function renderAlerts() {
     grid.append(chartPanel(translate('发送结果'), translate('按通道统计最近 200 条发送记录。'), barChart([...results].map(([name, v]) => ({ label: name, values: v, text: msg`送达 ${v[0]} / 共 ${v.reduce((a, b) => a + b, 0)}` })),
       [[statusNames.sent[0], 'up'], [translate('发送中或重试'), 'partial'], [statusNames.failed[0], 'down'], [statusNames.cancelled[0], 'unknown']])));
   }
-  if (state.view === 'alerts') $('#content').replaceChildren(toolbar, grid);
+  if (state.view === 'alerts') { $('#page-tools').replaceChildren(...toolbar.childNodes); $('#content').replaceChildren(grid); }
 }
 function smtpConfig(data) {
   const value = key => String(data.get(key) || '').trim();
@@ -3050,7 +3094,7 @@ async function renderBudgets() {
   } else p.append(table([translate('名称 / 范围'), translate('总额度'), translate('已上报用量'), translate('尚未归还预留'), translate('可分配'), translate('操作')], overview.budgets.map(b => [namedCell(b.name, `${budgetScopeNames[b.scope]} · ${scopeLabel(b)}`), bytes(b.limit_bytes), bytes(b.consumed_bytes), bytes(b.committed_bytes - b.consumed_bytes), bytes(b.limit_bytes - b.committed_bytes), budgetActions(b, users, nodes, overview.allocation_paused)])));
   p.append(el('p', translate('节点按需领取预留。全节点会话空闲或正常停机后可归还未用部分；严格节点保留原状态且交接历史连续时，重启会先核对并恢复预留；旧备份或无法确认的部分继续占额。预留明细显示当前记录，增加总额度不会清零已有账。'), 'fine'));
   const toolbar = el('div', undefined, 'toolbar view-toolbar'); toolbar.append(displayToggle('budgets', renderBudgets));
-  if (state.view === 'budgets') $('#content').replaceChildren(...(overview.budgets.length ? [toolbar] : []), p);
+  if (state.view === 'budgets') { $('#page-tools').replaceChildren(...(overview.budgets.length ? toolbar.childNodes : [])); $('#content').replaceChildren(p); }
 }
 function budgetActions(budget, users, nodes, paused) {
   const actions = el('div');

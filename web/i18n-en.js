@@ -2563,5 +2563,14 @@ export default {
   "面板 {0}": "Panel {0}",
   "＋ 新建共享": "＋ New share",
   "＋ 规则": "＋ Rule",
-  "＋ 输入邀请码": "＋ Enter invite code"
+  "＋ 输入邀请码": "＋ Enter invite code",
+  "上游目标": "Upstream targets",
+  "在线": "Online",
+  "搜索": "Search",
+  "更多操作": "More actions",
+  "最近回报": "Last report",
+  "用途": "Purpose",
+  "运行状态": "Status",
+  "配置错误": "Configuration error",
+  "需要关注": "Needs attention"
 };

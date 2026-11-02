@@ -9,7 +9,7 @@
 <div id="login-screen" class="login-screen">
   <button id="login-language-toggle" class="language-toggle login-language-toggle" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button>
   <form id="login-form" class="login-card">
-    <a class="brand login-brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span>Relay<span class="brand-sub">Your network, connected.</span></span></a>
+    <a class="brand login-brand" href="/"><span class="brand-mark" aria-hidden="true"></span><span class="brand-text"><span>Relay</span><span class="brand-sub">Your network, connected.</span></span></a>
     <p class="eyebrow">WELCOME TO YOUR WORKSPACE</p><h1>让网络有序，<br>让管理从容。</h1>
     <p class="muted">登录控制台，连接你的节点、规则与每一条线路。</p>
     <label>用户名<input name="username" value="admin" autocomplete="username" required maxlength="80"></label>
@@ -30,61 +30,73 @@
 </div>
 <div id="application" class="application hidden">
   <a href="#main-content" class="skip-link">跳到主要内容</a>
-  <div class="topbar">
-    <div class="topbar-brand"><button id="menu-toggle" class="icon-control mobile-only" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button><a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true"></span><span>Relay<span class="brand-sub">Network workspace</span></span></a></div>
-    <div class="topbar-tabs" aria-label="工作空间入口"><button id="console-tab" class="topbar-tab active">控制台</button><button id="guide-tab" class="topbar-tab">使用指南 <span aria-hidden="true">↗</span></button></div>
-    <button id="command-open" class="search-trigger" aria-label="搜索页面与指南"><span data-icon="search"></span><span>搜索页面与指南…</span><kbd>⌘ K</kbd></button>
-    <div class="topbar-actions"><span class="build-badge">DEV 0.140.0</span><button id="language-toggle" class="language-toggle" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button><button id="theme" class="subtle appearance-trigger" type="button" aria-label="外观与布局" title="外观与布局" aria-haspopup="dialog"><span data-icon="sliders"></span><span class="appearance-label">外观</span></button><span id="identity" class="identity"></span></div>
-  </div>
   <button id="nav-backdrop" class="nav-backdrop" aria-label="关闭导航" tabindex="-1" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="工作空间导航">
-    <div class="workspace-label"><span class="workspace-icon" data-icon="layers"></span><div><strong>我的工作空间</strong><span>Self-hosted infrastructure</span></div></div>
-    <nav aria-label="主导航">
-      <div class="nav-group"><p class="nav-label">总览</p>
-        <button data-view="overview" class="nav-button active"><span data-icon="overview"></span>运行总览</button>
+    <div class="sidebar-inner">
+      <a class="brand" href="#overview"><span class="brand-mark" aria-hidden="true"></span><span class="brand-text"><span>Relay</span><span class="brand-sub">Network workspace</span></span></a>
+      <button id="command-open" class="search-trigger" type="button" aria-label="搜索页面与指南"><span data-icon="search"></span><span class="search-label">搜索</span><kbd>⌘ K</kbd></button>
+      <nav aria-label="主导航">
+        <div class="nav-group"><p class="nav-label">总览</p>
+          <button data-view="overview" class="nav-button active"><span data-icon="overview"></span>运行总览</button>
+        </div>
+        <div class="nav-group"><p class="nav-label">转发配置</p>
+          <button data-view="nodes" class="nav-button"><span data-icon="server"></span>节点管理</button>
+          <button data-view="topology" class="nav-button"><span data-icon="arrows"></span>转发规则</button>
+          <button data-view="templates" class="nav-button tenant-admin-only"><span data-icon="layers"></span>规则模板</button>
+          <button data-view="wireguard" class="nav-button admin-only feature-off" data-feature="wireguard"><span data-icon="network"></span>WireGuard 组网</button>
+          <button data-view="federation" class="nav-button admin-only feature-off" data-feature="federation"><span data-icon="link"></span>跨面板共享</button>
+        </div>
+        <div class="nav-group"><p class="nav-label">监控与用量</p>
+          <button data-view="health" class="nav-button"><span data-icon="activity"></span>目标健康</button>
+          <button data-view="usage" class="nav-button"><span data-icon="chart"></span>流量账本</button>
+          <button data-view="budgets" class="nav-button"><span data-icon="gauge"></span>共享额度</button>
+          <button data-view="alerts" class="nav-button tenant-admin-only"><span data-icon="bell"></span>告警通知</button>
+          <button data-view="logs" class="nav-button admin-only"><span data-icon="terminal"></span>实时日志</button>
+          <button data-view="diagnostics" class="nav-button admin-only"><span data-icon="clipboard"></span>诊断报告</button>
+        </div>
+        <div class="nav-group"><p class="nav-label">客户与服务</p>
+          <button data-view="subscriptions" class="nav-button"><span data-icon="link"></span>客户端订阅</button>
+          <button data-view="dns" class="nav-button admin-only"><span data-icon="globe"></span>DNS 管理</button>
+          <button data-view="announcements" class="nav-button"><span data-icon="flag"></span>公告</button>
+          <button data-view="tickets" class="nav-button"><span data-icon="message"></span>工单</button>
+          <button data-view="commerce" class="nav-button"><span data-icon="wallet"></span>钱包与订单</button>
+        </div>
+        <div class="nav-group"><p class="nav-label">系统与帮助</p>
+          <button data-view="users" class="nav-button"><span data-icon="users"></span>用户与权限</button>
+          <button data-view="account" class="nav-button"><span data-icon="shield"></span>账户安全</button>
+          <button data-view="audit" class="nav-button admin-only"><span data-icon="list"></span>操作审计</button>
+          <button data-view="recovery" class="nav-button admin-only"><span data-icon="restore"></span>恢复保护</button>
+          <button data-view="features" class="nav-button admin-only"><span data-icon="sliders"></span>可选功能</button>
+          <button data-view="capabilities" class="nav-button"><span data-icon="check"></span>功能进度</button>
+          <button data-view="guide" class="nav-button"><span data-icon="book"></span>使用指南</button>
+        </div>
+      </nav>
+      <div class="sidebar-foot">
+        <span id="identity-avatar" class="avatar" aria-hidden="true"></span>
+        <span class="identity"><strong id="identity-name"></strong><span id="identity-role"></span></span>
+        <button id="logout" data-logout class="icon-control" aria-label="退出登录" title="退出登录" data-icon="logout"></button>
       </div>
-      <div class="nav-group"><p class="nav-label">转发配置</p>
-        <button data-view="nodes" class="nav-button"><span data-icon="server"></span>节点管理</button>
-        <button data-view="topology" class="nav-button"><span data-icon="arrows"></span>转发规则</button>
-        <button data-view="templates" class="nav-button tenant-admin-only"><span data-icon="layers"></span>规则模板</button>
-        <button data-view="wireguard" class="nav-button admin-only feature-off" data-feature="wireguard"><span data-icon="network"></span>WireGuard 组网</button>
-        <button data-view="federation" class="nav-button admin-only feature-off" data-feature="federation"><span data-icon="link"></span>跨面板共享</button>
-      </div>
-      <div class="nav-group"><p class="nav-label">监控与用量</p>
-        <button data-view="health" class="nav-button"><span data-icon="activity"></span>目标健康</button>
-        <button data-view="usage" class="nav-button"><span data-icon="chart"></span>流量账本</button>
-        <button data-view="budgets" class="nav-button"><span data-icon="gauge"></span>共享额度</button>
-        <button data-view="alerts" class="nav-button tenant-admin-only"><span data-icon="bell"></span>告警通知</button>
-        <button data-view="logs" class="nav-button admin-only"><span data-icon="terminal"></span>实时日志</button>
-        <button data-view="diagnostics" class="nav-button admin-only"><span data-icon="clipboard"></span>诊断报告</button>
-      </div>
-      <div class="nav-group"><p class="nav-label">客户与服务</p>
-        <button data-view="subscriptions" class="nav-button"><span data-icon="link"></span>客户端订阅</button>
-        <button data-view="dns" class="nav-button admin-only"><span data-icon="globe"></span>DNS 管理</button>
-        <button data-view="announcements" class="nav-button"><span data-icon="flag"></span>公告</button>
-        <button data-view="tickets" class="nav-button"><span data-icon="message"></span>工单</button>
-        <button data-view="commerce" class="nav-button"><span data-icon="wallet"></span>钱包与订单</button>
-      </div>
-      <div class="nav-group"><p class="nav-label">系统与帮助</p>
-        <button data-view="users" class="nav-button"><span data-icon="users"></span>用户与权限</button>
-        <button data-view="account" class="nav-button"><span data-icon="shield"></span>账户安全</button>
-        <button data-view="audit" class="nav-button admin-only"><span data-icon="list"></span>操作审计</button>
-        <button data-view="recovery" class="nav-button admin-only"><span data-icon="restore"></span>恢复保护</button>
-        <button data-view="features" class="nav-button admin-only"><span data-icon="sliders"></span>可选功能</button>
-        <button data-view="capabilities" class="nav-button"><span data-icon="check"></span>功能进度</button>
-        <button data-view="guide" class="nav-button"><span data-icon="book"></span>使用指南</button>
-      </div>
-    </nav>
-    <div class="sidebar-bottom"><div><span class="version">独立部署 · 持续开发</span><span class="fine">你的网络，由你掌握。</span></div><button id="logout" data-logout class="icon-control" aria-label="退出登录" title="退出登录" data-icon="logout"></button></div>
+    </div>
   </aside>
-  <main id="main-content" tabindex="-1">
-    <div class="page-breadcrumb"><span data-icon="home"></span><span>Relay</span><span aria-hidden="true">/</span><span id="breadcrumb-group">总览</span><span aria-hidden="true">/</span><span id="breadcrumb-current">运行总览</span></div>
-    <header class="page-header"><div><h1 id="view-title">运行总览</h1><p id="view-description" class="view-description"></p></div><div class="header-right"><button id="context-help" class="subtle" type="button"><span data-icon="book"></span>页面指南</button><button id="refresh" class="subtle" type="button"><span data-icon="refresh"></span>刷新</button></div></header>
-    <div class="page-meta"><span id="status-pill" class="status-pill" role="status"></span><span class="data-note"><span class="live-dot"></span>当前工作空间<span class="meta-separator">/</span><span id="refreshed">等待数据</span></span></div>
-    <div id="overview-controls" class="overview-controls hidden"><div class="overview-layout-picker" role="group" aria-label="总览显示模式"><button id="overview-monitoring" type="button" aria-pressed="true" aria-controls="content">展开总览</button><button id="overview-workspace" type="button" aria-pressed="false" aria-controls="content">紧凑总览</button></div><span>同一份实时数据 · 仅切换显示布局</span></div>
-    <div id="notification" class="notification hidden" role="status"></div><div id="content"></div>
-    <footer><span>Relay / 你的网络工作空间</span><span>控制在线仅表示 Agent 可联系控制服务，业务可用性须另行探测。</span></footer>
-  </main>
+  <div class="workspace">
+    <header class="pagebar">
+      <button id="menu-toggle" class="icon-control mobile-only" aria-label="打开导航" aria-controls="sidebar" aria-expanded="false" data-icon="menu"></button>
+      <div class="pagebar-title"><h1 id="view-title">运行总览</h1><span id="status-pill" class="status-pill" role="status"></span></div>
+      <div id="page-tools" class="page-tools"></div>
+      <div class="pagebar-actions">
+        <span class="updated" title="当前工作空间"><span class="live-dot" aria-hidden="true"></span><span id="refreshed">等待数据</span></span>
+        <button id="refresh" class="icon-control" type="button" aria-label="刷新" title="刷新" data-icon="refresh"></button>
+        <button id="context-help" class="subtle pagebar-button" type="button" title="页面指南"><span data-icon="book"></span><span class="pagebar-label">页面指南</span></button>
+        <button id="language-toggle" class="language-toggle pagebar-button" type="button" data-language-toggle aria-label="切换到英文"><span class="language-symbol" aria-hidden="true">文/A</span><span class="language-name" lang="en">English</span></button>
+        <button id="theme" class="subtle pagebar-button appearance-trigger" type="button" aria-label="外观与布局" title="外观与布局" aria-haspopup="dialog"><span data-icon="sliders"></span><span class="pagebar-label">外观</span></button>
+      </div>
+    </header>
+    <main id="main-content" tabindex="-1">
+      <p id="view-description" class="view-description"></p>
+      <div id="notification" class="notification hidden" role="status"></div><div id="content"></div>
+      <footer><span><span>Relay / 你的网络工作空间</span> · <span class="build-badge">DEV 0.141.0</span></span><span>控制在线仅表示 Agent 可联系控制服务，业务可用性须另行探测。</span></footer>
+    </main>
+  </div>
 </div>
 <dialog id="dialog" aria-labelledby="dialog-title"><div class="dialog-head"><h2 id="dialog-title"></h2><button id="dialog-close" class="icon-button" aria-label="关闭对话框">×</button></div><div id="dialog-body"></div></dialog>
 <dialog id="command-dialog" class="command-dialog" aria-labelledby="command-title"><h2 id="command-title" class="sr-only">搜索页面与指南</h2><div class="command-input-row"><span data-icon="search"></span><input id="command-input" type="search" placeholder="搜索页面、功能或操作指南…" aria-label="搜索页面与指南" autocomplete="off" role="combobox" aria-expanded="true" aria-controls="command-results" aria-autocomplete="list"><button id="command-close" class="command-escape" aria-label="关闭搜索">Esc</button></div><div id="command-results" role="listbox" aria-label="搜索结果"></div><p id="command-status" class="sr-only" role="status"></p><div class="command-footer"><span><kbd>↑</kbd> <kbd>↓</kbd> 选择 <kbd>↵</kbd> 打开</span><span>页面与指南 · 本地搜索</span></div></dialog>

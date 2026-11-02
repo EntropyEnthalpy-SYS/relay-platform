@@ -2,6 +2,16 @@
 
 For the current appearance controls and full UI review, see [0.126.0](RELEASE_0.126.0_EN.md). The original workflow below remains applicable.
 
+## Current layout (0.141.0)
+
+- A full-height sidebar with the navigation groups, search (Command/Ctrl+K) at the top and the signed-in account with sign-out at the bottom. On narrow screens it is a drawer opened from the menu button.
+- A sticky page bar with the page title, the overview status, page controls such as the overview trend range, the last update time, refresh, page guide, language and appearance. The page description sits under it. On phones the bar scrolls with the page.
+- Editing forms and details open in a sheet on the right; confirmations open centered.
+- Overview: metric tiles, the globe beside recent events, forwarding paths, trend charts and the node table. Expanded / Compact is under Appearance.
+- Nodes: tabs by state (All, Online, Needs attention, Awaiting enrollment). Clicking a row opens the node's status, profile and tasks.
+
+The sections below describe the 0.117.0 release.
+
 This release adds English and Simplified Chinese to the console introduced in 0.116.0. The data plane, billing behavior, permissions and protocol configuration are unchanged; the broader non-payment roadmap is still in development.
 
 ## Language switch
@@ -18,7 +28,7 @@ The interface combines the grouped navigation and reading structure of [GitBook]
 
 - Twenty pages: the existing nineteen console pages plus an integrated handbook.
 - Four navigation groups: workspace, observability/resources, services/collaboration, and administration/help.
-- Persistent header, breadcrumbs, page descriptions and contextual help.
+- Persistent page bar, page descriptions and contextual help.
 - Local search across page names, functional aliases and seven guide articles. Open with the search button or Command/Ctrl+K; use Up/Down and Enter to choose, Escape to close.
 - Role-aware navigation/search. Restricted administration pages are omitted for tenant administrators and viewers, and restricted deep links return to the overview. API authorization remains authoritative.
 - Hash links preserve the selected page on reload and support browser Back/Forward. Examples: `#rules`, `#guide/clients`. Unknown views fall back to the overview; unknown guide chapters open the quickstart.

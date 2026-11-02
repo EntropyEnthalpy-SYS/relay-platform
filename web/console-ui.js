@@ -130,7 +130,6 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
   }
   toggle.onclick = () => drawer(!drawerOpen, drawerOpen); $('#nav-backdrop').onclick = () => drawer(false, true);
   media.addEventListener('change', () => drawer(false)); drawer(false);
-  $('#console-tab').onclick = () => navigate('overview'); $('#guide-tab').onclick = () => navigate('guide');
   $('.skip-link').onclick = event => { event.preventDefault(); $('#main-content').focus(); };
   window.addEventListener('hashchange', () => { if (getActor()) { const route = parseRoute(location.hash); navigate(route.view, { topic: route.topic, history: false }); } });
   const dialog = $('#command-dialog'), input = $('#command-input'), list = $('#command-results');
@@ -175,8 +174,8 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
   }
   $('#context-help').onclick = () => { const article = guideArticles.find(a => a.id === (getView() === 'guide' ? parseRoute(location.hash).topic : pageInfo[getView()][3])); modal(article.title, articleBody(article, true)); };
   function sync(view) {
-    const info = pageInfo[view]; $('#breadcrumb-group').textContent = info[0]; $('#breadcrumb-current').textContent = titles[view]; $('#view-description').textContent = info[2];
-    document.title = `${titles[view]} · Relay`; $('#console-tab').classList.toggle('active', view !== 'guide'); $('#guide-tab').classList.toggle('active', view === 'guide');
+    $('#view-description').textContent = pageInfo[view][2];
+    document.title = `${titles[view]} · Relay`;
     document.querySelectorAll('[data-view]').forEach(n => { if (n.dataset.view === navView(view)) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current'); });
     drawer(false); $('#main-content').dataset.view = view;
   }
