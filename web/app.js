@@ -33,7 +33,14 @@ function applyAccent(accent, persist = true) {
   document.documentElement.dataset.accent = accentPreference;
   if (persist) { try { localStorage.setItem('relay-accent', accentPreference); } catch { /* Usable without storage. */ } }
 }
-applyTheme(themePreference, false); applyAccent(accentPreference, false);
+// Card color wash strength, 0-100: 0 turns the washes off, 100 is the strongest wash that keeps every text color at 4.5:1.
+let washPreference = (() => { try { const saved = localStorage.getItem('relay-wash'), value = Number(saved); return saved && value >= 0 && value <= 100 ? value : 90; } catch { return 90; } })();
+function applyWash(level, persist = true) {
+  washPreference = Math.min(100, Math.max(0, Math.round(Number(level)) || 0));
+  document.documentElement.style.setProperty('--wash-level', String(washPreference / 100));
+  if (persist) { try { localStorage.setItem('relay-wash', String(washPreference)); } catch { /* Usable without storage. */ } }
+}
+applyTheme(themePreference, false); applyAccent(accentPreference, false); applyWash(washPreference, false);
 themeMedia.addEventListener('change', () => { if (themePreference === 'system') applyTheme('system', false); });
 $('#theme').onclick = () => showAppearance();
 // The monitoring layout and color theme are independent browser preferences.
@@ -95,7 +102,15 @@ function showAppearance() {
   }
   choices('theme', translate('界面主题'), [['dark', translate('深色（默认）')], ['light', translate('浅色')], ['system', translate('跟随系统')]], themePreference, applyTheme);
   choices('accent', translate('强调色'), [['ember', translate('珊瑚（默认）')], ['indigo', translate('靛蓝')], ['violet', translate('紫罗兰')], ['rose', translate('玫瑰')], ['emerald', translate('翡翠绿')], ['cyan', translate('湖青')], ['sky', translate('天蓝')], ['graphite', translate('石墨')]], accentPreference, applyAccent);
-  body.append(el('p', translate('强调色用于导航、主要操作和流量图；正常、警告与错误保留固定的状态色和文字。'), 'fine'));
+  body.append(el('p', translate('强调色用于导航和主要操作；卡片与图表使用固定的配色，正常、警告与错误保留固定的状态色和文字。'), 'fine'));
+  const wash = el('fieldset'), slider = el('input'), level = el('output', `${washPreference}%`), row = el('div', undefined, 'wash-control');
+  wash.dataset.preference = 'wash'; wash.append(el('legend', translate('卡片配色')));
+  Object.assign(slider, { type: 'range', min: '0', max: '100', step: '5', value: String(washPreference) }); slider.setAttribute('aria-label', translate('卡片配色强度'));
+  const setWash = value => { applyWash(value); slider.value = String(washPreference); level.textContent = `${washPreference}%`; };
+  slider.oninput = () => setWash(slider.value);
+  row.append(slider, level, button(translate('恢复默认'), () => setWash(90), 'subtle'));
+  wash.append(row, el('small', translate('每张卡片顶部的淡彩渐变。拖到 0 关闭；最右侧是仍能保证文字清晰的最强一档。')));
+  body.append(wash);
   choices('layout', translate('总览显示模式'), [['monitoring', translate('展开总览'), translate('大图表、完整宽度的路径图和事件列表。')], ['workspace', translate('紧凑总览'), translate('较小的图表与摘要，适合日常管理。')]], overviewLayout, mode => {
     applyOverviewLayout(mode, true); if (state.view === 'overview') refresh().catch(e => notify(e.message, true));
   });
@@ -303,6 +318,13 @@ async function navigate(view, options = {}) {
   $('#main-content').focus({ preventScroll: true });
   try { await refresh(); } catch (e) { notify(e.message, true); }
 }
+// Cards on a page take turns through the companion colors, starting with the color of the page's sidebar section.
+const cardTones = ['teal', 'blue', 'violet', 'pink', 'gold'];
+function toneCards() {
+  const groups = [...document.querySelectorAll('.sidebar nav > .nav-group')], start = Math.max(0, groups.indexOf(document.querySelector('.sidebar nav .nav-button.active')?.closest('.nav-group')));
+  document.querySelectorAll('#content .panel').forEach((card, i) => { const tone = cardTones[(start + i) % cardTones.length]; if (card.dataset.tone !== tone) card.dataset.tone = tone; });
+}
+new MutationObserver(toneCards).observe($('#content'), { childList: true, subtree: true });
 async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedActor = state.actor, requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(), requestedOverviewLayout = overviewLayout; state.busy = true; $('#refresh').disabled = true;
@@ -530,7 +552,7 @@ async function renderOverview() {
   const problem = e => e.severity === 'warning' || e.severity === 'critical', day = events.filter(e => e.at_ms >= now - 86_400_000);
   const open = [...latest.values()].filter(problem), problems = day.filter(problem).length;
   const board = el('div', undefined, 'alert-status event-board');
-  for (const [label, value, color] of [[translate('仍未恢复'), open.length, open.length ? 'red' : 'green'], [translate('新问题'), problems, problems ? 'orange' : 'green'], [translate('已恢复'), day.filter(e => e.severity === 'recovered').length, '']]) { const item = el('div', undefined, `alert-stat ${color}`); item.append(el('div', String(value), 'metric-value'), el('div', label, 'metric-label')); board.append(item); }
+  for (const [label, value, color] of [[translate('仍未恢复'), open.length, open.length ? 'red' : 'green'], [translate('新问题'), problems, problems ? 'orange' : 'green'], [translate('已恢复'), day.filter(e => e.severity === 'recovered').length, 'green']]) { const item = el('div', undefined, `alert-stat ${color}`); item.append(el('div', String(value), 'metric-value'), el('div', label, 'metric-label')); board.append(item); }
   const list = el('ol', undefined, 'incidents');
   if (!events.length) list.append(el('li', translate('最近 24 小时没有目标故障、配置拒绝或节点离线。'), 'incident-empty'));
   [...open, ...events.filter(e => !open.includes(e))].slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', eventMessage(e), 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
@@ -2376,7 +2398,7 @@ async function renderUsage() {
   const p = panel(translate('已接纳应用负载'), translate('累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。'));
   if (!records.length) { p.append(empty(translate('还没有流量记录'), translate('让一条转发规则通过真实流量，Agent 会在同步后上报。'))); if (state.view === 'usage') $('#content').replaceChildren(p); return; }
   if (displayMode('usage') === 'chart') {
-    const parts = [[translate('上行'), 'teal'], [translate('下行'), 'blue']];
+    const parts = [[translate('上行'), 'teal'], [translate('下行'), 'violet']];
     const totals = key => { const sums = new Map(); for (const r of records) { const k = key(r), v = sums.get(k) || [0, 0]; v[0] += r.upload_bytes; v[1] += r.download_bytes; sums.set(k, v); } return [...sums].sort((a, b) => b[1][0] + b[1][1] - a[1][0] - a[1][1]); };
     const row = (label, [up, down], detail) => ({ label, detail, values: [up, down], text: bytes(up + down), title: msg`上行 ${bytes(up)} · 下行 ${bytes(down)}` });
     const byRule = totals(r => r.rule_id), byNode = totals(r => r.node_id), byMonth = totals(r => r.meter_epoch).sort((a, b) => a[0].localeCompare(b[0]));

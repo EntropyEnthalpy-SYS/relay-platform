@@ -122,10 +122,13 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
 @font-face { font-family: "InterVariable"; src: url("/assets/inter.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
 /* Two neutral themes: the sidebar and page sit on one quiet canvas, content lives on cards, and
    color is kept for meaning, with each hue family doing one job: the warm coral-orange accent marks
-   actions and selection; cool data colors (teal, blue, violet at matched lightness) draw charts; green,
-   amber and red, as tinted labels and striped bars, report status. Red sits well apart from the accent
-   so a problem never reads as a button. Dark: graphite cards on a near-black canvas. Light: white cards
-   on a soft grey canvas with near-black text. Status and data colors never follow the accent.
+   actions and selection; a set of companion colors (teal, blue, violet and pink at matched lightness,
+   plus gold) draws charts and tells card icons and sidebar sections apart; green, amber and red, as
+   tinted labels and striped bars, report status. Red sits well apart from the accent and from pink
+   so a problem never reads as a button or a chart series. Each companion color has a mid tone for
+   chart fills and a deeper -ink tone for icons, readable at 4.5:1 or more on its own tint.
+   Dark: graphite cards on a near-black canvas. Light: white cards on a soft grey canvas with
+   near-black text. Status and data colors never follow the accent.
    --accent is for accent text and lines, --accent-fill for solid fills under --accent-ink,
    --accent-soft for tinted selections under --accent-soft-text. */
 :root {
@@ -136,6 +139,7 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
   --text: #18181b; --text-2: #3a3a40; --muted: #5f6067;
   --accent: #b83b07; --accent-hover: #ac380a; --accent-fill: #d24201; --accent-ink: #ffffff; --accent-soft: #feeadf; --accent-soft-text: #9a3412;
   --green: #28713e; --green-soft: #e3f4e6; --blue: #3567ad; --blue-soft: #eaf3fb; --violet: #9084d2; --teal: #36a6b5;
+  --teal-ink: #0f7480; --violet-ink: #5a4dbf; --pink: #df7aa6; --pink-ink: #b0336c;
   --amber: #876406; --amber-soft: #fcf1cb; --red: #be2d39; --red-soft: #ffe4e5;
   /* Striped bars: the status color with lighter stripes, as in a progress pill. */
   --stripes: repeating-linear-gradient(-45deg, rgba(255, 255, 255, .32) 0 3px, transparent 3px 7px);
@@ -159,6 +163,7 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
   --text: #ededef; --text-2: #c6c7cc; --muted: #909197;
   --accent: #f87029; --accent-hover: #fb9a63; --accent-fill: #ca4c03; --accent-ink: #ffffff; --accent-soft: #3f2314; --accent-soft-text: #ffd9c4;
   --green: #74c088; --green-soft: #15291b; --blue: #7aa7dc; --blue-soft: #14233a; --violet: #9f93e3; --teal: #4bb8c7;
+  --teal-ink: #6fcfdc; --violet-ink: #b3a9f2; --pink: #e48bb3; --pink-ink: #f0a2c5;
   --amber: #e2b85a; --amber-soft: #322810; --red: #e8706f; --red-soft: #3a1a1c;
   --stripes: repeating-linear-gradient(-45deg, rgba(255, 255, 255, .26) 0 3px, transparent 3px 7px);
   --green-fill: #6fb57e; --amber-fill: #e3b54f; --red-fill: #e75655; --blue-fill: #719fd3;
@@ -314,7 +319,13 @@ pre {
 .nav-group + .nav-group { margin-top: 14px; }
 .nav-label { margin: 0 10px 4px; font-size: 12px; line-height: 1.6; font-weight: 500; color: var(--muted); }
 .nav-button { position: relative; width: 100%; display: flex; align-items: center; gap: 10px; min-height: 32px; margin: 1px 0; padding: 5px 10px; border: 0; border-radius: 8px; background: none; text-align: left; font-size: 13px; line-height: 1.4; color: var(--text-2); }
-.nav-button > span[data-icon] { width: 16px; color: var(--muted); }
+.nav-button > span[data-icon] { width: 16px; color: var(--section-ink, var(--muted)); }
+/* Each sidebar section carries one companion color on its icons; labels stay neutral and the current page keeps the accent. */
+.sidebar nav > .nav-group:nth-of-type(1) { --section-ink: var(--teal-ink); }
+.sidebar nav > .nav-group:nth-of-type(2) { --section-ink: var(--blue); }
+.sidebar nav > .nav-group:nth-of-type(3) { --section-ink: var(--violet-ink); }
+.sidebar nav > .nav-group:nth-of-type(4) { --section-ink: var(--pink-ink); }
+.sidebar nav > .nav-group:nth-of-type(5) { --section-ink: var(--amber); }
 /* Only the current page is marked, with a warm accent tint and a bar on its leading edge; touch screens skip hover so a tapped item never looks selected. */
 @media (hover: hover) { .nav-button:not(.active):hover { background: var(--nav-hover); color: var(--text); } }
 .nav-button.active, .guide-link.active { background: var(--nav-active); box-shadow: inset 2px 0 0 var(--nav-active-bar); color: var(--text); font-weight: 600; }
@@ -361,7 +372,13 @@ footer > span:first-child { flex-shrink: 0; color: var(--text-2); }
 .metric > .tile-icon { grid-column: 1; grid-row: 1 / span 3; align-self: start; }
 .kpi-head { display: flex; align-items: flex-start; gap: 14px; min-width: 0; }
 .kpi-text { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.tile-icon { display: grid; place-items: center; flex-shrink: 0; width: 34px; height: 34px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface-2); color: var(--text-2); }
+/* Summary cards cycle through the companion colors, so a row of four reads teal, blue, violet, pink and matches the sparklines under them. */
+.kpi:nth-child(4n+1), .metric:nth-child(4n+1) { --tile: var(--teal); --tile-ink: var(--teal-ink); }
+.kpi:nth-child(4n+2), .metric:nth-child(4n+2) { --tile: var(--blue-fill); --tile-ink: var(--blue); }
+.kpi:nth-child(4n+3), .metric:nth-child(4n+3) { --tile: var(--violet); --tile-ink: var(--violet-ink); }
+.kpi:nth-child(4n+4), .metric:nth-child(4n+4) { --tile: var(--pink); --tile-ink: var(--pink-ink); }
+.tile-icon { display: grid; place-items: center; flex-shrink: 0; width: 34px; height: 34px; border: 1px solid color-mix(in srgb, var(--tile, var(--line-strong)) 28%, var(--surface)); border-radius: 9px; background: color-mix(in srgb, var(--tile, var(--surface-2)) 13%, var(--surface)); color: var(--tile-ink, var(--text-2)); }
+:root[data-theme="dark"] .tile-icon { background: color-mix(in srgb, var(--tile, var(--surface-2)) 18%, var(--surface)); }
 .tile-icon svg { width: 16px; height: 16px; }
 .metric-label { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 450; color: var(--muted); }
 .metric-value { margin-top: 2px; font-size: 25px; font-weight: 500; line-height: 1.2; letter-spacing: -.02em; font-variant-numeric: tabular-nums; color: var(--text); overflow-wrap: anywhere; }
@@ -385,6 +402,22 @@ footer > span:first-child { flex-shrink: 0; color: var(--text-2); }
 
 /* Panels and tables */
 .panel { margin-bottom: 16px; overflow: hidden; background: var(--surface); border: 1px solid var(--card-line); border-radius: var(--radius); box-shadow: var(--card-shadow); }
+/* Cards take turns through the companion colors as a light wash: app.js gives each card on a page a data-tone in
+   order, starting with the page's sidebar section color, and summary strips wash each cell in its icon color. The
+   wash holds a light tint through the top third of the card's heading (or the cell) and fades to transparent by
+   its end, so tables, charts and forms below sit on the plain surface. Every text color keeps 4.5:1 or more even
+   on the strongest point of the wash. */
+.panel[data-tone="teal"] { --tone: var(--teal); }
+.panel[data-tone="blue"] { --tone: var(--blue-fill); }
+.panel[data-tone="violet"] { --tone: var(--violet); }
+.panel[data-tone="pink"] { --tone: var(--pink); }
+.panel[data-tone="gold"] { --tone: var(--amber-fill); }
+.kpis > .kpi, .metrics > .metric { --tone: var(--tile); }
+/* --wash-level (0-1) is the reader's Appearance setting; at 1 the wash reaches 18% light or 11% dark, the most
+   each theme allows before some text color drops under 4.5:1. */
+.panel[data-tone] > .panel-head, .kpis > .kpi, .metrics > .metric { --wash: color-mix(in srgb, var(--tone) calc(18% * var(--wash-level)), transparent); background-image: linear-gradient(var(--wash) 35%, transparent); }
+/* Dark washes lift muted text a little so it keeps 4.5:1 where the wash is strongest. */
+:root[data-theme="dark"] :is(.panel[data-tone] > .panel-head, .kpis > .kpi, .metrics > .metric) { --muted: #9c9da3; --wash: color-mix(in srgb, var(--tone) calc(11% * var(--wash-level)), transparent); }
 .panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 16px; padding: 16px 18px 12px; }
 /* The description keeps a readable width; actions move under it before squeezing it. */
 .panel-head > div:first-child { flex: 1 1 320px; min-width: 0; }
@@ -492,6 +525,8 @@ tr.row-link.selected { background: var(--accent-soft); }
 /* Dialogs: editing and details slide in from the right; confirmations stay centered. */
 dialog { width: min(680px, calc(100% - 32px)); max-height: 90vh; padding: 0; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--surface); color: inherit; box-shadow: var(--shadow); }
 dialog::backdrop { background: rgba(4, 6, 10, .5); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
+/* Appearance changes preview live, so the page behind stays sharp and only lightly dimmed. */
+#dialog:has(.appearance-settings)::backdrop { background: rgba(4, 6, 10, .12); -webkit-backdrop-filter: none; backdrop-filter: none; }
 #dialog.sheet { position: fixed; inset: 0 0 0 auto; margin: 0; width: min(600px, 100%); max-width: 100%; height: 100vh; height: 100dvh; max-height: none; border-width: 0 0 0 1px; border-radius: 0; overflow-y: auto; overscroll-behavior: contain; }
 #dialog.sheet[open] { animation: sheet-in .22s cubic-bezier(.2, .8, .2, 1); }
 #dialog.sheet:has(.setup-cards) { width: min(880px, 100%); }
@@ -663,6 +698,10 @@ td .clip { display: block; max-width: 340px; overflow: hidden; text-overflow: el
 .appearance-choice:has(:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .appearance-choice:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .appearance-choice input { margin: 0; flex-shrink: 0; box-shadow: none; }
+.wash-control { display: flex; align-items: center; gap: 12px; }
+.wash-control input[type="range"] { flex: 1; min-height: 28px; padding: 0; border: 0; background: none; box-shadow: none; accent-color: var(--accent-fill); }
+.wash-control output { min-width: 3em; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+.appearance-settings [data-preference="wash"] small { display: block; margin-top: 4px; color: var(--muted); font-size: 11.5px; line-height: 1.55; }
 .appearance-choice strong { display: block; color: var(--text); font-size: 13px; font-weight: 550; }
 .appearance-choice small { display: block; color: var(--text-2); font-size: 11.5px; font-weight: 400; line-height: 1.55; margin-top: 2px; }
 .accent-swatch { display: block; width: 14px; height: 14px; flex-shrink: 0; border-radius: 50%; }
@@ -966,6 +1005,7 @@ body[data-overview-layout="workspace"] .globe-list { max-height: 310px; }
 .chart-part, .chart-key i.unknown { background: var(--muted); }
 .chart-part.teal, .chart-key i.teal { background: var(--teal); }
 .chart-part.blue, .chart-key i.blue { background: var(--blue-fill); }
+.chart-part.violet, .chart-key i.violet { background: var(--violet); }
 .chart-part.up, .chart-key i.up { background: var(--green-fill); }
 .chart-part.partial, .chart-key i.partial { background: var(--amber-fill); }
 .chart-part.down, .chart-key i.down { background: var(--red-fill); }

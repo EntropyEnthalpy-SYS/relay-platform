@@ -2,6 +2,8 @@
 
 **Setting up a new server?** Follow [Deploying Relay on a new server, start to finish](docs/DEPLOYMENT_GUIDE_EN.md): build and sign a package, install the panel, add HTTPS, sign in, add nodes, upgrade and back up.
 
+0.141.4 adds companion colors. Teal, blue, violet and pink tell summary-card icons, sidebar sections and chart series apart (download is now violet beside teal upload), and each card on a page gets a soft wash of color at the top of its heading that fades to the plain card, starting from the color of the page's sidebar section. Appearance has a new Card color slider: 0 turns the wash off, and its strongest setting still keeps every text color at 4.5:1 or better. The page behind Appearance is no longer blurred, so changes preview live.
+
 0.141.3 restyles the panel after the Regline dashboard, in both themes. The sidebar and page header sit on a neutral grey page and content lives on cards; the overview metrics share one card with icon tiles; status labels are soft tinted tags; progress and status bars are striped pills; table actions are small outlined buttons. Coral is now the default accent and is kept for actions and selection: the current sidebar item and Page guide topic get a warm tint with a coral bar on the left edge. Charts use teal, blue and violet instead of the accent, and red now means only a problem, so it no longer looks like a button or ordinary traffic. Unselected time-range and chart/table options are flat instead of slightly shadowed.
 
 0.141.2 counts sign-in attempts per visitor behind a reverse proxy. The limit is still 30 attempts per 5 minutes, but a panel behind Caddy or nginx on the same server used to count every visitor as the proxy itself, so anyone could lock everyone out for five minutes. When a request comes from this server's own loopback address, the panel now uses the last `X-Forwarded-For` entry, the one the proxy appended. It ignores earlier entries supplied by the visitor and never trusts the header from other machines.
@@ -54,7 +56,7 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.141.3 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.141.4 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
 
 0.117.0 新增登录页与控制台 English / 中文切换，覆盖页面、编辑器、校验提示和七篇指南；保存浏览器偏好，切换时保留会话和当前页面。此前 0.116.0 重整控制台界面：分组导航、页面与指南本地搜索、七篇内嵌操作指南、浅色 / 深色主题、移动端抽屉与可分享页面链接。现有规则、协议、计量和权限流程保留，详见 [UI workspace guide](docs/UI_WORKSPACE_EN.md)。
 
