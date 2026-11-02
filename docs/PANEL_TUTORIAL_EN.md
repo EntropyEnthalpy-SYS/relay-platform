@@ -322,6 +322,7 @@ If building on the Agent VPS itself, use ordinary local copies of the same three
 
 ## Related guidance
 
+- [Deploying Relay on a new server, start to finish](DEPLOYMENT_GUIDE_EN.md)
 - [UI and embedded handbook](UI_WORKSPACE_EN.md)
 - [Linux deployment, upgrades, and rollback](LINUX_DEPLOYMENT.md)
 - [Port ranges, DNS, and outbound binding](ROUTING.md)
