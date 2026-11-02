@@ -8,18 +8,18 @@ const titles = localize({ overview: '运行总览', nodes: '节点管理', rules
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
-// Appearance affects this browser only. Dark with the indigo accent is the
+// Appearance affects this browser only. Dark with the coral ("ember") accent is the
 // default; status colors stay fixed whichever brand accent is chosen.
 function readPreference(key, choices, fallback) {
   try { const value = localStorage.getItem(key); return choices.includes(value) ? value : fallback; }
   catch { return fallback; }
 }
 const themeMedia = matchMedia('(prefers-color-scheme: dark)');
-const accents = ['indigo', 'violet', 'rose', 'ember', 'emerald', 'cyan', 'sky', 'graphite'];
+const accents = ['ember', 'indigo', 'violet', 'rose', 'emerald', 'cyan', 'sky', 'graphite'];
 let themePreference = readPreference('relay-theme', ['light', 'dark', 'system'], 'dark');
 // Accents saved by earlier versions map to their closest current color.
 const legacyAccents = { terracotta: 'ember', blue: 'indigo', cobalt: 'indigo', green: 'emerald' };
-let accentPreference = readPreference('relay-accent', [...accents, ...Object.keys(legacyAccents)], 'indigo');
+let accentPreference = readPreference('relay-accent', [...accents, ...Object.keys(legacyAccents)], 'ember');
 accentPreference = legacyAccents[accentPreference] || accentPreference;
 function applyTheme(theme, persist = true) {
   themePreference = ['light', 'dark', 'system'].includes(theme) ? theme : 'dark';
@@ -29,7 +29,7 @@ function applyTheme(theme, persist = true) {
   requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')));
 }
 function applyAccent(accent, persist = true) {
-  accentPreference = accents.includes(accent) ? accent : 'indigo';
+  accentPreference = accents.includes(accent) ? accent : 'ember';
   document.documentElement.dataset.accent = accentPreference;
   if (persist) { try { localStorage.setItem('relay-accent', accentPreference); } catch { /* Usable without storage. */ } }
 }
@@ -94,7 +94,7 @@ function showAppearance() {
     group.append(grid); body.append(group);
   }
   choices('theme', translate('界面主题'), [['dark', translate('深色（默认）')], ['light', translate('浅色')], ['system', translate('跟随系统')]], themePreference, applyTheme);
-  choices('accent', translate('强调色'), [['indigo', translate('靛蓝（默认）')], ['violet', translate('紫罗兰')], ['rose', translate('玫瑰')], ['ember', translate('余烬橙')], ['emerald', translate('翡翠绿')], ['cyan', translate('湖青')], ['sky', translate('天蓝')], ['graphite', translate('石墨')]], accentPreference, applyAccent);
+  choices('accent', translate('强调色'), [['ember', translate('珊瑚（默认）')], ['indigo', translate('靛蓝')], ['violet', translate('紫罗兰')], ['rose', translate('玫瑰')], ['emerald', translate('翡翠绿')], ['cyan', translate('湖青')], ['sky', translate('天蓝')], ['graphite', translate('石墨')]], accentPreference, applyAccent);
   body.append(el('p', translate('强调色用于导航、主要操作和流量图；正常、警告与错误保留固定的状态色和文字。'), 'fine'));
   choices('layout', translate('总览显示模式'), [['monitoring', translate('展开总览'), translate('大图表、完整宽度的路径图和事件列表。')], ['workspace', translate('紧凑总览'), translate('较小的图表与摘要，适合日常管理。')]], overviewLayout, mode => {
     applyOverviewLayout(mode, true); if (state.view === 'overview') refresh().catch(e => notify(e.message, true));
@@ -450,7 +450,8 @@ function trendChart(values, cls, format, now, ceiling = null, span = SPAN_MS) {
   frame.append(axis, spark(values, cls, 600, 150, ceiling), el('span'), labels); return frame;
 }
 function chartPanel(title, description, chart) { const p = panel(title, description); const body = el('div', undefined, 'panel-body chart-body'); body.append(chart); p.append(body); return p; }
-function kpi(label, value, foot, chart) { const n = el('div', undefined, 'kpi'), text = el('div', undefined, 'kpi-text'); text.append(el('div', label, 'metric-label'), el('div', value, 'metric-value'), el('div', foot, 'metric-foot')); n.append(text, chart); return n; }
+function tileIcon(name) { const n = el('span', undefined, 'tile-icon'); n.append(consoleUI.icon(name)); return n; }
+function kpi(label, value, foot, chart, symbol) { const n = el('div', undefined, 'kpi'), head = el('div', undefined, 'kpi-head'), text = el('div', undefined, 'kpi-text'); text.append(el('div', label, 'metric-label'), el('div', value, 'metric-value'), el('div', foot, 'metric-foot')); head.append(tileIcon(symbol), text); n.append(head, chart); return n; }
 function overviewStatus(node, latest) {
   if (!node.enrolled) return [translate('待注册'), '', 'idle'];
   if (!online(node)) return [translate('离线'), 'red', 'down'];
@@ -501,10 +502,10 @@ async function renderOverview() {
   for (const [value, label] of overviewRanges) { const choice = button(label, async () => { try { localStorage.setItem('relay-overview-range', value); } catch { /* Still switches without storage. */ } await renderOverview(); }); choice.setAttribute('aria-pressed', String(range === value)); picker.append(choice); }
   const kpis = el('div', undefined, 'kpis');
   kpis.append(
-    kpi(translate('实时吞吐'), liveRates.length ? bits(liveRates.reduce((sum, value) => sum + value, 0)) : '—', msg`多跳流量逐跳计入 · 峰值 ${peak == null ? '—' : bits(peak)}`, spark(rate, 'accent')),
-    kpi(translate('活跃会话'), live.length ? String(live.reduce((s, r) => s + r.latest.active_sessions, 0)) : '—', translate('TCP 连接 + UDP 会话'), spark(sessions, 'blue')),
-    kpi(translate('探测往返中位数'), millis(median(live.map(r => r.latest.probe_latency_us))), translate('节点到目标的探测，不含客户端一段'), spark(latency, 'violet')),
-    kpi(translate('节点在线'), `${live.length} / ${enrolled.length}`, probed ? msg`目标可用 ${healthy} / ${probed}` : translate('尚无目标探测'), fleet));
+    kpi(translate('实时吞吐'), liveRates.length ? bits(liveRates.reduce((sum, value) => sum + value, 0)) : '—', msg`多跳流量逐跳计入 · 峰值 ${peak == null ? '—' : bits(peak)}`, spark(rate, 'teal'), 'activity'),
+    kpi(translate('活跃会话'), live.length ? String(live.reduce((s, r) => s + r.latest.active_sessions, 0)) : '—', translate('TCP 连接 + UDP 会话'), spark(sessions, 'blue'), 'arrows'),
+    kpi(translate('探测往返中位数'), millis(median(live.map(r => r.latest.probe_latency_us))), translate('节点到目标的探测，不含客户端一段'), spark(latency, 'violet'), 'gauge'),
+    kpi(translate('节点在线'), `${live.length} / ${enrolled.length}`, probed ? msg`目标可用 ${healthy} / ${probed}` : translate('尚无目标探测'), fleet, 'server'));
   const events = telemetry.events.slice().reverse(), attention = rows.filter(r => r.status[2] === 'down' || r.status[2] === 'partial').length;
   const pill = $('#status-pill'); pill.className = `status-pill ${rows.some(r => r.status[2] === 'down') ? 'red' : attention ? 'orange' : 'green'}`;
   pill.textContent = !enrolled.length ? translate('等待节点注册') : !live.length ? translate('等待节点回报') : attention ? msg`${attention} 个节点需要关注` : msg`控制在线 · ${live.length} 个节点`;
@@ -515,7 +516,7 @@ async function renderOverview() {
   if (past) {
     const c = past.connections, percent = v => `${+(v * 100).toFixed(1)}%`;
     trends = el('div', undefined, 'chart-grid overview-trends');
-    trends.append(chartPanel(translate('吞吐'), msg`最近 ${rangeLabel} · 全部节点合计，多跳流量逐跳计入。`, trendChart(rate, 'accent', bits, past.end, null, past.span)),
+    trends.append(chartPanel(translate('吞吐'), msg`最近 ${rangeLabel} · 全部节点合计，多跳流量逐跳计入。`, trendChart(rate, 'teal', bits, past.end, null, past.span)),
       chartPanel(translate('真实连接成功率'), c.attempts ? msg`最近 ${rangeLabel} · ${connSummary(c)}。只计 TCP 到目标的连接。` : msg`最近 ${rangeLabel}没有到目标的 TCP 连接。`, trendChart(past.success, 'up', percent, past.end, 1, past.span)),
       chartPanel(translate('平均会话'), msg`最近 ${rangeLabel} · 全部节点合计。`, trendChart(sessions, 'blue', v => String(Math.round(v)), past.end, null, past.span)),
       chartPanel(translate('探测往返（中位数）'), msg`最近 ${rangeLabel} · 各节点平均值的中位数。`, trendChart(latency, 'violet', millis, past.end, null, past.span)));
@@ -546,7 +547,7 @@ async function renderOverview() {
   // Related readings share a cell (status with its report age, CPU with memory) so the table fits a laptop screen.
   const t = table([translate('节点'), translate('状态 / 最近回报'), translate('探测往返'), msg`吞吐（${rangeLabel}）`, translate('CPU / 内存'), translate('会话'), translate('配置修订'), ''], rows.map(r => {
     const { node, latest } = r, memory = latest?.memory_total_bytes ? 1 - latest.memory_available_bytes / latest.memory_total_bytes : null;
-    const throughput = el('div', undefined, 'throughput'); throughput.append(spark(r.series.rate, 'accent'), el('span', r.rate == null ? '—' : bits(r.rate)));
+    const throughput = el('div', undefined, 'throughput'); throughput.append(spark(r.series.rate, 'teal'), el('span', r.rate == null ? '—' : bits(r.rate)));
     const status = el('div'); status.append(badge(r.status[0], r.status[1]), el('div', node.last_seen_ms ? ago(node.last_seen_ms, now) : translate('尚未回报'), 'subline'));
     const resources = el('div', undefined, 'resource-meters');
     if (latest?.cpu_percent != null) resources.append(meter(latest.cpu_percent / 100, `CPU ${latest.cpu_percent.toFixed(0)}%`));
@@ -709,7 +710,7 @@ async function renderNodes() {
   state.inbound = {}; for (const c of topology?.configs || []) for (const r of c.rules) for (const t of r.targets) if (t.via) { const n = state.inbound[t.via.node_id] ||= { total: 0, draining: 0 }; n.total++; if (t.draining) n.draining++; }
   state.selectedNodes = new Set([...state.selectedNodes].filter(id => nodes.some(n => n.id === id)));
   const metric = el('div', undefined, 'metrics');
-  [[translate('节点数量'), nodes.length, query ? translate('当前筛选范围') : translate('当前账号可见的节点')], [translate('控制在线'), nodes.filter(online).length, translate('最近 30 秒收到心跳')], [translate('活跃连接'), nodes.some(online) ? nodes.filter(online).reduce((s,n) => s+n.stats.active_tcp+n.stats.active_udp,0) : '—', translate('当前范围的 TCP + UDP 会话')], [translate('近期上报负载'), bytes(usage.reduce((s,u) => s+u.upload_bytes+u.download_bytes,0)), translate('全部可见节点最近 2,000 个计量周期')]].forEach(([title,value,foot]) => { const n=el('div',undefined,'metric'); n.append(el('div',title,'metric-label'),el('div',String(value),'metric-value'),el('div',foot,'metric-foot'));metric.append(n); });
+  [[translate('节点数量'), nodes.length, query ? translate('当前筛选范围') : translate('当前账号可见的节点'), 'server'], [translate('控制在线'), nodes.filter(online).length, translate('最近 30 秒收到心跳'), 'activity'], [translate('活跃连接'), nodes.some(online) ? nodes.filter(online).reduce((s,n) => s+n.stats.active_tcp+n.stats.active_udp,0) : '—', translate('当前范围的 TCP + UDP 会话'), 'arrows'], [translate('近期上报负载'), bytes(usage.reduce((s,u) => s+u.upload_bytes+u.download_bytes,0)), translate('全部可见节点最近 2,000 个计量周期'), 'chart']].forEach(([title,value,foot,symbol]) => { const n=el('div',undefined,'metric'); n.append(tileIcon(symbol),el('div',title,'metric-label'),el('div',String(value),'metric-value'),el('div',foot,'metric-foot'));metric.append(n); });
   // Tabs split the list by what each node needs; selecting "this page" covers the nodes the tab shows.
   const counts = { all: nodes.length, online: 0, attention: 0, awaiting: 0 }; nodes.forEach(n => counts[nodeGroup(n)]++);
   const tab = Object.hasOwn(counts, state.nodeTab) ? state.nodeTab : 'all', shown = tab === 'all' ? nodes : nodes.filter(n => nodeGroup(n) === tab);
@@ -2375,7 +2376,7 @@ async function renderUsage() {
   const p = panel(translate('已接纳应用负载'), translate('累计值按节点、规则与计量周期去重；发送失败也可能已经接纳计量。最多显示最近 2,000 条周期记录。'));
   if (!records.length) { p.append(empty(translate('还没有流量记录'), translate('让一条转发规则通过真实流量，Agent 会在同步后上报。'))); if (state.view === 'usage') $('#content').replaceChildren(p); return; }
   if (displayMode('usage') === 'chart') {
-    const parts = [[translate('上行'), 'accent'], [translate('下行'), 'blue']];
+    const parts = [[translate('上行'), 'teal'], [translate('下行'), 'blue']];
     const totals = key => { const sums = new Map(); for (const r of records) { const k = key(r), v = sums.get(k) || [0, 0]; v[0] += r.upload_bytes; v[1] += r.download_bytes; sums.set(k, v); } return [...sums].sort((a, b) => b[1][0] + b[1][1] - a[1][0] - a[1][1]); };
     const row = (label, [up, down], detail) => ({ label, detail, values: [up, down], text: bytes(up + down), title: msg`上行 ${bytes(up)} · 下行 ${bytes(down)}` });
     const byRule = totals(r => r.rule_id), byNode = totals(r => r.node_id), byMonth = totals(r => r.meter_epoch).sort((a, b) => a[0].localeCompare(b[0]));
@@ -3083,7 +3084,7 @@ async function renderBudgets() {
   if (!overview.budgets.length) p.append(empty(translate('为多个入口设置一个总额度'), translate('创建前先暂停该范围内的规则，并确认所有相关节点已应用；之后重新启用规则，系统会自动绑定额度。')));
   else if (displayMode('budgets') === 'chart') {
     // Each bar is the budget's own limit: used, then reserved but not yet returned, then still available.
-    const body = el('div', undefined, 'panel-body chart-body'), parts = [[translate('已上报用量'), 'accent'], [translate('尚未归还预留'), 'partial'], [translate('可分配'), 'free']];
+    const body = el('div', undefined, 'panel-body chart-body'), parts = [[translate('已上报用量'), 'teal'], [translate('尚未归还预留'), 'partial'], [translate('可分配'), 'free']];
     body.append(barChart(overview.budgets.map(b => {
       const reserved = b.committed_bytes - b.consumed_bytes, available = b.limit_bytes - b.committed_bytes;
       return { label: b.name, detail: `${budgetScopeNames[b.scope]} · ${scopeLabel(b)}`, values: [b.consumed_bytes, reserved, available], max: b.limit_bytes || 1,

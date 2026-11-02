@@ -65,8 +65,8 @@ export function createGlobe({ label, onSelect }) {
   let yaw = -1.9, pitch = 0.35, target = null, drag = null, idleUntil = 0, hover = null, selected = null;
   function readColors() {
     const css = getComputedStyle(document.documentElement), v = name => css.getPropertyValue(name).trim();
-    colors = { surface: v('--surface'), surface2: v('--surface-2'), line: v('--line-strong'), text: v('--text'), muted: v('--muted'), accent: v('--accent'), soft: v('--accent-soft'),
-      up: v('--green'), partial: v('--amber'), down: v('--red'), idle: v('--muted'), unknown: v('--muted'), font: getComputedStyle(document.body).fontFamily };
+    colors = { surface: v('--surface'), surface2: v('--surface-2'), line: v('--line-strong'), text: v('--text'), muted: v('--muted'), accent: v('--accent'), soft: v('--accent-soft'), sky: v('--blue'),
+      up: v('--green-fill'), partial: v('--amber-fill'), down: v('--red-fill'), idle: v('--muted'), unknown: v('--muted'), font: getComputedStyle(document.body).fontFamily };
   }
   let cosYaw = 1, sinYaw = 0, cosPitch = 1, sinPitch = 0;
   function rotate(x, y, z) {
@@ -81,7 +81,7 @@ export function createGlobe({ label, onSelect }) {
     if (canvas.width !== Math.round(w * ratio) || canvas.height !== Math.round(h * ratio)) { canvas.width = Math.round(w * ratio); canvas.height = Math.round(h * ratio); }
     context.setTransform(ratio, 0, 0, ratio, 0, 0); context.clearRect(0, 0, w, h);
     if (r < 40) return;
-    const glow = context.createRadialGradient(cx, cy, r * 0.96, cx, cy, r * 1.25); glow.addColorStop(0, fade(colors.accent, 0.16)); glow.addColorStop(1, fade(colors.accent, 0));
+    const glow = context.createRadialGradient(cx, cy, r * 0.96, cx, cy, r * 1.25); glow.addColorStop(0, fade(colors.sky, 0.16)); glow.addColorStop(1, fade(colors.sky, 0));
     context.fillStyle = glow; context.fillRect(0, 0, w, h);
     const shade = context.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.1, cx, cy, r);
     shade.addColorStop(0, colors.surface); shade.addColorStop(1, colors.surface2);

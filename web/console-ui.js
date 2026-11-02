@@ -191,5 +191,5 @@ export function createConsoleUI({ navigate, getActor, getView, el, button, modal
     article.steps.forEach(([title], i) => toc.append(button(title, () => { const section = paper.querySelector(`#guide-step-${i}`); section.scrollIntoView({ block: 'start', behavior: 'instant' }); section.focus({ preventScroll: true }); }, 'toc-link')));
     toc.append(el('p', translate('指南随源码提供，离线可读。'), 'fine')); layout.append(contents, paper, toc); container.replaceChildren(layout);
   }
-  return { sync, renderGuide, reset() { closeSearch(false); drawer(false); } };
+  return { sync, renderGuide, icon, reset() { closeSearch(false); drawer(false); } };
 }
