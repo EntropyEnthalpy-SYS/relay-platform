@@ -121,21 +121,22 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
 /* Inter (SIL OFL 1.1), Latin subset, served by the panel itself. Chinese text uses the system font. */
 @font-face { font-family: "InterVariable"; src: url("/assets/inter.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
 /* Two themes. "Command deck" (dark, default): a blue-black canvas, raised panels and an indigo accent.
-   "Editorial" (light): warm paper, hairlines and ink text. Status colors never follow the accent.
+   Light: white panels on a cool grey canvas, firm borders and near-black text, so cards and
+   secondary text stay distinct in bright rooms. Status colors never follow the accent.
    --accent is for accent text and lines, --accent-fill for solid fills under --accent-ink,
    --accent-soft for tinted selections under --accent-soft-text. */
 :root {
   color-scheme: light;
-  --bg: #fafaf9; --chrome: #f5f5f3; --pagebar: rgba(250, 250, 249, .86); --grid: rgba(15, 23, 42, .05);
-  --surface: #ffffff; --surface-2: #f7f7f5; --surface-3: #efefec; --segment: #ffffff;
-  --line: #e7e5e4; --line-strong: #d6d3d1; --control-line: #8f8a85;
-  --text: #0f172a; --text-2: #334155; --muted: #64748b;
-  --accent: #2f5bea; --accent-hover: #2449c9; --accent-fill: #2f5bea; --accent-ink: #ffffff; --accent-soft: #ebf0fe; --accent-soft-text: #1e3fae;
-  --green: #0f7b55; --green-soft: #e5f5ee; --blue: #2563eb; --violet: #7c3aed;
-  --amber: #a15c07; --amber-soft: #fdf3e1; --red: #c2343b; --red-soft: #fcebec;
-  --card-shadow: 0 1px 2px rgba(28, 25, 23, .04);
-  --segment-shadow: 0 1px 2px rgba(28, 25, 23, .12), 0 0 0 1px rgba(28, 25, 23, .06);
-  --shadow: 0 24px 64px -12px rgba(28, 25, 23, .24);
+  --bg: #eef0f3; --chrome: #ffffff; --pagebar: rgba(238, 240, 243, .9); --grid: rgba(15, 23, 42, .08);
+  --surface: #ffffff; --surface-2: #f4f6f9; --surface-3: #e8ebef; --segment: #ffffff; --field: #ffffff;
+  --line: #dde1e7; --line-strong: #c4cad3; --control-line: #8b93a1;
+  --text: #0a0f1a; --text-2: #1f2937; --muted: #4b5563;
+  --accent: #2451e6; --accent-hover: #1b3fc4; --accent-fill: #2451e6; --accent-ink: #ffffff; --accent-soft: #e5ecfd; --accent-soft-text: #1737a6;
+  --green: #047857; --green-soft: #dcf3e8; --blue: #1d4ed8; --violet: #6d28d9;
+  --amber: #9a4b00; --amber-soft: #fcefd6; --red: #b91c1c; --red-soft: #fce6e6;
+  --card-shadow: 0 1px 2px rgba(15, 23, 42, .06), 0 1px 3px rgba(15, 23, 42, .04);
+  --segment-shadow: 0 1px 2px rgba(15, 23, 42, .16), 0 0 0 1px rgba(15, 23, 42, .08);
+  --shadow: 0 24px 64px -12px rgba(15, 23, 42, .3);
   --radius: 12px; --radius-sm: 8px;
   --sans: InterVariable, Inter, system-ui, -apple-system, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
   --mono: "SF Mono", "JetBrains Mono", "Cascadia Mono", ui-monospace, Menlo, Consolas, monospace;
@@ -146,7 +147,7 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #0b0d12; --chrome: #0d1016; --pagebar: rgba(11, 13, 18, .84); --grid: rgba(242, 244, 247, .045);
-  --surface: #12151c; --surface-2: #161a22; --surface-3: #1d222c; --segment: #2a303c;
+  --surface: #12151c; --surface-2: #161a22; --surface-3: #1d222c; --segment: #2a303c; --field: #161a22;
   --line: #22262f; --line-strong: #2e3440; --control-line: #5a6377;
   --text: #f2f4f7; --text-2: #c9cfda; --muted: #9aa3b2;
   --accent: #8c96ff; --accent-hover: #a7afff; --accent-fill: #5160ee; --accent-ink: #ffffff; --accent-soft: #1c2042; --accent-soft-text: #dfe2ff;
@@ -159,9 +160,18 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
 :root[data-accent="cyan"] { --accent: #0e7490; --accent-hover: #155e75; --accent-fill: #0e7490; --accent-soft: #e3f4f8; --accent-soft-text: #155e75; }
 :root[data-accent="emerald"] { --accent: #047857; --accent-hover: #065f46; --accent-fill: #047857; --accent-soft: #e6f5ef; --accent-soft-text: #065f46; }
 :root[data-accent="ember"] { --accent: #c2410c; --accent-hover: #9a3412; --accent-fill: #c2410c; --accent-soft: #fdeee6; --accent-soft-text: #9a3412; }
+:root[data-accent="violet"] { --accent: #6d3ae0; --accent-hover: #5626c4; --accent-fill: #6d3ae0; --accent-soft: #efe9fd; --accent-soft-text: #5222c0; }
+:root[data-accent="rose"] { --accent: #cf1d63; --accent-hover: #a8164f; --accent-fill: #cf1d63; --accent-soft: #fde7ef; --accent-soft-text: #9d1249; }
+:root[data-accent="sky"] { --accent: #0270ad; --accent-hover: #025a8c; --accent-fill: #0270ad; --accent-soft: #e0f1fd; --accent-soft-text: #075482; }
+/* Graphite is monochrome: near-black fills on light, near-white fills with dark text on dark. */
+:root[data-accent="graphite"] { --accent: #334155; --accent-hover: #0f172a; --accent-fill: #334155; --accent-soft: #e8ebef; --accent-soft-text: #0f172a; }
 :root[data-theme="dark"][data-accent="cyan"] { --accent: #22d3ee; --accent-hover: #67e8f9; --accent-soft: #10292f; --accent-soft-text: #cff6fc; }
 :root[data-theme="dark"][data-accent="emerald"] { --accent: #34d399; --accent-hover: #6ee7b7; --accent-soft: #10281f; --accent-soft-text: #d1fae5; }
 :root[data-theme="dark"][data-accent="ember"] { --accent: #ff7a45; --accent-hover: #ff9a70; --accent-soft: #2e1c16; --accent-soft-text: #ffe1d3; }
+:root[data-theme="dark"][data-accent="violet"] { --accent: #b39dff; --accent-hover: #cbbcff; --accent-fill: #6f42d8; --accent-soft: #231a3e; --accent-soft-text: #ece6ff; }
+:root[data-theme="dark"][data-accent="rose"] { --accent: #ff7eb0; --accent-hover: #ffa3c8; --accent-fill: #c2195c; --accent-soft: #36162a; --accent-soft-text: #ffe0ec; }
+:root[data-theme="dark"][data-accent="sky"] { --accent: #5cc6ff; --accent-hover: #8ad6ff; --accent-fill: #0270ad; --accent-soft: #0e2535; --accent-soft-text: #d7f0ff; }
+:root[data-theme="dark"][data-accent="graphite"] { --accent: #d4d9e1; --accent-hover: #f2f4f7; --accent-fill: #e4e7ec; --accent-ink: #0b0d12; --accent-soft: #262b35; --accent-soft-text: #f2f4f7; }
 
 * { box-sizing: border-box; }
 .theme-switching * { transition: none !important; }
@@ -227,7 +237,7 @@ kbd { font-family: var(--sans); font-size: 10.5px; font-weight: 500; border: 1px
 label { display: flex; flex-direction: column; gap: 6px; margin: 14px 0; font-size: 12.5px; font-weight: 550; color: var(--text-2); }
 input, select, textarea {
   width: 100%; min-width: 0; min-height: 36px;
-  background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--field); border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
   padding: 7px 11px; color: var(--text); font-weight: 400; font-size: 13.5px;
   transition: border-color .15s, box-shadow .15s;
 }
@@ -278,14 +288,14 @@ pre {
   background: linear-gradient(140deg, var(--accent), var(--accent-fill));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28), 0 6px 16px -6px color-mix(in srgb, var(--accent-fill) 80%, transparent);
 }
-.brand-mark::after { content: ""; position: absolute; inset: 9px; border: 2px solid #fff; border-radius: 2px; transform: rotate(45deg); }
+.brand-mark::after { content: ""; position: absolute; inset: 9px; border: 2px solid var(--accent-ink); border-radius: 2px; transform: rotate(45deg); }
 
 /* Workspace shell: a full-height grouped sidebar beside a sticky page bar and the page. */
 .application { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; }
 .sidebar { position: relative; z-index: 25; background: var(--chrome); border-right: 1px solid var(--line); }
 .sidebar-inner { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; padding: 16px 12px 10px; }
 .sidebar .brand { padding: 2px 8px 16px; }
-.search-trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; margin: 0 0 14px; padding: 6px 8px 6px 10px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); font-size: 12.5px; text-align: left; }
+.search-trigger { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 34px; margin: 0 0 14px; padding: 6px 8px 6px 10px; border: 1px solid var(--line); background: var(--surface-2); color: var(--muted); font-size: 12.5px; text-align: left; }
 .search-trigger:hover { border-color: var(--line-strong); color: var(--text-2); }
 .search-trigger kbd { margin-left: auto; }
 .sidebar nav { flex: 1; min-height: 0; overflow-y: auto; margin: 0 -12px; padding: 0 12px 16px; scrollbar-width: thin; scrollbar-color: var(--line-strong) transparent; -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent); }
@@ -638,14 +648,22 @@ td .clip { display: block; max-width: 340px; overflow: hidden; text-overflow: el
 .appearance-choice strong { display: block; color: var(--text); font-size: 13px; font-weight: 550; }
 .appearance-choice small { display: block; color: var(--text-2); font-size: 11.5px; font-weight: 400; line-height: 1.55; margin-top: 2px; }
 .accent-swatch { display: block; width: 14px; height: 14px; flex-shrink: 0; border-radius: 50%; }
-.accent-swatch[data-accent="indigo"] { background: #2f5bea; }
+.accent-swatch[data-accent="indigo"] { background: #2451e6; }
 .accent-swatch[data-accent="cyan"] { background: #0e7490; }
 .accent-swatch[data-accent="emerald"] { background: #047857; }
 .accent-swatch[data-accent="ember"] { background: #c2410c; }
+.accent-swatch[data-accent="violet"] { background: #6d3ae0; }
+.accent-swatch[data-accent="rose"] { background: #cf1d63; }
+.accent-swatch[data-accent="sky"] { background: #0270ad; }
+.accent-swatch[data-accent="graphite"] { background: #334155; }
 :root[data-theme="dark"] .accent-swatch[data-accent="indigo"] { background: #8c96ff; }
 :root[data-theme="dark"] .accent-swatch[data-accent="cyan"] { background: #22d3ee; }
 :root[data-theme="dark"] .accent-swatch[data-accent="emerald"] { background: #34d399; }
 :root[data-theme="dark"] .accent-swatch[data-accent="ember"] { background: #ff7a45; }
+:root[data-theme="dark"] .accent-swatch[data-accent="violet"] { background: #b39dff; }
+:root[data-theme="dark"] .accent-swatch[data-accent="rose"] { background: #ff7eb0; }
+:root[data-theme="dark"] .accent-swatch[data-accent="sky"] { background: #5cc6ff; }
+:root[data-theme="dark"] .accent-swatch[data-accent="graphite"] { background: #d4d9e1; }
 
 /* Sign in: the form on the left, a static and inexpensive network illustration on the right. */
 .login-screen { position: relative; min-height: 100vh; display: grid; grid-template-columns: minmax(400px, 44%) 1fr; background: var(--bg); }

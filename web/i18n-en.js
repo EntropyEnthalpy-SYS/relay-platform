@@ -2572,5 +2572,9 @@ export default {
   "用途": "Purpose",
   "运行状态": "Status",
   "配置错误": "Configuration error",
-  "需要关注": "Needs attention"
+  "需要关注": "Needs attention",
+  "紫罗兰": "Violet",
+  "玫瑰": "Rose",
+  "天蓝": "Sky",
+  "石墨": "Graphite"
 };

@@ -15,10 +15,10 @@ function readPreference(key, choices, fallback) {
   catch { return fallback; }
 }
 const themeMedia = matchMedia('(prefers-color-scheme: dark)');
-const accents = ['indigo', 'cyan', 'emerald', 'ember'];
+const accents = ['indigo', 'violet', 'rose', 'ember', 'emerald', 'cyan', 'sky', 'graphite'];
 let themePreference = readPreference('relay-theme', ['light', 'dark', 'system'], 'dark');
 // Accents saved by earlier versions map to their closest current color.
-const legacyAccents = { terracotta: 'ember', blue: 'indigo', cobalt: 'indigo', violet: 'indigo', green: 'emerald' };
+const legacyAccents = { terracotta: 'ember', blue: 'indigo', cobalt: 'indigo', green: 'emerald' };
 let accentPreference = readPreference('relay-accent', [...accents, ...Object.keys(legacyAccents)], 'indigo');
 accentPreference = legacyAccents[accentPreference] || accentPreference;
 function applyTheme(theme, persist = true) {
@@ -94,7 +94,7 @@ function showAppearance() {
     group.append(grid); body.append(group);
   }
   choices('theme', translate('界面主题'), [['dark', translate('深色（默认）')], ['light', translate('浅色')], ['system', translate('跟随系统')]], themePreference, applyTheme);
-  choices('accent', translate('强调色'), [['indigo', translate('靛蓝（默认）')], ['cyan', translate('湖青')], ['emerald', translate('翡翠绿')], ['ember', translate('余烬橙')]], accentPreference, applyAccent);
+  choices('accent', translate('强调色'), [['indigo', translate('靛蓝（默认）')], ['violet', translate('紫罗兰')], ['rose', translate('玫瑰')], ['ember', translate('余烬橙')], ['emerald', translate('翡翠绿')], ['cyan', translate('湖青')], ['sky', translate('天蓝')], ['graphite', translate('石墨')]], accentPreference, applyAccent);
   body.append(el('p', translate('强调色用于导航、主要操作和流量图；正常、警告与错误保留固定的状态色和文字。'), 'fine'));
   choices('layout', translate('总览显示模式'), [['monitoring', translate('展开总览'), translate('大图表、完整宽度的路径图和事件列表。')], ['workspace', translate('紧凑总览'), translate('较小的图表与摘要，适合日常管理。')]], overviewLayout, mode => {
     applyOverviewLayout(mode, true); if (state.view === 'overview') refresh().catch(e => notify(e.message, true));
