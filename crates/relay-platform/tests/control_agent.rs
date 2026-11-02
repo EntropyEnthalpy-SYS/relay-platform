@@ -1491,6 +1491,33 @@ async fn http_two_factor_login_and_scoped_api_tokens() {
     stop_server(s).await;
 }
 
+#[tokio::test]
+async fn login_limit_counts_each_visitor_behind_a_local_proxy() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("control.db")).unwrap();
+    db.bootstrap(PASSWORD).unwrap();
+    let s = server(db, "127.0.0.1:0".parse().unwrap()).await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let url = format!("http://{}/api/v1/auth/login", s.address);
+    // A reverse proxy on this host appends the visitor's address to X-Forwarded-For.
+    let attempt = |forwarded: &str, password: &str| {
+        let request = client
+            .post(&url)
+            .header("x-forwarded-for", forwarded)
+            .json(&json!({"username":"admin","password":password}));
+        async move { request.send().await.unwrap().status().as_u16() }
+    };
+    for _ in 0..30 {
+        assert_eq!(attempt("198.51.100.7", "wrong password").await, 401);
+    }
+    assert_eq!(attempt("198.51.100.7", PASSWORD).await, 429);
+    // Entries before the proxy's own are the client's claims and change nothing.
+    assert_eq!(attempt("198.51.100.8, 198.51.100.7", PASSWORD).await, 429);
+    // Another visitor behind the same proxy is not locked out.
+    assert_eq!(attempt("198.51.100.8", PASSWORD).await, 200);
+    stop_server(s).await;
+}
+
 #[test]
 fn remote_controller_requires_https_and_never_embeds_credentials() {
     for value in [

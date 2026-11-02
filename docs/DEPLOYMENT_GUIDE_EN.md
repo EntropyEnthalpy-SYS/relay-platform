@@ -322,7 +322,7 @@ Then copy the archive to another machine. It contains passwords and keys, so kee
 | `remote controller requires HTTPS` | `agent.json` must use `https://…`. Plain `http://` is only allowed for `127.0.0.1` or `localhost`. |
 | Caddy or certbot can't get a certificate | The domain must point at this server, and ports 80 and 443 must be reachable from the internet. Check with `getent hosts panel.example.com`. |
 | Node never shows as online | Run `journalctl -u relay-platform-agent -n 50 --no-pager` on the node, and check that `curl -sI https://panel.example.com` works from the node. A token works only once: if it was lost or already used, delete the never-enrolled node in the panel and enroll it again. |
-| Sign-in says `too many login attempts` | Wait five minutes. The panel allows 30 sign-in attempts per 5 minutes from each connecting address. Behind Caddy or nginx, every sign-in arrives from the web server, so all visitors share that limit. |
+| Sign-in says `too many login attempts` | Wait five minutes. The panel allows 30 sign-in attempts per 5 minutes from each visitor. Behind Caddy or nginx on the same server, it recognizes visitors by the `X-Forwarded-For` header the web server adds; both configurations above add it. Before 0.141.2, all visitors behind the web server shared one limit. |
 | Panel page doesn't load | Run `systemctl status relay-platform-controller`, `curl -s http://127.0.0.1:18090/` on the server, and check the web server's status (`systemctl status caddy` or `nginx`). |
 | A rule doesn't carry traffic | Open the rule's port in the node's firewall, and in the hosting provider's firewall or security group if it has one. |
 

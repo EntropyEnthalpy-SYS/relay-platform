@@ -744,9 +744,27 @@ struct LoginResponse {
     user: Actor,
     expires_in_seconds: u32,
 }
+/// The address a sign-in attempt counts against. Behind a reverse proxy on this
+/// host every request arrives from loopback, so the visitor is the last
+/// X-Forwarded-For entry, the one the proxy appended. Earlier entries are the
+/// client's own claims, and headers from remote peers are never trusted.
+fn login_source(peer: SocketAddr, headers: &HeaderMap) -> String {
+    let forwarded = headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .next_back()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit(',').next())
+        .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok());
+    match forwarded {
+        Some(visitor) if peer.ip().is_loopback() => visitor.to_string(),
+        _ => peer.ip().to_string(),
+    }
+}
 async fn login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(input): Json<Login>,
 ) -> Result<Response, ApiError> {
     if input.username.len() > 80
@@ -759,7 +777,7 @@ async fn login(
         }
         .into());
     }
-    if !state.login_allowed(peer.ip().to_string()) {
+    if !state.login_allowed(login_source(peer, &headers)) {
         return Err(Rejection {
             status: 429,
             message: "too many login attempts; retry in five minutes".into(),
