@@ -127,13 +127,20 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
    tinted labels and striped bars, report status. Red sits well apart from the accent and from pink
    so a problem never reads as a button or a chart series. Each companion color has a mid tone for
    chart fills and a deeper -ink tone for icons, readable at 4.5:1 or more on its own tint.
-   Dark: graphite cards on a near-black canvas. Light: white cards on a soft grey canvas with
-   near-black text. Status and data colors never follow the accent.
+   Dark: graphite cards on a near-black canvas. Light: white cards on a near-white canvas with a
+   faint mist of the companion colors, and near-black text. Status and data colors never follow the accent.
    --accent is for accent text and lines, --accent-fill for solid fills under --accent-ink,
    --accent-soft for tinted selections under --accent-soft-text. */
 :root {
   color-scheme: light;
-  --bg: #e9eaec; --chrome: #e9eaec; --pagebar: rgba(233, 234, 236, .9); --grid: rgba(24, 24, 27, .07);
+  --bg: #f6f6f9; --chrome: #f6f6f9; --pagebar: rgba(246, 246, 249, .9); --grid: rgba(24, 24, 27, .07);
+  /* Light canvas: a near-white page with a faint mist of the companion colors (teal top left, violet top right,
+     pink lower right). At 11% every sidebar and header text color keeps 4.5:1 or more where the mist is strongest. */
+  --canvas:
+    radial-gradient(48rem 32rem at 0% 0%, color-mix(in srgb, var(--teal) 11%, transparent), transparent 70%),
+    radial-gradient(52rem 34rem at 100% 0%, color-mix(in srgb, var(--violet) 11%, transparent), transparent 70%),
+    radial-gradient(56rem 36rem at 70% 100%, color-mix(in srgb, var(--pink) 11%, transparent), transparent 70%),
+    var(--bg);
   --surface: #ffffff; --surface-2: #f5f5f6; --surface-3: #ebecee; --segment: #ffffff; --field: #ffffff;
   --line: #ececee; --line-strong: #dcdde0; --control-line: #a1a2a8;
   --text: #18181b; --text-2: #3a3a40; --muted: #5f6067;
@@ -144,8 +151,8 @@ dialog:has(.forwarding-diagram) .dialog-head { position: sticky; top: 0; z-index
   /* Striped bars: the status color with lighter stripes, as in a progress pill. */
   --stripes: repeating-linear-gradient(-45deg, rgba(255, 255, 255, .32) 0 3px, transparent 3px 7px);
   --green-fill: #5cad6c; --amber-fill: #e3ae3c; --red-fill: #e2484f; --blue-fill: #6a98d2;
-  --card-line: #e0e1e4; --track: #dfe0e3; --nav-active: var(--accent-soft); --nav-active-bar: var(--accent-fill); --nav-hover: rgba(255, 255, 255, .55);
-  --card-shadow: 0 1px 2px rgba(24, 24, 27, .04);
+  --card-line: #e3e4ea; --track: #ebecf0; --nav-active: var(--accent-soft); --nav-active-bar: var(--accent-fill); --nav-hover: rgba(255, 255, 255, .7);
+  --card-shadow: 0 1px 2px rgba(20, 20, 40, .04), 0 1px 3px rgba(20, 20, 40, .03);
   --segment-shadow: 0 1px 2px rgba(24, 24, 27, .12), 0 0 0 1px rgba(24, 24, 27, .06);
   --shadow: 0 24px 64px -12px rgba(24, 24, 27, .28);
   --radius: 12px; --radius-sm: 8px;
@@ -338,6 +345,9 @@ pre {
 .identity span { font-size: 11px; color: var(--muted); }
 .workspace { display: flex; flex-direction: column; min-width: 0; }
 .pagebar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 12px 16px; min-height: 64px; padding: 12px 28px 10px; background: var(--pagebar); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); }
+/* The light canvas is fixed to the window and painted on the page, sidebar and page header alike, so they read
+   as one continuous background and content scrolling under the header stays hidden. */
+:root[data-theme="light"] :is(body, .sidebar, .pagebar) { background: var(--canvas); background-attachment: fixed; }
 .pagebar-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .pagebar h1 { font-size: 19px; font-weight: 600; letter-spacing: -.015em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .page-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
