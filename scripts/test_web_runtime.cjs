@@ -57,6 +57,20 @@ async function expiredResponse(replaced, path = '/nodes') {
   await assert.rejects(result, /expired/);
   assert.equal(logouts, replaced || path === '/auth/login' ? 0 : 1, 'an old request must not sign out a new session');
 }
+// Users paste their own proxies as share links; each must fill the same fields the panel exports.
+const methods = source.match(/^const shadowsocksMethods = .*;$/m)[0];
+const links = vm.runInNewContext(`${methods}\n${['shadowsocksLink', 'socks5Link', 'base64Text', 'parseUpstreamLink'].map(definition).join('\n')}\n({ shadowsocksLink, socks5Link, parseUpstreamLink });`,
+  { localize: value => value, translate: text => text, msg: (parts, ...values) => parts.reduce((out, part, i) => out + values[i - 1] + part), atob, btoa, TextEncoder, TextDecoder, Uint8Array });
+const key = Buffer.alloc(32, 1).toString('base64');
+for (const [link, expected] of [
+  [links.shadowsocksLink({ method: '2022-blake3-aes-256-gcm', password: key }, '2001:db8::1', 9443, 'Tokyo #1'), { name: 'Tokyo #1', type: 'shadowsocks', server: '2001:db8::1', port: 9443, method: '2022-blake3-aes-256-gcm', password: key }],
+  [links.shadowsocksLink({ method: 'aes-256-gcm', password: 'p@ss:w/rd' }, 'ss.example', 8388, 'Office'), { name: 'Office', type: 'shadowsocks', server: 'ss.example', port: 8388, method: 'aes-256-gcm', password: 'p@ss:w/rd' }],
+  [`ss://${Buffer.from('chacha20-ietf-poly1305:pw@203.0.113.9:80').toString('base64')}`, { name: 'SS 203.0.113.9', type: 'shadowsocks', server: '203.0.113.9', port: 80, method: 'chacha20-ietf-poly1305', password: 'pw' }],
+  [links.socks5Link({ username: 'a:b', password: 'p&w' }, 'home.example', 1080, 'Home'), { name: 'Home', type: 'socks5', server: 'home.example', port: 1080, username: 'a:b', password: 'p&w' }],
+]) assert.deepEqual({ ...links.parseUpstreamLink(link) }, expected, link);
+for (const link of ['http://h:1', 'socks5://h', 'socks5://h:70000', 'ss://YWVzLTI1Ni1nY206cHc@h:1/?plugin=obfs-local', `ss://${Buffer.from('rc4-md5:pw').toString('base64url')}@h:1`])
+  assert.throws(() => links.parseUpstreamLink(link), undefined, link);
+
 (async () => {
   for (const [name, view] of [['renderOverview', 'overview'], ['renderNodes', 'nodes'], ['renderTemplates', 'templates'], ['renderSubscriptions', 'subscriptions'], ['renderUsage', 'usage'], ['renderUsers', 'users'], ['renderAccount', 'account'], ['renderAudit', 'audit'], ['renderAlerts', 'alerts'], ['renderCapabilities', 'capabilities'], ['renderFeatures', 'features'], ['renderBudgets', 'budgets'], ['renderRecovery', 'recovery'], ['renderTopology', 'topology'], ['renderRules', 'rules'], ['renderHealth', 'health'], ['renderTickets', 'tickets'], ['renderCommerce', 'commerce'], ['renderAnnouncements', 'announcements'], ['renderDns', 'dns']]) {
     for (const transition of ['navigation', 'logout', 'account change']) await lateResponse(name, view, transition);

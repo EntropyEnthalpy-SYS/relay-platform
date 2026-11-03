@@ -47,6 +47,36 @@
 
 模板在创建/轮换时作为记录的一部分保存；节点之后改名、改标签或改地址不会重写已生成的订阅内容，只有重新渲染（客户端再次拉取）时才按当前节点配置生成。这使“模板快照”与实时节点状态有明确边界：快照保存的是显示选项，不冻结节点地址。
 
+## 代理链：经中转节点连接你自己的代理
+
+模板可带 `upstreams`：用户自己的 SOCKS5 或 Shadowsocks 代理，最多 8 个。订阅为每个代理生成一个客户端条目，客户端经本订阅的中转条目连接它：客户端 → 中转节点 → 你的代理 → 目标网站。代理链由客户端组装，节点配置不变；中转节点只看到一条到 `server:port` 的普通代理连接。
+
+```json
+"upstreams": [
+  {"name": "Home", "type": "socks5", "server": "home.example.net", "port": 1080, "username": "alice", "password": "…"},
+  {"name": "Office", "type": "shadowsocks", "server": "203.0.113.9", "port": 8388, "method": "2022-blake3-aes-128-gcm", "password": "…"}
+]
+```
+
+- `name`：1..64 字节，不能重复；与中转条目同名时按现有规则追加 ` #2` 等后缀。
+- `type`：`socks5` 的用户名和密码要么同时填写，要么都省略，不能带 `method`；`shadowsocks` 必须带 `method` 和 `password`，不能带 `username`，2022 方式的密钥按方法长度校验。
+- `server` 与模板 `host` 使用同一校验；`port` 为 1..65535；用户名和密码 1..255 字节，不含控制字符。
+
+| 格式 | 代理条目 |
+| --- | --- |
+| `sing_box` | `socks`（`version: "5"`）或 `shadowsocks` 出站，`detour` 指向选择器 `Relay entry` |
+| `clash` | `type: socks5` 或 `ss`，`dialer-proxy: Relay entry` |
+| `surge` | `socks5` 或 `ss` 行，`underlying-proxy=Relay entry` |
+| `v2ray`、`shadowrocket` | 无法表达代理链；每个代理列入 `skipped` |
+
+带代理时会多一个选择组 `Relay entry`，只包含中转条目，用来选择链的第一跳。主组 `Relay` 先列出你的代理，再列出中转条目，客户端默认使用第一个代理。组名与条目名冲突时追加 `_`。没有任何中转条目时，代理同样列入 `skipped`。Surge 无法表示用户名或密码中的逗号，这类代理在 Surge 格式中跳过。
+
+- 你的代理必须能从中转节点访问。节点入站默认拒绝内网和回环目的地（`allow_private_destinations: false`）。
+- 代理凭据随订阅记录保存，和中转条目的密钥一样出现在生成内容中：任何持有订阅链接的人，以及能预览该订阅的管理员，都能读到它们。
+- 订阅创建后不能编辑；更换代理需要新建订阅。
+- sing-box 的 `detour` 会让该出站的其他拨号字段失效，所以代理条目不写 `udp_fragment`。UDP 能否经整条链转发取决于客户端和代理本身。
+- 不含 `upstreams` 的记录序列化结果不变，旧版本仍可读取。0.141.5 及更早版本的模板拒绝未知字段：只要存在一条带 `upstreams` 的订阅，旧版本的订阅列表接口就会整体报错，该订阅链接也无法渲染。回退到这些版本前，先删除带代理的订阅。
+
 ## API
 
 | 方法 | 路径 | 用途 |

@@ -2,7 +2,7 @@
 //! rules a user owns, rendered for common clients. It never contains controller
 //! credentials; the public token is an independent, revocable subscription key.
 use crate::model::{Rule, now_ms};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
@@ -32,6 +32,10 @@ pub struct Template {
     pub node_tags: Vec<String>,
     /// Advertise UDP support in generated clients.
     pub udp: bool,
+    /// The user's own proxies. Clients reach each one through this
+    /// subscription's relay entries: client → relay node → upstream → site.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub upstreams: Vec<Upstream>,
 }
 impl Default for Template {
     fn default() -> Self {
@@ -40,7 +44,75 @@ impl Default for Template {
             host: None,
             node_tags: vec![],
             udp: true,
+            upstreams: vec![],
         }
+    }
+}
+pub const MAX_UPSTREAMS: usize = 8;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamKind {
+    Socks5,
+    Shadowsocks,
+}
+/// A proxy the user already has, exported as a client entry that dials it
+/// through the relay entries (mihomo `dialer-proxy`, sing-box `detour`,
+/// Surge `underlying-proxy`). The relay nodes only see an ordinary
+/// connection to `server:port`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Upstream {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: UpstreamKind,
+    pub server: String,
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Shadowsocks only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<crate::shadowsocks::Method>,
+}
+impl Upstream {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            label(&self.name, 64),
+            "upstream proxy names must be 1..64 bytes without surrounding whitespace or control characters"
+        );
+        normalize_host(&self.server)?;
+        ensure!(self.port != 0, "upstream proxy port must be 1..65535");
+        let credential = |value: &Option<String>| {
+            value
+                .as_deref()
+                .is_none_or(|v| !v.is_empty() && v.len() <= 255 && !v.chars().any(char::is_control))
+        };
+        ensure!(
+            credential(&self.username) && credential(&self.password),
+            "upstream proxy usernames and passwords must be 1..255 bytes without control characters"
+        );
+        match self.kind {
+            UpstreamKind::Socks5 => ensure!(
+                self.method.is_none() && self.username.is_some() == self.password.is_some(),
+                "a SOCKS5 upstream takes a username and password together, or neither, and no method"
+            ),
+            UpstreamKind::Shadowsocks => {
+                let (Some(method), Some(password), None) =
+                    (self.method, &self.password, &self.username)
+                else {
+                    bail!("a Shadowsocks upstream needs a method and password, and no username");
+                };
+                crate::shadowsocks::ServerConfig {
+                    method,
+                    password: password.clone(),
+                    allow_private_destinations: false,
+                    udp_over_tcp: false,
+                }
+                .key()?;
+            }
+        }
+        Ok(())
     }
 }
 fn label(value: &str, maximum: usize) -> bool {
@@ -97,6 +169,20 @@ impl Template {
             self.node_tags.iter().any(|tag| !seen.insert(tag.as_str()))
         } {
             bail!("subscription node tags must be 0..16 unique labels");
+        }
+        ensure!(
+            self.upstreams.len() <= MAX_UPSTREAMS,
+            "a subscription takes at most {MAX_UPSTREAMS} upstream proxies"
+        );
+        let mut names = std::collections::HashSet::new();
+        for upstream in &self.upstreams {
+            upstream
+                .validate()
+                .with_context(|| format!("upstream proxy “{}”", upstream.name))?;
+            ensure!(
+                names.insert(upstream.name.as_str()),
+                "upstream proxy names must be unique"
+            );
         }
         Ok(())
     }
@@ -160,10 +246,50 @@ pub struct Entry {
     pub method: String,
     pub password: String,
     pub udp: bool,
+    /// An upstream proxy that clients reach through the relay entries.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub chained: bool,
     #[serde(skip)]
     udp_over_tcp: bool,
     #[serde(skip)]
     outbound: Option<serde_json::Value>,
+    #[serde(skip)]
+    upstream: Option<Upstream>,
+}
+/// Client configs share one namespace for proxies and groups.
+fn free_name(base: &str, taken: &[&str]) -> String {
+    let mut name = base.to_owned();
+    while taken.contains(&name.as_str()) {
+        name.push('_');
+    }
+    name
+}
+/// The default selection lists the user's chained proxies first, then the
+/// relay entries; the chain's first hop selects among the relay entries.
+struct Groups {
+    main: String,
+    via: String,
+}
+impl Groups {
+    fn new(names: &[&str]) -> Self {
+        let main = free_name("Relay", names);
+        let via = free_name("Relay entry", &[names, &[main.as_str()]].concat());
+        Self { main, via }
+    }
+}
+fn selection<'a>(entries: &'a [Entry], names: &'a [String]) -> (Vec<&'a str>, Vec<&'a str>) {
+    let chained = entries.iter().zip(names).filter(|(e, _)| e.chained);
+    let front: Vec<&str> = entries
+        .iter()
+        .zip(names)
+        .filter(|(e, _)| !e.chained)
+        .map(|(_, n)| n.as_str())
+        .collect();
+    let main = chained
+        .map(|(_, n)| n.as_str())
+        .chain(front.iter().copied())
+        .collect();
+    (main, front)
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Skipped {
@@ -242,43 +368,68 @@ fn unique_names(entries: &mut [Entry]) {
 }
 fn clash(entries: &[Entry]) -> Result<String> {
     use serde_yaml::{Mapping, Value};
+    let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+    let groups = Groups::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
     let mut proxies = vec![];
     for entry in entries {
         if let Some(proxy) = &entry.outbound {
             proxies.push(serde_yaml::to_value(proxy)?);
             continue;
         }
+        let socks = entry.upstream.as_ref().map(|u| u.kind) == Some(UpstreamKind::Socks5);
         let mut proxy = Mapping::new();
         proxy.insert(Value::from("name"), Value::from(entry.name.clone()));
-        proxy.insert(Value::from("type"), Value::from("ss"));
+        proxy.insert(
+            Value::from("type"),
+            Value::from(if socks { "socks5" } else { "ss" }),
+        );
         proxy.insert(Value::from("server"), Value::from(entry.host.clone()));
         proxy.insert(Value::from("port"), Value::from(entry.port));
-        proxy.insert(Value::from("cipher"), Value::from(entry.method.clone()));
-        proxy.insert(Value::from("password"), Value::from(entry.password.clone()));
+        if socks {
+            if let Some(Upstream {
+                username: Some(user),
+                password: Some(pass),
+                ..
+            }) = &entry.upstream
+            {
+                proxy.insert(Value::from("username"), Value::from(user.clone()));
+                proxy.insert(Value::from("password"), Value::from(pass.clone()));
+            }
+        } else {
+            proxy.insert(Value::from("cipher"), Value::from(entry.method.clone()));
+            proxy.insert(Value::from("password"), Value::from(entry.password.clone()));
+        }
         proxy.insert(Value::from("udp"), Value::from(entry.udp));
         if entry.udp_over_tcp {
             proxy.insert(Value::from("udp-over-tcp"), Value::from(true));
             proxy.insert(Value::from("udp-over-tcp-version"), Value::from(2));
         }
+        if entry.chained {
+            proxy.insert(Value::from("dialer-proxy"), Value::from(groups.via.clone()));
+        }
         proxies.push(Value::Mapping(proxy));
     }
-    let names: Vec<Value> = entries
-        .iter()
-        .map(|entry| Value::from(entry.name.clone()))
-        .collect();
-    let mut group = Mapping::new();
-    group.insert(Value::from("name"), Value::from("Relay"));
-    group.insert(Value::from("type"), Value::from("select"));
-    group.insert(Value::from("proxies"), Value::Sequence(names));
+    let (main, front) = selection(entries, &names);
+    let group = |name: &str, members: Vec<&str>| {
+        let mut group = Mapping::new();
+        group.insert(Value::from("name"), Value::from(name));
+        group.insert(Value::from("type"), Value::from("select"));
+        group.insert(
+            Value::from("proxies"),
+            Value::Sequence(members.into_iter().map(Value::from).collect()),
+        );
+        Value::Mapping(group)
+    };
+    let mut proxy_groups = vec![group(&groups.main, main)];
+    if entries.iter().any(|e| e.chained) {
+        proxy_groups.push(group(&groups.via, front));
+    }
     let mut root = Mapping::new();
     root.insert(Value::from("proxies"), Value::Sequence(proxies));
-    root.insert(
-        Value::from("proxy-groups"),
-        Value::Sequence(vec![Value::Mapping(group)]),
-    );
+    root.insert(Value::from("proxy-groups"), Value::Sequence(proxy_groups));
     root.insert(
         Value::from("rules"),
-        Value::Sequence(vec![Value::from("MATCH,Relay")]),
+        Value::Sequence(vec![Value::from(format!("MATCH,{}", groups.main))]),
     );
     Ok(serde_yaml::to_string(&Value::Mapping(root))?)
 }
@@ -294,28 +445,48 @@ fn surge(entries: &[Entry]) -> String {
         *seen += 1;
         names.push(name);
     }
+    let groups = Groups::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
     let mut out = String::from("# Relay subscription\n[Proxy]\n");
     for (entry, name) in entries.iter().zip(&names) {
-        out.push_str(&format!(
-            "{} = ss, {}, {}, encrypt-method={}, password={}, udp-relay={}\n",
-            name,
-            if entry.host.contains(':') && !entry.host.starts_with('[') {
-                format!("[{}]", entry.host)
-            } else {
-                entry.host.clone()
-            },
-            entry.port,
-            entry.method,
-            entry.password,
-            entry.udp
-        ));
+        let host = if entry.host.contains(':') && !entry.host.starts_with('[') {
+            format!("[{}]", entry.host)
+        } else {
+            entry.host.clone()
+        };
+        let protocol = match &entry.upstream {
+            Some(Upstream {
+                kind: UpstreamKind::Socks5,
+                username: Some(user),
+                password: Some(pass),
+                ..
+            }) => {
+                format!("socks5, {host}, {}, {user}, {pass}", entry.port)
+            }
+            Some(Upstream {
+                kind: UpstreamKind::Socks5,
+                ..
+            }) => format!("socks5, {host}, {}", entry.port),
+            _ => format!(
+                "ss, {host}, {}, encrypt-method={}, password={}",
+                entry.port, entry.method, entry.password
+            ),
+        };
+        out.push_str(&format!("{name} = {protocol}, udp-relay={}", entry.udp));
+        if entry.chained {
+            out.push_str(&format!(", underlying-proxy={}", groups.via));
+        }
+        out.push('\n');
     }
-    out.push_str("[Proxy Group]\nRelay = select");
-    for name in &names {
+    let (main, front) = selection(entries, &names);
+    out.push_str(&format!("[Proxy Group]\n{} = select", groups.main));
+    for name in main {
         out.push_str(", ");
         out.push_str(name);
     }
-    out.push_str("\n[Rule]\nMATCH,Relay\n");
+    if entries.iter().any(|e| e.chained) {
+        out.push_str(&format!("\n{} = select, {}", groups.via, front.join(", ")));
+    }
+    out.push_str(&format!("\n[Rule]\nMATCH,{}\n", groups.main));
     out
 }
 
@@ -402,6 +573,8 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 udp,
                 udp_over_tcp: false,
                 outbound: Some(outbound),
+                chained: false,
+                upstream: None,
             });
             continue;
         }
@@ -497,8 +670,54 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                             && matches!(format, Format::SingBox | Format::Clash))),
                 udp_over_tcp: template.udp && shadowsocks.udp_over_tcp,
                 outbound: None,
+                chained: false,
+                upstream: None,
             });
         }
+    }
+    let relay_entries = entries.len();
+    for upstream in &template.upstreams {
+        let skip = |reason: &str| Skipped {
+            rule_id: format!("upstream:{}", upstream.name),
+            rule_name: upstream.name.clone(),
+            reason: reason.into(),
+        };
+        if !matches!(format, Format::SingBox | Format::Clash | Format::Surge) {
+            skipped.push(skip(
+                "this format cannot express a proxy chain; use sing_box, Clash/mihomo or Surge",
+            ));
+            continue;
+        }
+        if relay_entries == 0 {
+            skipped.push(skip("no relay node entry to connect through"));
+            continue;
+        }
+        if format == Format::Surge
+            && [&upstream.username, &upstream.password]
+                .into_iter()
+                .flatten()
+                .any(|value| value.contains(','))
+        {
+            skipped.push(skip(
+                "Surge cannot represent a comma in the upstream username or password",
+            ));
+            continue;
+        }
+        entries.push(Entry {
+            name: upstream.name.clone(),
+            host: normalize_host(&upstream.server)?,
+            port: upstream.port,
+            method: upstream
+                .method
+                .map(method_name)
+                .unwrap_or_else(|| "socks5".into()),
+            password: upstream.password.clone().unwrap_or_default(),
+            udp: template.udp,
+            chained: true,
+            udp_over_tcp: false,
+            outbound: None,
+            upstream: Some(upstream.clone()),
+        });
     }
     unique_names(&mut entries);
     let content_type = match format {
@@ -508,26 +727,44 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
     };
     let content = match format {
         Format::SingBox => {
+            let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();
+            // Selector names cannot collide with an arbitrary user-facing rule label.
+            let groups = Groups::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
             let mut outbounds: Vec<_> = entries.iter().map(|entry| entry.outbound.clone().unwrap_or_else(|| {
-                let mut value = serde_json::json!({"type":"shadowsocks","tag":entry.name,"server":entry.host,"server_port":entry.port,"method":entry.method,"password":entry.password});
+                let mut value = match &entry.upstream {
+                    Some(upstream) if upstream.kind == UpstreamKind::Socks5 => {
+                        let mut value = serde_json::json!({"type":"socks","tag":entry.name,"server":entry.host,"server_port":entry.port,"version":"5"});
+                        if let (Some(user), Some(pass)) = (&upstream.username, &upstream.password) {
+                            value["username"] = user.clone().into();
+                            value["password"] = pass.clone().into();
+                        }
+                        value
+                    }
+                    _ => serde_json::json!({"type":"shadowsocks","tag":entry.name,"server":entry.host,"server_port":entry.port,"method":entry.method,"password":entry.password}),
+                };
                 if !entry.udp { value["network"] = "tcp".into(); }
                 else if entry.udp_over_tcp { value["udp_over_tcp"] = serde_json::json!({"enabled":true,"version":2}); }
-                else { value["udp_fragment"] = true.into(); }
+                // A detour replaces every other dial field, udp_fragment included.
+                else if !entry.chained { value["udp_fragment"] = true.into(); }
+                if entry.chained { value["detour"] = groups.via.clone().into(); }
                 value
             })).collect();
-            // A selector name cannot collide with an arbitrary user-facing rule label.
-            let mut selector = "Relay".to_owned();
-            while entries.iter().any(|e| e.name == selector) {
-                selector.push('_');
-            }
             if entries.is_empty() {
                 serde_json::to_string_pretty(
                     &serde_json::json!({"outbounds":[],"route":{"rules":[{"action":"reject"}]}}),
                 )?
             } else {
-                outbounds.push(serde_json::json!({"type":"selector","tag":selector,"outbounds":entries.iter().map(|e| &e.name).collect::<Vec<_>>()}));
+                let (main, front) = selection(&entries, &names);
+                outbounds.push(
+                    serde_json::json!({"type":"selector","tag":groups.main,"outbounds":main}),
+                );
+                if entries.iter().any(|e| e.chained) {
+                    outbounds.push(
+                        serde_json::json!({"type":"selector","tag":groups.via,"outbounds":front}),
+                    );
+                }
                 serde_json::to_string_pretty(
-                    &serde_json::json!({"outbounds":outbounds,"route":{"final":selector}}),
+                    &serde_json::json!({"outbounds":outbounds,"route":{"final":groups.main}}),
                 )?
             }
         }
@@ -688,6 +925,7 @@ mod tests {
             host: None,
             node_tags: vec!["prod".into()],
             udp: true,
+            upstreams: vec![],
         };
         let mut candidates = candidates();
         let mut plain = rule();
@@ -787,6 +1025,190 @@ mod tests {
         for entry in &rendered.entries {
             assert!(entry.name.contains("(1900"));
         }
+    }
+
+    fn upstreams() -> Vec<Upstream> {
+        vec![
+            Upstream {
+                name: "Home".into(),
+                kind: UpstreamKind::Socks5,
+                server: "home.example.net".into(),
+                port: 1080,
+                username: Some("alice".into()),
+                password: Some("s3cret".into()),
+                method: None,
+            },
+            // Named like the default group, so the groups have to move aside.
+            Upstream {
+                name: "Relay".into(),
+                kind: UpstreamKind::Shadowsocks,
+                server: "203.0.113.9".into(),
+                port: 8388,
+                username: None,
+                password: Some("pw".into()),
+                method: Some(crate::shadowsocks::Method::Aes256Gcm),
+            },
+        ]
+    }
+
+    #[test]
+    fn upstreams_chain_through_relay_entries_in_formats_that_express_it() {
+        let template = Template {
+            upstreams: upstreams(),
+            ..Default::default()
+        };
+        let front = "edge · Tokyo";
+
+        let clash = render(Format::Clash, &template, &candidates()).unwrap();
+        assert_eq!(clash.entries.iter().filter(|e| e.chained).count(), 2);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&clash.content).unwrap();
+        let proxies = parsed["proxies"].as_sequence().unwrap();
+        assert_eq!(proxies.len(), 3);
+        assert!(
+            proxies[0].get("dialer-proxy").is_none(),
+            "relay entries dial directly"
+        );
+        let home = &proxies[1];
+        assert_eq!(home["type"], "socks5");
+        assert_eq!(home["server"], "home.example.net");
+        assert_eq!(home["port"], 1080);
+        assert_eq!(home["username"], "alice");
+        assert_eq!(home["password"], "s3cret");
+        assert_eq!(proxies[2]["type"], "ss");
+        assert_eq!(proxies[2]["cipher"], "aes-256-gcm");
+        let via = home["dialer-proxy"].as_str().unwrap();
+        assert_eq!(proxies[2]["dialer-proxy"], via);
+        let groups = parsed["proxy-groups"].as_sequence().unwrap();
+        let members = |name: &str| -> Vec<String> {
+            let group = groups.iter().find(|g| g["name"] == name).unwrap();
+            group["proxies"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        };
+        let main = parsed["rules"][0]
+            .as_str()
+            .unwrap()
+            .strip_prefix("MATCH,")
+            .unwrap();
+        assert!(
+            !proxies
+                .iter()
+                .any(|p| p["name"] == main || p["name"] == via),
+            "groups and proxies share one namespace"
+        );
+        assert_eq!(members(main), ["Home", "Relay", front]);
+        assert_eq!(members(via), [front]);
+
+        let sing = render(Format::SingBox, &template, &candidates()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&sing.content).unwrap();
+        let outbounds = json["outbounds"].as_array().unwrap();
+        let tagged = |tag: &str| outbounds.iter().find(|o| o["tag"] == tag).unwrap();
+        let home = tagged("Home");
+        assert_eq!(home["type"], "socks");
+        assert_eq!(home["version"], "5");
+        assert_eq!(home["username"], "alice");
+        assert!(home.get("udp_fragment").is_none());
+        let via = home["detour"].as_str().unwrap();
+        assert_eq!(tagged("Relay")["type"], "shadowsocks");
+        assert_eq!(tagged("Relay")["detour"], via);
+        assert!(tagged(front).get("detour").is_none());
+        assert_eq!(tagged(via)["type"], "selector");
+        assert_eq!(tagged(via)["outbounds"], serde_json::json!([front]));
+        let main = json["route"]["final"].as_str().unwrap();
+        assert_eq!(
+            tagged(main)["outbounds"],
+            serde_json::json!(["Home", "Relay", front])
+        );
+
+        let surge = render(Format::Surge, &template, &candidates()).unwrap();
+        for line in [
+            "\nHome = socks5, home.example.net, 1080, alice, s3cret, udp-relay=true, underlying-proxy=Relay entry\n",
+            "\nRelay = ss, 203.0.113.9, 8388, encrypt-method=aes-256-gcm, password=pw, udp-relay=true, underlying-proxy=Relay entry\n",
+            "[Proxy Group]\nRelay_ = select, Home, Relay, edge · Tokyo\nRelay entry = select, edge · Tokyo\n[Rule]\nMATCH,Relay_\n",
+        ] {
+            assert!(surge.content.contains(line), "{}", surge.content);
+        }
+
+        for format in [Format::V2ray, Format::Shadowrocket] {
+            let rendered = render(format, &template, &candidates()).unwrap();
+            assert_eq!(rendered.entries.len(), 1);
+            assert_eq!(rendered.skipped.len(), 2);
+            assert!(
+                rendered
+                    .skipped
+                    .iter()
+                    .all(|s| s.reason.contains("proxy chain"))
+            );
+        }
+        let alone = render(Format::Clash, &template, &[]).unwrap();
+        assert!(alone.entries.is_empty());
+        assert_eq!(alone.skipped.len(), 2);
+        assert!(
+            alone
+                .skipped
+                .iter()
+                .all(|s| s.reason.contains("no relay node entry"))
+        );
+    }
+
+    #[test]
+    fn upstream_proxies_are_validated() {
+        // Field names as API clients send them in POST /subscriptions.
+        let key = general_purpose::STANDARD.encode([7u8; 16]);
+        let parsed: Template = serde_json::from_value(serde_json::json!({"upstreams": [
+            {"name": "Home", "type": "socks5", "server": "home.example.net", "port": 1080},
+            {"name": "Office", "type": "shadowsocks", "server": "[2001:db8::7]", "port": 8388,
+             "method": "2022-blake3-aes-128-gcm", "password": key},
+        ]}))
+        .unwrap();
+        parsed.validate().unwrap();
+        assert!(
+            serde_json::from_value::<Template>(serde_json::json!({"upstreams": [
+                {"name": "X", "type": "socks5", "server": "x.example", "port": 1, "uuid": "u"}
+            ]}))
+            .is_err()
+        );
+        // Records without upstreams stay readable by earlier releases.
+        assert!(
+            !serde_json::to_string(&Template::default())
+                .unwrap()
+                .contains("upstreams")
+        );
+        let rejected = |index: usize, change: fn(&mut Upstream)| {
+            let mut template = Template {
+                upstreams: upstreams(),
+                ..Default::default()
+            };
+            template.validate().unwrap();
+            change(&mut template.upstreams[index]);
+            template.validate().is_err()
+        };
+        assert!(rejected(0, |u| u.password = None));
+        assert!(rejected(0, |u| u.method =
+            Some(crate::shadowsocks::Method::Aes256Gcm)));
+        assert!(rejected(0, |u| u.server = "https://home.example.net".into()));
+        assert!(rejected(0, |u| u.port = 0));
+        assert!(rejected(0, |u| u.name = "Home ".into()));
+        assert!(rejected(0, |u| u.username = Some("a\nb".into())));
+        assert!(rejected(1, |u| u.method = None));
+        assert!(rejected(1, |u| u.username = Some("bob".into())));
+        assert!(rejected(1, |u| {
+            u.method = Some(crate::shadowsocks::Method::Blake3Aes256Gcm)
+        }));
+        assert!(rejected(1, |u| u.name = "Home".into()));
+        let too_many = Template {
+            upstreams: (0..=MAX_UPSTREAMS)
+                .map(|i| Upstream {
+                    name: format!("p{i}"),
+                    ..upstreams().remove(0)
+                })
+                .collect(),
+            ..Default::default()
+        };
+        assert!(too_many.validate().is_err());
     }
 
     #[test]

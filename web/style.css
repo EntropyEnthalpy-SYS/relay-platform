@@ -290,6 +290,11 @@ fieldset { border: 1px solid var(--line); border-radius: 10px; padding: 4px 14px
 legend { padding: 0 6px; font-size: 11.5px; font-weight: 600; letter-spacing: .02em; color: var(--muted); }
 .target-editor { background: var(--surface-2); margin: 16px 0; }
 .target-editor legend { color: var(--accent); }
+.upstream-editor { background: var(--surface-2); }
+.upstream-editor legend { color: var(--accent); }
+.upstream-paste { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 14px; }
+.upstream-paste label { flex: 1; margin-bottom: 0; }
+.upstream-row { border-top: 1px solid var(--line); padding-top: 12px; margin-bottom: 12px; }
 pre {
   white-space: pre-wrap; overflow-wrap: anywhere;
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
@@ -501,6 +506,7 @@ tr.row-link.selected { background: var(--accent-soft); }
 .badge.green { background: var(--green-soft); color: var(--green); }
 .badge.orange { background: var(--amber-soft); color: var(--amber); }
 .badge.red { background: var(--red-soft); color: var(--red); }
+.badge.blue { background: var(--blue-soft); color: var(--blue); }
 .status-pill {
   display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0;
   padding: 3px 10px; border-radius: 7px;

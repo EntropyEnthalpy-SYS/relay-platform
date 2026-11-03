@@ -93,7 +93,9 @@ impl Store {
         expires_in_days: u32,
     ) -> Result<(SubscriptionView, String)> {
         validate_name(name)?;
-        template.validate()?;
+        if let Err(error) = template.validate() {
+            return reject(400, format!("{error:#}"));
+        }
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let owner = owner_actor(&tx, actor, owner)?;

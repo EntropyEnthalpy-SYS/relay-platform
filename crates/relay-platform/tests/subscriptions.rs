@@ -55,6 +55,29 @@ async fn subscriptions_are_scoped_rotated_and_rendered_without_a_session() {
         )
         .unwrap();
 
+    // A mistake in the template is the caller's to fix: a 400 that names it.
+    let invalid: subscription::Template = serde_json::from_value(json!({"upstreams": [
+        {"name": "Home", "type": "socks5", "server": "home.example.net", "port": 0}
+    ]}))
+    .unwrap();
+    let error = store
+        .create_subscription(
+            &admin,
+            None,
+            "phone",
+            subscription::Format::Clash,
+            invalid,
+            30,
+        )
+        .unwrap_err();
+    let error = error.downcast_ref::<Rejection>().unwrap();
+    assert_eq!(error.status, 400);
+    assert!(
+        error.message.contains("Home") && error.message.contains("port"),
+        "{}",
+        error.message
+    );
+
     let (view, token) = store
         .create_subscription(
             &admin,

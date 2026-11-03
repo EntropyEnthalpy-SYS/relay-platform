@@ -135,7 +135,7 @@ impl std::fmt::Debug for ServerConfig {
     }
 }
 impl ServerConfig {
-    fn key(&self) -> Result<Vec<u8>> {
+    pub(crate) fn key(&self) -> Result<Vec<u8>> {
         let len = self.method.key_len();
         if self.method.edition_2022() {
             let key = base64::engine::general_purpose::STANDARD

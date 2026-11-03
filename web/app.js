@@ -2325,6 +2325,87 @@ async function renderSubscriptions() {
   })));
   if (state.view === 'subscriptions') $('#content').replaceChildren(p);
 }
+function base64Text(value) {
+  const raw = atob(value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '='));
+  return new TextDecoder().decode(Uint8Array.from(raw, c => c.charCodeAt(0)));
+}
+// socks5://user:pass@host:port#name, socks://base64(user:pass)@host:port, and
+// ss:// in SIP002 (percent-encoded or base64 userinfo) or legacy all-base64 form.
+function parseUpstreamLink(text) {
+  const match = /^(socks5h?|socks|ss):\/\/([^#]*)(?:#(.*))?$/i.exec(text.trim());
+  if (!match) throw new Error(translate('只支持 socks5:// 和 ss:// 链接'));
+  const type = match[1].toLowerCase() === 'ss' ? 'shadowsocks' : 'socks5';
+  let body = match[2];
+  const query = body.indexOf('?');
+  if (query >= 0) {
+    if (/(^|&)plugin=/.test(body.slice(query + 1))) throw new Error(translate('不支持带插件的 ss:// 链接'));
+    body = body.slice(0, query);
+  }
+  body = body.replace(/\/$/, '');
+  if (type === 'shadowsocks' && !body.includes('@')) body = base64Text(body);
+  const at = body.lastIndexOf('@');
+  const userinfo = at < 0 ? '' : body.slice(0, at);
+  const address = /^(\[[^\]]+\]|[^:@]+):(\d{1,5})$/.exec(body.slice(at + 1));
+  if (!address || !Number(address[2]) || Number(address[2]) > 65535) throw new Error(translate('无法识别链接中的服务器地址和端口'));
+  // Split before percent-decoding: an encoded ':' belongs to the username.
+  const encoded = userinfo.includes(':'), plain = encoded || !userinfo ? userinfo : base64Text(decodeURIComponent(userinfo));
+  const split = plain.indexOf(':');
+  const [first, second] = (split < 0 ? [plain, ''] : [plain.slice(0, split), plain.slice(split + 1)]).map(part => encoded ? decodeURIComponent(part) : part);
+  const server = address[1].replace(/^\[|\]$/g, ''), port = Number(address[2]);
+  const name = (match[3] ? decodeURIComponent(match[3]).trim() : '') || `${type === 'socks5' ? 'SOCKS5' : 'SS'} ${server}`;
+  if (type === 'socks5') return { name, type, server, port, username: first, password: second };
+  if (!first || !second) throw new Error(translate('链接缺少 Shadowsocks 加密方式或密码'));
+  if (!shadowsocksMethods.some(([id]) => id === first)) throw new Error(msg`不支持的加密方式：${first}`);
+  return { name, type, server, port, method: first, password: second };
+}
+const MAX_UPSTREAMS = 8;
+function upstreamEditor() {
+  const box = el('fieldset', undefined, 'upstream-editor');
+  box.append(el('legend', translate('我的代理（可选 · 代理链）')), el('p', translate('填入你自己的 SOCKS5 或 Shadowsocks 代理。客户端会先连到中转节点，再经它连接你的代理：客户端 → 中转节点 → 你的代理 → 网站。只有 sing-box、mihomo / Clash Meta 和 Surge 格式能表达这条链；其他格式会在预览中跳过这些代理。'), 'fine'));
+  const paste = el('div', undefined, 'upstream-paste');
+  const link = field(paste, 'upstream_link', translate('粘贴 socks5:// 或 ss:// 链接（自动填入一行）'), '', 'text', false);
+  link.autocomplete = 'off';
+  const rows = [], list = el('div');
+  let serial = 0;
+  const addButton = button(translate('＋ 添加代理'), () => add());
+  const add = (value = {}) => {
+    if (rows.length >= MAX_UPSTREAMS) throw new Error(msg`最多添加 ${MAX_UPSTREAMS} 个代理`);
+    const id = ++serial, row = el('div', undefined, 'upstream-row'), grid = el('div', undefined, 'form-grid');
+    const name = field(grid, `upstream-name-${id}`, translate('显示名称'), value.name || ''); name.maxLength = 64;
+    const type = select(grid, `upstream-type-${id}`, translate('代理类型'), [['socks5', 'SOCKS5'], ['shadowsocks', 'Shadowsocks']], value.type || 'socks5');
+    const server = field(grid, `upstream-server-${id}`, translate('服务器地址（域名或 IP）'), value.server || ''); server.maxLength = 253;
+    const port = field(grid, `upstream-port-${id}`, translate('端口'), value.port || '', 'number'); port.min = 1; port.max = 65535;
+    const method = select(grid, `upstream-method-${id}`, translate('加密方式'), shadowsocksMethods, value.method || '2022-blake3-aes-128-gcm');
+    const username = field(grid, `upstream-user-${id}`, translate('用户名（留空不认证）'), value.username || '', 'text', false); username.maxLength = 255; username.autocomplete = 'off';
+    const password = field(grid, `upstream-password-${id}`, translate('密码'), value.password || '', 'password', false); password.maxLength = 255; password.autocomplete = 'new-password';
+    const show = () => {
+      const socks = type.value === 'socks5';
+      username.closest('label').classList.toggle('hidden', !socks); username.disabled = !socks;
+      method.closest('label').classList.toggle('hidden', socks); method.disabled = socks;
+      password.closest('label').firstChild.nodeValue = socks ? translate('密码（与用户名同时填写）') : translate('密码');
+      password.required = !socks;
+    };
+    type.addEventListener('change', show); show();
+    const entry = { name, type, server, port, method, username, password };
+    row.append(grid, button(translate('移除此代理'), () => { rows.splice(rows.indexOf(entry), 1); row.remove(); addButton.disabled = false; }, 'table-action danger'));
+    rows.push(entry); list.append(row); addButton.disabled = rows.length >= MAX_UPSTREAMS;
+  };
+  paste.append(button(translate('导入链接'), () => { if (!link.value.trim()) return; add(parseUpstreamLink(link.value)); link.value = ''; }));
+  box.append(paste, list, addButton, el('p', translate('你的代理必须能从中转节点访问；节点默认拒绝内网和回环地址。订阅创建后不能修改，需要更改时请新建订阅。'), 'fine'));
+  const read = () => {
+    const names = new Set();
+    return rows.map(row => {
+      const upstream = { name: row.name.value.trim(), type: row.type.value, server: row.server.value.trim().replace(/^\[|\]$/g, ''), port: Number(row.port.value) };
+      if (names.has(upstream.name)) throw new Error(translate('代理名称不能重复'));
+      names.add(upstream.name);
+      if (upstream.type === 'shadowsocks') return { ...upstream, method: row.method.value, password: row.password.value };
+      const user = row.username.value.trim(), pass = row.password.value;
+      if (!!user !== !!pass) throw new Error(translate('SOCKS5 用户名和密码必须同时填写或同时留空'));
+      return user ? { ...upstream, username: user, password: pass } : upstream;
+    });
+  };
+  return { box, read };
+}
 async function newSubscription() {
   const users = state.actor.role === 'viewer' ? [] : await api('/users').catch(() => []);
   const form = el('form'), grid = el('div', undefined, 'form-grid');
@@ -2340,8 +2421,10 @@ async function newSubscription() {
     const owner = select(grid, 'user_id', translate('订阅所有者'), [['', translate('当前账号')], ...users.map(u => [u.id, `${u.username} · ${roleNames[u.role]}`])], '');
     owner.required = false;
   }
-  form.append(grid, el('p', translate('名称前缀和节点标签会作为快照保存在订阅记录中；节点后续改名不会改变已生成链接的显示名。只读账号不能创建或轮换链接。'), 'fine'));
+  const upstreams = upstreamEditor();
+  form.append(grid, upstreams.box, el('p', translate('名称前缀和节点标签会作为快照保存在订阅记录中；节点后续改名不会改变已生成链接的显示名。只读账号不能创建或轮换链接。'), 'fine'));
   submit(form, translate('创建订阅'), async data => {
+    const chained = upstreams.read();
     const result = await api('/subscriptions', { method: 'POST', body: {
       name: String(data.get('name')).trim(),
       format: data.get('format'),
@@ -2351,7 +2434,8 @@ async function newSubscription() {
         name_prefix: String(data.get('prefix') || ''),
         host: String(data.get('host') || '').trim() || null,
         node_tags: String(data.get('tags') || '').split(',').map(t => t.trim()).filter(Boolean),
-        udp: data.get('udp') === 'yes'
+        udp: data.get('udp') === 'yes',
+        ...(chained.length ? { upstreams: chained } : {})
       }
     }});
     $('#dialog').close();
@@ -2369,10 +2453,11 @@ function showSubscriptionToken(name, token) {
   body.append(actions);
   modal(msg`订阅已创建 · ${name}`, body);
 }
+function chainedCell(name) { const n = el('div'); n.append(el('strong', name), ' ', badge(translate('代理链'), 'blue'), el('div', translate('经中转入口连接你的代理'), 'subline')); return n; }
 async function previewSubscription(item) {
   const preview = await api(`/subscriptions/${item.id}/preview`);
   const body = el('div');
-  if (preview.entries.length) body.append(table([translate('客户端名称'), translate('服务器'), translate('端口'), translate('加密方式')], preview.entries.map(entry => [entry.name, entry.host, entry.port, entry.method])));
+  if (preview.entries.length) body.append(table([translate('客户端名称'), translate('服务器'), translate('端口'), translate('加密方式')], preview.entries.map(entry => [entry.chained ? chainedCell(entry.name) : entry.name, entry.host, entry.port, entry.method])));
   else body.append(el('p', translate('没有可生成的条目，原因见下方跳过列表。'), 'muted'));
   if (preview.skipped.length) body.append(el('h3', translate('跳过规则')), table([translate('规则'), translate('原因')], preview.skipped.map(s => [namedCell(s.rule_name, s.rule_id), s.reason])));
   const details = el('details'); details.append(el('summary', translate('查看生成内容')), el('pre', preview.content, 'subscription-preview')); body.append(details);
