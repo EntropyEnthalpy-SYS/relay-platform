@@ -21,10 +21,24 @@
 | --- | --- | --- |
 | `v2ray` | 标准 Base64，解码后每行一个 `ss://` URI | 适合 v2rayN、Shadowrocket、sing-box 等支持 SIP002 的客户端 |
 | `clash` | Clash / mihomo YAML：`proxies`、`proxy-groups`、`rules` | 使用 `type: ss`、`cipher`、`password`、`udp`；组名固定为 `Relay` |
-| `surge` | Surge 文本：`[Proxy]`、`[Proxy Group]`、`[Rule]` | 逗号或换行密码、IPv6 地址会单独处理；2022 方式是否被具体 Surge 版本接受取决于客户端 |
+| `surge` | 完整的 Surge 托管配置：`[General]`、`[Proxy]`、`[Proxy Group]`、`[Rule]`，见下方「Surge 完整配置」 | 逗号或换行密码、IPv6 地址会单独处理；Surge 手册列出 2022 方式中的 `2022-blake3-aes-128-gcm` 与 `2022-blake3-aes-256-gcm` |
 | `shadowrocket` | 每行一个 `ss://` URI | 可直接导入 Shadowrocket |
 
 2022 方式 URI 使用 `method:password` 的 URL 编码；旧版 AEAD 使用 `base64url(method:password)`，与面板现有分享链接一致。URI 片段使用节点名和规则名生成显示名。
+
+### Surge 完整配置
+
+Surge 订阅是一份可以直接安装、使用的完整配置，Surge 的三种出站模式（规则判定、全局代理、直接连接）都能直接切换：
+
+- 公开链接返回的第一行是 `#!MANAGED-CONFIG <订阅链接> interval=86400 strict=false`，Surge 据此把它当作托管配置，每天自动更新；更新失败时继续使用旧配置。链接使用客户端访问时的地址：反向代理转发的 `Host`，加上 `X-Forwarded-Proto: https` 时的 `https`（否则为 `http`）。面板部署在子路径下时这一行不正确。`Host` 含有无法写入这一行的字符时不写这一行，配置仍可使用但不会自动更新。登录后的预览不含这一行，因为预览不知道订阅令牌。
+- `[General]`：`loglevel = notify`、`dns-server = system`，`skip-proxy` 让本机、局域网和 `*.local` 绕过系统代理，`exclude-simple-hostnames = true`；连通性测试使用 `http://www.apple.com/library/test/success.html`（直连）和 `http://www.gstatic.com/generate_204`（代理）。
+- `[Proxy Group]`：
+  - `Relay`：主选择组。先列出你自己的代理（代理链），再列出 `Auto`、`Fallback` 和各中转条目；默认使用第一项，没有自己的代理时默认 `Auto`。
+  - `Auto`（`url-test`）：自动使用延迟最低的中转条目。`Fallback`（`fallback`）：按顺序使用第一个可用的中转条目。
+  - `Relay entry`：只在有代理链时出现，见上一节。
+  - `Mainland China`：中国大陆的网站和 IP 走哪里，默认 `DIRECT`（直连），可在 Surge 里切换为 `Relay`。
+- `[Rule]`（规则判定模式下生效，按顺序匹配）：`RULE-SET,SYSTEM,DIRECT`（Apple 系统服务直连）、`RULE-SET,LAN,DIRECT`（局域网直连）、`DOMAIN-SUFFIX,cn` 与 `GEOIP,CN` 交给 `Mainland China`，其余 `FINAL,Relay,dns-failed`。`LAN` 和 `GEOIP` 规则会先在本机解析域名；解析失败时 `dns-failed` 让请求直接走 `Relay`。
+- 组名与条目名冲突时追加 `_`，`FINAL` 和 `Mainland China` 指向改名后的主组。
 
 ## 模板快照
 

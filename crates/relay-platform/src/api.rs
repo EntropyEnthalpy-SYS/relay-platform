@@ -2290,6 +2290,7 @@ async fn preview_subscription(
 async fn public_subscription(
     State(state): State<AppState>,
     Path(token): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if !state.subscription_allowed(&token) {
         return Err(Rejection {
@@ -2298,7 +2299,31 @@ async fn public_subscription(
         }
         .into());
     }
-    let rendered = database(state.store, move |db| db.render_public_subscription(&token)).await?;
+    // The address the client used, as the HTTPS reverse proxy forwards it. The
+    // response only reaches someone who already holds the token.
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|host| {
+            !host.is_empty()
+                && host
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+        })
+        .map(str::to_owned);
+    let scheme = match headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some("https") => "https",
+        _ => "http",
+    };
+    let url = host.map(|host| format!("{scheme}://{host}/sub/{token}"));
+    let mut rendered =
+        database(state.store, move |db| db.render_public_subscription(&token)).await?;
+    if let Some(url) = url {
+        rendered = rendered.with_update_url(&url);
+    }
     let mut response = Response::new(Body::from(rendered.content));
     response.headers_mut().insert(
         header::CONTENT_TYPE,

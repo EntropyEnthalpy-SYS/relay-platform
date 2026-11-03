@@ -303,6 +303,21 @@ pub struct Rendered {
     pub content_type: &'static str,
     pub entries: Vec<Entry>,
     pub skipped: Vec<Skipped>,
+    #[serde(skip)]
+    format: Format,
+}
+impl Rendered {
+    /// Surge keeps a profile updated only while its first line names the URL
+    /// it came from; other formats are refreshed by the client's own setting.
+    pub fn with_update_url(mut self, url: &str) -> Self {
+        if self.format == Format::Surge {
+            self.content.insert_str(
+                0,
+                &format!("#!MANAGED-CONFIG {url} interval=86400 strict=false\n"),
+            );
+        }
+        self
+    }
 }
 
 fn percent(value: &str) -> String {
@@ -446,7 +461,24 @@ fn surge(entries: &[Entry]) -> String {
         names.push(name);
     }
     let groups = Groups::new(&names.iter().map(String::as_str).collect::<Vec<_>>());
-    let mut out = String::from("# Relay subscription\n[Proxy]\n");
+    let mut taken = [names.as_slice(), &[groups.main.clone(), groups.via.clone()]].concat();
+    let mut group = |base: &str| {
+        let name = free_name(base, &taken.iter().map(String::as_str).collect::<Vec<_>>());
+        taken.push(name.clone());
+        name
+    };
+    let (auto, fallback, china) = (group("Auto"), group("Fallback"), group("Mainland China"));
+    // A complete profile: Surge's Rule, Global and Direct outbound modes all
+    // work on it as is. LAN and Apple system traffic stay direct, mainland
+    // China defaults to direct through a group the user can switch, and the
+    // rest goes to the main group.
+    let mut out = String::from(
+        "# Relay subscription\n[General]\nloglevel = notify\ndns-server = system\n\
+         skip-proxy = 127.0.0.1, 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 100.64.0.0/10, 169.254.0.0/16, localhost, *.local\n\
+         exclude-simple-hostnames = true\n\
+         internet-test-url = http://www.apple.com/library/test/success.html\n\
+         proxy-test-url = http://www.gstatic.com/generate_204\n[Proxy]\n",
+    );
     for (entry, name) in entries.iter().zip(&names) {
         let host = if entry.host.contains(':') && !entry.host.starts_with('[') {
             format!("[{}]", entry.host)
@@ -478,15 +510,24 @@ fn surge(entries: &[Entry]) -> String {
         out.push('\n');
     }
     let (main, front) = selection(entries, &names);
-    out.push_str(&format!("[Proxy Group]\n{} = select", groups.main));
-    for name in main {
-        out.push_str(", ");
-        out.push_str(name);
+    // The user's chained proxies come first, so they stay the default; without
+    // them the default is the fastest relay entry.
+    let chained = &main[..main.len() - front.len()];
+    let front = front.join(", ");
+    let choices = [chained, &[auto.as_str(), fallback.as_str()]].concat();
+    out.push_str(&format!(
+        "[Proxy Group]\n{} = select, {}, {front}\n{auto} = url-test, {front}\n{fallback} = fallback, {front}\n",
+        groups.main,
+        choices.join(", ")
+    ));
+    if !chained.is_empty() {
+        out.push_str(&format!("{} = select, {front}\n", groups.via));
     }
-    if entries.iter().any(|e| e.chained) {
-        out.push_str(&format!("\n{} = select, {}", groups.via, front.join(", ")));
-    }
-    out.push_str(&format!("\n[Rule]\nMATCH,{}\n", groups.main));
+    out.push_str(&format!(
+        "{china} = select, DIRECT, {main}\n[Rule]\nRULE-SET,SYSTEM,DIRECT\nRULE-SET,LAN,DIRECT\n\
+         DOMAIN-SUFFIX,cn,{china}\nGEOIP,CN,{china}\nFINAL,{main},dns-failed\n",
+        main = groups.main
+    ));
     out
 }
 
@@ -781,6 +822,7 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
         content_type,
         entries,
         skipped,
+        format,
     })
 }
 fn method_name(method: crate::shadowsocks::Method) -> String {
@@ -976,6 +1018,28 @@ mod tests {
         );
         assert!(surge.content.contains("udp-relay=true"));
         assert!(surge.skipped[0].reason.contains("not a Shadowsocks"));
+        // A complete profile: Surge has no MATCH rule, and FINAL must come last.
+        assert!(
+            surge
+                .content
+                .starts_with("# Relay subscription\n[General]\n")
+        );
+        assert!(
+            surge.content.ends_with(
+                "[Proxy Group]\nRelay = select, Auto, Fallback, Relay edge · Tokyo\n\
+             Auto = url-test, Relay edge · Tokyo\nFallback = fallback, Relay edge · Tokyo\n\
+             Mainland China = select, DIRECT, Relay\n[Rule]\nRULE-SET,SYSTEM,DIRECT\n\
+             RULE-SET,LAN,DIRECT\nDOMAIN-SUFFIX,cn,Mainland China\nGEOIP,CN,Mainland China\n\
+             FINAL,Relay,dns-failed\n"
+            ),
+            "{}",
+            surge.content
+        );
+        let url = "https://panel.example.com/sub/rsub_1";
+        assert!(surge.clone().with_update_url(url).content.starts_with(
+            "#!MANAGED-CONFIG https://panel.example.com/sub/rsub_1 interval=86400 strict=false\n# Relay subscription\n"
+        ));
+        assert_eq!(v2ray.clone().with_update_url(url).content, v2ray.content);
     }
 
     #[test]
@@ -1127,7 +1191,10 @@ mod tests {
         for line in [
             "\nHome = socks5, home.example.net, 1080, alice, s3cret, udp-relay=true, underlying-proxy=Relay entry\n",
             "\nRelay = ss, 203.0.113.9, 8388, encrypt-method=aes-256-gcm, password=pw, udp-relay=true, underlying-proxy=Relay entry\n",
-            "[Proxy Group]\nRelay_ = select, Home, Relay, edge · Tokyo\nRelay entry = select, edge · Tokyo\n[Rule]\nMATCH,Relay_\n",
+            "[Proxy Group]\nRelay_ = select, Home, Relay, Auto, Fallback, edge · Tokyo\nAuto = url-test, edge · Tokyo\n\
+             Fallback = fallback, edge · Tokyo\nRelay entry = select, edge · Tokyo\nMainland China = select, DIRECT, Relay_\n\
+             [Rule]\nRULE-SET,SYSTEM,DIRECT\nRULE-SET,LAN,DIRECT\nDOMAIN-SUFFIX,cn,Mainland China\nGEOIP,CN,Mainland China\n\
+             FINAL,Relay_,dns-failed\n",
         ] {
             assert!(surge.content.contains(line), "{}", surge.content);
         }

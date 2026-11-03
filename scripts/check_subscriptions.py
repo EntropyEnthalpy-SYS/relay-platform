@@ -183,7 +183,8 @@ def main():
                 elif format_name == 'surge':
                     text = raw.decode()
                     assert '[Proxy]' in text and 'edge.example.com, 9000' in text, text[:300]
-                    assert 'encrypt-method=2022-blake3-aes-256-gcm' in text and 'MATCH,Relay' in text, text[-200:]
+                    assert text.startswith(f"#!MANAGED-CONFIG {origin}/sub/{created['token']} interval=86400 strict=false\n"), text[:200]
+                    assert 'encrypt-method=2022-blake3-aes-256-gcm' in text and text.endswith('FINAL,Relay,dns-failed\n'), text[-200:]
 
             target = subscriptions['v2ray']
             old, new = target['token'], None

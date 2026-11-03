@@ -686,7 +686,7 @@ export default {
   "链接包含认证信息；需要停用时删除规则或修改用户名/密码。": "This link contains credentials. Delete the rule or change its username/password to revoke access.",
   "sing-box JSON（全部已接入协议）": "sing-box JSON (all integrated protocols)",
   "V2Ray / Base64（ss:// 列表）": "V2Ray / Base64 (ss:// list)",
-  "Surge（Shadowsocks 文本）": "Surge (Shadowsocks text)",
+  "Surge（完整配置 · 自动更新）": "Surge (complete profile · auto-update)",
   "Shadowrocket（ss:// 列表）": "Shadowrocket (ss:// list)",
   "观察（只读，不写服务商）": "Observe (read-only; no provider writes)",
   "应用（创建/更新/删除托管记录）": "Apply (create/update/delete managed records)",

@@ -1623,7 +1623,7 @@ function shareSocks5(rule) {
   body.append(grid, link, el('p', translate('链接包含认证信息；需要停用时删除规则或修改用户名/密码。'), 'fine'), actions);
   modal(msg`分享 ${rule.name}`, body);
 }
-const subscriptionFormats = localize({ sing_box: 'sing-box JSON（SS 与受管协议）', v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'mihomo / Clash Meta（YAML）', surge: 'Surge（Shadowsocks 文本）', shadowrocket: 'Shadowrocket（ss:// 列表）' });
+const subscriptionFormats = localize({ sing_box: 'sing-box JSON（SS 与受管协议）', v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'mihomo / Clash Meta（YAML）', surge: 'Surge（完整配置 · 自动更新）', shadowrocket: 'Shadowrocket（ss:// 列表）' });
 const dnsModes = localize({ observe: '观察（只读，不写服务商）', apply: '应用（创建/更新/删除托管记录）' });
 const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];
 const announcementSeverities = localize({ info: '信息', warning: '警告', critical: '严重' });

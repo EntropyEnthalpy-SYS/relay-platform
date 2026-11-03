@@ -314,6 +314,50 @@ async fn public_subscription_http_rotation_and_rate_limit_are_real() {
         .unwrap();
     assert_eq!(preview["entries"][0]["name"], "Relay edge · Tokyo");
 
+    // Surge updates a profile from the URL in its first line: the address the
+    // client used, as the HTTPS reverse proxy forwards it.
+    let surge: Value = client
+        .post(format!("{origin}/api/v1/subscriptions"))
+        .bearer_auth(&session)
+        .json(&json!({"name": "mac", "format": "surge"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let surge_token = surge["token"].as_str().unwrap();
+    let fetch = |host: &str, proto: Option<&str>| {
+        let mut request = client
+            .get(format!("{origin}/sub/{surge_token}"))
+            .header("host", host);
+        if let Some(proto) = proto {
+            request = request.header("x-forwarded-proto", proto);
+        }
+        async move { request.send().await.unwrap().text().await.unwrap() }
+    };
+    let profile = fetch("panel.example.com", Some("https")).await;
+    assert!(
+        profile.starts_with(&format!(
+            "#!MANAGED-CONFIG https://panel.example.com/sub/{surge_token} interval=86400 strict=false\n# Relay subscription\n[General]\n"
+        )),
+        "{profile}"
+    );
+    assert!(profile.ends_with("FINAL,Relay,dns-failed\n"), "{profile}");
+    assert!(
+        fetch(&address.to_string(), None)
+            .await
+            .starts_with(&format!(
+                "#!MANAGED-CONFIG http://{address}/sub/{surge_token} "
+            ))
+    );
+    assert!(
+        fetch("panel.example.com\"x", Some("https"))
+            .await
+            .starts_with("# Relay subscription\n"),
+        "a host that cannot be written into the line leaves the profile unmanaged"
+    );
+
     let rotated: Value = client
         .post(format!("{origin}/api/v1/subscriptions/{id}/rotate"))
         .bearer_auth(&session)
