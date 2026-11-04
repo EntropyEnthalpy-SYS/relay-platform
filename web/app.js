@@ -923,6 +923,12 @@ function nodeInspector(node) {
     [translate('成本'), costLabel(s.cost)],
   ]);
   const more = el('section', undefined, 'inspector-section'); more.append(el('h3', translate('更多操作')), nodeMoreList(node)); body.append(more);
+  if (canWrite()) {
+    const removal = el('section', undefined, 'inspector-section inspector-danger');
+    removal.append(el('h3', translate('删除节点')), el('p', node.enrolled ? translate('这个节点还绑定着 Agent 身份：先撤销身份，它的规则立即停止转发，然后删除节点及其规则、配置历史和用量记录。审计日志保留。') : translate('删除节点及其规则、配置历史和用量记录。审计日志保留。'), 'fine'),
+      button(node.enrolled ? translate('撤销身份并删除…') : translate('删除节点…'), () => removeNode(node), 'subtle danger'));
+    body.append(removal);
+  }
   body.insertBefore(actions, head.nextSibling);
   modal(node.name, body);
 }
@@ -990,13 +996,19 @@ async function nodeCredential(node) {
   body.append(actions);
   modal(translate('节点身份与凭据'), body);
 }
+// The details' delete button: a node still bound to an Agent identity is revoked first, then deleted.
+async function removeNode(node) {
+  const status = await api(`/nodes/${node.id}/credential`), phase = status.phase || (node.enrolled ? 'active' : 'not_enrolled');
+  if (phase === 'revoked' || phase === 'not_enrolled') return deleteNode(node);
+  revokeNodeIdentity(node, status, () => deleteNode(node));
+}
 async function deleteNode(node) {
   if (!await confirmAction(msg`永久删除节点「${node.name}」及其规则、配置历史和用量记录？审计日志保留。仍被其他节点、DNS 记录或预算引用的节点不能删除。`)) return;
   await api(`/nodes/${node.id}`, { method: 'DELETE' });
   if (state.selectedNode === node.id) state.selectedNode = null;
   notify(msg`节点「${node.name}」已删除。`); await refresh();
 }
-function revokeNodeIdentity(node,status) {
+function revokeNodeIdentity(node,status,then = () => nodeCredential(node)) {
   const form = el('form');
   form.append(el('p', msg`撤销「${node.name}」的当前凭据、待执行轮换和注册票据。规则与历史账本保留，无法撤回此动作；恢复运行需要签发新票据。`));
   field(form,'reason',translate('撤销原因（最多 512 字节）'),'','text').maxLength=512;
@@ -1007,8 +1019,8 @@ function revokeNodeIdentity(node,status) {
     if (!request && (!reason || new TextEncoder().encode(reason).length>512 || /[\x00-\x1f\x7f-\x9f]/.test(reason))) throw new Error(translate('请填写不含控制字符、最多 512 字节的撤销原因。'));
     request ||= {operation_id:operation,expected_revision:status.revision,reason};
     await api(`/nodes/${node.id}/credential/revoke`,{method:'POST',body:request});
-    await nodeCredential(node);
     notify(translate('撤销操作已确认，请以当前身份状态为准。严格节点按已授期限停止；离线实例需要外部停止。'));
+    await then();
   });
   modal(translate('紧急撤销节点身份'),form);
 }
@@ -1304,7 +1316,7 @@ async function renderRules() {
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p);
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -3574,6 +3586,7 @@ async function renderTopology() {
     const path = shadowsocksPath(snapshot, root);
     if (path) tools.append(button(translate('客户端链接'), () => shareShadowsocks(path.exit, path.entry, path.hops.map(hop => names.get(hop.node_id)).join(' → ')), 'table-action'));
     if (canWrite()) tools.append(button(rule?.enabled ? translate('停用') : translate('启用'), () => changeTopologyComponent(snapshot, key, !rule?.enabled), 'table-action'));
+    if (canWrite() && !root.rule_id.startsWith('fed-')) tools.append(button(translate('删除'), () => deleteForwarding(snapshot, root), 'table-action danger'));
     head.append(title, tools); card.append(head, routeChips(model, health, byId, conns));
     const details = el('details', undefined, 'path-details'); details.open = open.has(key);
     details.addEventListener('toggle', () => details.open ? open.add(key) : open.delete(key));
@@ -3715,6 +3728,44 @@ async function changeTopologyComponent(snapshot, seed, enabled) {
   while (changed) { changed = false; for (const edge of snapshot.graph.edges) { const a = topologyKey(edge.from), b = topologyKey(edge.to); if (selected.has(a) || selected.has(b)) { if (!selected.has(a) || !selected.has(b)) changed = true; selected.add(a); selected.add(b); } } }
   const updates = snapshot.configs.filter(config => config.rules.some(rule => selected.has(`${config.node_id}/${rule.id}`))).map(config => ({ node_id: config.node_id, expected_revision: config.revision, rules: config.rules.map(rule => selected.has(`${config.node_id}/${rule.id}`) ? { ...rule, enabled } : rule) }));
   await previewTopology(snapshot, { updates });
+}
+// The rules a forwarding owns: every hop from its entry, except a hop another forwarding also passes through, and what follows it.
+function forwardingRules(snapshot, root) {
+  const next = new Map(snapshot.configs.flatMap(config => config.rules.map(rule => [`${config.node_id}/${rule.id}`, (rule.targets || []).filter(t => t.via).map(t => topologyKey(t.via))])));
+  const members = new Set(), shared = new Set();
+  const walk = (key, into) => { if (into.has(key) || !next.has(key)) return; into.add(key); next.get(key).forEach(k => walk(k, into)); };
+  walk(topologyKey(root), members);
+  for (const [key, hops] of next) if (!members.has(key)) hops.filter(k => members.has(k)).forEach(k => walk(k, shared));
+  return { own: [...members].filter(k => !shared.has(k)), shared: [...members].filter(k => shared.has(k)) };
+}
+// Deleting a forwarding takes two publishes when it chains servers: its rules stop first with their routes unchanged,
+// and only after every server has applied the stop and ended its sessions does the panel accept their removal.
+async function deleteForwarding(snapshot, root) {
+  const { own, shared } = forwardingRules(snapshot, root), keys = new Set(own), names = new Map(snapshot.nodes.map(n => [n.id, n.name]));
+  const owned = snapshot.configs.flatMap(config => config.rules.filter(rule => keys.has(`${config.node_id}/${rule.id}`)).map(rule => ({ node_id: config.node_id, rule })));
+  const name = owned.find(item => `${item.node_id}/${item.rule.id}` === topologyKey(root))?.rule.name || root.rule_id;
+  const servers = [...new Set(owned.map(item => names.get(item.node_id) || item.node_id))].join(getLanguage() === 'en' ? ', ' : '、');
+  const updates = change => snapshot.configs.filter(config => config.rules.some(rule => keys.has(`${config.node_id}/${rule.id}`))).map(config => ({ node_id: config.node_id, expected_revision: config.revision, rules: change(config) }));
+  const label = key => { const config = snapshot.configs.find(c => key.startsWith(`${c.node_id}/`)), rule = config?.rules.find(r => `${config.node_id}/${r.id}` === key); return `${names.get(config?.node_id) || key} · ${rule?.name || key}`; };
+  const keep = shared.length ? ' ' + msg`${shared.map(label).join(getLanguage() === 'en' ? ', ' : '、')} 也属于其他转发，保留不删。` : '';
+  if (!owned.length) { notify(translate('这条转发的每一跳都被其他转发使用，请删除那些转发。'), true); return; }
+  if (owned.some(item => item.rule.enabled && (item.rule.advertise || item.rule.targets.some(t => t.via))))
+    return previewTopology(snapshot, { updates: updates(config => config.rules.map(rule => keys.has(`${config.node_id}/${rule.id}`) ? { ...rule, enabled: false } : rule)) },
+      msg`删除「${name}」分两步：先停止，等 ${servers} 应用停止并结束现有连接后，再点一次「删除」完成删除。现在发布第 1 步：停止 ${owned.length} 条规则，路线保持不变。` + keep);
+  try {
+    await previewTopology(snapshot, { updates: updates(config => config.rules.filter(rule => !keys.has(`${config.node_id}/${rule.id}`))) }, msg`删除「${name}」：从 ${servers} 移除 ${owned.length} 条规则并结束其会话，历史账本保留。` + keep);
+  } catch (error) {
+    if (!/topology stop is not confirmed/.test(error.message)) throw error;
+    modal(translate('还不能删除'), el('p', msg`「${name}」已停止，但还有服务器没有确认：它需要应用停止后的配置，并报告没有活动连接。稍等片刻再点「删除」。离线的服务器无法确认；不再使用它的话，请在「节点」页打开它的详情并删除该节点。`, 'workflow-callout'));
+  }
+}
+// From the per-server page: a chained rule goes through its whole forwarding, or explains which forwarding owns it.
+async function deleteChainedRule(nodeId, rule) {
+  const snapshot = await api('/topology'), key = `${nodeId}/${rule.id}`, root = forwardingPathRoots(snapshot).find(r => topologyKey(r) === key);
+  if (root) return deleteForwarding(snapshot, root);
+  const body = el('div');
+  body.append(el('p', msg`「${rule.name}」是一条多服务器转发中的一跳，前面的服务器仍指向它，所以不能单独删除。请在「全部转发」里删除整条转发：它会先停止整条路线，再移除各跳规则。`, 'workflow-callout'), button(translate('打开全部转发'), async () => { $('#dialog').close(); await navigate('topology'); }, 'primary'));
+  modal(msg`删除「${rule.name}」`, body);
 }
 async function newTopologyChain(snapshot, preset = {}) {
   const minimum = preset.single ? 1 : 2;

@@ -2623,5 +2623,18 @@ export default {
   "较昨日同时段": "vs this time yesterday",
   "连接 · 最近 24 小时": "Connections · last 24 hours",
   "连接成功": "connections succeeded",
-  "暂无监控历史": "No monitoring history"
+  "暂无监控历史": "No monitoring history",
+  "{0} 也属于其他转发，保留不删。": "Also used by other forwarding, so kept: {0}.",
+  "「{0}」已停止，但还有服务器没有确认：它需要应用停止后的配置，并报告没有活动连接。稍等片刻再点「删除」。离线的服务器无法确认；不再使用它的话，请在「节点」页打开它的详情并删除该节点。": "“{0}” is stopped, but a server has not confirmed it yet: each server must apply the stopped configuration and report no active connections. Wait a moment, then press Delete again. A server that is offline cannot confirm; if you no longer use it, open its details on the Nodes page and delete that node.",
+  "「{0}」是一条多服务器转发中的一跳，前面的服务器仍指向它，所以不能单独删除。请在「全部转发」里删除整条转发：它会先停止整条路线，再移除各跳规则。": "“{0}” is one hop of a forwarding that crosses several servers. The servers before it still point to it, so it cannot be deleted on its own. Delete the whole forwarding in “All forwarding”: it stops the route first, then removes each hop's rule.",
+  "删除「{0}」": "Delete “{0}”",
+  "删除「{0}」分两步：先停止，等 {1} 应用停止并结束现有连接后，再点一次「删除」完成删除。现在发布第 1 步：停止 {2} 条规则，路线保持不变。": "Deleting “{0}” takes two steps: it stops first, and once the stop is applied on {1} and its connections have ended, press Delete again to remove it. Publishing now does step 1: it stops its rules ({2} in total) and keeps their routes.",
+  "删除「{0}」：从 {1} 移除 {2} 条规则并结束其会话，历史账本保留。": "Deletes “{0}” and its rules on {1} ({2} in total), ending their sessions. The traffic ledger is kept.",
+  "删除节点…": "Delete node…",
+  "删除节点及其规则、配置历史和用量记录。审计日志保留。": "Deletes the node with its rules, configuration history and usage records. The audit log is kept.",
+  "打开全部转发": "Open All forwarding",
+  "撤销身份并删除…": "Revoke identity and delete…",
+  "还不能删除": "Not ready to delete",
+  "这个节点还绑定着 Agent 身份：先撤销身份，它的规则立即停止转发，然后删除节点及其规则、配置历史和用量记录。审计日志保留。": "This node is still bound to an Agent identity. Revoke the identity first, which stops its rules at once, then delete the node with its rules, configuration history and usage records. The audit log is kept.",
+  "这条转发的每一跳都被其他转发使用，请删除那些转发。": "Every hop of this forwarding is used by other forwarding; delete those instead."
 };
