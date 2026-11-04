@@ -2,6 +2,8 @@
 
 **Setting up a new server?** Follow [Deploying Relay on a new server, start to finish](docs/DEPLOYMENT_GUIDE_EN.md): build and sign a package, install the panel, add HTTPS, sign in, add nodes, upgrade and back up.
 
+0.141.8 rebuilds the Overview around what an operator checks first. Each summary card now shows a bar sparkline in its own color and how the live value compares with the same hour yesterday (from the 7-day history; round trips are green when faster and amber when slower). A new row puts a 24-hour connection dial beside what needs attention: the dial draws one spoke per 15 minutes of local time, with teal dots for real connections to targets that succeeded and red dots for failures, and the success rate in the middle. Needs attention shows the newest unresolved problem with buttons to open the node or the event list (green when nothing is open), then each node's traffic over the selected range. A throughput chart with a dashed line for the same time yesterday sits under it. The globe, events, forwarding paths, trends and node table follow as before; the separate throughput trend moved into the new card.
+
 0.141.7 makes the Surge subscription a complete profile that Surge installs and keeps up to date. The public link now starts with #!MANAGED-CONFIG pointing back at itself (from the forwarded host and X-Forwarded-Proto), so Surge refreshes it daily, and the profile adds a [General] section (system DNS, local addresses bypass the proxy, connectivity test URLs), Auto (fastest relay entry) and Fallback (first working entry) groups, and rules for Surge's Rule-based mode: Apple system services and the local network go direct, mainland China goes through a Mainland China group that defaults to direct, and everything else ends at FINAL,Relay,dns-failed. This replaces the Clash-style MATCH,Relay line, which Surge does not document. Existing Surge links get the new profile on their next fetch; see [Client subscriptions](docs/SUBSCRIPTIONS.md).
 
 0.141.6 lets a subscription chain your own proxy. Add up to 8 SOCKS5 or Shadowsocks proxies when you create a subscription, by hand or by pasting a socks5:// or ss:// link, and the sing-box, mihomo / Clash Meta and Surge formats export each one as an entry the app reaches through a relay node: app → relay node → your proxy → website. The app builds the chain itself (sing-box detour, mihomo dialer-proxy, Surge underlying-proxy) from a new Relay entry group, so node configuration is unchanged. V2Ray and Shadowrocket cannot express a chain and list these proxies as skipped. A mistake in the subscription settings now returns a clear 400 message instead of an internal error. Before rolling back to 0.141.5 or earlier, delete subscriptions that contain proxies; see [Client subscriptions](docs/SUBSCRIPTIONS.md).
@@ -62,7 +64,7 @@
 
 这是从独立源码开始开发的控制服务、Agent 和 TCP/UDP 转发核心。原有压缩包及三个参考产品没有作为代码基础；网络、数据库、密码哈希和 TLS 实现采用公开的成熟依赖。运行不需要商业产品激活。
 
-**当前是开发中的 0.141.7 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
+**当前是开发中的 0.141.8 开发版本，完整目标尚未完成。** 已经打通真实数据转发、管理 API、节点同步、持久化计量和管理界面源码。完整范围保留在 [22 个模块验收清单](docs/REQUIREMENTS.md)，逐项状态见 [STATUS.md](docs/STATUS.md)。多路径已接入本地实现，完整性能、组网、运营交易等范围仍需继续开发。
 
 0.117.0 新增登录页与控制台 English / 中文切换，覆盖页面、编辑器、校验提示和七篇指南；保存浏览器偏好，切换时保留会话和当前页面。此前 0.116.0 重整控制台界面：分组导航、页面与指南本地搜索、七篇内嵌操作指南、浅色 / 深色主题、移动端抽屉与可分享页面链接。现有规则、协议、计量和权限流程保留，详见 [UI workspace guide](docs/UI_WORKSPACE_EN.md)。
 

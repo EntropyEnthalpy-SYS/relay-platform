@@ -402,17 +402,32 @@ function currentRate(samples) {
   return (last.forwarded_bytes - first.forwarded_bytes) / ((last.at_ms - first.at_ms) / 1000);
 }
 function sumBins(list) { return Array.from({ length: list[0]?.length ?? BINS }, (_, i) => { const v = list.map(s => s[i]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) : null; }); }
-function spark(values, cls, width = 160, height = 44, ceiling = null) {
+// `compare`, when given, is a second series over the same bins drawn as a dashed line on the same scale.
+function spark(values, cls, width = 160, height = 44, ceiling = null, compare = null) {
   const box = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, `spark ${cls}`);
-  const top = ceiling ?? (Math.max(0, ...values.filter(v => v != null)) || 1), x = i => i / (values.length - 1) * width, y = v => height - 2 - v / top * (height - 6);
-  const runs = []; let run = [];
-  values.forEach((v, i) => { if (v == null) { if (run.length) runs.push(run); run = []; } else run.push([x(i), y(v)]); }); if (run.length) runs.push(run);
+  const top = ceiling ?? (Math.max(0, ...values.filter(v => v != null), ...(compare || []).filter(v => v != null)) || 1), x = i => i / (values.length - 1) * width, y = v => height - 2 - v / top * (height - 6);
+  const runs = series => { const out = []; let run = []; series.forEach((v, i) => { if (v == null) { if (run.length) out.push(run); run = []; } else run.push([x(i), y(v)]); }); if (run.length) out.push(run); for (const r of out) if (r.length === 1) r.push([r[0][0] + 2, r[0][1]]); return out; };
+  const path = r => r.map(([px, py], i) => `${i ? 'L' : 'M'}${px.toFixed(1)} ${py.toFixed(1)}`).join('');
   box.append(svg('line', { x1: 0, x2: width, y1: height - 2, y2: height - 2 }, 'spark-empty'));
-  for (const r of runs) {
-    if (r.length === 1) r.push([r[0][0] + 2, r[0][1]]);
-    const line = r.map(([px, py], i) => `${i ? 'L' : 'M'}${px.toFixed(1)} ${py.toFixed(1)}`).join('');
+  for (const r of runs(compare || [])) box.append(svg('path', { d: path(r) }, 'spark-compare'));
+  for (const r of runs(values)) {
+    const line = path(r);
     box.append(svg('path', { d: `${line}L${r.at(-1)[0].toFixed(1)} ${height}L${r[0][0].toFixed(1)} ${height}Z` }, 'spark-area'), svg('path', { d: line }, 'spark-line'));
   }
+  return box;
+}
+// Summary-card sparklines as discrete bars, at most 48: neighbouring bins are averaged and older bars are fainter.
+// A bin without reports stays a grey tick, so a measured zero still reads differently from no data.
+function barSpark(values, cls, width = 160, height = 36) {
+  const group = Math.max(1, Math.ceil(values.length / 48)), cols = [];
+  for (let i = 0; i < values.length; i += group) { const v = values.slice(i, i + group).filter(x => x != null); cols.push(v.length ? v.reduce((a, b) => a + b, 0) / v.length : null); }
+  const box = svg('svg', { viewBox: `0 0 ${width} ${height}`, preserveAspectRatio: 'none', 'aria-hidden': 'true' }, `spark bars ${cls}`);
+  const top = Math.max(0, ...cols.filter(v => v != null)) || 1, step = width / cols.length, w = step * .62;
+  cols.forEach((v, i) => {
+    const h = v == null ? 2 : Math.max(2, v / top * height), attrs = { x: (i * step + (step - w) / 2).toFixed(2), y: (height - h).toFixed(2), width: w.toFixed(2), height: h.toFixed(2) };
+    if (v != null) attrs.opacity = (.4 + .6 * i / Math.max(1, cols.length - 1)).toFixed(2);
+    box.append(svg('rect', attrs, v == null ? 'bar-gap' : 'bar'));
+  });
   return box;
 }
 function meter(ratio, label) {
@@ -463,17 +478,18 @@ function columnChart(columns, parts, format) {
   frame.append(axis, plot, el('span'), labels); box.append(frame); return box;
 }
 // A line over `span` ending at `now` (15 minutes unless given) with a value axis, built on the overview sparkline.
-function trendChart(values, cls, format, now, ceiling = null, span = SPAN_MS) {
+function trendChart(values, cls, format, now, ceiling = null, span = SPAN_MS, compare = null) {
   const frame = el('div', undefined, 'chart-frame trend-chart'), axis = el('div', undefined, 'chart-axis'), labels = el('div', undefined, 'chart-labels');
-  const top = ceiling ?? Math.max(0, ...values.filter(v => v != null));
+  const top = ceiling ?? Math.max(0, ...values.filter(v => v != null), ...(compare || []).filter(v => v != null));
   axis.append(el('span', top ? format(top) : '—'), el('span', top ? format(top / 2) : ''), el('span', format(0)));
   const at = ms => span > 86_400_000 ? shortTime(ms, true) : clock(ms);
   labels.append(el('span', at(now - span)), el('span', at(now - span / 2)), el('span', at(now)));
-  frame.append(axis, spark(values, cls, 600, 150, ceiling), el('span'), labels); return frame;
+  frame.append(axis, spark(values, cls, 600, 150, ceiling, compare), el('span'), labels); return frame;
 }
 function chartPanel(title, description, chart) { const p = panel(title, description); const body = el('div', undefined, 'panel-body chart-body'); body.append(chart); p.append(body); return p; }
 function tileIcon(name) { const n = el('span', undefined, 'tile-icon'); n.append(consoleUI.icon(name)); return n; }
-function kpi(label, value, foot, chart, symbol) { const n = el('div', undefined, 'kpi'), head = el('div', undefined, 'kpi-head'), text = el('div', undefined, 'kpi-text'); text.append(el('div', label, 'metric-label'), el('div', value, 'metric-value'), el('div', foot, 'metric-foot')); head.append(tileIcon(symbol), text); n.append(head, chart); return n; }
+// `foot` is text or an element; `note` explains what the number counts and shows on hover.
+function kpi(label, value, foot, chart, symbol, note) { const n = el('div', undefined, 'kpi'), head = el('div', undefined, 'kpi-head'), text = el('div', undefined, 'kpi-text'), footer = el('div', undefined, 'metric-foot'); footer.append(foot); text.append(el('div', label, 'metric-label'), el('div', value, 'metric-value'), footer); head.append(tileIcon(symbol), text); n.append(head, chart); if (note) n.title = note; return n; }
 function overviewStatus(node, latest) {
   if (!node.enrolled) return [translate('待注册'), '', 'idle'];
   if (!online(node)) return [translate('离线'), 'red', 'down'];
@@ -504,11 +520,96 @@ function historySeries(history) {
 }
 const overviewRanges = localize([['15m', '15 分钟'], ['24h', '24 小时'], ['7d', '7 天']]);
 function readOverviewRange() { try { const r = localStorage.getItem('relay-overview-range'); return overviewRanges.some(([v]) => v === r) ? r : '15m'; } catch { return '15m'; } }
+// The 7-day history (hourly bins) as a lookup of the fleet's forwarded rate at a time; null where no node reported.
+function hourlyRate(week) {
+  if (!week) return () => null;
+  const totals = new Map(), slot = at => Math.floor((at - week.start_ms) / week.step_ms);
+  for (const n of week.nodes) for (const b of n.bins) if (b.reports) totals.set(slot(b.at_ms), (totals.get(slot(b.at_ms)) || 0) + b.forwarded_bytes);
+  return at => { const v = totals.get(slot(at)); return v == null ? null : v / (week.step_ms / 1000); };
+}
+// The same hour yesterday from the 7-day history, for the summary deltas; null when no node reported then.
+function yesterday(week, now) {
+  const at = now - 86_400_000, bins = (week?.nodes || []).map(n => n.bins.find(b => b.at_ms <= at && at < b.at_ms + week.step_ms)).filter(b => b?.reports);
+  if (!bins.length) return null;
+  return { rate: hourlyRate(week)(at), sessions: bins.reduce((s, b) => s + b.sessions_sum / b.reports, 0), latency: median(bins.map(b => b.latency_count ? b.latency_sum_us / b.latency_count : null)) };
+}
+// "+12% vs this time yesterday". Round trips compare in milliseconds, where lower is better.
+function kpiDelta(current, before, format, { percent = true, lowerIsBetter = false } = {}) {
+  const line = el('span', undefined, 'kpi-delta');
+  if (current == null) return line;
+  if (before == null) { line.textContent = translate('昨日同时段无数据'); return line; }
+  const diff = current - before, ratio = percent && before > 0 ? Math.abs(diff) / before : null;
+  const size = ratio == null ? format(Math.abs(diff)) : `${(ratio * 100).toFixed(ratio && ratio < .1 ? 1 : 0)}%`;
+  const value = el('b', `${diff > 0 ? '+' : diff < 0 ? '−' : '±'}${size}`, lowerIsBetter && diff ? (diff < 0 ? 'better' : 'worse') : ''), label = translate('较昨日同时段');
+  line.append(...(getLanguage() === 'en' ? [value, ' ', label] : [label, ' ', value]));
+  return line;
+}
+// The last 24 hours as a clock face: one spoke per 15-minute bin at its local time of day and one dot per `unit`
+// real TCP connections to targets, failed ones outermost in red. A bin without connections keeps one faint dot.
+function connectionDial(day, now) {
+  const C = 200, R0 = 94, GAP = 5.9, DOTS = 13, OUT = R0 + (DOTS - 1) * GAP, step = day.step_ms, count = Math.round((day.end_ms - day.start_ms) / step);
+  const bins = new Map(); for (const h of day.hops) if (h.target_index != null) for (const b of h.bins) { const i = Math.round((b.at_ms - day.start_ms) / step); bins.set(i, addCounts(bins.get(i) || {}, b)); }
+  const total = [...bins.values()].reduce(addCounts, { attempts: 0, connected: 0 }), peak = Math.max(0, ...[...bins.values()].map(c => c.attempts));
+  const nice = x => { const p = 10 ** Math.floor(Math.log10(x)); return [1, 2, 5, 10].map(k => k * p).find(v => v >= x); }, unit = peak > DOTS ? nice(peak / DOTS) : 1;
+  const angle = at => { const d = new Date(at); return (d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60) / 1440 * 2 * Math.PI - Math.PI / 2; };
+  const point = (a, r) => [+(C + r * Math.cos(a)).toFixed(1), +(C + r * Math.sin(a)).toFixed(1)], label = (x, y, text, cls, anchor = 'middle') => { const n = svg('text', { x, y, 'text-anchor': anchor }, cls); n.textContent = text; return n; };
+  const box = svg('svg', { viewBox: '0 0 400 400', role: 'img', 'aria-label': total.attempts ? msg`最近 24 小时：${connSummary(total)}` : translate('最近 24 小时没有到目标的 TCP 连接') }, 'dial');
+  box.append(svg('circle', { cx: C, cy: C, r: R0 - 12 }, 'dial-face'));
+  for (let h = 0; h < 24; h++) { const a = h / 24 * 2 * Math.PI - Math.PI / 2, [x1, y1] = point(a, R0 - 12), [x2, y2] = point(a, R0 - (h % 6 ? 16 : 21)); box.append(svg('line', { x1, y1, x2, y2 }, h % 6 ? 'dial-tick' : 'dial-tick major')); }
+  for (const [h, anchor, dx, dy] of [[0, 'middle', 0, -2], [6, 'start', 4, 4], [12, 'middle', 0, 10], [18, 'end', -4, 4]]) { const [x, y] = point(h / 24 * 2 * Math.PI - Math.PI / 2, OUT + 12); box.append(label(x + dx, y + dy, String(h).padStart(2, '0'), 'dial-hour', anchor)); }
+  let worst = null;
+  for (let i = 0; i < count; i++) {
+    const at = day.start_ms + i * step, c = bins.get(i), a = angle(at + step / 2), spoke = svg('g'), failed = c ? c.attempts - c.connected : 0;
+    const n = c?.attempts ? Math.min(DOTS, Math.max(1, Math.round(c.attempts / unit))) : 0, bad = failed ? Math.min(n, Math.max(1, Math.round(failed / unit))) : 0;
+    if (!n) { const [cx, cy] = point(a, R0); spoke.append(svg('circle', { cx, cy, r: 1.3 }, 'idle')); }
+    for (let k = 0; k < n; k++) { const [cx, cy] = point(a, R0 + k * GAP), fail = k >= n - bad; spoke.append(svg('circle', { cx, cy, r: 1.8, opacity: fail ? 1 : (.45 + .55 * k / (DOTS - 1)).toFixed(2) }, fail ? 'fail' : 'ok')); }
+    if (c?.attempts) { const tip = svg('title'); tip.textContent = `${clock(at)}–${clock(at + step)} · ${connSummary(c)}`; spoke.append(tip); }
+    if (failed && (!worst || failed > worst.failed)) worst = { at, failed, a };
+    box.append(spoke);
+  }
+  const hand = angle(now), [x1, y1] = point(hand, R0 - 24), [x2, y2] = point(hand, OUT + 5);
+  box.append(svg('line', { x1, y1, x2, y2 }, 'dial-hand'), svg('circle', { cx: x2, cy: y2, r: 3 }, 'dial-hand-dot'));
+  if (worst) { const [x, y] = point(worst.a, OUT + 14), side = Math.cos(worst.a); box.append(label(x, y + 4, clock(worst.at), 'dial-alert', side > .3 ? 'start' : side < -.3 ? 'end' : 'middle')); }
+  box.append(label(C, C + 8, total.attempts ? successRate(total) : '—', 'dial-value'), label(C, C + 32, total.attempts ? translate('连接成功') : translate('暂无连接'), 'dial-label'));
+  const key = el('div', undefined, 'dial-key');
+  for (const [cls, name, value] of [['ok', translate('成功'), total.connected], ['fail', translate('失败'), total.attempts - total.connected], ['idle', translate('无连接'), null]]) { const item = el('span'); item.append(el('i', undefined, cls), name); if (value != null) item.append(el('b', value.toLocaleString(getLanguage()))); key.append(item); }
+  return { chart: box, key, unit };
+}
+// The newest unrecovered problem, critical ones first, with the way to its node and to the event list.
+function attentionCallout(open, events, byId, now) {
+  const top = open.find(e => e.severity === 'critical') || open[0], box = el('div', undefined, `attention-callout ${top ? top.severity : 'clear'}`), text = el('div', undefined, 'attention-text'), head = el('div', undefined, 'attention-title'), actions = el('div', undefined, 'attention-actions');
+  const all = () => modal(translate('全部事件'), eventTable(events, byId, now)), node = top && byId.get(top.node_id);
+  if (top) {
+    head.append(el('strong', node?.name || top.node_id), el('time', `${clock(top.at_ms)} · ${ago(top.at_ms, now)}`));
+    text.append(head, Object.assign(el('p', eventMessage(top)), { title: top.message }));
+    if (node) actions.append(button(translate('查看节点'), () => nodeInspector(node), 'primary'));
+  } else {
+    head.append(el('strong', translate('没有未恢复的问题')));
+    text.append(head, el('p', translate('目标故障、配置被拒绝和节点离线会显示在这里，直到恢复。')));
+  }
+  if (events.length) actions.append(button(translate('查看事件'), all));
+  if (open.length > 1) actions.append(el('span', msg`另有 ${open.length - 1} 个未恢复`, 'attention-more'));
+  if (actions.childElementCount) text.append(actions);
+  box.append(el('i'), text); return box;
+}
+// Each node's forwarded bytes over the range, largest first; a bar takes its node's status colour.
+function trafficRank(rows, totals) {
+  const list = el('ol', undefined, 'traffic-rank'), top = Math.max(1, ...totals.values());
+  rows.slice().sort((a, b) => totals.get(b.node.id) - totals.get(a.node.id) || a.node.name.localeCompare(b.node.name)).slice(0, 5).forEach((r, i) => {
+    const item = el('li'), bar = el('span', undefined, 'traffic-bar'), fill = el('i', undefined, r.status[2]), value = totals.get(r.node.id);
+    fill.style.width = `${value ? Math.max(1.5, value / top * 100) : 0}%`; bar.append(fill); item.title = r.status[0];
+    item.append(el('span', String(i + 1), 'traffic-index'), el('strong', r.node.name), el('span', locationName(r.node.profile?.settings.location), 'traffic-place'), bar, el('span', bytes(value), 'traffic-value'));
+    list.append(item);
+  });
+  return list;
+}
 async function renderOverview() {
   const actor = state.actor;
   const range = readOverviewRange();
-  const [telemetry, nodes, topology, recent, history] = await Promise.all([api('/telemetry'), api('/nodes'), api('/topology'), monitoringHistory('1h'), range === '15m' ? null : monitoringHistory(range)]);
+  // The connection dial always shows the last 24 hours; the 7-day history also gives "this time yesterday".
+  const [telemetry, nodes, topology, recent, daily, week] = await Promise.all([api('/telemetry'), api('/nodes'), api('/topology'), monitoringHistory('1h'), monitoringHistory('24h'), monitoringHistory('7d')]);
   if (state.view !== 'overview' || !actor || state.actor !== actor) return;
+  const history = range === '24h' ? daily : range === '7d' ? week : null;
   const now = telemetry.generated_at_ms, byId = new Map(nodes.map(n => [n.id, n])), past = history && historySeries(history), conns = hopTotals(recent);
   const noData = () => ({ rate: Array(past.count).fill(null), sessions: Array(past.count).fill(null), latency: Array.from({ length: past.count }, () => []), available: Array(past.count).fill(null) });
   const rows = telemetry.nodes.filter(t => byId.has(t.id)).map(t => { const node = byId.get(t.id), latest = online(node) ? t.samples.at(-1) : null; return { node, samples: t.samples, latest, series: past ? past.nodes.get(t.id) || noData() : nodeSeries(t.samples, now), rate: online(node) ? currentRate(t.samples) : null, status: overviewStatus(node, latest) }; });
@@ -522,13 +623,16 @@ async function renderOverview() {
   const rangeLabel = overviewRanges.find(([v]) => v === range)[1], picker = el('div', undefined, 'mode-picker');
   picker.setAttribute('role', 'group'); picker.setAttribute('aria-label', translate('趋势范围'));
   for (const [value, label] of overviewRanges) { const choice = button(label, async () => { try { localStorage.setItem('relay-overview-range', value); } catch { /* Still switches without storage. */ } await renderOverview(); }); choice.setAttribute('aria-pressed', String(range === value)); picker.append(choice); }
+  const events = telemetry.events.slice().reverse(), attention = rows.filter(r => r.status[2] === 'down' || r.status[2] === 'partial').length;
+  const before = yesterday(week, now), liveRate = liveRates.length ? liveRates.reduce((sum, value) => sum + value, 0) : null, liveSessions = live.length ? live.reduce((s, r) => s + r.latest.active_sessions, 0) : null, liveLatency = median(live.map(r => r.latest.probe_latency_us));
+  const count = v => (Math.round(v * 10) / 10).toLocaleString(getLanguage()), fleetNote = el('span', undefined, 'kpi-delta');
+  if (enrolled.length) fleetNote.append(el('b', attention ? msg`${attention} 个需要关注` : translate('全部正常'), attention ? 'worse' : 'better'), ' · ', probed ? msg`目标可用 ${healthy} / ${probed}` : translate('尚无目标探测'));
   const kpis = el('div', undefined, 'kpis');
   kpis.append(
-    kpi(translate('实时吞吐'), liveRates.length ? bits(liveRates.reduce((sum, value) => sum + value, 0)) : '—', msg`多跳流量逐跳计入 · 峰值 ${peak == null ? '—' : bits(peak)}`, spark(rate, 'teal'), 'activity'),
-    kpi(translate('活跃会话'), live.length ? String(live.reduce((s, r) => s + r.latest.active_sessions, 0)) : '—', translate('TCP 连接 + UDP 会话'), spark(sessions, 'blue'), 'arrows'),
-    kpi(translate('探测往返中位数'), millis(median(live.map(r => r.latest.probe_latency_us))), translate('节点到目标的探测，不含客户端一段'), spark(latency, 'violet'), 'gauge'),
-    kpi(translate('节点在线'), `${live.length} / ${enrolled.length}`, probed ? msg`目标可用 ${healthy} / ${probed}` : translate('尚无目标探测'), fleet, 'server'));
-  const events = telemetry.events.slice().reverse(), attention = rows.filter(r => r.status[2] === 'down' || r.status[2] === 'partial').length;
+    kpi(translate('实时吞吐'), liveRate == null ? '—' : bits(liveRate), kpiDelta(liveRate, before?.rate, bits), barSpark(rate, 'teal'), 'activity', msg`多跳流量逐跳计入 · 峰值 ${peak == null ? '—' : bits(peak)}`),
+    kpi(translate('活跃会话'), liveSessions == null ? '—' : String(liveSessions), kpiDelta(liveSessions, before?.sessions, count), barSpark(sessions, 'blue'), 'arrows', translate('TCP 连接 + UDP 会话')),
+    kpi(translate('探测往返中位数'), millis(liveLatency), kpiDelta(liveLatency, before?.latency, millis, { percent: false, lowerIsBetter: true }), barSpark(latency, 'violet'), 'gauge', translate('节点到目标的探测，不含客户端一段')),
+    kpi(translate('节点在线'), `${live.length} / ${enrolled.length}`, fleetNote, fleet, 'server'));
   const pill = $('#status-pill'); pill.className = `status-pill ${rows.some(r => r.status[2] === 'down') ? 'red' : attention ? 'orange' : 'green'}`;
   pill.textContent = !enrolled.length ? translate('等待节点注册') : !live.length ? translate('等待节点回报') : attention ? msg`${attention} 个节点需要关注` : msg`控制在线 · ${live.length} 个节点`;
   if (!live.length) pill.className = 'status-pill neutral';
@@ -538,8 +642,7 @@ async function renderOverview() {
   if (past) {
     const c = past.connections, percent = v => `${+(v * 100).toFixed(1)}%`;
     trends = el('div', undefined, 'chart-grid overview-trends');
-    trends.append(chartPanel(translate('吞吐'), msg`最近 ${rangeLabel} · 全部节点合计，多跳流量逐跳计入。`, trendChart(rate, 'teal', bits, past.end, null, past.span)),
-      chartPanel(translate('真实连接成功率'), c.attempts ? msg`最近 ${rangeLabel} · ${connSummary(c)}。只计 TCP 到目标的连接。` : msg`最近 ${rangeLabel}没有到目标的 TCP 连接。`, trendChart(past.success, 'up', percent, past.end, 1, past.span)),
+    trends.append(chartPanel(translate('真实连接成功率'), c.attempts ? msg`最近 ${rangeLabel} · ${connSummary(c)}。只计 TCP 到目标的连接。` : msg`最近 ${rangeLabel}没有到目标的 TCP 连接。`, trendChart(past.success, 'up', percent, past.end, 1, past.span)),
       chartPanel(translate('平均会话'), msg`最近 ${rangeLabel} · 全部节点合计。`, trendChart(sessions, 'blue', v => String(Math.round(v)), past.end, null, past.span)),
       chartPanel(translate('探测往返（中位数）'), msg`最近 ${rangeLabel} · 各节点平均值的中位数。`, trendChart(latency, 'violet', millis, past.end, null, past.span)));
   }
@@ -557,6 +660,24 @@ async function renderOverview() {
   if (!events.length) list.append(el('li', translate('最近 24 小时没有目标故障、配置拒绝或节点离线。'), 'incident-empty'));
   [...open, ...events.filter(e => !open.includes(e))].slice(0, 6).forEach(e => { const item = el('li', undefined, `incident ${e.severity}`), text = el('div'); text.append(Object.assign(el('div', eventMessage(e), 'incident-message'), { title: e.message }), el('div', byId.get(e.node_id)?.name || e.node_id, 'subline')); item.append(el('i'), text, el('time', ago(e.at_ms, now))); list.append(item); });
   incidents.append(board, list);
+  // Second row: the 24-hour connection dial beside what needs attention, each node's traffic and the throughput line.
+  // Without history the cards fall back to the last 15 minutes of telemetry, and say so.
+  const dial = daily && connectionDial(daily, now), dialPanel = panel(translate('连接 · 最近 24 小时'), dial ? msg`到目标的真实 TCP 连接，按本地时间每 15 分钟一列，每点约 ${dial.unit.toLocaleString(getLanguage())} 次。` : undefined), shownRange = past ? rangeLabel : overviewRanges[0][1];
+  const dialBody = el('div', undefined, 'dial-body'); dialBody.append(...(dial ? [dial.chart, dial.key] : [empty(translate('暂无监控历史'), translate('控制器没有提供监控历史，暂时无法显示最近 24 小时。'))])); dialPanel.classList.add('dial-panel'); dialPanel.append(dialBody);
+  const attentionPanel = panel(translate('需要关注'), undefined, el('span', open.length ? msg`${open.length} 个问题仍未恢复` : translate('全部已恢复'), `attention-count${open.length ? '' : ' clear'}`));
+  // Bytes each node forwarded over the range: history bins, or for 15 minutes the measured deltas in its chart bins.
+  const forwarded = new Map(rows.map(r => [r.node.id, history ? (history.nodes.find(n => n.id === r.node.id)?.bins.reduce((s, b) => s + b.forwarded_bytes, 0) ?? 0) : Math.round(r.series.rate.reduce((s, v) => s + (v ?? 0), 0) * BIN_MS / 1000)]));
+  const trafficHead = el('div', undefined, 'traffic-head'), trafficTitle = el('h3', translate('各节点流量'));
+  trafficTitle.append(el('span', ' · ' + msg`最近 ${shownRange}`)); trafficHead.append(trafficTitle);
+  if (rows.length) trafficHead.append(button(translate('全部节点 ↓'), () => nodePanel.scrollIntoView({ behavior: 'smooth', block: 'start' }), 'text-link'));
+  attentionPanel.classList.add('attention-panel'); attentionPanel.append(attentionCallout(open, events, byId, now), trafficHead, rows.length ? trafficRank(rows, forwarded) : el('p', translate('还没有节点'), 'fine'));
+  // The dashed line is the same time yesterday, from the 7-day history; 7 days back from a week has no data to compare.
+  const start = past ? history.start_ms : now - SPAN_MS, step = past ? history.step_ms : BIN_MS, rateAt = hourlyRate(range === '7d' ? null : week);
+  const compare = rate.map((_, i) => rateAt(start + i * step + step / 2 - 86_400_000)), compared = compare.some(v => v != null), key = el('div', undefined, 'legend chart-key');
+  for (const [name, cls] of [[translate('吞吐'), 'teal'], ...(compared ? [[translate('昨日同时段'), 'compare']] : [])]) { const item = el('span'); item.append(el('i', undefined, cls), name); key.append(item); }
+  const throughputPanel = chartPanel(translate('吞吐'), msg`最近 ${shownRange} · 全部节点合计，多跳流量逐跳计入。`, trendChart(rate, 'teal', bits, past ? past.end : now, null, past ? past.span : SPAN_MS, compared ? compare : null));
+  throughputPanel.querySelector('.panel-head').append(key); throughputPanel.classList.add('throughput-panel');
+  const overviewGrid = el('div', undefined, 'overview-grid'); overviewGrid.append(dialPanel, attentionPanel, throughputPanel);
   // The map sits beside what needs attention; without nodes the path graph takes its place.
   const globe = rows.length ? globePanel(rows, topology, now) : null, bento = el('div', undefined, 'overview-bento'); bento.append(globe || graphPanel, incidents);
   const waiting = el('div', undefined, 'overview-waiting');
@@ -582,7 +703,7 @@ async function renderOverview() {
   const filter = () => { state.overviewFilter = search.value; const q = search.value.trim().toLowerCase(); trs.forEach((tr, i) => tr.classList.toggle('hidden', !!q && !keys[i].includes(q))); };
   search.addEventListener('input', filter); filter();
   nodePanel.append(rows.length ? t : empty(translate('还没有节点'), translate('注册节点并启动 Agent 后，这里会显示实时吞吐、资源和事件。'), button(translate('前往节点管理'), () => navigate('nodes'))));
-  if (state.view === 'overview') { $('#page-tools').replaceChildren(picker); $('#content').replaceChildren(...(!live.length ? [waiting] : []), kpis, bento, ...(globe ? [graphPanel] : []), ...(trends ? [trends] : []), nodePanel); }
+  if (state.view === 'overview') { $('#page-tools').replaceChildren(picker); $('#content').replaceChildren(...(!live.length ? [waiting] : []), kpis, overviewGrid, bento, ...(globe ? [graphPanel] : []), ...(trends ? [trends] : []), nodePanel); }
 }
 function locationName(location) { const city = cityFor(location); return city ? (getLanguage() === 'en' ? city[2] : city[1]) : location?.name || ''; }
 // One globe per page load: it keeps its rotation and selection across the 5-second refreshes.

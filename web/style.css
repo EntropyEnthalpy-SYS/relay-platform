@@ -409,6 +409,15 @@ footer > span:first-child { flex-shrink: 0; color: var(--text-2); }
 .spark.teal { --spark: var(--teal); }
 .spark.blue { --spark: var(--blue-fill); }
 .spark.violet { --spark: var(--violet); }
+.spark-compare { fill: none; stroke: var(--muted); stroke-width: 1.3; stroke-dasharray: 5 4; stroke-linejoin: round; vector-effect: non-scaling-stroke; opacity: .85; }
+/* Summary bars: each card's own companion colour; a bin without reports stays a grey tick. */
+.kpi > .spark.bars { height: 34px; }
+.spark.bars .bar { fill: var(--spark); }
+.spark.bars .bar-gap { fill: var(--line-strong); }
+.kpi-delta { color: var(--muted); }
+.kpi-delta b { font-weight: 600; color: var(--tile-ink, var(--text)); font-variant-numeric: tabular-nums; }
+.kpi-delta b.better { color: var(--green); }
+.kpi-delta b.worse { color: var(--amber); }
 .fleet-bar { display: flex; gap: 5px; height: 10px; }
 .fleet-bar i { flex: 1; border-radius: 999px; background: var(--line-strong); }
 .fleet-bar i.up { background: var(--stripes), var(--green-fill); }
@@ -575,7 +584,67 @@ dialog::backdrop { background: rgba(4, 6, 10, .5); -webkit-backdrop-filter: blur
 .overview-waiting strong { font-size: 13px; }
 .overview-waiting p { margin: 4px 0 0; font-size: 12.5px; color: var(--text-2); max-width: 70em; }
 .overview-waiting button { flex-shrink: 0; }
+/* Three trend charts sit in one row on a laptop screen. */
 .overview-trends { margin-bottom: 16px; }
+.chart-grid.overview-trends { grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+/* Second row: the 24-hour connection dial on the left, what needs attention and throughput stacked on the right. */
+.overview-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
+.overview-grid > .panel { margin: 0; min-width: 0; display: flex; flex-direction: column; }
+.overview-grid > .dial-panel { grid-row: span 2; }
+.dial-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; padding: 4px 18px 20px; }
+.dial { display: block; width: 100%; max-width: 540px; height: auto; aspect-ratio: 1; overflow: visible; font-family: var(--sans); }
+.dial .ok { fill: var(--teal); }
+.dial .fail { fill: var(--red-fill); }
+.dial .idle { fill: var(--line-strong); }
+.dial-face { fill: none; stroke: var(--line-strong); stroke-width: 1; }
+.dial-tick { stroke: var(--line-strong); stroke-width: 1; }
+.dial-tick.major { stroke: var(--muted); }
+.dial-hour { font-family: var(--mono); font-size: 11px; fill: var(--muted); }
+.dial-alert { font-family: var(--mono); font-size: 11px; font-weight: 600; fill: var(--red); }
+.dial-hand { stroke: var(--text-2); stroke-width: 1.3; stroke-linecap: round; }
+.dial-hand-dot { fill: var(--text); }
+.dial-value { font-size: 38px; font-weight: 600; letter-spacing: -.02em; fill: var(--text); font-variant-numeric: tabular-nums; }
+.dial-label { font-size: 13px; fill: var(--muted); }
+.dial-key { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 26px; font-size: 12.5px; color: var(--muted); }
+.dial-key span { display: inline-flex; align-items: center; gap: 7px; }
+.dial-key i { width: 8px; height: 8px; border-radius: 50%; background: var(--line-strong); }
+.dial-key i.ok { background: var(--teal); }
+.dial-key i.fail { background: var(--red-fill); }
+.dial-key b { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
+.attention-count { font-size: 12.5px; font-weight: 550; color: var(--amber); white-space: nowrap; }
+.attention-count.clear { color: var(--green); }
+/* The open problem as a tinted callout: red for critical, amber for a warning, green when nothing is open. */
+.attention-callout { --call: var(--red); --call-fill: var(--red-fill); --call-soft: var(--red-soft); display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 12px; margin: 0 18px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--call) 38%, var(--line)); border-radius: 10px; background: var(--call-soft); }
+.attention-callout.warning { --call: var(--amber); --call-fill: var(--amber-fill); --call-soft: var(--amber-soft); }
+.attention-callout.clear { --call: var(--green); --call-fill: var(--green-fill); --call-soft: var(--green-soft); }
+.attention-callout > i { width: 9px; height: 9px; margin-top: 5px; border-radius: 50%; background: var(--call-fill); box-shadow: 0 0 0 3px color-mix(in srgb, var(--call-fill) 28%, transparent); }
+.attention-text { min-width: 0; }
+.attention-title { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.attention-title strong { font-size: 13.5px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.attention-title time { flex-shrink: 0; font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+.attention-text p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin: 4px 0 0; font-size: 12.5px; line-height: 1.55; color: var(--text-2); overflow-wrap: anywhere; }
+.attention-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin-top: 12px; }
+.attention-actions button { min-height: 30px; padding: 4px 14px; font-size: 12.5px; }
+.attention-more { font-size: 12px; color: var(--text-2); }
+.traffic-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px 4px; }
+.traffic-head h3 { margin: 0; font-size: 13px; font-weight: 550; color: var(--text); }
+.traffic-head h3 span { font-weight: 400; color: var(--muted); }
+.text-link { min-height: 0; padding: 3px 4px; border: 0; background: none; box-shadow: none; color: var(--text-2); font-size: 12.5px; font-weight: 500; }
+.text-link:hover { background: none; color: var(--accent); }
+.traffic-rank { list-style: none; margin: 0; padding: 2px 18px 14px; }
+.traffic-rank li { display: grid; grid-template-columns: 1.4em minmax(0, 9em) minmax(0, 7em) minmax(48px, 1fr) 6.5em; align-items: center; gap: 12px; padding: 6px 0; font-size: 12.5px; }
+.traffic-index { font-family: var(--mono); color: var(--muted); }
+.traffic-rank strong { font-weight: 500; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.traffic-place { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.traffic-bar { height: 6px; border-radius: 999px; background: var(--track); overflow: hidden; }
+.traffic-bar i { display: block; height: 100%; border-radius: inherit; background: var(--muted); }
+.traffic-bar i.up { background: var(--teal); }
+.traffic-bar i.partial { background: var(--amber-fill); }
+.traffic-bar i.down { background: var(--red-fill); }
+.traffic-value { font-family: var(--mono); font-size: 12px; color: var(--text); text-align: right; white-space: nowrap; }
+.throughput-panel .chart-body { flex: 1; }
+.legend i.teal { background: var(--teal); }
+.legend i.compare { height: 0; border-radius: 0; background: none; border-top: 2px dashed var(--muted); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; color: var(--muted); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 12px; height: 4px; border-radius: 2px; background: var(--line-strong); }
@@ -638,6 +707,7 @@ dialog::backdrop { background: rgba(4, 6, 10, .5); -webkit-backdrop-filter: blur
 body[data-overview-layout="workspace"] .kpi > .spark { height: 30px; }
 body[data-overview-layout="workspace"] .metric-value { font-size: 22px; }
 body[data-overview-layout="workspace"] .chain-wrap { min-height: 200px; }
+body[data-overview-layout="workspace"] .dial { max-width: 400px; }
 body[data-overview-layout="workspace"] td { padding-top: 9px; padding-bottom: 9px; }
 
 /* Alerts */
@@ -795,6 +865,9 @@ td .clip { display: block; max-width: 340px; overflow: hidden; text-overflow: el
   .pagebar .language-toggle { width: auto; padding: 5px 9px; }
 }
 @media (max-width: 1100px) {
+  .overview-grid { grid-template-columns: minmax(0, 1fr); }
+  .overview-grid > .dial-panel { grid-row: auto; }
+  .dial { max-width: 380px; }
   .kpis, .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric:nth-child(odd)::before, .kpi:nth-child(odd)::before { display: none; }
   .metric:nth-child(n+3), .kpi:nth-child(n+3) { border-top: 1px solid var(--line); }
@@ -840,6 +913,10 @@ td .clip { display: block; max-width: 340px; overflow: hidden; text-overflow: el
   .metric-value, .kpi .metric-value { font-size: 21px; }
   .metric-foot { font-size: 11px; }
   .incidents { grid-template-columns: 1fr; }
+  .traffic-rank li { grid-template-columns: 1.2em minmax(0, 1fr) minmax(40px, 1fr) 6.5em; gap: 10px; }
+  .traffic-place { display: none; }
+  .attention-callout { margin: 0 14px; }
+  .traffic-head, .traffic-rank { padding-left: 14px; padding-right: 14px; }
   .panel-head { padding: 13px 14px; flex-wrap: wrap; }
   .panel-head > input[type="search"] { max-width: none; }
   .panel-body { padding: 14px; }
