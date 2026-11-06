@@ -71,11 +71,56 @@ for (const [link, expected] of [
 for (const link of ['http://h:1', 'socks5://h', 'socks5://h:70000', 'ss://YWVzLTI1Ni1nY206cHc@h:1/?plugin=obfs-local', `ss://${Buffer.from('rc4-md5:pw').toString('base64url')}@h:1`])
   assert.throws(() => links.parseUpstreamLink(link), undefined, link);
 
+// The subscription form edits a link in place and rotation can keep the old link for a grace period.
+async function subscriptionDialogs() {
+  class Node {
+    constructor(tag, text = '') { Object.assign(this, { tag, textContent: text, children: [], value: '', classList: { toggle() {} }, firstChild: { nodeValue: text } }); }
+    append(...items) { for (const item of items) if (item && typeof item === 'object') { item.parentElement = this; this.children.push(item); } }
+    addEventListener() {} remove() {} closest() { return this.parentElement || this; }
+    inputs() { return this.children.flatMap(c => [...(c.name ? [c] : []), ...c.inputs()]); }
+  }
+  const calls = []; let handler, form;
+  const context = {
+    state: { actor: { id: 'admin', role: 'system_admin' } }, Date, roleNames: {}, MAX_UPSTREAMS: 8, shadowsocksMethods: [['aes-256-gcm', 'aes-256-gcm']],
+    translate: text => text, msg: (parts, ...values) => parts.reduce((out, part, i) => out + values[i - 1] + part),
+    el: (tag, text) => new Node(tag, text), button: text => new Node('button', text),
+    field(parent, name, text, value = '', type = 'text', required = true) { const label = new Node('label', text), input = new Node('input'); Object.assign(input, { name, type, required, value: String(value ?? '') }); label.append(input); parent.append(label); return input; },
+    select(parent, name, text, options, value) { return context.field(parent, name, text, value ?? options[0][0], 'select'); },
+    textarea(parent, name, text, value = '') { return context.field(parent, name, text, value, 'textarea', false); },
+    submit(value, _label, callback) { form = value; handler = callback; }, modal() {}, notify() {}, $: () => ({ close() {} }),
+    api: async (path, options) => { calls.push([path, options]); return path === '/users' ? [] : { token: 'rsub_new', subscription: { name: 'phone', previous_token_expires_at_ms: null } }; },
+    renderSubscriptions: async () => {}, showSubscriptionToken() {}, timestamp: String, subscriptionFormats: { clash: 'Clash', sing_box: 'sing-box' },
+    number: (data, key) => data.get(key) === '' || data.get(key) === null ? null : Number(data.get(key)),
+  };
+  vm.createContext(context);
+  vm.runInContext(['parseUpstreamLink', 'upstreamEditor', 'subscriptionSources', 'subscriptionForm', 'rotateSubscription'].map(definition).join('\n') + '\nthis.edit = subscriptionForm; this.rotate = rotateSubscription;', context);
+  const send = async (changes = {}) => { const values = new Map(form.inputs().map(i => [i.name, i.value])); for (const [k, v] of Object.entries(changes)) values.set(k, v); await handler({ get: k => values.has(k) ? values.get(k) : null }); return calls.at(-1); };
+  const item = { id: 's1', name: 'phone', format: 'clash', allow_sources: ['203.0.113.0/24'], template: { name_prefix: 'Relay ', host: 'edge.example', node_tags: ['prod', 'hk'], udp: false, upstreams: [{ name: 'Home', type: 'socks5', server: 'home.example', port: 1080, username: 'a', password: 'b' }] } };
+  await context.edit(item);
+  let [path, options] = await send();
+  assert.equal(path, '/subscriptions/s1'); assert.equal(options.method, 'PUT');
+  assert.deepEqual(JSON.parse(JSON.stringify(options.body)), { name: 'phone', format: 'clash', template: item.template, allow_sources: ['203.0.113.0/24'] }, 'an unchanged edit must send the stored settings and keep the expiry');
+  [, options] = await send({ days: '30', allow_sources: '198.51.100.7\n2001:db8::/32, 2001:db8::9' });
+  assert.equal(options.body.expires_in_days, 30);
+  assert.deepEqual([...options.body.allow_sources], ['198.51.100.7/32', '2001:db8::/32', '2001:db8::9/128']);
+  await context.edit();
+  [path, options] = await send({ name: 'tablet' });
+  assert.equal(path, '/subscriptions'); assert.equal(options.method, 'POST');
+  assert.equal(options.body.expires_in_days, 365); assert.deepEqual([...options.body.allow_sources], []);
+  await context.rotate(item);
+  [path, options] = await send({ grace_minutes: '15' });
+  assert.equal(path, '/subscriptions/s1/rotate'); assert.deepEqual({ ...options.body }, { grace_minutes: 15 });
+  [, options] = await send({ grace_minutes: '' });
+  assert.deepEqual({ ...options.body }, { grace_minutes: 0 });
+}
+
 (async () => {
+  await subscriptionDialogs();
   for (const [name, view] of [['renderOverview', 'overview'], ['renderNodes', 'nodes'], ['renderTemplates', 'templates'], ['renderSubscriptions', 'subscriptions'], ['renderUsage', 'usage'], ['renderUsers', 'users'], ['renderAccount', 'account'], ['renderAudit', 'audit'], ['renderAlerts', 'alerts'], ['renderCapabilities', 'capabilities'], ['renderFeatures', 'features'], ['renderBudgets', 'budgets'], ['renderRecovery', 'recovery'], ['renderTopology', 'topology'], ['renderRules', 'rules'], ['renderHealth', 'health'], ['renderTickets', 'tickets'], ['renderCommerce', 'commerce'], ['renderAnnouncements', 'announcements'], ['renderDns', 'dns']]) {
     for (const transition of ['navigation', 'logout', 'account change']) await lateResponse(name, view, transition);
   }
   await expiredResponse(false); await expiredResponse(true); await expiredResponse(false, '/auth/login');
   console.log('UI runtime passed: unknown/zero telemetry, byte conservation, repeated timestamps, counter reset and 57 delayed-response cases across all 19 API-backed pages');
   console.log('Authentication runtime passed: current-session expiry, old-session expiry and failed sign-in');
+  console.log('Subscription dialogs passed: in-place edit keeps settings and expiry, source lists, create defaults and rotation grace');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -62,13 +62,33 @@ export function eventMessage(event) {
     // Written by the controller's alert loop for node silence, not by telemetry.
     node_silent: [/^节点 (.+) 已 (\d+) 秒无回报$/, match => msg`节点 ${match[1]} 已 ${match[2]} 秒无回报`],
     node_reported: [/^节点 (.+) 恢复回报$/, match => msg`节点 ${match[1]} 恢复回报`],
+    // Written by the alert loop's threshold rules.
+    cpu_high: [/^节点 (.+) CPU 使用率 (\d+)%，连续 (\d+) 次回报不低于 (\d+)%$/, match => msg`节点 ${match[1]} CPU 使用率 ${match[2]}%，连续 ${match[3]} 次回报不低于 ${match[4]}%`],
+    cpu_normal: [/^节点 (.+) CPU 使用率回落到 (\d+)%$/, match => msg`节点 ${match[1]} CPU 使用率回落到 ${match[2]}%`],
+    memory_high: [/^节点 (.+) 内存使用率 (\d+)%，连续 (\d+) 次回报不低于 (\d+)%$/, match => msg`节点 ${match[1]} 内存使用率 ${match[2]}%，连续 ${match[3]} 次回报不低于 ${match[4]}%`],
+    memory_normal: [/^节点 (.+) 内存使用率回落到 (\d+)%$/, match => msg`节点 ${match[1]} 内存使用率回落到 ${match[2]}%`],
+    expiry_soon: [/^节点 (.+) 将于 (.+) 到期$/, match => msg`节点 ${match[1]} 将于 ${match[2]} 到期`],
+    expiry_passed: [/^节点 (.+) 已于 (.+) 到期$/, match => msg`节点 ${match[1]} 已于 ${match[2]} 到期`],
+    expiry_cleared: [/^节点 (.+) 的到期时间已延后或取消$/, match => msg`节点 ${match[1]} 的到期时间已延后或取消`],
+    budget_near: [/^共享额度 (.+) 已占用 (\d+)%，阈值 (\d+)%$/, match => msg`共享额度 ${match[1]} 已占用 ${match[2]}%，阈值 ${match[3]}%`],
+    budget_below: [/^共享额度 (.+) 占用回落到 (\d+)%$/, match => msg`共享额度 ${match[1]} 占用回落到 ${match[2]}%`],
+    budget_exhausted: [/^共享额度 (.+) 已用尽，无法再分配流量$/, match => msg`共享额度 ${match[1]} 已用尽，无法再分配流量`],
+    budget_available: [/^共享额度 (.+) 恢复可分配$/, match => msg`共享额度 ${match[1]} 恢复可分配`],
+    dns_failed: [/^DNS 记录 (.+?) 同步失败：([\s\S]*)$/, match => msg`DNS 记录 ${match[1]} 同步失败：${match[2]}`],
+    dns_synced: [/^DNS 记录 (.+) 同步恢复$/, match => msg`DNS 记录 ${match[1]} 同步恢复`],
+    rule_disabled: [/^此项告警已停用$/, () => t('此项告警已停用')],
   };
   const pattern = Object.hasOwn(patterns, event.kind) ? patterns[event.kind] : null;
   const match = pattern && String(event.message).match(pattern[0]);
   return match ? pattern[1](match) : event.message;
 }
 // An alert keeps the text of the event that opened or resolved it; its key prefix names the source.
-const incidentKinds = { target: ['target_down', 'target_recovered', 'target_removed'], config: ['config_rejected', 'config_recovered'], node: ['node_silent', 'node_reported'] };
+const expiry = ['expiry_soon', 'expiry_passed', 'expiry_cleared', 'rule_disabled'];
+const incidentKinds = {
+  target: ['target_down', 'target_recovered', 'target_removed'], config: ['config_rejected', 'config_recovered'], node: ['node_silent', 'node_reported'],
+  cpu: ['cpu_high', 'cpu_normal', 'rule_disabled'], memory: ['memory_high', 'memory_normal', 'rule_disabled'], expiring: expiry, expired: expiry,
+  budget_near: ['budget_near', 'budget_below', 'rule_disabled'], budget_exhausted: ['budget_exhausted', 'budget_available', 'rule_disabled'], dns: ['dns_failed', 'dns_synced', 'rule_disabled'],
+};
 export function incidentMessage(incident) {
   const source = String(incident.key).split(':')[0];
   for (const kind of Object.hasOwn(incidentKinds, source) ? incidentKinds[source] : []) {

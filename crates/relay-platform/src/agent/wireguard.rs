@@ -86,6 +86,7 @@ impl Applier {
         let mut report = Report {
             ready: true,
             probes: true,
+            preshared_keys: true,
             public_key: self
                 .key
                 .as_deref()

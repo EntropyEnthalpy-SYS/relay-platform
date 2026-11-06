@@ -44,6 +44,8 @@ fn options(origin: &str, node: &str, token: Option<PathBuf>) -> AgentOptions {
         ca_certificate: None,
         tls_directory: None,
         poll_interval: Duration::from_millis(50),
+        controller_addresses: vec![],
+        controller_proxy: None,
     }
 }
 fn question(name: &str, kind: RecordType) -> Message {

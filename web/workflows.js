@@ -94,6 +94,9 @@ export function forwardingDiagram(snapshot, root, draft = null) {
     if (rule.inbound_shadowsocks?.udp_over_tcp && (rule.protocol === 'udp' || [...ancestors].some(k => rules.get(k)?.protocol === 'udp'))) issue('uot_tcp', name);
     const path = new Set([...ancestors, key]), targets = service === 'forward' ? rule.targets || [] : [];
     if (service === 'forward' && !targets.length) issue('targets', name);
+    // A paused target takes no new sessions, not even as a last resort.
+    const now = Date.now(), paused = target => !!target.paused && (target.paused_until_ms == null || now < target.paused_until_ms);
+    if (targets.length && targets.every(paused)) issue('paused', name);
     const children = targets.slice(0, 32).map(target => {
       const address = target.address || '', parsed = splitEndpoint(address);
       if (!parsed || parsed.wildcard) issue('target', name);
@@ -108,6 +111,7 @@ export function forwardingDiagram(snapshot, root, draft = null) {
         address, protocol: rule.protocol,
         transport: target.websocket ? (target.tls ? 'WSS' : 'WS') : target.tls ? 'TLS' : '',
         weight: target.weight ?? 1, priority: target.priority ?? 0, draining: !!target.draining,
+        paused: paused(target), pausedUntil: paused(target) ? target.paused_until_ms ?? null : null,
         next: target.via ? walk(target.via, path, depth + 1) : { kind: 'target', address },
       };
     });

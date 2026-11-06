@@ -2,7 +2,7 @@ use crate::{
     budget::{Budget, BudgetOverview, BudgetUpdate, NewBudget},
     model::*,
     store::{Actor, Rejection, Role, Scope, Store, reject},
-    subscription::{Format, Template},
+    subscription::{Format, Settings, Template},
 };
 use axum::{
     Json, Router,
@@ -331,6 +331,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/nodes/{node}/health", get(node_health))
         .route("/api/v1/nodes/{node}/rollback", post(rollback))
+        .route(
+            "/api/v1/nodes/{node}/rules/{rule}/share",
+            get(share_gateway_rule),
+        )
         .route("/api/v1/nodes/{node}/drain", post(drain))
         .route("/api/v1/topology", get(topology))
         .route("/api/v1/telemetry", get(telemetry))
@@ -372,7 +376,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/subscriptions/{id}",
-            get(subscription).delete(delete_subscription),
+            get(subscription)
+                .put(update_subscription)
+                .delete(delete_subscription),
         )
         .route(
             "/api/v1/subscriptions/{id}/rotate",
@@ -477,6 +483,7 @@ pub fn router(state: AppState) -> Router {
                 .put(update_dns_provider)
                 .delete(delete_dns_provider),
         )
+        .route("/api/v1/dns/providers/{id}/test", post(test_dns_provider))
         .route("/api/v1/dns/zones", get(dns_zones).post(create_dns_zone))
         .route(
             "/api/v1/dns/zones/{id}",
@@ -744,11 +751,12 @@ struct LoginResponse {
     user: Actor,
     expires_in_seconds: u32,
 }
-/// The address a sign-in attempt counts against. Behind a reverse proxy on this
-/// host every request arrives from loopback, so the visitor is the last
-/// X-Forwarded-For entry, the one the proxy appended. Earlier entries are the
-/// client's own claims, and headers from remote peers are never trusted.
-fn login_source(peer: SocketAddr, headers: &HeaderMap) -> String {
+/// The client's address, for sign-in limits and subscription source lists.
+/// Behind a reverse proxy on this host every request arrives from loopback,
+/// so the visitor is the last X-Forwarded-For entry, the one the proxy
+/// appended. Earlier entries are the client's own claims, and headers from
+/// remote peers are never trusted.
+fn client_address(peer: SocketAddr, headers: &HeaderMap) -> std::net::IpAddr {
     let forwarded = headers
         .get_all("x-forwarded-for")
         .iter()
@@ -757,8 +765,8 @@ fn login_source(peer: SocketAddr, headers: &HeaderMap) -> String {
         .and_then(|value| value.rsplit(',').next())
         .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok());
     match forwarded {
-        Some(visitor) if peer.ip().is_loopback() => visitor.to_string(),
-        _ => peer.ip().to_string(),
+        Some(visitor) if peer.ip().is_loopback() => visitor,
+        _ => peer.ip(),
     }
 }
 async fn login(
@@ -777,7 +785,7 @@ async fn login(
         }
         .into());
     }
-    if !state.login_allowed(login_source(peer, &headers)) {
+    if !state.login_allowed(client_address(peer, &headers).to_string()) {
         return Err(Rejection {
             status: 429,
             message: "too many login attempts; retry in five minutes".into(),
@@ -2218,6 +2226,28 @@ struct NewSubscription {
     /// subscription for another user in their scope.
     #[serde(default)]
     user_id: Option<String>,
+    #[serde(default)]
+    allow_sources: Vec<ipnet::IpNet>,
+}
+/// The editable settings; omitted `template` and `allow_sources` are reset
+/// to their defaults, an omitted `expires_in_days` keeps the expiry.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubscriptionUpdate {
+    name: String,
+    format: Format,
+    #[serde(default)]
+    template: Template,
+    #[serde(default)]
+    expires_in_days: Option<u32>,
+    #[serde(default)]
+    allow_sources: Vec<ipnet::IpNet>,
+}
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rotation {
+    #[serde(default)]
+    grace_minutes: u32,
 }
 fn default_subscription_days() -> u32 {
     365
@@ -2239,9 +2269,10 @@ async fn create_subscription(
         db.create_subscription(
             &actor,
             input.user_id.as_deref(),
-            &input.name,
-            input.format,
-            input.template,
+            Settings {
+                allow_sources: input.allow_sources,
+                ..Settings::new(&input.name, input.format, input.template)
+            },
             input.expires_in_days,
         )
     })
@@ -2259,13 +2290,47 @@ async fn subscription(
         database(state.store, move |db| db.subscription(&actor, &id)).await?,
     ))
 }
+async fn update_subscription(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<SubscriptionUpdate>,
+) -> ApiResult<crate::subscription::SubscriptionView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_subscription(
+                &actor,
+                &id,
+                Settings {
+                    allow_sources: input.allow_sources,
+                    ..Settings::new(&input.name, input.format, input.template)
+                },
+                input.expires_in_days,
+            )
+        })
+        .await?,
+    ))
+}
+/// The body is optional: `{"grace_minutes": n}` keeps the replaced link
+/// working for n minutes; none, or 0, ends it at once.
 async fn rotate_subscription(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> ApiResult<serde_json::Value> {
-    let (subscription, token) =
-        database(state.store, move |db| db.rotate_subscription(&actor, &id)).await?;
+    let input: Rotation = if body.iter().all(u8::is_ascii_whitespace) {
+        Rotation::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|error| Rejection {
+            status: 400,
+            message: format!("invalid rotation request: {error}"),
+        })?
+    };
+    let (subscription, token) = database(state.store, move |db| {
+        db.rotate_subscription(&actor, &id, input.grace_minutes)
+    })
+    .await?;
     Ok(Json(
         serde_json::json!({"subscription": subscription, "token": token}),
     ))
@@ -2289,6 +2354,7 @@ async fn preview_subscription(
 }
 async fn public_subscription(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -2319,8 +2385,11 @@ async fn public_subscription(
         _ => "http",
     };
     let url = host.map(|host| format!("{scheme}://{host}/sub/{token}"));
-    let mut rendered =
-        database(state.store, move |db| db.render_public_subscription(&token)).await?;
+    let source = client_address(peer, &headers);
+    let mut rendered = database(state.store, move |db| {
+        db.render_public_subscription(&token, source)
+    })
+    .await?;
     if let Some(url) = url {
         rendered = rendered.with_update_url(&url);
     }
@@ -2336,7 +2405,85 @@ async fn public_subscription(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    if let Some(value) = rendered
+        .usage
+        .header()
+        .and_then(|value| HeaderValue::from_str(&value).ok())
+    {
+        response
+            .headers_mut()
+            .insert("subscription-userinfo", value);
+    }
     Ok(response)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareQuery {
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    name: Option<String>,
+}
+/// A protocol gateway rule's share link and its QR code. The link holds the
+/// same client material as the rule's subscription export: whoever may read
+/// the node's configuration may read it.
+async fn share_gateway_rule(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((node, rule)): Path<(String, String)>,
+    Query(query): Query<ShareQuery>,
+) -> ApiResult<serde_json::Value> {
+    let config = database(state.store, move |db| db.config(&actor, &node, None)).await?;
+    let Some(rule) = config.rules.into_iter().find(|r| r.id == rule) else {
+        return Err(Rejection {
+            status: 404,
+            message: "rule not found".into(),
+        }
+        .into());
+    };
+    let Some(gateway) = &rule.protocol_gateway else {
+        return Err(Rejection {
+            status: 409,
+            message: "rule is not a managed protocol gateway".into(),
+        }
+        .into());
+    };
+    let name = query.name.unwrap_or_else(|| rule.name.clone());
+    if name.len() > 120 {
+        return Err(Rejection {
+            status: 400,
+            message: "share link name must be at most 120 bytes".into(),
+        }
+        .into());
+    }
+    let link = gateway
+        .share_link(
+            &query.host,
+            query.port.unwrap_or(gateway.listen.port()),
+            name.trim(),
+        )
+        .map_err(|error| Rejection {
+            status: 400,
+            message: format!("{error:#}"),
+        })?;
+    let Some(uri) = link else {
+        return Err(Rejection {
+            status: 409,
+            message: format!(
+                "{} has no widely supported share link; use a subscription",
+                gateway.protocol.kind()
+            ),
+        }
+        .into());
+    };
+    let qr = qrcode::QrCode::new(uri.as_bytes())
+        .map_err(|e| ApiError(anyhow::anyhow!("QR encoding failed: {e}")))?
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(200, 200)
+        .build();
+    Ok(Json(serde_json::json!({"uri": uri, "qr_svg": qr})))
 }
 
 async fn mptcp_diagnostics(
@@ -3227,6 +3374,9 @@ struct NewDnsProvider {
     #[serde(default)]
     endpoint: Option<String>,
     token: String,
+    /// 0 or absent: no provider minimum.
+    #[serde(default)]
+    min_ttl: u32,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3237,6 +3387,9 @@ struct UpdateDnsProvider {
     endpoint: Option<String>,
     #[serde(default)]
     token: Option<String>,
+    /// 0 removes the minimum; absent leaves it unchanged.
+    #[serde(default)]
+    min_ttl: Option<u32>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3246,6 +3399,11 @@ struct NewDnsZone {
     mode: crate::dns::ZoneMode,
     #[serde(default)]
     min_keep: u32,
+    #[serde(default = "default_failover_confirm")]
+    failover_confirm_secs: u32,
+}
+fn default_failover_confirm() -> u32 {
+    crate::dns::DEFAULT_FAILOVER_CONFIRM_SECS
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3256,6 +3414,8 @@ struct UpdateDnsZone {
     mode: Option<crate::dns::ZoneMode>,
     #[serde(default)]
     min_keep: Option<u32>,
+    #[serde(default)]
+    failover_confirm_secs: Option<u32>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3324,10 +3484,43 @@ async fn create_dns_provider(
         .unwrap_or_else(|| "https://api.cloudflare.com/client/v4".into());
     Ok(Json(
         database(state.store, move |db| {
-            db.create_dns_provider(&actor, &input.name, input.kind, &endpoint, &input.token)
+            db.create_dns_provider(
+                &actor,
+                &input.name,
+                input.kind,
+                &endpoint,
+                &input.token,
+                input.min_ttl,
+            )
         })
         .await?,
     ))
+}
+/// Checks the stored credentials by listing the zones they can see.
+async fn test_dns_provider(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::dns::ProviderTest> {
+    // Check the system-administrator scope before touching provider secrets.
+    let provider = database(state.store, move |db| {
+        db.dns_provider(&actor, &id)?;
+        db.dns_provider_raw(&id)
+    })
+    .await?;
+    let client = crate::dns::Cloudflare::new(crate::dns::http_client(), &provider)
+        .or_else(|error| reject(400, format!("{error:#}")))
+        .map_err(ApiError)?;
+    let (zones, truncated) = client
+        .zones()
+        .await
+        .or_else(|error| reject(502, format!("DNS provider test failed: {error:#}")))
+        .map_err(ApiError)?;
+    Ok(Json(crate::dns::ProviderTest {
+        ok: true,
+        zones,
+        truncated,
+    }))
 }
 async fn update_dns_provider(
     State(state): State<AppState>,
@@ -3343,6 +3536,7 @@ async fn update_dns_provider(
                 input.name.as_deref(),
                 input.endpoint.as_deref(),
                 input.token.as_deref(),
+                input.min_ttl,
             )
         })
         .await?,
@@ -3359,19 +3553,23 @@ async fn delete_dns_provider(
 async fn dns_zones(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
-) -> ApiResult<Vec<crate::dns::Zone>> {
+) -> ApiResult<Vec<crate::dns::ZoneView>> {
+    let zones = database(state.store.clone(), move |db| db.dns_zones(&actor)).await?;
+    let runtime = state.store.dns_runtime();
     Ok(Json(
-        database(state.store, move |db| db.dns_zones(&actor)).await?,
+        zones
+            .into_iter()
+            .map(|zone| runtime.zone_view(zone))
+            .collect(),
     ))
 }
 async fn dns_zone(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
-) -> ApiResult<crate::dns::Zone> {
-    Ok(Json(
-        database(state.store, move |db| db.dns_zone(&actor, &id)).await?,
-    ))
+) -> ApiResult<crate::dns::ZoneView> {
+    let zone = database(state.store.clone(), move |db| db.dns_zone(&actor, &id)).await?;
+    Ok(Json(state.store.dns_runtime().zone_view(zone)))
 }
 async fn create_dns_zone(
     State(state): State<AppState>,
@@ -3386,6 +3584,7 @@ async fn create_dns_zone(
                 &input.name,
                 input.mode,
                 input.min_keep,
+                input.failover_confirm_secs,
             )
         })
         .await?,
@@ -3405,6 +3604,7 @@ async fn update_dns_zone(
                 input.name.as_deref(),
                 input.mode,
                 input.min_keep,
+                input.failover_confirm_secs,
             )
         })
         .await?,
@@ -3612,6 +3812,10 @@ async fn delete_dns_record(
         move |db| db.dns_zone(&actor, &zone_id)
     })
     .await?;
+    // A sync pass of the zone must not recreate the record between the
+    // provider deletion and the local one.
+    let lock = store.dns_runtime().zone_lock(&zone.id);
+    let _pass = lock.lock().await;
     if zone.mode == crate::dns::ZoneMode::Apply
         && let Some(remote_id) = record.provider_record_id.as_deref()
     {
@@ -3621,7 +3825,7 @@ async fn delete_dns_record(
         })
         .await?;
         let client =
-            crate::dns::Cloudflare::new(reqwest::Client::new(), &provider).map_err(ApiError)?;
+            crate::dns::Cloudflare::new(crate::dns::http_client(), &provider).map_err(ApiError)?;
         client
             .delete(&zone.name, remote_id)
             .await
@@ -3642,7 +3846,7 @@ async fn reconcile_dns_zone(
         move |db| db.dns_zone(&actor, &id)
     })
     .await?;
-    let result = crate::dns::reconcile(&state.store, &reqwest::Client::new(), &id)
+    let result = crate::dns::reconcile(&state.store, &crate::dns::http_client(), &id)
         .await
         .map_err(ApiError)?;
     Ok(Json(result))
@@ -3684,7 +3888,7 @@ async fn dns_ddns(
         .map(|_| ())
     })
     .await?;
-    let result = crate::dns::reconcile(&state.store, &reqwest::Client::new(), &zone_id)
+    let result = crate::dns::reconcile(&state.store, &crate::dns::http_client(), &zone_id)
         .await
         .map_err(ApiError)?;
     Ok(Json(result))
@@ -3797,14 +4001,23 @@ async fn delete_wireguard_member(
     .await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
+/// The body is optional: an empty one keeps the device's preshared-key choice.
 async fn rekey_wireguard_device(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
+    body: axum::body::Bytes,
 ) -> ApiResult<crate::wireguard::Issued> {
+    let input = match body.iter().all(u8::is_ascii_whitespace) {
+        true => crate::wireguard::RekeyInput::default(),
+        false => serde_json::from_slice(&body).map_err(|error| Rejection {
+            status: 400,
+            message: format!("invalid request body: {error}"),
+        })?,
+    };
     Ok(Json(
         database(state.store, move |db| {
-            db.rekey_wireguard_device(&actor, &id)
+            db.rekey_wireguard_device(&actor, &id, input)
         })
         .await?,
     ))

@@ -42,6 +42,19 @@ assert.equal(readOnly.box.all().filter(x => x.tag === 'button').length, 0, 'read
 const rootOnly = context.make({ onSelect() {}, canSelect: item => item.node_id === 'n1' }); rootOnly.update(model, 'validated');
 assert.equal(rootOnly.box.all().filter(x => x.tag === 'button').length, 1, 'single-rule review must not pretend to edit downstream rules');
 
+// Paused targets are marked on their branch; with all of them paused the path warns.
+const pausedRule = (targets) => ({ nodes: [nodes[0]], configs: [{ node_id: 'n1', rules: [{ id: 'p', listen: '0.0.0.0:20000', advertise: 'node0.example:20000', protocol: 'tcp', tenant_id: 't', targets }] }] });
+const later = Date.now() + 3_600_000;
+const partly = context.forwardingDiagram(pausedRule([{ address: 'a.example:1', paused: true, paused_until_ms: later }, { address: 'b.example:1' }, { address: 'c.example:1', paused: true, paused_until_ms: Date.now() - 1 }]), { node_id: 'n1', rule_id: 'p' });
+assert.deepEqual(partly.root.children.map(c => c.paused), [true, false, false], 'an elapsed pause no longer counts');
+assert.equal(partly.root.children[0].pausedUntil, later);
+assert.ok(!partly.issues.some(i => i.code === 'paused'));
+const shown = context.make(); shown.update(partly, 'saved');
+const texts = shown.box.all().map(x => x.textContent).join('\n');
+assert.ok(texts.includes(context.msg(['暂停至 ', ''], new Date(later).toLocaleString(context.getLanguage(), { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }))), 'the paused branch is not marked');
+const all = context.forwardingDiagram(pausedRule([{ address: 'a.example:1', paused: true }, { address: 'b.example:1', paused: true }]), { node_id: 'n1', rule_id: 'p' });
+assert.ok(all.issues.some(i => i.code === 'paused'), 'a rule whose targets are all paused must warn');
+
 let opened, writable = true;
 const dispatch = { ...loadI18n(), state: { nodes: [], selectedNode: 'wrong', config: { node_id: 'wrong', rules: [] } },
   canWrite: () => writable,

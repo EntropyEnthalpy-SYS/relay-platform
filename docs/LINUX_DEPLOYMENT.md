@@ -65,13 +65,15 @@ sudo python3 scripts/relay_deploy.py start --role controller
 sudo python3 scripts/relay_deploy.py enable --role controller
 ```
 
-控制器首次管理员密码仍在私有状态目录的 `admin-password.secret`。远程管理应按现有 Caddy 示例配置 HTTPS；非回环监听须明确设置 `behind_tls_proxy:true`。安装器不自动配置域名、证书或反向代理。
+控制器首次管理员密码仍在私有状态目录的 `admin-password.secret`；忘记密码时可停止控制器后用 `relay reset-password` 离线重置，见 [RECOVERY.md](RECOVERY.md#离线重置用户密码)。远程管理应按现有 Caddy 示例配置 HTTPS；非回环监听须明确设置 `behind_tls_proxy:true`。安装器不自动配置域名、证书或反向代理。
 
 创建节点后，把一次性注册令牌保存为私有普通文件。`agent.json`：
 
 ```json
 {"controller":"https://relay.example.com","node_id":"实际节点ID","poll_seconds":5}
 ```
+
+无法直连控制器的服务器可增加 `"controller_addresses":["中转主机:端口", …]`（按顺序尝试，最多 8 个，生成重复的 `--controller-address`）或 `"controller_proxy":"http://代理:端口"`（HTTP CONNECT 代理，生成 `--controller-proxy`），二者只能选一。TLS 仍校验控制器域名；`controller` 必须是域名，带端口时中转须监听同一端口；代理地址不接受账号密码，不支持 SOCKS。用法和用现有 Relay 规则做中转的步骤见 [部署指南](DEPLOYMENT_GUIDE_EN.md#servers-that-cannot-reach-the-panel-directly)。
 
 ```sh
 sudo python3 scripts/relay_deploy.py install \

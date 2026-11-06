@@ -715,6 +715,223 @@ async fn rejected_config_keeps_the_running_user_share_on_a_managed_agent() {
     stop_server(server_instance).await;
 }
 
+/// An HTTPS front for `relay.test` signed by the test CA that forwards the
+/// decrypted bytes to the controller, like the reverse proxy before a real
+/// panel. A TCP relay or proxy in front of it never sees plaintext.
+async fn https_front(certs: &topology_tls::Certificates, controller: SocketAddr) -> SocketAddr {
+    use tokio_rustls::rustls::{
+        self,
+        pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    };
+    let chain =
+        CertificateDer::pem_slice_iter(&std::fs::read(certs.root.join("server/cert.pem")).unwrap())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let key =
+        PrivateKeyDer::from_pem_slice(&std::fs::read(certs.root.join("server/key.pem")).unwrap())
+            .unwrap();
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(chain, key)
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            tokio::spawn(async move {
+                let (Ok(mut secure), Ok(mut plain)) = (
+                    acceptor.accept(stream).await,
+                    TcpStream::connect(controller).await,
+                ) else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut secure, &mut plain).await;
+            });
+        }
+    });
+    address
+}
+/// A minimal HTTP CONNECT proxy that records each requested authority and
+/// tunnels it to `upstream`, as a forward proxy resolving that name would.
+async fn connect_proxy(
+    upstream: SocketAddr,
+) -> (SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                while !head.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    if client.read_exact(&mut byte).await.is_err() || head.len() > 4096 {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head);
+                let mut words = head.split_whitespace();
+                if words.next() != Some("CONNECT") {
+                    let _ = client.write_all(b"HTTP/1.1 405 CONNECT only\r\n\r\n").await;
+                    return;
+                }
+                log.lock()
+                    .unwrap()
+                    .push(words.next().unwrap_or("").to_owned());
+                let Ok(mut server) = TcpStream::connect(upstream).await else {
+                    return;
+                };
+                if client
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .is_ok()
+                {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                }
+            });
+        }
+    });
+    (address, seen)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_reaches_an_https_controller_through_a_relay_address_or_proxy_with_tls_verified() {
+    let certs = topology_tls::Certificates::new();
+    let ca = certs.root.join("root/ca.pem");
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let front = https_front(&certs, s.address).await;
+    let echo = tcp_echo().await;
+    let node = |name: &str| {
+        let (node, token) = control.create_node(&admin, "default", name).unwrap();
+        let mut r = rule(echo.address, Protocol::Tcp);
+        r.id = name.into();
+        control.set_config(&admin, &node.id, 0, vec![r]).unwrap();
+        let path = temp.path().join(format!("{name}.secret"));
+        write_secret(&path, token.as_bytes()).unwrap();
+        (node.id, path)
+    };
+    let state = |id: &str| {
+        control
+            .nodes(&admin)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == id)
+            .unwrap()
+    };
+    async fn applied(state: impl Fn() -> relay_platform::store::Node) {
+        timeout(Duration::from_secs(10), async {
+            while state().applied_revision != 1 {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("agent never applied revision 1");
+    }
+    // `.test` names never resolve, so reaching relay.test at all proves the
+    // configured address (or proxy) carried the connection.
+    let origin = "https://relay.test";
+
+    // TLS checks the controller's name, not the relay: the front presents
+    // relay.test's certificate, so an agent expecting another name refuses
+    // it and never enrolls.
+    let (mismatch, token) = node("mismatch");
+    let mut opts = options("https://other.test", &mismatch, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_addresses = vec![front.to_string()];
+    let error = timeout(
+        Duration::from_secs(10),
+        agent::run(
+            Store::open(&temp.path().join("mismatch.db")).unwrap(),
+            opts,
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").to_lowercase().contains("certificate"),
+        "{error:#}"
+    );
+    assert!(!state(&mismatch).enrolled);
+
+    // Ordered fallback: an address that refuses connections, then the relay.
+    let (relayed, token) = node("relayed");
+    let mut opts = options(origin, &relayed, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_addresses = vec![free_address().to_string(), front.to_string()];
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        Store::open(&temp.path().join("relayed.db")).unwrap(),
+        opts,
+        stop.clone(),
+    ));
+    applied(|| state(&relayed)).await;
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // An HTTP CONNECT proxy carries every request; TLS runs inside the tunnel.
+    let (proxy, seen) = connect_proxy(front).await;
+    let (proxied, token) = node("proxied");
+    let mut opts = options(origin, &proxied, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(format!("http://{proxy}"));
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        Store::open(&temp.path().join("proxied.db")).unwrap(),
+        opts,
+        stop.clone(),
+    ));
+    applied(|| state(&proxied)).await;
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let seen = seen.lock().unwrap().clone();
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|a| a == "relay.test:443"), "{seen:?}");
+
+    // Settings that cannot work are refused before any request.
+    let base = controller_url(origin).unwrap();
+    let relay = vec![front.to_string()];
+    for (url, addresses, proxy) in [
+        // Without a host name the URL is dialed directly, bypassing addresses.
+        ("https://203.0.113.9", relay.clone(), None),
+        // An explicit URL port is always dialed; the relay port must match it.
+        ("https://relay.test:8443", relay.clone(), None),
+        (origin, relay.clone(), Some("http://127.0.0.1:3128")),
+        (origin, vec![], Some("socks5://127.0.0.1:1080")),
+        (origin, vec![], Some("http://user:secret@127.0.0.1:3128")),
+        (origin, vec!["relay.test".to_string()], None),
+    ] {
+        assert!(
+            agent::controller_client(&controller_url(url).unwrap(), &addresses, proxy, None)
+                .is_err(),
+            "{url} {addresses:?} {proxy:?}"
+        );
+    }
+    assert!(agent::controller_client(&base, &relay, None, None).is_ok());
+    stop_server(s).await;
+}
+
 async fn server(db: Store, bind: SocketAddr) -> Server {
     let stop = CancellationToken::new();
     let router = api::router(AppState::new(db).with_shutdown(stop.clone()));
@@ -761,6 +978,8 @@ fn options(origin: &str, node: &str, token: Option<PathBuf>) -> AgentOptions {
         ca_certificate: None,
         tls_directory: None,
         poll_interval: Duration::from_millis(50),
+        controller_addresses: vec![],
+        controller_proxy: None,
     }
 }
 async fn wait_applied(db: &Store, actor: &Actor, revision: u64) {

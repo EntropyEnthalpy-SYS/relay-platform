@@ -45,9 +45,29 @@ relay restore --backup ./backups/controller.sqlite \
 relay server --state ./state/restored-controller --listen 127.0.0.1:8080
 ```
 
-恢复结果包含 `controller.sqlite`、`recovery.log` 和 `recovery.log.head.json`。原输入不会被修改。管理员密码和会话以数据库状态为准，恢复不会重新创建初始密码文件；原密码必须另行掌握。不要同时重启旧控制器与新实例。
+恢复结果包含 `controller.sqlite`、`recovery.log` 和 `recovery.log.head.json`。原输入不会被修改。管理员密码和会话以数据库状态为准，恢复不会重新创建初始密码文件；原密码必须另行掌握，忘记时见下节的离线重置。不要同时重启旧控制器与新实例。
 
 报告中的 `backup_sequence` 是备份检查点，`restored_sequence` 是最新完整提交，`replayed_transactions` 是重放数量。`budget_allocation_paused` 反映恢复后的真实状态：源控制器未隔离时，完整重放后可以继续分配；源控制器原本隔离时仍保持隔离。`ignored_uncommitted_tail:true` 表示日志末尾存在未完成提交，其内容没有被当作已确认事务重放。
+
+## 离线重置用户密码
+
+忘记密码、又没有另一位系统管理员可以在“用户与权限”中重置时，可在控制器所在服务器上离线重置。控制器必须先停止：
+
+```sh
+sudo python3 scripts/relay_deploy.py stop --role controller
+sudo -u relayp-controller /opt/relay-platform/roles/controller/current/relay reset-password \
+  --state /var/lib/relay-platform/controller --user admin
+sudo cat /var/lib/relay-platform/controller/admin-password.secret
+sudo python3 scripts/relay_deploy.py start --role controller
+```
+
+手动部署时把 `--state` 换成 `relay server` 使用的状态目录（缺省 `state/controller`，也接受 `--state-dir`）；`relay server` 用 `--recovery-log` 指定了其他日志时，这里须传同一路径。
+
+- 生成新的随机密码（64 个十六进制字符），写入 `STATE/<用户名>-password.secret`（`admin` 即首次启动用的 `admin-password.secret`），权限 0600，先写临时文件再原子替换；可用 `--password-file` 指定其他路径。密码不在终端、日志或 JSON 输出中出现。
+- 该用户的全部登录会话和 API 令牌立即作废；其他用户不受影响。两步验证设置不变：已启用两步验证的账户登录时仍需动态码或恢复码。
+- 输出 JSON 包含 `user`、`user_id`、`password_file`、`revoked_sessions`、`revoked_api_tokens` 和 `disabled`。`disabled:true` 表示该账户已被停用，换了密码仍不能登录。
+- 与 `relay server` 使用同一实例锁和恢复日志锁；控制器运行时拒绝执行（`stop the controller before resetting a password`），不修改数据库，也不生成密码文件。必须以数据库文件的所有者身份运行（安装器部署时为 `relayp-controller`）；以 root 等其他身份运行会被拒绝，避免留下服务账户无法打开的数据库或日志文件。
+- 改动与管理员在面板中重置密码相同，作为一次普通事务写入审计（操作者 `local-cli`，动作 `user.password`）和恢复日志。之后用较早的备份执行 `relay restore` 会重放这次重置：恢复出的状态使用新密码，旧会话和令牌仍然无效。
 
 ## 写入和拒绝条件
 

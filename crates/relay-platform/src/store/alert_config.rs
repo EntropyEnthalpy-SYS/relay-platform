@@ -37,6 +37,26 @@ pub struct AlertNode {
     pub last_seen_ms: Option<i64>,
     /// Enrolled and allowed to run, so silence is a problem.
     pub watched: bool,
+    /// The node profile's expiry.
+    pub expires_at_ms: Option<i64>,
+    /// The newest report's resources; none before a report reaches this controller.
+    pub usage: Option<crate::telemetry::Sample>,
+}
+/// A shared budget as the alert worker sees it.
+pub struct AlertBudget {
+    pub tenant_id: String,
+    pub id: String,
+    pub name: String,
+    pub limit_bytes: u64,
+    pub committed_bytes: u64,
+}
+/// A managed DNS record as the alert worker sees it. Records belong to no tenant.
+pub struct AlertDnsRecord {
+    pub id: String,
+    /// The record's name and type.
+    pub name: String,
+    /// Why the last provider sync failed.
+    pub error: Option<String>,
 }
 
 impl Store {
@@ -62,24 +82,74 @@ impl Store {
         let now = now_ms();
         rows.into_iter()
             .map(|(id, name, last_seen_ms, enrolled, tenant_id)| {
-                let active = node_profiles::read(&conn, &id)?.settings.lifecycle(now)
-                    == crate::node::NodeLifecycle::Active;
+                let profile = node_profiles::read(&conn, &id)?.settings;
+                let active = profile.lifecycle(now) == crate::node::NodeLifecycle::Active;
                 Ok(AlertNode {
                     tenant_id,
                     watched: enrolled && active,
                     last_seen_ms: self.4.current(&id, last_seen_ms, String::new()).0,
+                    expires_at_ms: profile.expires_at_ms,
+                    usage: self.4.latest(&id),
                     id,
                     name,
                 })
             })
             .collect()
     }
+    pub fn alert_budgets(&self) -> Result<Vec<AlertBudget>> {
+        let conn = self.0.lock().unwrap();
+        let mut q =
+            conn.prepare("SELECT tenant_id,id,name,limit_bytes,committed_bytes FROM budgets")?;
+        let rows = q
+            .query_map([], |r| {
+                Ok(AlertBudget {
+                    tenant_id: r.get(0)?,
+                    id: r.get(1)?,
+                    name: r.get(2)?,
+                    limit_bytes: r.get(3)?,
+                    committed_bytes: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows)
+    }
+    /// Read straight from the stored records, so the alert worker depends
+    /// on nothing but their id, name, type and last error.
+    pub fn alert_dns_records(&self) -> Result<Vec<AlertDnsRecord>> {
+        #[derive(Deserialize)]
+        struct Stored {
+            id: String,
+            name: String,
+            #[serde(rename = "type", default)]
+            record_type: String,
+            #[serde(default)]
+            last_error: Option<String>,
+        }
+        let conn = self.0.lock().unwrap();
+        let mut q = conn.prepare("SELECT value FROM metadata WHERE key GLOB 'dns_record:*'")?;
+        let rows: Vec<String> = q
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(rows
+            .iter()
+            .filter_map(|value| serde_json::from_str::<Stored>(value).ok())
+            .map(|record| AlertDnsRecord {
+                name: format!("{} {}", record.name, record.record_type)
+                    .trim_end()
+                    .to_string(),
+                id: record.id,
+                error: record.last_error,
+            })
+            .collect())
+    }
     pub fn alert_overview(&self, actor: &Actor) -> Result<serde_json::Value> {
         if actor.role == Role::Viewer {
             return reject(403, "tenant administrator required");
         }
         let conn = self.0.lock().unwrap();
-        let settings: Settings = read(&conn, SETTINGS)?;
+        let mut settings: Settings = read(&conn, SETTINGS)?;
+        // Shown in full, with the defaults of rules never saved.
+        settings.rules.get_or_insert_default();
         let channels: Vec<Channel> = read(&conn, CHANNELS)?;
         let admin = actor.role == Role::SystemAdmin;
         let views: Vec<ChannelView> = channels
@@ -95,7 +165,10 @@ impl Store {
             .collect();
         let mut incidents = self.5.snapshot();
         if !admin {
-            let mut q = conn.prepare("SELECT id FROM nodes WHERE tenant_id=?1")?;
+            // The tenant's nodes and budgets, by owner key.
+            let mut q = conn.prepare(
+                "SELECT id FROM nodes WHERE tenant_id=?1 UNION ALL SELECT 'budget:'||id FROM budgets WHERE tenant_id=?1",
+            )?;
             let nodes: std::collections::HashSet<String> = q
                 .query_map([&actor.tenant_id], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
@@ -124,25 +197,44 @@ impl Store {
         if !channel.enabled || !channels.iter().any(|c| c == channel) {
             return Ok(false);
         }
-        for (node, tenant) in ownership {
+        for (owner, tenant) in ownership {
             if channel.tenant_id.as_ref().is_some_and(|t| t != tenant) {
                 return Ok(false);
             }
-            let current: Option<String> = conn
-                .query_row("SELECT tenant_id FROM nodes WHERE id=?1", [node], |r| {
+            let current: Option<String> = if let Some(id) = owner.strip_prefix("budget:") {
+                conn.query_row("SELECT tenant_id FROM budgets WHERE id=?1", [id], |r| {
                     r.get(0)
                 })
-                .optional()?;
+                .optional()?
+            } else if owner.starts_with("dns_record:") {
+                // The owner key is the record's metadata key; records have no tenant.
+                conn.query_row("SELECT '' FROM metadata WHERE key=?1", [owner], |r| {
+                    r.get(0)
+                })
+                .optional()?
+            } else {
+                conn.query_row("SELECT tenant_id FROM nodes WHERE id=?1", [owner], |r| {
+                    r.get(0)
+                })
+                .optional()?
+            };
             if current.as_ref() != Some(tenant) {
                 return Ok(false);
             }
         }
         Ok(true)
     }
-    pub fn set_alert_settings(&self, actor: &Actor, settings: Settings) -> Result<()> {
+    /// Saves the settings; without `rules` the saved rules stay.
+    pub fn set_alert_settings(&self, actor: &Actor, mut settings: Settings) -> Result<()> {
         require_admin(actor)?;
+        if let Some(Err(error)) = settings.rules.as_ref().map(|r| r.validate()) {
+            return reject(400, error.to_string());
+        }
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
+        if settings.rules.is_none() {
+            settings.rules = read::<Settings>(&tx, SETTINGS)?.rules;
+        }
         write(&tx, SETTINGS, &settings)?;
         audit(
             &tx,

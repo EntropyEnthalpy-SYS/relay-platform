@@ -315,6 +315,10 @@ mod tests {
             listen_port: None,
             via: None,
             public_key: None,
+            enabled: true,
+            allowed_ips: vec![],
+            keepalive: None,
+            preshared_key: None,
             updated_at_ms: 0,
         }
     }
@@ -326,6 +330,7 @@ mod tests {
             mtu: 1420,
             listen_port: 51820,
             relay: None,
+            dns: vec![],
             updated_at_ms: 0,
         }
     }

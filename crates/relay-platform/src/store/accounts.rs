@@ -499,14 +499,73 @@ impl Store {
     }
 }
 
-/// Ends every interactive session and API token of a user.
-pub(super) fn end_credentials(tx: &Transaction<'_>, user_id: &str) -> Result<()> {
-    tx.execute("DELETE FROM sessions WHERE user_id=?1", [user_id])?;
-    tx.execute(
+/// What `relay reset-password` changed; never contains the password.
+#[derive(Debug, Serialize)]
+pub struct OfflinePasswordReset {
+    pub user_id: String,
+    pub username: String,
+    /// A disabled account keeps its new password but still cannot sign in.
+    pub disabled: bool,
+    pub revoked_sessions: usize,
+    pub revoked_api_tokens: usize,
+}
+
+impl Store {
+    /// Offline recovery of a forgotten password, run while the controller is
+    /// stopped: sets `username`'s password and ends all of that user's
+    /// sessions and API tokens in one audited transaction, so the recovery
+    /// log replays it like an administrator's reset. The second factor, if
+    /// any, is unchanged.
+    pub fn reset_password_offline(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> Result<OfflinePasswordReset> {
+        let hash = password_hash(password)?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let user: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT id,disabled FROM users WHERE username=?1",
+                [username],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((user_id, disabled)) = user else {
+            anyhow::bail!("user {username} does not exist");
+        };
+        tx.execute(
+            "UPDATE users SET password_hash=?1 WHERE id=?2",
+            params![hash, user_id],
+        )?;
+        let (revoked_sessions, revoked_api_tokens) = end_credentials(&tx, &user_id)?;
+        audit(
+            &tx,
+            "local-cli",
+            "user.password",
+            &user_id,
+            r#"{"source":"reset-password"}"#,
+        )?;
+        tx.commit()?;
+        Ok(OfflinePasswordReset {
+            user_id,
+            username: username.into(),
+            disabled,
+            revoked_sessions,
+            revoked_api_tokens,
+        })
+    }
+}
+
+/// Ends every interactive session and API token of a user; returns how many
+/// of each were removed.
+pub(super) fn end_credentials(tx: &Transaction<'_>, user_id: &str) -> Result<(usize, usize)> {
+    let sessions = tx.execute("DELETE FROM sessions WHERE user_id=?1", [user_id])?;
+    let tokens = tx.execute(
         "DELETE FROM metadata WHERE key GLOB 'api_token:*' AND json_extract(value,'$.user_id')=?1",
         [user_id],
     )?;
-    Ok(())
+    Ok((sessions, tokens))
 }
 /// Same scope rule as session revocation: tenant writers manage their tenant,
 /// and only system administrators manage system administrators.

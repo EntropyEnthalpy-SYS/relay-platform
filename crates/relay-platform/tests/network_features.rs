@@ -424,6 +424,8 @@ async fn dns_negative_cache_expires_and_failed_target_falls_back() {
         via: None,
         prewarm: None,
         draining: false,
+        paused: false,
+        paused_until_ms: None,
     });
     *dns.ips.lock().unwrap() = vec![];
     engine.apply(c).await.unwrap();

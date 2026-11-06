@@ -54,6 +54,9 @@ pub enum Balance {
     /// Lowest probe latency among healthy targets of the best priority. Exchange
     /// probes measure through any downstream relays to the final service.
     LowestLatency,
+    /// Uniform choice among the usable targets of the best priority; weights
+    /// are ignored. Agents older than this value reject the configuration.
+    Random,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,8 +88,24 @@ pub struct Target {
     /// older than this field accept the config.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub draining: bool,
+    /// Hard pause: no new sessions at all, not even as a last resort;
+    /// existing sessions continue and health probes keep running. Omitted
+    /// when false so agents older than this field accept the config.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
+    /// With `paused`, the pause ends at this time (ms since the Unix epoch,
+    /// on the agent's clock) without a new revision. None pauses until the
+    /// operator resumes the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_until_ms: Option<i64>,
 }
 pub const MAX_PREWARM: u16 = 32;
+impl Target {
+    /// Whether the target takes no new sessions at `now` (ms since the epoch).
+    pub fn paused_at(&self, now: i64) -> bool {
+        self.paused && self.paused_until_ms.is_none_or(|until| now < until)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -693,6 +712,13 @@ impl Rule {
             ensure!(
                 target.weight > 0 && target.weight <= 1000,
                 "target weight must be 1..1000"
+            );
+            // An elapsed time stays valid: the agent simply uses the target again.
+            ensure!(
+                target
+                    .paused_until_ms
+                    .is_none_or(|until| target.paused && until > 0),
+                "paused_until_ms requires paused and a positive time"
             );
             ensure!(targets.insert(&target.address), "duplicate target");
             ensure!(

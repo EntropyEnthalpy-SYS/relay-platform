@@ -3,8 +3,10 @@
 use super::*;
 use crate::node::NodeLifecycle;
 use crate::subscription::{
-    self, Candidate, Format, MAX_SUBSCRIPTIONS, Rendered, Subscription, SubscriptionView, Template,
+    self, Candidate, MAX_ROTATION_GRACE_MINUTES, MAX_SUBSCRIPTIONS, Rendered, Settings,
+    Subscription, SubscriptionView, Usage,
 };
+use std::net::IpAddr;
 
 fn record_key(id: &str) -> String {
     format!("subscription:{id}")
@@ -24,6 +26,16 @@ fn validate_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+fn validate_settings(settings: &Settings) -> Result<()> {
+    validate_name(&settings.name)?;
+    if let Err(error) = settings.validate() {
+        return reject(400, format!("{error:#}"));
+    }
+    Ok(())
+}
+fn expiry(days: u32) -> Result<i64> {
+    subscription::expiry(now_ms(), days).or_else(|error| reject(400, format!("{error:#}")))
 }
 fn read_record(conn: &Connection, id: &str) -> Result<Option<Subscription>> {
     let value: Option<String> = conn
@@ -87,15 +99,11 @@ impl Store {
         &self,
         actor: &Actor,
         owner: Option<&str>,
-        name: &str,
-        format: Format,
-        template: Template,
+        settings: Settings,
         expires_in_days: u32,
     ) -> Result<(SubscriptionView, String)> {
-        validate_name(name)?;
-        if let Err(error) = template.validate() {
-            return reject(400, format!("{error:#}"));
-        }
+        validate_settings(&settings)?;
+        let expires_at_ms = expiry(expires_in_days)?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let owner = owner_actor(&tx, actor, owner)?;
@@ -115,14 +123,17 @@ impl Store {
             id: Uuid::new_v4().to_string(),
             tenant_id: owner.tenant_id.clone(),
             owner_id: owner.id.clone(),
-            name: name.into(),
-            format,
-            template,
+            name: settings.name,
+            format: settings.format,
+            template: settings.template,
             token_hash: subscription::token_hash(&value),
             created_at_ms: now_ms(),
-            expires_at_ms: Some(subscription::expiry(now_ms(), expires_in_days)?),
+            expires_at_ms: Some(expires_at_ms),
             last_used_ms: None,
             uses: 0,
+            allow_sources: settings.allow_sources,
+            previous_token_hash: None,
+            previous_token_expires_at_ms: None,
         };
         write_record(&tx, &record)?;
         tx.execute(
@@ -169,22 +180,81 @@ impl Store {
         Ok(SubscriptionView::from(&record))
     }
 
+    /// Changes a link's settings in place: the token, owner, creation time
+    /// and usage counters stay. `expires_in_days` restarts the expiry from
+    /// now; `None` keeps the current one. Editing needs the rights that
+    /// managing the link and creating one for its owner need.
+    pub fn update_subscription(
+        &self,
+        actor: &Actor,
+        id: &str,
+        settings: Settings,
+        expires_in_days: Option<u32>,
+    ) -> Result<SubscriptionView> {
+        validate_settings(&settings)?;
+        let expires_at_ms = expires_in_days.map(expiry).transpose()?;
+        let mut conn = self.0.lock().unwrap();
+        let tx = conn.transaction()?;
+        let mut record = read_record(&tx, id)?.context("subscription not found")?;
+        manager(&tx, actor, &record)?;
+        if actor.id != record.owner_id {
+            super::accounts::require_user_manager(&tx, actor, &record.owner_id)?;
+        }
+        record.name = settings.name;
+        record.format = settings.format;
+        record.template = settings.template;
+        record.allow_sources = settings.allow_sources;
+        if let Some(expiry) = expires_at_ms {
+            record.expires_at_ms = Some(expiry);
+        }
+        write_record(&tx, &record)?;
+        audit(
+            &tx,
+            &actor.id,
+            "subscription.update",
+            &record.id,
+            &serde_json::json!({"owner_id":record.owner_id,"format":record.format,"name":record.name}).to_string(),
+        )?;
+        tx.commit()?;
+        Ok(SubscriptionView::from(&record))
+    }
+
+    /// Issues a new token. With `grace_minutes` above zero the replaced token
+    /// keeps working until the grace period ends; only the token this
+    /// rotation replaces is kept, so an earlier one stops at once.
     pub fn rotate_subscription(
         &self,
         actor: &Actor,
         id: &str,
+        grace_minutes: u32,
     ) -> Result<(SubscriptionView, String)> {
+        if grace_minutes > MAX_ROTATION_GRACE_MINUTES {
+            return reject(
+                400,
+                format!("rotation grace period must be 0..={MAX_ROTATION_GRACE_MINUTES} minutes"),
+            );
+        }
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut record = read_record(&tx, id)?.context("subscription not found")?;
         manager(&tx, actor, &record)?;
         let old = record.token_hash.clone();
+        if let Some(previous) = record.previous_token_hash.take() {
+            tx.execute("DELETE FROM metadata WHERE key=?1", [index_key(&previous)])?;
+        }
+        record.previous_token_expires_at_ms = None;
+        if grace_minutes > 0 {
+            record.previous_token_hash = Some(old);
+            record.previous_token_expires_at_ms =
+                Some(now_ms().saturating_add(i64::from(grace_minutes) * 60_000));
+        } else {
+            tx.execute("DELETE FROM metadata WHERE key=?1", [index_key(&old)])?;
+        }
         let value = subscription::token();
         record.token_hash = subscription::token_hash(&value);
         record.last_used_ms = None;
         record.uses = 0;
         write_record(&tx, &record)?;
-        tx.execute("DELETE FROM metadata WHERE key=?1", [index_key(&old)])?;
         tx.execute(
             "INSERT INTO metadata(key,value) VALUES(?1,?2)",
             params![index_key(&record.token_hash), record.id],
@@ -194,7 +264,8 @@ impl Store {
             &actor.id,
             "subscription.rotate",
             &record.id,
-            &serde_json::json!({"owner_id":record.owner_id}).to_string(),
+            &serde_json::json!({"owner_id":record.owner_id,"grace_minutes":grace_minutes})
+                .to_string(),
         )?;
         tx.commit()?;
         Ok((SubscriptionView::from(&record), value))
@@ -206,10 +277,9 @@ impl Store {
         let record = read_record(&tx, id)?.context("subscription not found")?;
         manager(&tx, actor, &record)?;
         tx.execute("DELETE FROM metadata WHERE key=?1", [record_key(id)])?;
-        tx.execute(
-            "DELETE FROM metadata WHERE key=?1",
-            [index_key(&record.token_hash)],
-        )?;
+        for hash in std::iter::once(&record.token_hash).chain(&record.previous_token_hash) {
+            tx.execute("DELETE FROM metadata WHERE key=?1", [index_key(hash)])?;
+        }
         audit(
             &tx,
             &actor.id,
@@ -234,7 +304,9 @@ impl Store {
 
     /// Public rendering by opaque token. The token is independent of a login
     /// session and can be rotated or deleted without touching the account.
-    pub fn render_public_subscription(&self, token: &str) -> Result<Rendered> {
+    /// `source` is the client address; a source outside the link's
+    /// `allow_sources` gets the same answer as an unknown token.
+    pub fn render_public_subscription(&self, token: &str, source: IpAddr) -> Result<Rendered> {
         if !token.starts_with(subscription::TOKEN_PREFIX)
             || token.len() != subscription::TOKEN_PREFIX.len() + 64
             || !token[subscription::TOKEN_PREFIX.len()..]
@@ -258,13 +330,25 @@ impl Store {
             .map(|id| read_record(&tx, id))
             .transpose()?
             .flatten()
-            .filter(|record| record.token_hash == hash)
         else {
             return reject(401, "subscription token invalid or expired");
         };
+        if !record.accepts(&hash, now_ms()) {
+            if record.previous_token_hash.as_deref() == Some(hash.as_str()) {
+                // The grace period is over: forget the old token for good.
+                let mut updated = record.clone();
+                updated.previous_token_hash = None;
+                updated.previous_token_expires_at_ms = None;
+                write_record(&tx, &updated)?;
+                tx.execute("DELETE FROM metadata WHERE key=?1", [index_key(&hash)])?;
+                tx.commit()?;
+            }
+            return reject(401, "subscription token invalid or expired");
+        }
         if record
             .expires_at_ms
             .is_some_and(|expiry| expiry <= now_ms())
+            || !record.permits_source(source)
         {
             return reject(401, "subscription token invalid or expired");
         }
@@ -280,7 +364,7 @@ impl Store {
             return reject(401, "subscription token invalid or expired");
         }
         let candidates = candidates(&tx, &record)?;
-        let rendered = subscription::render(record.format, &record.template, &candidates)?;
+        let mut rendered = subscription::render(record.format, &record.template, &candidates)?;
         if rendered.entries.is_empty() {
             return reject(
                 409,
@@ -296,9 +380,34 @@ impl Store {
             updated.uses = updated.uses.saturating_add(1);
             write_record(&tx, &updated)?;
         }
+        rendered.usage = usage(&tx, &record.owner_id)?;
         tx.commit()?;
         Ok(rendered)
     }
+}
+
+/// What the owner's user budget and plan entitlement say, for the
+/// `Subscription-Userinfo` header. Tenant and node budgets are shared with
+/// other users and are not reported.
+fn usage(conn: &Connection, owner: &str) -> Result<Usage> {
+    let mut usage = Usage::default();
+    if let Some(budget) = super::budgets::user_budget(conn, owner)? {
+        usage.used_bytes = Some(budget.consumed_bytes);
+        // A plan without a traffic cap raises the limit to the counter
+        // maximum; there is no total to report.
+        if budget.limit_bytes < MAX_COUNTER {
+            usage.total_bytes = Some(budget.limit_bytes);
+        }
+    }
+    if let Some(plan) = super::commerce::plan(conn, owner)? {
+        // A plan refunded before its end lapsed early; its stored end is
+        // not when it stopped.
+        if plan.state != crate::commerce::EntitlementState::Lapsed || plan.expires_at_ms <= now_ms()
+        {
+            usage.expires_at_ms = Some(plan.expires_at_ms);
+        }
+    }
+    Ok(usage)
 }
 
 fn candidates(conn: &Connection, record: &Subscription) -> Result<Vec<Candidate>> {

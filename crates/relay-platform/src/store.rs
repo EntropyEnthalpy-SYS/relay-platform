@@ -39,10 +39,10 @@ mod topology;
 mod user_rates;
 mod wireguard;
 pub use accounts::{
-    API_TOKEN_PREFIX, ApiToken, SECOND_FACTOR_INVALID, SECOND_FACTOR_REQUIRED, Scope,
-    SecondFactorSetup, SecondFactorStatus, UserSummary,
+    API_TOKEN_PREFIX, ApiToken, OfflinePasswordReset, SECOND_FACTOR_INVALID,
+    SECOND_FACTOR_REQUIRED, Scope, SecondFactorSetup, SecondFactorStatus, UserSummary,
 };
-pub use alert_config::AlertNode;
+pub use alert_config::{AlertBudget, AlertDnsRecord, AlertNode};
 pub use dns::{DnsRecordPatch, NewDnsRecord};
 pub use features::{FEATURES, FeatureState};
 pub use reservations::MeterFlush;
@@ -95,6 +95,7 @@ pub struct Store(
     Arc<Mutex<user_rates::UserRates>>,
     Arc<Mutex<std::collections::HashSet<String>>>,
     Arc<Mutex<crate::wireguard::punch::Traversal>>,
+    Arc<crate::dns::Runtime>,
 );
 #[derive(Default)]
 struct BudgetSignals {
@@ -314,6 +315,7 @@ impl Store {
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
             Arc::new(Mutex::new(leases::LeaseClocks::default())),
+            Arc::default(),
             Arc::default(),
             Arc::default(),
             Arc::default(),

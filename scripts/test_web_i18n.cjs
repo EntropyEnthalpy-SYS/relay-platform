@@ -21,6 +21,12 @@ assert.equal(i18n.eventMessage({ kind: 'unknown', message: '已应用配置修�
 assert.equal(i18n.incidentMessage({ key: 'target:n1:r1', summary: '规则 测试 的目标 example.test:443（UDP 端口 53）恢复可用' }), 'Rule 测试: target example.test:443 (UDP port 53) recovered');
 assert.equal(i18n.incidentMessage({ key: 'node:n1', summary: '节点 东京 已 95 秒无回报' }), 'Node 东京 has not reported for 95 seconds');
 assert.equal(i18n.incidentMessage({ key: 'config:n1', summary: '节点 东京 恢复回报' }), '节点 东京 恢复回报', 'a message only matches the kinds its source can emit');
+assert.equal(i18n.incidentMessage({ key: 'cpu:n1', summary: '节点 东京 CPU 使用率 95%，连续 5 次回报不低于 90%' }), 'Node 东京 CPU usage 95%: at or above 90% in 5 reports in a row');
+assert.equal(i18n.incidentMessage({ key: 'expired:n1', summary: '节点 东京 已于 2026-11-06 00:00:00 UTC 到期' }), 'Node 东京 expired at 2026-11-06 00:00:00 UTC');
+assert.equal(i18n.incidentMessage({ key: 'budget_near:b1', summary: '共享额度 东京 占用回落到 10%' }), 'Shared budget 东京 is back down to 10% committed');
+assert.equal(i18n.incidentMessage({ key: 'dns:r1', summary: 'DNS 记录 a.example.com A 同步失败：原始诊断 {0}' }), 'DNS record a.example.com A failed to sync: 原始诊断 {0}');
+assert.equal(i18n.incidentMessage({ key: 'budget_exhausted:b1', summary: '此项告警已停用' }), 'This alert rule was switched off');
+assert.equal(i18n.incidentMessage({ key: 'node:n1', summary: '此项告警已停用' }), '此项告警已停用');
 const opaque = '节点管理 <img onerror=alert(1)> {1} $&';
 assert.equal(i18n.msg(['删除「', '」会终止其会话，历史账本保留。'], opaque), `Deleting “${opaque}” terminates its sessions. Ledger history is preserved.`);
 assert.equal(i18n.msg(['为「', '」输入新的 ', ' 地址（DDNS）；当前 ', ''], '测试', 'AAAA', '::1'), 'Enter a new AAAA address for “测试” (DDNS); current address: ::1');

@@ -4,6 +4,7 @@
 use crate::model::{Rule, now_ms};
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::{Engine as _, engine::general_purpose};
+use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
@@ -188,6 +189,38 @@ impl Template {
     }
 }
 
+pub const MAX_ALLOW_SOURCES: usize = 64;
+pub const MAX_ROTATION_GRACE_MINUTES: u32 = 1440;
+
+/// What an owner chooses for a link. Creating and editing take the same
+/// settings; the token, owner and usage counters are not among them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settings {
+    pub name: String,
+    pub format: Format,
+    pub template: Template,
+    /// Networks that may fetch the public link; empty allows every source.
+    pub allow_sources: Vec<IpNet>,
+}
+impl Settings {
+    pub fn new(name: &str, format: Format, template: Template) -> Self {
+        Self {
+            name: name.into(),
+            format,
+            template,
+            allow_sources: vec![],
+        }
+    }
+    pub fn validate(&self) -> Result<()> {
+        self.template.validate()?;
+        ensure!(
+            self.allow_sources.len() <= MAX_ALLOW_SOURCES,
+            "a subscription takes at most {MAX_ALLOW_SOURCES} allowed source networks"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Subscription {
     pub id: String,
@@ -201,6 +234,33 @@ pub struct Subscription {
     pub expires_at_ms: Option<i64>,
     pub last_used_ms: Option<i64>,
     pub uses: u64,
+    /// Fetches from other sources look like an unknown token.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_sources: Vec<IpNet>,
+    /// The token replaced by the last rotation, valid until
+    /// `previous_token_expires_at_ms`. Only its hash is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_token_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_token_expires_at_ms: Option<i64>,
+}
+impl Subscription {
+    pub fn permits_source(&self, source: IpAddr) -> bool {
+        let source = match source {
+            IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(source),
+            v4 => v4,
+        };
+        self.allow_sources.is_empty() || self.allow_sources.iter().any(|n| n.contains(&source))
+    }
+    /// Whether `hash` opens this subscription at `now`: the current token,
+    /// or the previous one inside its grace period.
+    pub fn accepts(&self, hash: &str, now: i64) -> bool {
+        self.token_hash == hash
+            || (self.previous_token_hash.as_deref() == Some(hash)
+                && self
+                    .previous_token_expires_at_ms
+                    .is_some_and(|until| now < until))
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -214,6 +274,9 @@ pub struct SubscriptionView {
     pub expires_at_ms: Option<i64>,
     pub last_used_ms: Option<i64>,
     pub uses: u64,
+    pub allow_sources: Vec<IpNet>,
+    /// While set and in the future, the link before the last rotation still works.
+    pub previous_token_expires_at_ms: Option<i64>,
 }
 impl From<&Subscription> for SubscriptionView {
     fn from(value: &Subscription) -> Self {
@@ -227,7 +290,43 @@ impl From<&Subscription> for SubscriptionView {
             expires_at_ms: value.expires_at_ms,
             last_used_ms: value.last_used_ms,
             uses: value.uses,
+            allow_sources: value.allow_sources.clone(),
+            previous_token_expires_at_ms: value
+                .previous_token_hash
+                .as_ref()
+                .and(value.previous_token_expires_at_ms),
         }
+    }
+}
+
+/// The parts of `Subscription-Userinfo` Relay can fill truthfully; the
+/// header leaves out the others.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    /// Bytes the owner's user budget has consumed. Budgets count both
+    /// directions together, so this is reported as `download` and `upload`
+    /// is left out.
+    pub used_bytes: Option<u64>,
+    /// The user budget's limit.
+    pub total_bytes: Option<u64>,
+    /// When the owner's plan entitlement ends.
+    pub expires_at_ms: Option<i64>,
+}
+impl Usage {
+    /// `download=…; total=…; expire=…` with `expire` in Unix seconds, or
+    /// `None` when nothing is known.
+    pub fn header(&self) -> Option<String> {
+        let mut parts = vec![];
+        if let Some(used) = self.used_bytes {
+            parts.push(format!("download={used}"));
+        }
+        if let Some(total) = self.total_bytes {
+            parts.push(format!("total={total}"));
+        }
+        if let Some(expiry) = self.expires_at_ms {
+            parts.push(format!("expire={}", expiry.div_euclid(1000)));
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
     }
 }
 
@@ -305,6 +404,9 @@ pub struct Rendered {
     pub skipped: Vec<Skipped>,
     #[serde(skip)]
     format: Format,
+    /// Filled for public fetches; see [`Usage`].
+    #[serde(skip)]
+    pub usage: Usage,
 }
 impl Rendered {
     /// Surge keeps a profile updated only while its first line names the URL
@@ -320,7 +422,7 @@ impl Rendered {
     }
 }
 
-fn percent(value: &str) -> String {
+pub(crate) fn percent(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
@@ -823,6 +925,7 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
         entries,
         skipped,
         format,
+        usage: Usage::default(),
     })
 }
 fn method_name(method: crate::shadowsocks::Method) -> String {
@@ -984,6 +1087,8 @@ mod tests {
             via: None,
             prewarm: None,
             draining: false,
+            paused: false,
+            paused_until_ms: None,
         });
         candidates.push(Candidate {
             node_name: "edge".into(),
@@ -1276,6 +1381,36 @@ mod tests {
             ..Default::default()
         };
         assert!(too_many.validate().is_err());
+    }
+
+    #[test]
+    fn stored_records_load_unchanged_and_grace_ends_at_its_deadline() {
+        // A record written before source lists and rotation grace existed.
+        let stored = serde_json::json!({"id":"s","tenant_id":"default","owner_id":"admin","name":"phone","format":"v2ray","template":{"name_prefix":"","host":null,"node_tags":[],"udp":true},"token_hash":"aa","created_at_ms":1,"expires_at_ms":null,"last_used_ms":null,"uses":0});
+        let mut record: Subscription = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&record).unwrap(),
+            stored,
+            "records that use neither feature keep their stored shape"
+        );
+        assert!(record.permits_source("198.51.100.1".parse().unwrap()));
+        assert!(!record.accepts("bb", 0));
+        record.previous_token_hash = Some("bb".into());
+        record.previous_token_expires_at_ms = Some(1_000);
+        assert!(record.accepts("aa", 5_000));
+        assert!(record.accepts("bb", 999) && !record.accepts("bb", 1_000));
+        assert!(!record.accepts("cc", 0));
+        record.allow_sources = vec!["203.0.113.0/24".parse().unwrap()];
+        assert!(record.permits_source("::ffff:203.0.113.1".parse().unwrap()));
+        assert!(!record.permits_source("203.0.114.1".parse().unwrap()));
+
+        assert_eq!(Usage::default().header(), None);
+        let usage = Usage {
+            used_bytes: Some(0),
+            total_bytes: None,
+            expires_at_ms: Some(1_999),
+        };
+        assert_eq!(usage.header().as_deref(), Some("download=0; expire=1"));
     }
 
     #[test]

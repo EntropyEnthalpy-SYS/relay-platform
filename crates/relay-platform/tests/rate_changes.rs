@@ -176,6 +176,8 @@ fn options(origin: &str, node: &str, token: Option<PathBuf>) -> AgentOptions {
         ca_certificate: None,
         tls_directory: None,
         poll_interval: Duration::from_millis(50),
+        controller_addresses: vec![],
+        controller_proxy: None,
     }
 }
 async fn wait_applied(db: &Store, actor: &Actor, revision: u64) {

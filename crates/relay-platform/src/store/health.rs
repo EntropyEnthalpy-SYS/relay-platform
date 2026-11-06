@@ -84,6 +84,7 @@ pub(super) fn validate_reports(
             "eligible",
             "degraded",
             "draining",
+            "paused",
             "standby",
             "unhealthy",
             "recovering",

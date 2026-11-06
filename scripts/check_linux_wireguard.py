@@ -286,6 +286,36 @@ def main():
         assert table[('wg-p', 'laptop')]['path'] == 'direct'
         assert {m['label']: m['state'] for m in view()['networks'][0]['members']}['laptop'] == 'connected'
 
+        # Device settings on the kernel: the laptop makes way for a phone with
+        # network DNS, a preshared key, its own allowed IPs and keepalive.
+        ns('d', 'ip', 'link', 'del', 'wgdev')
+        api('PUT', f'/wireguard/networks/{network["id"]}', {'name': 'lab', 'dns': ['10.88.0.53']})
+        phone = api('POST', f'/wireguard/networks/{network["id"]}/members', {'kind': 'device', 'name': 'phone',
+            'allowed_ips': [address['p'] + '/32'], 'keepalive': 7, 'preshared_key': True})
+        config = phone['config']
+        for line in ['DNS = 10.88.0.53', f'AllowedIPs = {address["p"]}/32', 'PersistentKeepalive = 7']:
+            assert line in config.splitlines(), (line, config)
+        wanted = [line for line in config.splitlines() if not line.startswith(('Address', 'MTU', 'DNS'))]
+        (root / 'phone.conf').write_text('\n'.join(wanted) + '\n')
+        ns('d', 'ip', 'link', 'add', 'wgdev', 'type', 'wireguard')
+        ns('d', 'wg', 'setconf', 'wgdev', root / 'phone.conf')
+        ns('d', 'ip', 'address', 'add', f'{phone["address"]}/24', 'dev', 'wgdev')
+        ns('d', 'ip', 'link', 'set', 'wgdev', 'up')
+        phone_key = ns('d', 'wg', 'show', 'wgdev', 'public-key').strip()
+        hub_psk = lambda: dict(line.split('\t') for line in ns('p', 'wg', 'show', interface, 'preshared-keys').splitlines())
+        until('phone peer on the hub', lambda: phone_key in hub_psk())
+        assert [k for k, v in hub_psk().items() if v != '(none)'] == [phone_key], 'preshared key on the wrong peers'
+        result['phone_ping_p_with_psk'] = until('phone ping with preshared key', lambda: _ping(ns, 'd', address['p']), 20)
+        assert _ping(ns, 'd', address['b']) is None, 'phone reached an address outside its allowed IPs'
+        assert ns('d', 'wg', 'show', 'wgdev', 'persistent-keepalive').split()[-1] == '7'
+        # Switched off, the hub drops the phone's peer; switched on, the same configuration works again.
+        api('PUT', f'/wireguard/members/{phone["id"]}', {'kind': 'device', 'name': 'phone', 'enabled': False})
+        until('phone peer removed', lambda: phone_key not in hub_psk())
+        assert _ping(ns, 'd', address['p']) is None, 'switched-off phone still reaches the hub'
+        assert {m['label']: m['state'] for m in view()['networks'][0]['members']}['phone'] == 'disabled'
+        api('PUT', f'/wireguard/members/{phone["id"]}', {'kind': 'device', 'name': 'phone', 'enabled': True})
+        result['phone_ping_after_switch_on'] = until('phone ping after switch on', lambda: _ping(ns, 'd', address['p']), 20)
+
         # A range that overlaps A's own link is refused on A, and nothing is made.
         clash = api('POST', '/wireguard/networks', {'name': 'clash', 'cidr': '10.230.1.0/24', 'listen_port': 51821})
         api('POST', f'/wireguard/networks/{clash["id"]}/members', {'kind': 'node', 'node_id': nodes['a']})

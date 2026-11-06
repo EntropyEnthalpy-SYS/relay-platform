@@ -217,6 +217,8 @@ async fn routing_updates_preserve_existing_connections_and_shutdown_cancels_all_
         via: None,
         prewarm: None,
         draining: false,
+        paused: false,
+        paused_until_ms: None,
     });
     engine.apply(c).await.unwrap();
     old.write_all(b"alive").await.unwrap();
@@ -939,6 +941,160 @@ async fn draining_target_keeps_its_sessions_and_takes_new_ones_only_as_a_last_re
 }
 
 #[tokio::test]
+async fn paused_target_takes_no_new_sessions_and_a_timed_pause_ends_on_its_own() {
+    let a = tcp_echo_at("127.0.0.1:0", Some(b'A')).await;
+    let b = tcp_echo_at("127.0.0.1:0", Some(b'B')).await;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    let mut r = rule(a.address, Protocol::Tcp);
+    let mut backup = r.targets[0].clone();
+    backup.address = b.address.to_string();
+    backup.priority = 1;
+    r.targets.push(backup);
+    let address = r.listen;
+    let mut c = config(r);
+    engine.apply(c.clone()).await.unwrap();
+    async fn marker(s: &mut TcpStream) -> u8 {
+        let mut m = [0];
+        timeout(Duration::from_secs(1), s.read_exact(&mut m))
+            .await
+            .unwrap()
+            .unwrap();
+        m[0]
+    }
+    async fn next(address: std::net::SocketAddr) -> u8 {
+        marker(&mut TcpStream::connect(address).await.unwrap()).await
+    }
+    let mut held = TcpStream::connect(address).await.unwrap();
+    assert_eq!(marker(&mut held).await, b'A');
+    // Paused until resumed: the preferred target is skipped entirely.
+    c.revision = 2;
+    c.rules[0].targets[0].paused = true;
+    engine.apply(c.clone()).await.unwrap();
+    for _ in 0..3 {
+        assert_eq!(next(address).await, b'B');
+    }
+    held.write_all(b"still").await.unwrap();
+    let mut echoed = [0; 5];
+    timeout(Duration::from_secs(1), held.read_exact(&mut echoed))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&echoed, b"still", "pausing must not end existing sessions");
+    // Unlike draining, a paused target is not a last resort: with every
+    // target paused, new sessions are refused.
+    c.revision = 3;
+    c.rules[0].targets[1].paused = true;
+    engine.apply(c.clone()).await.unwrap();
+    let mut refused = TcpStream::connect(address).await.unwrap();
+    let mut byte = [0];
+    let read = timeout(Duration::from_secs(3), refused.read(&mut byte))
+        .await
+        .expect("a refused session closes promptly");
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "a paused target answered: {read:?}"
+    );
+    // A timed pause ends at its time without another revision.
+    let until = now_ms() + 1_500;
+    c.revision = 4;
+    c.rules[0].targets[0].paused_until_ms = Some(until);
+    c.rules[0].targets[1].paused = false;
+    engine.apply(c).await.unwrap();
+    assert_eq!(next(address).await, b'B');
+    sleep(Duration::from_millis(
+        (until - now_ms()).max(0) as u64 + 100,
+    ))
+    .await;
+    for _ in 0..3 {
+        assert_eq!(next(address).await, b'A', "the timed pause did not end");
+    }
+    assert_eq!(engine.revision().await, 4);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn paused_target_keeps_being_probed_and_reports_why_it_is_skipped() {
+    let echo = tcp_echo().await;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    let mut r = rule(echo.address, Protocol::Tcp);
+    r.targets[0].paused = true;
+    r.health_check = Some(
+        serde_json::from_value(serde_json::json!({
+            "interval_ms": 100, "timeout_ms": 80, "healthy_threshold": 1,
+            "unhealthy_threshold": 2, "recovery_delay_ms": 0, "max_age_ms": 1000,
+            "tcp": {"kind": "connect"}
+        }))
+        .unwrap(),
+    );
+    engine.apply(config(r)).await.unwrap();
+    let report = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(report) = engine
+                .stats()
+                .target_health
+                .into_iter()
+                .find(|r| r.status == relay_platform::health::Status::Healthy)
+            {
+                return report;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a paused target is still probed");
+    assert_eq!(report.selection_reason, "paused");
+    assert!(!report.eligible);
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn random_balance_spreads_over_the_preferred_tier_ignoring_weights() {
+    let a = tcp_echo_at("127.0.0.1:0", Some(b'A')).await;
+    let b = tcp_echo_at("127.0.0.1:0", Some(b'B')).await;
+    let c = tcp_echo_at("127.0.0.1:0", Some(b'C')).await;
+    let temp = tempfile::tempdir().unwrap();
+    let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+    let mut r = rule(a.address, Protocol::Tcp);
+    r.balance = Balance::Random;
+    r.targets[0].weight = 5;
+    for (echo, priority) in [(&b, 0), (&c, 1)] {
+        let mut target = r.targets[0].clone();
+        target.address = echo.address.to_string();
+        target.weight = 1;
+        target.priority = priority;
+        r.targets.push(target);
+    }
+    let address = r.listen;
+    engine.apply(config(r)).await.unwrap();
+    let mut markers = vec![];
+    for _ in 0..300 {
+        let mut s = TcpStream::connect(address).await.unwrap();
+        let mut m = [0];
+        timeout(Duration::from_secs(1), s.read_exact(&mut m))
+            .await
+            .unwrap()
+            .unwrap();
+        markers.push(m[0]);
+    }
+    let count = |m: u8| markers.iter().filter(|&&x| x == m).count();
+    assert_eq!(count(b'C'), 0, "the lower-priority target was chosen");
+    // Uniform: B (weight 1) gets about half, not the 1/6 weights would give.
+    assert!(
+        (90..=210).contains(&count(b'B')),
+        "B received {} of 300",
+        count(b'B')
+    );
+    // Not a rotation in disguise.
+    assert!(
+        markers.windows(2).any(|w| w[0] == w[1]),
+        "random selection alternated strictly"
+    );
+    engine.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn weighted_target_selection_and_connect_failure_fallback() {
     let a = tcp_echo_at("127.0.0.1:0", Some(b'A')).await;
     let b = tcp_echo_at("127.0.0.1:0", Some(b'B')).await;
@@ -957,6 +1113,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             via: None,
             prewarm: None,
             draining: false,
+            paused: false,
+            paused_until_ms: None,
         },
         Target {
             priority: 0,
@@ -969,6 +1127,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             via: None,
             prewarm: None,
             draining: false,
+            paused: false,
+            paused_until_ms: None,
         },
     ];
     let address = r.listen;
@@ -998,6 +1158,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             via: None,
             prewarm: None,
             draining: false,
+            paused: false,
+            paused_until_ms: None,
         },
         Target {
             priority: 0,
@@ -1010,6 +1172,8 @@ async fn weighted_target_selection_and_connect_failure_fallback() {
             via: None,
             prewarm: None,
             draining: false,
+            paused: false,
+            paused_until_ms: None,
         },
     ];
     let refused_address = c.rules[0].targets[0].address.clone();
@@ -1215,6 +1379,8 @@ async fn stalled_primary_falls_back_within_one_connect_and_is_tried_last_afterwa
         via: None,
         prewarm: None,
         draining: false,
+        paused: false,
+        paused_until_ms: None,
     });
     let address = r.listen;
     let cert = Certificates::new();
@@ -1258,6 +1424,8 @@ async fn source_hash_is_stable_and_least_connections_uses_active_sessions() {
         via: None,
         prewarm: None,
         draining: false,
+        paused: false,
+        paused_until_ms: None,
     });
     r.balance = Balance::SourceHash;
     let address = r.listen;

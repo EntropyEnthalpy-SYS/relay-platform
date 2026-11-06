@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import sys
@@ -424,6 +425,62 @@ class DeploymentTests(unittest.TestCase):
                              ('controller', {'listen': '127.0.0.1:80'})]:
             with self.subTest(config=config), self.assertRaises(DeployError):
                 install.settings(role, config)
+
+
+class AgentControlRouteSettings(unittest.TestCase):
+    """agent.json settings for servers that cannot reach the panel directly.
+    Only settings and the service wrapper are checked; no binary is needed."""
+
+    def arguments(self, extra, controller='https://panel.example.com'):
+        config = install.settings('agent', {'controller': controller, 'node_id': 'cn-1', **extra})
+        with tempfile.TemporaryDirectory(prefix='relay-agent-route-') as root:
+            text = install.Layout(root, 'agent', 'systemd').wrapper(config, Path(root) / 'generation', False).decode()
+        line = next(line for line in text.splitlines() if line.startswith('exec '))
+        return shlex.split(line)[1:]
+
+    def values(self, args, flag):
+        return [args[i + 1] for i, arg in enumerate(args) if arg == flag]
+
+    def test_addresses_become_ordered_repeated_flags_and_a_proxy_one_flag(self):
+        relays = ['relay-cn.example.net:30443', '203.0.113.7:443', '[2001:db8::7]:8443']
+        args = self.arguments({'controller_addresses': relays})
+        self.assertEqual(self.values(args, '--controller-address'), relays)
+        self.assertEqual(self.values(args, '--controller'), ['https://panel.example.com'])
+        self.assertEqual(self.values(args, '--controller-proxy'), [])
+        args = self.arguments({'controller_proxy': 'http://10.0.0.8:3128'})
+        self.assertEqual(self.values(args, '--controller-proxy'), ['http://10.0.0.8:3128'])
+        self.assertEqual(self.values(args, '--controller-address'), [])
+        # The default port written out is the same as no port.
+        args = self.arguments({'controller_addresses': ['relay.example.net:30443']}, 'https://panel.example.com:443')
+        self.assertEqual(self.values(args, '--controller-address'), ['relay.example.net:30443'])
+
+    def test_existing_settings_keep_the_same_wrapper(self):
+        # Installed generations compare their wrapper byte for byte.
+        args = self.arguments({})
+        self.assertNotIn('--controller-address', args)
+        self.assertNotIn('--controller-proxy', args)
+        self.assertEqual(self.values(args, '--controller'), ['https://panel.example.com'])
+
+    def test_unusable_routes_are_rejected_before_installation(self):
+        for controller, extra in [
+            ('https://panel.example.com', {'controller_proxy': 'socks5://10.0.0.8:1080'}),
+            ('https://panel.example.com', {'controller_proxy': 'http://user:secret@10.0.0.8:3128'}),
+            ('https://panel.example.com', {'controller_proxy': 'http://10.0.0.8'}),
+            ('https://panel.example.com', {'controller_proxy': 'http://10.0.0.8:3128/path'}),
+            ('https://panel.example.com', {'controller_addresses': ['relay.example.net:443'], 'controller_proxy': 'http://10.0.0.8:3128'}),
+            ('https://203.0.113.9', {'controller_addresses': ['relay.example.net:443']}),
+            ('https://[2001:db8::9]', {'controller_addresses': ['relay.example.net:443']}),
+            ('https://panel.example.com:8443', {'controller_addresses': ['relay.example.net:443']}),
+            ('https://panel.example.com', {'controller_addresses': 'relay.example.net:443'}),
+            ('https://panel.example.com', {'controller_addresses': ['relay.example.net:443', 'relay.example.net:443']}),
+            ('https://panel.example.com', {'controller_addresses': [f'relay{i}.example.net:443' for i in range(9)]}),
+        ] + [('https://panel.example.com', {'controller_addresses': [bad]})
+             for bad in ('relay.example.net', 'relay.example.net:0', 'relay.example.net:70000', '2001:db8::7:443',
+                         'relay;id:443', '--help:443', 'relay example.net:443', 443)]:
+            with self.subTest(controller=controller, extra=extra), self.assertRaises(DeployError):
+                install.settings('agent', {'controller': controller, 'node_id': 'cn-1', **extra})
+        same_port = install.settings('agent', {'controller': 'https://panel.example.com:8443', 'node_id': 'cn-1', 'controller_addresses': ['relay.example.net:8443']})
+        self.assertEqual(same_port['controller_addresses'], ['relay.example.net:8443'])
 
 
 if __name__ == '__main__':

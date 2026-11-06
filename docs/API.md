@@ -22,6 +22,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | GET | `/nodes/{id}/health` | 实际修订对应的目标健康、年龄、候选原因、探测流量与容量；按节点权限过滤 |
 | GET | `/nodes/{id}/history` | 最近 100 次配置修订 |
 | POST | `/nodes/{id}/rollback` | `{revision,expected_revision}`；把历史规则作为新修订发布，账本不回滚 |
+| GET | `/nodes/{id}/rules/{rule}/share?host=&port=&name=` | 受管协议规则的分享链接与二维码 `{uri,qr_svg}`；权限同读取配置；AnyTLS 与非协议规则 409，见 PROTOCOL_GATEWAYS.md |
 | POST | `/nodes/{id}/drain` | `{draining}`；把所有 `via` 指向该节点的上游目标设为（或取消）维护排空，在一个批次中发布有变化的上游节点；没有上游指向它时返回 409，已是目标状态时返回空结果 |
 | GET | `/topology` | 当前可见节点、配置、声明边、根规则及应用状态 |
 | POST | `/configurations/allocate-endpoints` | `{hops:[{node_id,listen?,advertise?}]}`；只读分配建议端点，返回 `endpoints,configs`；需写权限及 `nodes:write` token scope |
@@ -148,7 +149,7 @@ TLS 配置使用 `Rule.inbound_tls={identity,client_ca}` 与 `Target.tls={server
 
 ## 0.10.0 目标健康与选择
 
-规则新增可选 `health_check`，逐目标新增 `priority`（缺省 0，越小越优先）和 `max_sessions`（缺省不设单目标上限）。健康检查必须覆盖规则的实际 TCP/UDP 协议；请求/预期内容使用有界 Base64。状态机、恢复等待、端口映射、目标容量作用域、实际出口和探测计量见 [HEALTH.md](HEALTH.md)。
+规则新增可选 `health_check`，逐目标新增 `priority`（缺省 0，越小越优先）和 `max_sessions`（缺省不设单目标上限）。目标还可设 `paused`（硬暂停）和 `paused_until_ms`（到期自动恢复的 Unix 毫秒时间，须与 `paused` 同时出现）；`balance` 另接受 `random`（最高可用优先级内均匀随机，忽略权重）。健康检查必须覆盖规则的实际 TCP/UDP 协议；请求/预期内容使用有界 Base64。状态机、恢复等待、端口映射、目标容量作用域、实际出口和探测计量见 [HEALTH.md](HEALTH.md)。
 
 同步 stats 新增可省略的 `active_probes` 和 `target_health`。控制器将报告与该节点 `applied_revision` 的配置比较，再接受整项同步；无效健康报告返回 400，同项用量也不提交。报告仅供诊断，不承担业务计费或额度归还职责。
 
@@ -370,10 +371,11 @@ Shadowsocks：TCP 重放盐缓存按（方式、密钥）在进程内共享。�
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/subscriptions` | 可见订阅列表；不返回令牌或哈希 |
-| POST | `/subscriptions` | `{name,format,template,expires_in_days,user_id?}` → `{subscription,token}`；令牌只返回一次 |
+| POST | `/subscriptions` | `{name,format,template,expires_in_days,user_id?,allow_sources?}` → `{subscription,token}`；令牌只返回一次 |
 | GET | `/subscriptions/{id}` | 订阅元数据 |
+| PUT | `/subscriptions/{id}` | `{name,format,template?,allow_sources?,expires_in_days?}`；修改设置，令牌不变 |
 | GET | `/subscriptions/{id}/preview` | `{content,content_type,entries,skipped}`；普通 TCP/TLS/WS 规则明确列入 `skipped` |
-| POST | `/subscriptions/{id}/rotate` | 新令牌，旧令牌立即失效 |
+| POST | `/subscriptions/{id}/rotate` | 可选 `{grace_minutes}`（0..1440）；新令牌，旧令牌立即或宽限期后失效 |
 | DELETE | `/subscriptions/{id}` | 删除记录与索引 |
 | GET | `/sub/{token}` | 公开端点，无登录；60 次/分钟/令牌；`Cache-Control: no-store` |
 
@@ -387,13 +389,14 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/dns/providers` | 服务商列表/创建 `{name,kind,endpoint,token}` |
-| GET/PUT/DELETE | `/dns/providers/{id}` | 读取（脱敏）/更新（令牌留空保留）/删除；有区域时 409 |
-| GET/POST | `/dns/zones` | 区域列表/创建 `{provider_id,name,mode,min_keep}` |
-| GET/PUT/DELETE | `/dns/zones/{id}` | 读取/更新/删除；有记录时 409 |
-| GET/POST | `/dns/zones/{id}/records` | 记录列表/创建 `{name,type,content,ttl,proxied,health?}` |
-| GET/PUT/DELETE | `/dns/records/{id}` | 记录读取/更新/删除；应用模式删除时清理服务商记录 |
-| POST | `/dns/zones/{id}/reconcile` | 观察或应用同步，返回创建/更新/删除/未变/保留/错误和逐条 action |
+| GET/POST | `/dns/providers` | 服务商列表/创建 `{name,kind,endpoint,token,min_ttl?}` |
+| GET/PUT/DELETE | `/dns/providers/{id}` | 读取（脱敏）/更新（令牌留空保留，`min_ttl` 传 0 清除）/删除；有区域时 409 |
+| POST | `/dns/providers/{id}/test` | 用已保存令牌列出可见区域 `{ok,zones:[{id,name}],truncated}`；失败 502，错误文本中的令牌替换为 `[redacted]` |
+| GET/POST | `/dns/zones` | 区域列表（含内存中的 `status`）/创建 `{provider_id,name,mode,min_keep,failover_confirm_secs?}`（确认窗口 0..=1800 秒，省略为 60） |
+| GET/PUT/DELETE | `/dns/zones/{id}` | 读取（含 `status`）/更新/删除；有记录时 409 |
+| GET/POST | `/dns/zones/{id}/records` | 记录列表（含 `status`）/创建 `{name,type,content,ttl,proxied,health?}` |
+| GET/PUT/DELETE | `/dns/records/{id}` | 记录读取（含 `status`）/更新/删除；应用模式删除时清理服务商记录 |
+| POST | `/dns/zones/{id}/reconcile` | 观察或应用同步，返回创建/更新/删除/未变/保留/待确认（`pending`）/过半保护（`guarded`）/错误和逐条 action |
 | POST | `/dns/records/{id}/ddns` | `{content}` 更新 A/AAAA 并同步；CNAME 返回 400 |
 
 `mode=observe` 不写服务商，`apply` 只管理带 `relay:<record id>` 注释的记录。`min_keep` 在删除停用/健康摘除记录时保护当前有效托管记录数。记录的 `health:{node_id,rule_id}` 要求节点心跳不超过 90 秒且规则至少有一个 `eligible && healthy` 目标；否则观察模式给出 `would-health-remove`，应用模式摘除，恢复后重建。更新时 `clear_health:true` 移除门控。DDNS 不自动探测公网 IP；服务商只证明 API 接受，不证明 DNS 已传播。详见 [DNS.md](DNS.md)。

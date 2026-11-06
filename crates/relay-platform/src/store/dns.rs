@@ -22,6 +22,28 @@ fn require_admin(actor: &Actor) -> Result<()> {
     }
     Ok(())
 }
+/// `min_ttl` input: 0 means "no minimum".
+fn parse_min_ttl(value: u32) -> Result<Option<u32>> {
+    if value > 86_400 {
+        return reject(
+            400,
+            "DNS provider min_ttl must be 0 (none) or 1..=86400 seconds",
+        );
+    }
+    Ok((value > 0).then_some(value))
+}
+fn failover_confirm(value: u32) -> Result<u32> {
+    if value > crate::dns::MAX_FAILOVER_CONFIRM_SECS {
+        return reject(
+            400,
+            format!(
+                "DNS failover_confirm_secs must be 0..={}",
+                crate::dns::MAX_FAILOVER_CONFIRM_SECS
+            ),
+        );
+    }
+    Ok(value)
+}
 fn label(value: &str, maximum: usize, what: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > maximum
@@ -180,6 +202,7 @@ impl Store {
         kind: ProviderKind,
         endpoint: &str,
         token: &str,
+        min_ttl: u32,
     ) -> Result<ProviderView> {
         require_admin(actor)?;
         label(name, 120, "DNS provider name")?;
@@ -196,6 +219,7 @@ impl Store {
             kind,
             endpoint,
             token: token.into(),
+            min_ttl: parse_min_ttl(min_ttl)?,
             created_at_ms: now_ms(),
         };
         let mut conn = self.0.lock().unwrap();
@@ -206,7 +230,7 @@ impl Store {
             &actor.id,
             "dns.provider.create",
             &provider.id,
-            &serde_json::json!({"name":provider.name,"kind":provider.kind,"endpoint":provider.endpoint}).to_string(),
+            &serde_json::json!({"name":provider.name,"kind":provider.kind,"endpoint":provider.endpoint,"min_ttl":provider.min_ttl}).to_string(),
         )?;
         tx.commit()?;
         Ok(ProviderView::from(&provider))
@@ -218,11 +242,15 @@ impl Store {
         name: Option<&str>,
         endpoint: Option<&str>,
         token: Option<&str>,
+        min_ttl: Option<u32>,
     ) -> Result<ProviderView> {
         require_admin(actor)?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut provider = read_provider(&tx, id)?.context("DNS provider not found")?;
+        if let Some(value) = min_ttl {
+            provider.min_ttl = parse_min_ttl(value)?;
+        }
         if let Some(value) = name {
             label(value, 120, "DNS provider name")?;
             provider.name = value.into();
@@ -287,12 +315,14 @@ impl Store {
         name: &str,
         mode: ZoneMode,
         min_keep: u32,
+        failover_confirm_secs: u32,
     ) -> Result<Zone> {
         require_admin(actor)?;
         crate::dns::validate_zone_name(name)?;
         if min_keep > 1000 {
             return reject(400, "DNS min_keep must be 0..1000");
         }
+        let failover_confirm_secs = failover_confirm(failover_confirm_secs)?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         read_provider(&tx, provider_id)?.context("DNS provider not found")?;
@@ -302,10 +332,11 @@ impl Store {
             name: name.into(),
             mode,
             min_keep,
+            failover_confirm_secs,
             created_at_ms: now_ms(),
         };
         write_zone(&tx, &zone)?;
-        audit(&tx, &actor.id, "dns.zone.create", &zone.id, &serde_json::json!({"provider_id":provider_id,"name":name,"mode":mode,"min_keep":min_keep}).to_string())?;
+        audit(&tx, &actor.id, "dns.zone.create", &zone.id, &serde_json::json!({"provider_id":provider_id,"name":name,"mode":mode,"min_keep":min_keep,"failover_confirm_secs":failover_confirm_secs}).to_string())?;
         tx.commit()?;
         Ok(zone)
     }
@@ -316,11 +347,15 @@ impl Store {
         name: Option<&str>,
         mode: Option<ZoneMode>,
         min_keep: Option<u32>,
+        failover_confirm_secs: Option<u32>,
     ) -> Result<Zone> {
         require_admin(actor)?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut zone = read_zone(&tx, id)?.context("DNS zone not found")?;
+        if let Some(value) = failover_confirm_secs {
+            zone.failover_confirm_secs = failover_confirm(value)?;
+        }
         if let Some(value) = name {
             crate::dns::validate_zone_name(value)?;
             zone.name = value.into();
@@ -358,14 +393,36 @@ impl Store {
         Ok(())
     }
 
+    /// Process-local DNS sync state (locks, confirmation windows, status).
+    pub fn dns_runtime(&self) -> &crate::dns::Runtime {
+        &self.9
+    }
+    fn dns_record_view(&self, record: &Record) -> RecordView {
+        let mut view = RecordView::from(record);
+        view.status = self.9.record_status(&record.id);
+        view
+    }
+    /// Zone and record IDs for the background synchroniser.
+    pub(crate) fn dns_ids(&self) -> Result<(Vec<String>, Vec<String>)> {
+        let conn = self.0.lock().unwrap();
+        let zones = all::<Zone>(&conn, "dns_zone:")?;
+        let records = all::<Record>(&conn, "dns_record:")?;
+        Ok((
+            zones.into_iter().map(|zone| zone.id).collect(),
+            records.into_iter().map(|record| record.id).collect(),
+        ))
+    }
     pub fn dns_records(&self, actor: &Actor, zone_id: &str) -> Result<Vec<RecordView>> {
         require_admin(actor)?;
-        let conn = self.0.lock().unwrap();
-        read_zone(&conn, zone_id)?.context("DNS zone not found")?;
-        Ok(all::<Record>(&conn, "dns_record:")?
+        let records = {
+            let conn = self.0.lock().unwrap();
+            read_zone(&conn, zone_id)?.context("DNS zone not found")?;
+            all::<Record>(&conn, "dns_record:")?
+        };
+        Ok(records
             .iter()
             .filter(|record| record.zone_id == zone_id)
-            .map(RecordView::from)
+            .map(|record| self.dns_record_view(record))
             .collect())
     }
     pub(crate) fn dns_records_for_zone(&self, zone_id: &str) -> Result<Vec<Record>> {
@@ -382,7 +439,7 @@ impl Store {
     pub fn dns_record(&self, actor: &Actor, id: &str) -> Result<RecordView> {
         require_admin(actor)?;
         self.dns_record_raw(id)
-            .map(|record| RecordView::from(&record))
+            .map(|record| self.dns_record_view(&record))
     }
     pub fn create_dns_record(
         &self,
@@ -461,7 +518,7 @@ impl Store {
         write_record(&tx, &record)?;
         audit(&tx, &actor.id, "dns.record.update", &record.id, "{}")?;
         tx.commit()?;
-        Ok(RecordView::from(&record))
+        Ok(self.dns_record_view(&record))
     }
     /// Removes the local record and returns it so the caller can delete the
     /// provider record if the zone is in apply mode.
@@ -473,6 +530,7 @@ impl Store {
         tx.execute("DELETE FROM metadata WHERE key=?1", [record_key(id)])?;
         audit(&tx, &actor.id, "dns.record.delete", id, "{}")?;
         tx.commit()?;
+        self.9.forget_record(id);
         Ok(record)
     }
     pub(crate) fn dns_health_ok(&self, gate: &HealthGate) -> Result<bool> {
@@ -487,6 +545,14 @@ impl Store {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut record = read_record(&tx, id)?.context("DNS record not found")?;
+        // The background pass confirms unchanged records every tick; do not
+        // rewrite metadata (and the recovery log) for that.
+        if record.last_error.is_none()
+            && provider_id.is_none_or(|value| record.provider_record_id.as_deref() == Some(value))
+            && observed.is_none_or(|value| record.last_observed.as_deref() == Some(value))
+        {
+            return Ok(());
+        }
         if let Some(value) = provider_id {
             record.provider_record_id = Some(value.into());
         }
@@ -503,7 +569,11 @@ impl Store {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut record = read_record(&tx, id)?.context("DNS record not found")?;
-        record.last_error = Some(error.chars().take(512).collect());
+        let error: String = error.chars().take(512).collect();
+        if record.last_error.as_deref() == Some(error.as_str()) {
+            return Ok(());
+        }
+        record.last_error = Some(error);
         record.updated_at_ms = now_ms();
         write_record(&tx, &record)?;
         tx.commit()?;

@@ -175,7 +175,9 @@ fn nodes_join_with_reported_keys_and_get_their_peers_through_sync() {
     );
     let own_key = add(json!({"kind":"device","name":"laptop","public_key":wireguard::public_key(&wireguard::private_key()).unwrap()})).unwrap();
     assert!(own_key.qr_svg.is_none() && !own_key.config.unwrap().contains(&private));
-    let rekeyed = db.rekey_wireguard_device(&admin, &phone.member.id).unwrap();
+    let rekeyed = db
+        .rekey_wireguard_device(&admin, &phone.member.id, Default::default())
+        .unwrap();
     assert_ne!(rekeyed.member.public_key, phone.member.public_key);
     let raw = rusqlite::Connection::open(&path).unwrap();
     let leaked: i64 = raw
@@ -297,6 +299,241 @@ fn nodes_join_with_reported_keys_and_get_their_peers_through_sync() {
         Some(report(&home_key, &desired.digest)),
     );
     assert!(!after.enabled && after.interfaces.is_empty());
+}
+
+#[test]
+fn device_settings_preshared_keys_and_the_switch_reach_the_agents() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("controller.db");
+    let db = Store::open(&path).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    db.set_feature(&admin, "wireguard", true).unwrap();
+    let mut nodes = vec![];
+    for name in ["hub", "home"] {
+        let (node, _) = db.create_node(&admin, "default", name).unwrap();
+        let ledger = ledger(&db, &node.id);
+        let key = wireguard::private_key();
+        // The hub's agent at first predates preshared keys.
+        sync(&db, &node.id, &ledger, Some(report(&key, "")));
+        nodes.push((node.id, ledger, key));
+    }
+    let [(hub, hub_ledger, hub_key), (home, home_ledger, home_key)] = nodes.try_into().unwrap();
+    let upgraded = || Report {
+        preshared_keys: true,
+        ..report(&hub_key, "")
+    };
+
+    assert_eq!(
+        rejection(db.create_wireguard_network(
+            &admin,
+            input(json!({"name":"office","cidr":"10.88.0.0/24","dns":["dns.example.com"]}))
+        )),
+        400
+    );
+    let office = db
+        .create_wireguard_network(
+            &admin,
+            input(json!({"name":"office","cidr":"10.88.0.0/24","dns":["1.1.1.1","2606:4700:4700::1111"]})),
+        )
+        .unwrap();
+    let add =
+        |value: serde_json::Value| db.create_wireguard_member(&admin, &office.id, input(value));
+    add(json!({"kind":"node","node_id":hub,"endpoint":"203.0.113.1"})).unwrap();
+    for device_only in [
+        json!({"kind":"node","node_id":home,"keepalive":10}),
+        json!({"kind":"node","node_id":home,"enabled":false}),
+        json!({"kind":"node","node_id":home,"allowed_ips":["0.0.0.0/0"]}),
+        json!({"kind":"node","node_id":home,"preshared_key":true}),
+    ] {
+        assert_eq!(rejection(add(device_only.clone())), 400, "{device_only}");
+    }
+    add(json!({"kind":"node","node_id":home})).unwrap();
+
+    // A preshared key needs an entry node whose agent writes it.
+    let device = json!({"kind":"device","name":"phone","allowed_ips":["10.88.0.0/24","192.168.50.0/24"],"keepalive":15,"preshared_key":true});
+    assert_eq!(rejection(add(device.clone())), 409);
+    let mut bad = device.clone();
+    bad["allowed_ips"] = json!(["192.168.50.1/24"]);
+    assert_eq!(rejection(add(bad)), 400);
+    sync(&db, &hub, &hub_ledger, Some(upgraded()));
+    let phone = add(device).unwrap();
+    let config = phone.config.clone().unwrap();
+    assert!(
+        config
+            .contains("Address = 10.88.0.3/24\nDNS = 1.1.1.1, 2606:4700:4700::1111\nMTU = 1420\n"),
+        "{config}"
+    );
+    assert!(
+        config.contains("AllowedIPs = 10.88.0.0/24, 192.168.50.0/24\nPersistentKeepalive = 15\n"),
+        "{config}"
+    );
+    let psk = config
+        .lines()
+        .find_map(|line| line.strip_prefix("PresharedKey = "))
+        .unwrap()
+        .to_string();
+    assert!(wireguard::valid_key(&psk));
+    let phone_key = phone.member.public_key.clone().unwrap();
+
+    // The hub's entry for the phone carries the key; the home node reaches
+    // the phone through the hub without it.
+    let entry = |desired: &Desired, key: &str| {
+        desired.interfaces[0]
+            .peers
+            .iter()
+            .find(|p| p.public_key == key)
+            .cloned()
+    };
+    let hub_desired = sync(&db, &hub, &hub_ledger, Some(upgraded()));
+    assert_eq!(
+        entry(&hub_desired, &phone_key).unwrap().preshared_key,
+        Some(psk.clone())
+    );
+    let hub_public = wireguard::public_key(&hub_key).unwrap();
+    let home_desired = sync(&db, &home, &home_ledger, Some(report(&home_key, "")));
+    let via_hub = entry(&home_desired, &hub_public).unwrap();
+    assert_eq!(via_hub.preshared_key, None);
+    assert!(
+        via_hub
+            .allowed_ips
+            .contains(&"10.88.0.3/32".parse().unwrap())
+    );
+
+    // Shown once: not in the panel's view or the audit log; kept for the hub.
+    let member_view = |db: &Store| {
+        db.wireguard(&admin).unwrap().networks[0]
+            .members
+            .iter()
+            .find(|m| m.member.id == phone.member.id)
+            .map(|m| (m.state, m.preshared_key, m.member.enabled))
+            .unwrap()
+    };
+    assert_eq!(member_view(&db), ("idle", true, true));
+    assert!(
+        !serde_json::to_string(&db.wireguard(&admin).unwrap())
+            .unwrap()
+            .contains(&psk)
+    );
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    let count = |sql: &str| -> i64 { raw.query_row(sql, [&psk], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM audit WHERE instr(detail,?1)>0"),
+        0
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM metadata WHERE key GLOB 'wg_psk:*' AND instr(value,?1)>0"),
+        1
+    );
+    // An entry node that later reports no preshared-key support shows why
+    // the device cannot connect.
+    sync(&db, &hub, &hub_ledger, Some(report(&hub_key, "")));
+    assert_eq!(member_view(&db).0, "error");
+    sync(&db, &hub, &hub_ledger, Some(upgraded()));
+
+    // An edit keeps the settings it leaves out; the preshared key changes
+    // only with a new key.
+    let edit = |value: serde_json::Value| {
+        db.update_wireguard_member(&admin, &phone.member.id, input(value))
+    };
+    let renamed = edit(json!({"kind":"device","name":"phone-2"})).unwrap();
+    assert_eq!(
+        (
+            renamed.keepalive,
+            renamed.allowed_ips.len(),
+            renamed.enabled
+        ),
+        (Some(15), 2, true)
+    );
+    assert_eq!(
+        rejection(edit(
+            json!({"kind":"device","name":"phone-2","preshared_key":false})
+        )),
+        400
+    );
+
+    // Switched off, the phone leaves every node's peers and routes; switched
+    // on, the same key and preshared key come back unchanged.
+    edit(json!({"kind":"device","name":"phone-2","enabled":false})).unwrap();
+    let off = sync(&db, &hub, &hub_ledger, Some(upgraded()));
+    assert!(entry(&off, &phone_key).is_none());
+    let home_off = sync(&db, &home, &home_ledger, Some(report(&home_key, "")));
+    assert!(
+        !entry(&home_off, &hub_public)
+            .unwrap()
+            .allowed_ips
+            .contains(&"10.88.0.3/32".parse().unwrap())
+    );
+    assert_eq!(member_view(&db), ("disabled", true, false));
+    edit(json!({"kind":"device","name":"phone-2","enabled":true})).unwrap();
+    assert_eq!(
+        sync(&db, &hub, &hub_ledger, Some(upgraded())).digest,
+        hub_desired.digest
+    );
+    assert_eq!(
+        sync(&db, &home, &home_ledger, Some(report(&home_key, ""))).digest,
+        home_desired.digest
+    );
+
+    // A new key brings a new preshared key, or drops it on request.
+    let rekeyed = db
+        .rekey_wireguard_device(&admin, &phone.member.id, Default::default())
+        .unwrap();
+    let config = rekeyed.config.unwrap();
+    let new_psk = config
+        .lines()
+        .find_map(|line| line.strip_prefix("PresharedKey = "))
+        .unwrap();
+    assert_ne!(new_psk, psk);
+    assert!(config.contains("PersistentKeepalive = 15\n"));
+    let dropped = db
+        .rekey_wireguard_device(
+            &admin,
+            &phone.member.id,
+            input(json!({"preshared_key": false})),
+        )
+        .unwrap();
+    assert!(!dropped.config.unwrap().contains("PresharedKey"));
+    let new_key = dropped.member.public_key.unwrap();
+    assert_eq!(
+        entry(&sync(&db, &hub, &hub_ledger, Some(upgraded())), &new_key)
+            .unwrap()
+            .preshared_key,
+        None
+    );
+
+    // Network DNS: an edit without it keeps it, an empty list removes it.
+    let update = |value: serde_json::Value| {
+        db.update_wireguard_network(&admin, &office.id, input(value))
+            .unwrap()
+            .dns
+            .len()
+    };
+    assert_eq!(update(json!({"name":"office-2"})), 2);
+    assert_eq!(update(json!({"name":"office-2","dns":[]})), 0);
+    let plain = db
+        .rekey_wireguard_device(&admin, &phone.member.id, Default::default())
+        .unwrap()
+        .config
+        .unwrap();
+    assert!(!plain.contains("DNS ="), "{plain}");
+
+    // The stored preshared key goes with the device or the network.
+    db.rekey_wireguard_device(
+        &admin,
+        &phone.member.id,
+        input(json!({"preshared_key": true})),
+    )
+    .unwrap();
+    db.delete_wireguard_member(&admin, &phone.member.id)
+        .unwrap();
+    let left: i64 = raw
+        .query_row(
+            "SELECT COUNT(*) FROM metadata WHERE key GLOB 'wg_psk:*'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
 }
 
 /// What `key` sees of the peers `(key, endpoint, handshake, rx)` on `network`.

@@ -28,6 +28,11 @@ pub struct AgentOptions {
     pub ca_certificate: Option<PathBuf>,
     pub tls_directory: Option<PathBuf>,
     pub poll_interval: Duration,
+    /// `host:port` addresses dialed, in order, instead of the controller host
+    /// name's own addresses, e.g. a TCP relay. TLS still verifies the name.
+    pub controller_addresses: Vec<String>,
+    /// HTTP CONNECT proxy (`http://host:port`) for every controller request.
+    pub controller_proxy: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Credential {
@@ -67,6 +72,128 @@ pub fn controller_url(input: &str) -> Result<Url> {
     Ok(url)
 }
 
+/// Most alternate controller addresses an agent accepts.
+pub const MAX_CONTROLLER_ADDRESSES: usize = 8;
+
+/// Resolves the controller host name to the configured addresses, in order;
+/// any other name (none is expected) uses the system resolver. Names among
+/// the addresses are looked up on every connection, so a relay may move.
+struct ControllerAddresses {
+    host: String,
+    addresses: Vec<(String, u16)>,
+}
+impl reqwest::dns::Resolve for ControllerAddresses {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let wanted: Vec<(String, u16)> = if name.as_str().eq_ignore_ascii_case(&self.host) {
+            self.addresses.clone()
+        } else {
+            vec![(name.as_str().to_owned(), 0)]
+        };
+        Box::pin(async move {
+            let mut found = Vec::new();
+            let mut last = None;
+            for (host, port) in wanted {
+                match tokio::net::lookup_host((host.trim_matches(['[', ']']), port)).await {
+                    Ok(addresses) => found.extend(addresses),
+                    Err(error) => last = Some(error),
+                }
+            }
+            if found.is_empty() {
+                let error = last.unwrap_or_else(|| std::io::Error::other("no addresses"));
+                return Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(found.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+/// Checks `--controller-proxy`: plain HTTP CONNECT only. reqwest's SOCKS
+/// support needs a crate this build does not include.
+pub fn controller_proxy(input: &str) -> Result<reqwest::Proxy> {
+    let url = Url::parse(input).context("invalid controller proxy URL")?;
+    ensure!(
+        !url.scheme().starts_with("socks"),
+        "SOCKS proxies are not supported by this agent; use an HTTP CONNECT proxy (http://host:port) or --controller-address with a TCP relay"
+    );
+    ensure!(
+        url.scheme() == "http",
+        "controller proxy must be an http://host:port URL"
+    );
+    ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "controller proxy credentials would be visible in the process list; use a proxy that admits this server by address"
+    );
+    ensure!(
+        url.host_str().is_some_and(|h| !h.is_empty())
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "controller proxy must be an http://host:port URL without path, query or fragment"
+    );
+    Ok(reqwest::Proxy::all(url)?)
+}
+
+/// The one HTTP client for every controller request. It never uses proxies
+/// from the environment; `addresses` and `proxy` change only where the TCP
+/// connection goes, while TLS still verifies the controller's own name.
+pub fn controller_client(
+    base: &Url,
+    addresses: &[String],
+    proxy: Option<&str>,
+    ca_certificate: Option<&[u8]>,
+) -> Result<Client> {
+    let mut builder = Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15));
+    if let Some(pem) = ca_certificate {
+        builder = builder.add_root_certificate(reqwest::Certificate::from_pem(pem)?);
+    }
+    ensure!(
+        addresses.is_empty() || proxy.is_none(),
+        "use either --controller-address or --controller-proxy, not both"
+    );
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(controller_proxy(proxy)?);
+    }
+    if !addresses.is_empty() {
+        ensure!(
+            addresses.len() <= MAX_CONTROLLER_ADDRESSES,
+            "at most {MAX_CONTROLLER_ADDRESSES} controller addresses"
+        );
+        // An IP literal URL is dialed directly, without the resolver below.
+        let host = base
+            .domain()
+            .context(
+                "--controller-address requires a controller URL with a host name, which TLS verifies",
+            )?
+            .to_ascii_lowercase();
+        let mut parsed = Vec::new();
+        for address in addresses {
+            validate_target(address)
+                .with_context(|| format!("invalid controller address {address}"))?;
+            let (name, port) = address.rsplit_once(':').unwrap();
+            let port: u16 = port.parse()?;
+            // The HTTP client always dials a port written in the URL itself.
+            ensure!(
+                base.port().is_none_or(|own| own == port),
+                "the controller URL names port {}, so the relay at {address} must listen on that same port (or use a controller URL without a port)",
+                base.port().unwrap_or_default()
+            );
+            parsed.push((name.to_owned(), port));
+        }
+        // The connector splits its connect timeout evenly over the resolved
+        // addresses; keep about 5 s for each fallback instead of 5 s in total.
+        builder = builder.connect_timeout(Duration::from_secs(5) * parsed.len() as u32);
+        builder = builder.dns_resolver(Arc::new(ControllerAddresses {
+            host,
+            addresses: parsed,
+        }));
+    }
+    Ok(builder.build()?)
+}
+
 async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> Result<T> {
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await? {
@@ -83,17 +210,16 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     let _instance = store.lock_instance()?;
     store.set_kind("agent")?;
     let base = controller_url(&options.controller)?;
-    let mut builder = Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15));
-    if let Some(path) = options.ca_certificate {
-        builder = builder.add_root_certificate(reqwest::Certificate::from_pem(
-            &tokio::fs::read(path).await?,
-        )?);
-    }
-    let client = builder.build()?;
+    let ca = match &options.ca_certificate {
+        Some(path) => Some(tokio::fs::read(path).await?),
+        None => None,
+    };
+    let client = controller_client(
+        &base,
+        &options.controller_addresses,
+        options.controller_proxy.as_deref(),
+        ca.as_deref(),
+    )?;
     let mut credential: Credential = if let Some(saved) = store.metadata("agent_credential")? {
         let credential: Credential = serde_json::from_str(&saved)?;
         ensure!(

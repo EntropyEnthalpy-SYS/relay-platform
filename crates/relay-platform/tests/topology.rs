@@ -162,6 +162,51 @@ fn draining_a_node_marks_every_route_into_it_without_tripping_the_rewire_barrier
 }
 
 #[test]
+fn pausing_a_routed_target_passes_the_rewire_barrier_unlike_moving_it() {
+    let mut f = Fixture::new();
+    f.publish();
+    // The barrier is active here: moving a running topology route is refused.
+    let mut moved = f.configs[2].clone();
+    moved.rules[0].targets[0].address = "127.0.0.1:38999".into();
+    assert_eq!(
+        rejection(f.store.publish_configs(&f.admin, batch(&[moved]))),
+        409
+    );
+    let mut paused = f.configs[0].clone();
+    let target = &mut paused.rules[0].targets[0];
+    assert!(
+        target.via.is_some(),
+        "the paused target routes to the next hop"
+    );
+    target.paused = true;
+    target.paused_until_ms = Some(now_ms() + 60_000);
+    let published = f.store.publish_configs(&f.admin, batch(&[paused])).unwrap();
+    assert_eq!(published.configs[0].revision, 2);
+    assert!(published.configs[0].rules[0].targets[0].paused);
+    let mut resumed = published.configs[0].clone();
+    resumed.rules[0].targets[0].paused = false;
+    resumed.rules[0].targets[0].paused_until_ms = None;
+    let published = f
+        .store
+        .publish_configs(&f.admin, batch(&[resumed]))
+        .unwrap();
+    assert_eq!(published.configs[0].revision, 3);
+    assert!(
+        !serde_json::to_string(&published.configs[0])
+            .unwrap()
+            .contains("paused"),
+        "a resumed target serializes as before for older agents"
+    );
+    // A time without the pause flag is rejected rather than silently ignored.
+    let mut stray = published.configs[0].clone();
+    stray.rules[0].targets[0].paused_until_ms = Some(now_ms() + 60_000);
+    assert_eq!(
+        rejection(f.store.publish_configs(&f.admin, batch(&[stray]))),
+        400
+    );
+}
+
+#[test]
 fn mptcp_rules_wait_for_the_optional_feature_which_then_stays_on() {
     use relay_platform::mptcp::{Config, Mode};
     let mut f = Fixture::new();

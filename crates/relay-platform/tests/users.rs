@@ -92,6 +92,108 @@ fn password_change_reset_disable_and_delete_revoke_the_right_credentials() {
     );
 }
 
+#[test]
+fn offline_password_reset_waits_for_a_stopped_controller_and_survives_restore() {
+    use relay_platform::store::{Role, Scope};
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("controller");
+    let database = state.join("controller.sqlite");
+    let log = state.join("recovery.log");
+    let backup = temp.path().join("backup.sqlite");
+    // A controller as `relay server` leaves it: recovery log, admin and
+    // another user signed in, and a backup taken before the reset.
+    let (session, api_token, other) = {
+        let store = Store::open(&database).unwrap();
+        store.enable_recovery_log(&log).unwrap();
+        store.set_kind("controller").unwrap();
+        let admin = store.bootstrap(PASSWORD).unwrap();
+        store
+            .create_user(&admin, "default", "alice", PASSWORD, Role::Viewer)
+            .unwrap();
+        store.backup(&backup).unwrap();
+        let (session, actor) = store.login("admin", PASSWORD).unwrap();
+        let api_token = store
+            .create_api_token(&actor, "script", &[Scope::Read], 1)
+            .unwrap()
+            .0;
+        let (other, _) = store.login("alice", PASSWORD).unwrap();
+        (session, api_token, other)
+    };
+    let password_file = state.join("admin-password.secret");
+    let reset = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_relay"))
+            .args(["reset-password", "--state"])
+            .arg(&state)
+            .args(["--user", "admin"])
+            .output()
+            .unwrap()
+    };
+    {
+        // The running controller holds the instance lock.
+        let running = Store::open(&database).unwrap();
+        let _lock = running.lock_instance().unwrap();
+        let refused = reset();
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("stop the controller"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(!password_file.exists());
+    }
+    let done = reset();
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&done.stdout),
+        String::from_utf8_lossy(&done.stderr),
+    );
+    assert!(done.status.success(), "{stderr}");
+    let password = std::fs::read_to_string(&password_file).unwrap();
+    assert!(password.len() >= 32);
+    assert!(
+        !stdout.contains(&password) && !stderr.contains(&password),
+        "the password was printed"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&password_file)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(report["user"], "admin");
+    assert_eq!(report["revoked_sessions"], 1);
+    assert_eq!(report["revoked_api_tokens"], 1);
+    // The new password is the only way in; the user's old credentials are
+    // gone while other users keep theirs. The same holds after a restore of
+    // the earlier backup, which replays the reset from the recovery log.
+    let check = |database: &std::path::Path, log: &std::path::Path| {
+        let store = Store::open(database).unwrap();
+        store.enable_recovery_log(log).unwrap();
+        assert_eq!(rejection(store.authenticate(&session).unwrap_err()), 401);
+        assert_eq!(rejection(store.authenticate(&api_token).unwrap_err()), 401);
+        assert!(store.authenticate(&other).is_ok());
+        assert_eq!(rejection(store.login("admin", PASSWORD).unwrap_err()), 401);
+        let (_, admin) = store.login("admin", &password).unwrap();
+        let audit = store.audit_log(&admin).unwrap();
+        assert!(
+            audit
+                .iter()
+                .any(|a| a["actor_id"] == "local-cli" && a["action"] == "user.password"),
+            "{audit:?}"
+        );
+    };
+    check(&database, &log);
+    let restored = temp.path().join("restored");
+    relay_platform::journal::restore_controller(&backup, &log, &restored).unwrap();
+    check(
+        &restored.join("controller.sqlite"),
+        &restored.join("recovery.log"),
+    );
+}
+
 async fn serve(store: Store) -> (SocketAddr, CancellationToken) {
     let stop = CancellationToken::new();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

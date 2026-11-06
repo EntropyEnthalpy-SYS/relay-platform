@@ -352,6 +352,18 @@ impl Telemetry {
         }
     }
 
+    /// The sample of a node's newest report since this controller started.
+    pub fn latest(&self, node: &str) -> Option<Sample> {
+        self.0
+            .lock()
+            .unwrap()
+            .nodes
+            .get(node)?
+            .samples
+            .back()
+            .cloned()
+    }
+
     /// Drops the history of a deleted node.
     pub fn forget(&self, node: &str) {
         let mut inner = self.0.lock().unwrap();

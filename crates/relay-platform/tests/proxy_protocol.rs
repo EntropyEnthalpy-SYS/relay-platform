@@ -890,6 +890,8 @@ async fn source_hash_uses_claimed_ip_and_normalizes_mapped_ipv4() {
         via: None,
         prewarm: None,
         draining: false,
+        paused: false,
+        paused_until_ms: None,
     });
     let address = r.listen;
     engine.apply(config(r)).await.unwrap();

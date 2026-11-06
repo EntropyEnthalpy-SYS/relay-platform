@@ -69,6 +69,8 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
             via: None,
             prewarm: None,
             draining: false,
+            paused: false,
+            paused_until_ms: None,
         }],
         balance: Balance::WeightedRoundRobin,
         enabled: true,

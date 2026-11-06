@@ -1117,15 +1117,20 @@ impl RuntimeRule {
     }
     fn order(&self, source: SocketAddr, inlet: ListenerKey) -> Vec<usize> {
         let targets = &self.spec.targets;
+        // Paused targets take no new sessions, not even as a last resort; a
+        // timed pause ends here on the agent's clock without a new revision.
+        let wall = now_ms();
         let mut eligible: Vec<_> = (0..targets.len())
             .filter(|&index| {
-                self.health.as_ref().is_none_or(|health| {
-                    health
-                        .point(index, inlet.address.port(), inlet.tcp)
-                        .eligible()
-                }) && targets[index].max_sessions.is_none_or(|limit| {
-                    self.target_active[index].load(Ordering::Relaxed) < limit as usize
-                })
+                !targets[index].paused_at(wall)
+                    && self.health.as_ref().is_none_or(|health| {
+                        health
+                            .point(index, inlet.address.port(), inlet.tcp)
+                            .eligible()
+                    })
+                    && targets[index].max_sessions.is_none_or(|limit| {
+                        self.target_active[index].load(Ordering::Relaxed) < limit as usize
+                    })
             })
             .collect();
         eligible.sort_by_key(|&index| targets[index].priority);
@@ -1217,6 +1222,10 @@ impl RuntimeRule {
                 self.preferred.store(pool[0], Ordering::Relaxed);
                 pool
             }
+            Balance::Random => rotate(rand::Rng::gen_range(
+                &mut rand::thread_rng(),
+                0..primary.len(),
+            )),
         };
         let now = clock();
         let (ready, cooling): (Vec<_>, Vec<_>) = pool
@@ -2512,6 +2521,26 @@ async fn fill_prewarm(rule: Arc<RuntimeRule>, set: Arc<PrewarmSet>, index: usize
     };
     let mut backoff = Duration::from_millis(500);
     loop {
+        // A paused target keeps no idle connections; filling resumes when a
+        // timed pause ends.
+        let target = &rule.spec.targets[index];
+        if target.paused_at(now_ms()) {
+            pool.ready.lock().unwrap().clear();
+            let resume = target
+                .paused_until_ms
+                .map(|until| Duration::from_millis(until.saturating_sub(now_ms()).max(1) as u64));
+            tokio::select! {
+                biased;
+                _ = set.stop.cancelled() => return,
+                _ = async {
+                    match resume {
+                        Some(wait) => sleep(wait).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
+            }
+            continue;
+        }
         let full_until = {
             let mut ready = pool.ready.lock().unwrap();
             ready.retain(|d| d.opened.elapsed() < max_age);

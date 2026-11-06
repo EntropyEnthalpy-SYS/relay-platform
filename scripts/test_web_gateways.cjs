@@ -61,8 +61,57 @@ async function serialize(existing) {
   const reality={ ...native, mptcp:null, targets:[], protocol_gateway:{listen:'[::]:443',protocol:{type:'vless',uuid:'bf000d23-0752-40b4-affe-68f7707a9661',vision:true},security:{type:'reality',server_name:'relay.test',handshake:'relay.test:443',private_key:'B'.repeat(43),short_id:'abcd'},allow_private_destinations:true} };
   result=await serialize(reality);
   assert.equal(JSON.stringify(result.saved.protocol_gateway),JSON.stringify(reality.protocol_gateway));
+  // Options added in the engine form survive an unchanged edit, defaults stay
+  // out of the saved rule, and invalid values are refused before saving.
+  const options = (protocol, security = { type:'certificate', identity:'server', server_name:'relay.test' }) => ({ ...native, mptcp:null, protocol:'both', targets:[], health_check:null, protocol_gateway:{ listen:'0.0.0.0:443', protocol, security, allow_private_destinations:false } });
+  const hysteria = options({ type:'hysteria2', password:'secret-password-1234', obfs:{ type:'salamander', password:'obfuscation-pass-1234' }, masquerade:{ type:'string', status_code:404, content:'<h1>gone</h1>' } });
+  result = await serialize(hysteria);
+  assert.equal(JSON.stringify(result.saved.protocol_gateway), JSON.stringify(hysteria.protocol_gateway));
+  const tuic = options({ type:'tuic', uuid:'bf000d23-0752-40b4-affe-68f7707a9661', password:'secret-password-1234', congestion_control:'new_reno', zero_rtt_handshake:true });
+  result = await serialize(tuic);
+  assert.equal(JSON.stringify(result.saved.protocol_gateway), JSON.stringify(tuic.protocol_gateway));
+  for (const type of ['hysteria2', 'tuic']) {
+    const plain = options({ type, uuid:'bf000d23-0752-40b4-affe-68f7707a9661', password:'secret-password-1234' });
+    result = await serialize(plain);
+    for (const key of ['obfs', 'masquerade', 'congestion_control', 'zero_rtt_handshake']) assert.equal(result.saved.protocol_gateway.protocol[key], undefined, `${type} gained ${key}`);
+  }
+  const shortIds = { ...reality, protocol_gateway:{ ...reality.protocol_gateway, security:{ ...reality.protocol_gateway.security, short_id:'abcd', extra_short_ids:['01', 'fedcba9876543210'], max_time_difference_secs:90 } } };
+  result = await serialize(shortIds);
+  assert.equal(JSON.stringify(result.saved.protocol_gateway), JSON.stringify(shortIds.protocol_gateway));
+  for (const invalid of [
+    options({ ...hysteria.protocol_gateway.protocol, obfs:{ type:'salamander', password:'short' } }),
+    options({ ...hysteria.protocol_gateway.protocol, masquerade:{ type:'string', status_code:600 } }),
+    { ...shortIds, protocol_gateway:{ ...shortIds.protocol_gateway, security:{ ...shortIds.protocol_gateway.security, extra_short_ids:['ABCD'] } } },
+    { ...shortIds, protocol_gateway:{ ...shortIds.protocol_gateway, security:{ ...shortIds.protocol_gateway.security, max_time_difference_secs:3601 } } },
+  ]) await assert.rejects(serialize(invalid), /混淆|伪装|short ID|时钟|obfuscation|masquerade|short IDs|clock/);
   const conflict={...reality,inbound_socks5:{username:'test',password:'secret'}};
   await assert.rejects(serialize(conflict),/只能启用一种|Only one proxy inbound/);
   const invalid={...reality,protocol:'udp'}; await assert.rejects(serialize(invalid),/TCP/);
-  console.log('Rule submission preserves MPTCP + health, six typed gateways, Reality secrets, public/bridge addresses and rejects incompatible modes');
+  // Gateway share links come from the controller, which also renders the QR code.
+  const shareSource = source.slice(source.indexOf('function shareGateway('), source.indexOf('const subscriptionFormats'));
+  const requests = [], dialog = { closed: false };
+  let shown;
+  const share = {
+    ...require('./web_i18n_helpers.cjs').loadI18n(), URLSearchParams, encodeURIComponent, setTimeout, clearTimeout,
+    el: (tag, text = '') => Object.assign(new Element(tag), { textContent: text, hidden: false, src: '' }),
+    field(parent, name, _label, value = '') { const input = new Element('input'); Object.assign(input, { name, value: String(value ?? '') }); parent.append(input); return input; },
+    button: () => new Element('button'), modal: (_title, body) => { shown = body; }, $: () => dialog, notify() {},
+    clientEndpoint: rule => ({ host: rule.protocol_gateway.listen.startsWith('0.0.0.0') ? '' : '203.0.113.5', port: '443' }),
+    splitEndpoint: value => /^(\[[^\]]+\]|[^:]+):\d+$/.test(value) ? {} : null,
+    api: async path => { requests.push(path); return { uri: 'hysteria2://secret@203.0.113.5:443/?sni=relay.test#hy', qr_svg: '<svg/>' }; },
+  };
+  vm.createContext(share);
+  vm.runInContext(shareSource + '\nthis.shareGateway = shareGateway;', share);
+  const gatewayRule = { id: 'gw/1', name: 'hy', protocol_gateway: { listen: '[::]:443', protocol: { type: 'hysteria2' } } };
+  share.shareGateway(gatewayRule, 'node 1');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0], '/nodes/node%201/rules/gw%2F1/share?host=203.0.113.5&port=443&name=hy');
+  const nodes = []; const walk = n => { nodes.push(n); (n.children || []).forEach(c => typeof c === 'object' && walk(c)); }; walk(shown);
+  assert.ok(nodes.some(n => n.textContent === 'hysteria2://secret@203.0.113.5:443/?sni=relay.test#hy'), 'link not shown');
+  assert.ok(nodes.some(n => n.tag === 'img' && !n.hidden && n.src === `data:image/svg+xml;charset=utf-8,${encodeURIComponent('<svg/>')}`), 'QR code not shown');
+  share.shareGateway({ ...gatewayRule, protocol_gateway: { ...gatewayRule.protocol_gateway, listen: '0.0.0.0:443' } }, 'node');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.length, 1, 'a wildcard listener needs a public host before asking for a link');
+  console.log('Rule submission preserves MPTCP + health, six typed gateways, Reality secrets, Hysteria2 / TUIC / Reality options, public/bridge addresses and rejects incompatible modes; gateway share dialog shows the controller link and QR code');
 })().catch(error => { console.error(error); process.exitCode=1; });

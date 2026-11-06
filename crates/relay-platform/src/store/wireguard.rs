@@ -6,7 +6,7 @@ use super::*;
 use crate::wireguard::{
     self as wg, Desired, Issued, Kind, MAX_MEMBERS, MAX_NETWORKS, MAX_NODE_NETWORKS, Member,
     MemberInput, MemberView, Network, NetworkInput, NetworkView, NodeReadiness, PairView, Path,
-    PeerReport, Report, View,
+    PeerReport, RekeyInput, Report, View,
     punch::{Stage, Traversal},
 };
 use std::{collections::HashMap, net::Ipv4Addr};
@@ -61,6 +61,71 @@ fn node_keys(conn: &Connection) -> Result<HashMap<String, String>> {
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+/// Device member id to the preshared key the panel made for it.
+fn preshared_keys(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut q =
+        conn.prepare("SELECT substr(key,8),value FROM metadata WHERE key GLOB 'wg_psk:*'")?;
+    let rows: Vec<(String, String)> = q
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    rows.into_iter()
+        .map(|(id, value)| {
+            Ok((
+                id,
+                serde_json::from_str(&value).context("invalid stored WireGuard data")?,
+            ))
+        })
+        .collect()
+}
+/// Whether the agent on `node` said in its newest report that it writes
+/// preshared keys.
+fn writes_preshared_keys(
+    conn: &Connection,
+    telemetry: &crate::telemetry::Telemetry,
+    node: &str,
+) -> Result<bool> {
+    let row: Option<(Option<i64>, String)> = conn
+        .query_row(
+            "SELECT last_seen_ms,COALESCE(stats_json,'{}') FROM nodes WHERE id=?1",
+            [node],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((last_seen, stats)) = row else {
+        return Ok(false);
+    };
+    let (_, stats) = telemetry.current(node, last_seen, stats);
+    Ok(serde_json::from_str::<EngineStats>(&stats)
+        .ok()
+        .and_then(|stats| stats.wireguard)
+        .is_some_and(|report| report.preshared_keys))
+}
+/// Makes or removes a device's preshared key. A new key needs a hub whose
+/// agent writes preshared keys, or the device could not connect.
+fn set_preshared_key(
+    tx: &Transaction<'_>,
+    telemetry: &crate::telemetry::Telemetry,
+    network: &Network,
+    device: &mut Member,
+    wanted: bool,
+) -> Result<()> {
+    if !wanted {
+        device.preshared_key = None;
+        return remove(tx, "psk", &device.id);
+    }
+    let members = members_of(tx, &network.id)?;
+    let hub = wg::hub(device, &members).and_then(|hub| hub.node_id.as_deref());
+    if !hub.map_or(Ok(false), |node| writes_preshared_keys(tx, telemetry, node))? {
+        return reject(
+            409,
+            "the entry node's agent does not write preshared keys yet; upgrade its agent and wait for its next report",
+        );
+    }
+    let key = wg::preshared_key();
+    write(tx, "psk", &device.id, &key)?;
+    device.preshared_key = Some(key);
+    Ok(())
 }
 fn members_of(conn: &Connection, network: &str) -> Result<Vec<Member>> {
     let mut members: Vec<Member> = all::<Member>(conn, "member")?
@@ -140,6 +205,7 @@ pub(super) fn desired(conn: &Connection, node: &str, traversal: &Traversal) -> R
         return Ok(Desired::new(true, vec![]));
     }
     let keys = node_keys(conn)?;
+    let preshared = preshared_keys(conn)?;
     let mut interfaces = vec![];
     for network in all::<Network>(conn, "network")?
         .iter()
@@ -148,7 +214,10 @@ pub(super) fn desired(conn: &Connection, node: &str, traversal: &Traversal) -> R
         let mut peers: Vec<Member> = members
             .iter()
             .filter(|m| m.network_id == network.id)
-            .cloned()
+            .map(|m| Member {
+                preshared_key: preshared.get(&m.id).cloned(),
+                ..m.clone()
+            })
             .collect();
         peers.sort_by_key(|m| m.address);
         let punches = peers
@@ -279,6 +348,10 @@ fn network_fields(
             }
         }
     }
+    let dns = match &input.dns {
+        Some(list) => wg::dns_servers(list).or_else(invalid)?,
+        None => current.map(|c| c.dns.clone()).unwrap_or_default(),
+    };
     Ok(Network {
         id: current.map_or_else(|| Uuid::new_v4().to_string(), |c| c.id.clone()),
         name,
@@ -286,6 +359,7 @@ fn network_fields(
         mtu,
         listen_port,
         relay,
+        dns,
         updated_at_ms: now_ms(),
     })
 }
@@ -360,6 +434,10 @@ fn member_fields(
         listen_port: None,
         via: None,
         public_key: None,
+        enabled: true,
+        allowed_ips: vec![],
+        keepalive: None,
+        preshared_key: None,
         updated_at_ms: now_ms(),
     };
     let keys = node_keys(conn)?;
@@ -375,6 +453,16 @@ fn member_fields(
     };
     match input.kind {
         Kind::Node => {
+            if input.enabled == Some(false)
+                || input.allowed_ips.is_some_and(|list| !list.is_empty())
+                || input.keepalive.is_some()
+                || input.preshared_key == Some(true)
+            {
+                return reject(
+                    400,
+                    "switching off, allowed IPs, keepalive and preshared keys are for devices",
+                );
+            }
             let node = input
                 .node_id
                 .filter(|n| !n.is_empty())
@@ -506,6 +594,13 @@ fn member_fields(
                 }
                 _ => None,
             };
+            // Each setting the input leaves out keeps its current value.
+            member.enabled = input.enabled.unwrap_or(current.is_none_or(|c| c.enabled));
+            member.allowed_ips = match &input.allowed_ips {
+                Some(list) => wg::allowed_ips(list).or_else(invalid)?,
+                None => current.map(|c| c.allowed_ips.clone()).unwrap_or_default(),
+            };
+            member.keepalive = input.keepalive.or(current.and_then(|c| c.keepalive));
         }
     }
     Ok(member)
@@ -580,6 +675,7 @@ impl Store {
             });
             nodes.insert(id, (name, online, report));
         }
+        let preshared = preshared_keys(&conn)?;
         let mut expected: HashMap<String, String> = HashMap::new();
         let mut networks = vec![];
         let mut all_networks = all::<Network>(&conn, "network")?;
@@ -640,12 +736,27 @@ impl Store {
                             Some(_) => ("up", None),
                         }
                     }
+                    None if !member.enabled => ("disabled", None),
                     None => {
-                        let fresh = wg::hub(member, &members)
+                        let hub = wg::hub(member, &members);
+                        // An agent that predates preshared keys ignores them,
+                        // and the device cannot connect.
+                        let unwritten = preshared.contains_key(&member.id)
+                            && hub
+                                .and_then(|hub| nodes.get(hub.node_id.as_ref()?)?.2.as_ref())
+                                .is_some_and(|report| !report.preshared_keys);
+                        let fresh = hub
                             .and_then(|hub| leg(hub, member))
                             .and_then(|p| age(p.handshake, now_s))
                             .is_some_and(|age| age <= CONNECTED_S);
-                        (if fresh { "connected" } else { "idle" }, None)
+                        match (unwritten, fresh) {
+                            (true, _) => (
+                                "error",
+                                Some("the entry node's agent does not write preshared keys; upgrade it".into()),
+                            ),
+                            (false, true) => ("connected", None),
+                            (false, false) => ("idle", None),
+                        }
                     }
                 };
                 views.push(MemberView {
@@ -653,6 +764,7 @@ impl Store {
                     label: label(member),
                     state,
                     error,
+                    preshared_key: preshared.contains_key(&member.id),
                 });
             }
             let mut pairs = vec![];
@@ -660,10 +772,14 @@ impl Store {
                 for b in &members[index + 1..] {
                     let route = match (a.kind, b.kind) {
                         (Kind::Node, Kind::Node) => wg::path(a, b, relay),
-                        (Kind::Node, Kind::Device) if b.via.as_deref() == Some(a.id.as_str()) => {
+                        (Kind::Node, Kind::Device)
+                            if b.enabled && b.via.as_deref() == Some(a.id.as_str()) =>
+                        {
                             Path::Direct
                         }
-                        (Kind::Device, Kind::Node) if a.via.as_deref() == Some(b.id.as_str()) => {
+                        (Kind::Device, Kind::Node)
+                            if a.enabled && a.via.as_deref() == Some(b.id.as_str()) =>
+                        {
                             Path::Direct
                         }
                         _ => continue,
@@ -785,6 +901,7 @@ impl Store {
         let network = network(&tx, id)?;
         for member in members_of(&tx, id)? {
             remove(&tx, "member", &member.id)?;
+            remove(&tx, "psk", &member.id)?;
         }
         remove(&tx, "network", id)?;
         audit(
@@ -809,6 +926,7 @@ impl Store {
         let tx = conn.transaction()?;
         features::require(&tx, FEATURE, "WireGuard networking")?;
         let network = network(&tx, network_id)?;
+        let preshared = input.preshared_key == Some(true);
         let mut member = member_fields(&tx, &network, input, None)?;
         let private_key =
             (member.kind == Kind::Device && member.public_key.is_none()).then(wg::private_key);
@@ -816,6 +934,9 @@ impl Store {
             member.public_key = Some(wg::public_key(private_key)?);
         }
         write(&tx, "member", &member.id, &member)?;
+        if preshared {
+            set_preshared_key(&tx, &self.4, &network, &mut member, true)?;
+        }
         let issued = match member.kind {
             Kind::Device => issue(&tx, &network, member, private_key.as_deref())?,
             Kind::Node => Issued {
@@ -841,7 +962,29 @@ impl Store {
         features::require(&tx, FEATURE, "WireGuard networking")?;
         let current = member(&tx, id)?;
         let network = network(&tx, &current.network_id)?;
+        let preshared = read::<String>(&tx, "psk", id)?.is_some();
+        if input
+            .preshared_key
+            .is_some_and(|wanted| wanted != preshared)
+        {
+            return reject(
+                400,
+                "a preshared key comes and goes with a new key; use New key",
+            );
+        }
         let member = member_fields(&tx, &network, input, Some(&current))?;
+        // A device keeps its preshared key, so a new entry node must write it.
+        if preshared
+            && member.via != current.via
+            && !wg::hub(&member, &members_of(&tx, &network.id)?)
+                .and_then(|hub| hub.node_id.clone())
+                .map_or(Ok(false), |node| writes_preshared_keys(&tx, &self.4, &node))?
+        {
+            return reject(
+                409,
+                "the new entry node's agent does not write preshared keys yet; upgrade its agent first",
+            );
+        }
         write(&tx, "member", id, &member)?;
         audit(&tx, &actor.id, "wireguard.member.update", id, "{}")?;
         tx.commit()?;
@@ -870,12 +1013,19 @@ impl Store {
             write(&tx, "network", &network.id.clone(), &network)?;
         }
         remove(&tx, "member", id)?;
+        remove(&tx, "psk", id)?;
         audit(&tx, &actor.id, "wireguard.member.delete", id, "{}")?;
         tx.commit()?;
         Ok(())
     }
-    /// A new key pair for a device; the old configuration stops working.
-    pub fn rekey_wireguard_device(&self, actor: &Actor, id: &str) -> Result<Issued> {
+    /// A new key pair for a device; the old configuration stops working. A
+    /// device with a preshared key, or asking for one, gets a new one too.
+    pub fn rekey_wireguard_device(
+        &self,
+        actor: &Actor,
+        id: &str,
+        input: RekeyInput,
+    ) -> Result<Issued> {
         require_admin(actor)?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
@@ -892,6 +1042,11 @@ impl Store {
         member.public_key = Some(wg::public_key(&private_key)?);
         member.updated_at_ms = now_ms();
         write(&tx, "member", id, &member)?;
+        let preshared = match input.preshared_key {
+            Some(wanted) => wanted,
+            None => read::<String>(&tx, "psk", id)?.is_some(),
+        };
+        set_preshared_key(&tx, &self.4, &network, &mut member, preshared)?;
         let issued = issue(&tx, &network, member, Some(&private_key))?;
         audit(&tx, &actor.id, "wireguard.member.rekey", id, "{}")?;
         tx.commit()?;

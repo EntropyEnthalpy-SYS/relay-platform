@@ -35,7 +35,42 @@ This build command pins the version instead of using the upstream Makefile's lat
 4. Publish and verify the node's applied revision. Node diagnostics report engine version, running state and automatic restarts.
 5. Create a sing-box JSON or mihomo/Clash Meta YAML subscription. For wildcard listeners, supply the public host. Certificate server name can differ from the host clients dial. Client certificate verification stays enabled. Install a private CA or pin its certificate in the client if using privately issued certificates.
 
-Other legacy subscription formats currently skip these gateways with explicit preview reasons. A sing-box export contains outbounds and routing; add the local SOCKS/TUN inlet appropriate for the client application. Client exports contain protocol client credentials and Reality **public** keys, never Reality private keys, local TLS keys or private bridge credentials. Subscription links must be protected as credentials.
+Other legacy subscription formats currently skip these gateways with explicit preview reasons. Single rules can also be shared as a link and QR code; see [Share links and QR codes](#share-links-and-qr-codes). A sing-box export contains outbounds and routing; add the local SOCKS/TUN inlet appropriate for the client application. Client exports contain protocol client credentials and Reality **public** keys, never Reality private keys, local TLS keys or private bridge credentials. Subscription links must be protected as credentials.
+
+## Protocol options
+
+These options are optional. Their defaults are today's behaviour and are left out of the stored rule, so configurations that do not use them are byte-for-byte what earlier agents accept. A rule that uses one is rejected by agents that predate it (rule fields deny unknown names): upgrade the agents before using the options. Every option name and value below was checked against the bundled sing-box 1.14.4 source (`option/hysteria2.go`, `option/tuic.go`, `option/tls.go`, `common/tls/reality_server.go`).
+
+| Rule field | Values | Engine inbound | sing-box client export | mihomo export |
+| --- | --- | --- | --- | --- |
+| Hysteria2 `obfs` | `{"type":"salamander","password":…}`, password 16..256 bytes | `obfs` (same object) | `obfs` (same object) | `obfs: salamander`, `obfs-password` |
+| Hysteria2 `masquerade` | `{"type":"string","status_code":200..599,"content":…}`, content up to 4096 bytes | `masquerade` `string` type | — (server only) | — |
+| TUIC `congestion_control` | `bbr` (default), `cubic`, `new_reno` | `congestion_control` | `congestion_control` | `congestion-controller` |
+| TUIC `zero_rtt_handshake` | `false` (default), `true` | `zero_rtt_handshake` | `zero_rtt_handshake` | `reduce-rtt` |
+| Reality `extra_short_ids` | up to 15 more short IDs, 2..16 hex digits each, unique ignoring case | `reality.short_id` list: `short_id` first, then these | `reality.short_id`: the first only | `reality-opts.short-id`: the first only |
+| Reality `max_time_difference_secs` | 1..3600; unset leaves the check off | `reality.max_time_difference` as a duration (`"90s"`) | — (server only) | — |
+
+- Clients need the same obfuscation password; without it they cannot connect. Salamander is the only obfuscation offered; the engine's `gecko` type needs packet-size settings Relay does not expose.
+- The masquerade answers HTTP/3 requests that fail authentication; without it the engine answers 404. Only the engine's fixed `string` response is offered. Its `file` masquerade would serve node files, and its `proxy` masquerade dials from the engine directly, outside the metered bridge, the destination ACL and the budgets, which would let a rule owner reach node-local services. Both are rejected.
+- 0-RTT makes reconnects faster, but early data can be replayed by an on-path attacker. It stays off unless chosen.
+- Additional Reality short IDs let groups of clients use different IDs, so one can be withdrawn without changing the others. Exports and share links always carry `short_id`, the first one. A clock limit rejects clients whose clock differs from the node's by more than the limit; keep node clocks synchronized before setting it.
+
+The panel's gateway section shows these fields for the selected protocol; Reality short IDs are entered comma-separated, the first one going to clients.
+
+## Share links and QR codes
+
+`GET /api/v1/nodes/{node}/rules/{rule}/share?host=…[&port=…][&name=…]` returns `{"uri":…,"qr_svg":…}` for a gateway rule. `host` is the address clients dial (required; wildcard listeners have no public address). `port` defaults to the gateway listener's port and `name` (up to 120 bytes) to the rule name. Whoever may read the node's configuration may read its links; other tenants get 404. The panel's rule list has a 分享链接 / Share link action for gateway rules that shows the link and its QR code.
+
+| Protocol | Link |
+| --- | --- |
+| VLESS | `vless://UUID@host:port?encryption=none&type=tcp[&flow=xtls-rprx-vision]&security=tls&sni=…`; Reality: `security=reality&sni=…&fp=chrome&pbk=PUBLIC_KEY&sid=SHORT_ID` |
+| VMess | `vmess://` + Base64 of the v2rayN JSON: `v=2`, `ps`, `add`, `port`, `id`, `aid=0`, `scy=auto`, `net=tcp`, `type=none`, `tls=tls`, `sni` |
+| Trojan | `trojan://PASSWORD@host:port?security=tls&sni=…&type=tcp` |
+| Hysteria2 | `hysteria2://PASSWORD@host:port/?sni=…[&obfs=salamander&obfs-password=…]` |
+| TUIC | `tuic://UUID:PASSWORD@host:port?sni=…&alpn=h3&congestion_control=…` |
+| AnyTLS | no widely used scheme: 409; use a subscription |
+
+Credentials, query values and the `#name` fragment are percent-encoded. A link carries the same client material as the subscription export: never the Reality private key, local TLS keys or bridge credentials. It cannot say that certificate mode needs a privately issued CA trusted (no `insecure` flag is ever written), that UDP is disabled, or that TUIC uses 0-RTT (there is no common parameter); clients use their default, 0-RTT off, which still connects. The QR code is rendered by the controller and holds the same secret as the link.
 
 ## Enforcement and lifecycle
 

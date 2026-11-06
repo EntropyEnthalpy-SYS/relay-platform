@@ -101,6 +101,8 @@ fn agent(db: Store, origin: &str, node: &str, enrollment: Option<PathBuf>) -> Ag
         ca_certificate: None,
         tls_directory: None,
         poll_interval: Duration::from_millis(50),
+        controller_addresses: vec![],
+        controller_proxy: None,
     };
     let task = tokio::spawn(agent::run(db, options, stop.clone()));
     Agent { stop, task }

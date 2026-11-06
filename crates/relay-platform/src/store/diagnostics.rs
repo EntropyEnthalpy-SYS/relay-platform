@@ -362,6 +362,8 @@ fn rule_summary(rule: &Rule, names: &HashMap<String, String>) -> Value {
                 "weight": t.weight,
                 "priority": t.priority,
                 "draining": t.draining,
+                "paused": t.paused,
+                "paused_until_ms": t.paused_until_ms,
                 "prewarm": t.prewarm,
                 "tls": t.tls.is_some(),
                 "proxy_protocol": t.proxy_protocol.is_some(),

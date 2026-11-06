@@ -37,6 +37,10 @@ fn live(conn: &Connection) -> Result<Vec<Entitlement>> {
     list.retain(|e| e.state != EntitlementState::Lapsed);
     Ok(list)
 }
+/// The user's plan in any state, for the subscription usage header.
+pub(in crate::store) fn plan(conn: &Connection, user: &str) -> Result<Option<Entitlement>> {
+    read_json(conn, &key(user))
+}
 pub(in crate::store) fn live_count(conn: &Connection) -> Result<usize> {
     Ok(live(conn)?.len())
 }

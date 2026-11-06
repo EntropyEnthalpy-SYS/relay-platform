@@ -6,7 +6,14 @@ use relay_platform::{
     store::{Rejection, Store},
 };
 use serde_json::{Value, json};
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 use tokio::{net::TcpListener, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +31,10 @@ struct Remote {
 struct Mock {
     records: Arc<Mutex<Vec<Remote>>>,
     next: Arc<Mutex<u64>>,
+    /// Create, update and delete calls received.
+    writes: Arc<AtomicU64>,
+    /// Delay of every list response, to widen race windows.
+    list_delay_ms: Arc<AtomicU64>,
 }
 async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
     use axum::{
@@ -35,12 +46,51 @@ async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
     let mock = Mock {
         records: Arc::new(Mutex::new(vec![])),
         next: Arc::new(Mutex::new(1)),
+        writes: Arc::new(AtomicU64::new(0)),
+        list_delay_ms: Arc::new(AtomicU64::new(0)),
     };
     let state = mock.clone();
     fn auth(headers: &HeaderMap) -> bool {
         headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer test-token")
     }
+    // Like Cloudflare: proxied records always report TTL 1 ("automatic").
+    fn stored_ttl(body: &Value) -> u32 {
+        if body["proxied"].as_bool().unwrap_or(false) {
+            1
+        } else {
+            body["ttl"].as_u64().unwrap() as u32
+        }
+    }
+    // The zone list echoes a rejected token in its error, so the controller
+    // must redact it.
+    let zones = |headers: HeaderMap| async move {
+        let presented = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or_default()
+            .to_owned();
+        if presented != "test-token" {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(
+                    json!({"success":false,"errors":[{"code":9109,"message":format!("Invalid access token {presented}")}],"result":null}),
+                ),
+            );
+        }
+        (
+            StatusCode::OK,
+            Json(json!({"success":true,"errors":[],"result":[
+                {"id":"023e105f4ecef8ad9ca31a8372d0c353","name":"example.com","status":"active"},
+                {"id":"9a7806061c88ada191ed06f989cc3dac","name":"example.net","status":"active"}
+            ],"result_info":{"page":1,"per_page":50,"total_pages":1}})),
+        )
+    };
     let list = |State(mock): State<Mock>, headers: HeaderMap| async move {
+        tokio::time::sleep(Duration::from_millis(
+            mock.list_delay_ms.load(Ordering::SeqCst),
+        ))
+        .await;
         if !auth(&headers) {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -76,6 +126,7 @@ async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
                 ),
             );
         }
+        mock.writes.fetch_add(1, Ordering::SeqCst);
         let mut next = mock.next.lock().await;
         let id = format!("remote-{}", *next);
         *next += 1;
@@ -84,7 +135,7 @@ async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
             name: body["name"].as_str().unwrap().into(),
             record_type: body["type"].as_str().unwrap().into(),
             content: body["content"].as_str().unwrap().into(),
-            ttl: body["ttl"].as_u64().unwrap() as u32,
+            ttl: stored_ttl(&body),
             proxied: body["proxied"].as_bool().unwrap_or(false),
             comment: body["comment"].as_str().map(str::to_owned),
         };
@@ -109,6 +160,7 @@ async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
                 ),
             );
         }
+        mock.writes.fetch_add(1, Ordering::SeqCst);
         let mut records = mock.records.lock().await;
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
             return (
@@ -121,7 +173,7 @@ async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
         record.name = body["name"].as_str().unwrap().into();
         record.record_type = body["type"].as_str().unwrap().into();
         record.content = body["content"].as_str().unwrap().into();
-        record.ttl = body["ttl"].as_u64().unwrap() as u32;
+        record.ttl = stored_ttl(&body);
         record.proxied = body["proxied"].as_bool().unwrap_or(false);
         record.comment = body["comment"].as_str().map(str::to_owned);
         let result = record.clone();
@@ -144,6 +196,7 @@ async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
                 ),
             );
         }
+        mock.writes.fetch_add(1, Ordering::SeqCst);
         mock.records.lock().await.retain(|record| record.id != id);
         (
             StatusCode::OK,
@@ -151,6 +204,7 @@ async fn mock_cloudflare(_zone: &str) -> (Mock, String, CancellationToken) {
         )
     };
     let app = Router::new()
+        .route("/client/v4/zones", get(zones))
         .route(
             "/client/v4/zones/{zone}/dns_records",
             get(list).post(create),
@@ -203,6 +257,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
             ProviderKind::Cloudflare,
             &endpoint,
             "test-token",
+            0,
         )
         .unwrap();
     assert!(provider.token_set);
@@ -212,7 +267,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
             .contains("test-token")
     );
     let zone = store
-        .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Apply, 1)
+        .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Apply, 1, 0)
         .unwrap();
     let first = store
         .create_dns_record(
@@ -276,7 +331,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
 
     // Observation mode reports without writing or assigning a provider ID.
     let observe = store
-        .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Observe, 1)
+        .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Observe, 1, 0)
         .unwrap();
     let probe = store
         .create_dns_record(
@@ -318,7 +373,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
 
     // Disabling a record with min_keep=2 keeps it; min_keep=1 removes it.
     store
-        .update_dns_zone(&admin, &zone.id, None, None, Some(2))
+        .update_dns_zone(&admin, &zone.id, None, None, Some(2), None)
         .unwrap();
     store
         .update_dns_record(
@@ -334,7 +389,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
     assert_eq!(kept.kept, 1, "{kept:?}");
     assert_eq!(_mock.records.lock().await.len(), 2);
     store
-        .update_dns_zone(&admin, &zone.id, None, None, Some(1))
+        .update_dns_zone(&admin, &zone.id, None, None, Some(1), None)
         .unwrap();
     let deleted = dns::reconcile(&store, &http, &zone.id).await.unwrap();
     assert_eq!(deleted.deleted, 1, "{deleted:?}");
@@ -389,10 +444,11 @@ async fn dns_health_gate_removes_an_entry_and_restores_it_after_recovery() {
             ProviderKind::Cloudflare,
             &endpoint,
             "test-token",
+            0,
         )
         .unwrap();
     let zone = store
-        .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Apply, 0)
+        .create_dns_zone(&admin, &provider.id, "example.com", ZoneMode::Apply, 0, 0)
         .unwrap();
     let gated = || relay_platform::store::NewDnsRecord {
         name: "edge.example.com".into(),
@@ -697,6 +753,7 @@ async fn dns_list_follows_cloudflare_pagination() {
         kind: ProviderKind::Cloudflare,
         endpoint: format!("http://{address}/client/v4"),
         token: "test-token".into(),
+        min_ttl: None,
         created_at_ms: 0,
     };
     let client = dns::Cloudflare::new(reqwest::Client::new(), &provider).unwrap();
@@ -704,4 +761,591 @@ async fn dns_list_follows_cloudflare_pagination() {
     assert_eq!(records.len(), 2);
     assert_eq!(records[0].id, "one");
     assert_eq!(records[1].id, "two");
+}
+
+/// Writes a fresh heartbeat for `node` with one health report per rule.
+fn write_health(path: &std::path::Path, node: &str, rules: &[(&str, bool)]) {
+    let now = relay_platform::model::now_ms();
+    let reports: Vec<Value> = rules
+        .iter()
+        .map(|&(rule, healthy)| {
+            let n = u64::from(healthy);
+            json!({
+                "probe_kind": "tcp_connect", "rule_id": rule, "target_index": 0,
+                "listen_port": 443, "protocol": "tcp", "target_address": "127.0.0.1:9",
+                "status": if healthy { "healthy" } else { "unhealthy" }, "eligible": healthy,
+                "selection_reason": if healthy { "eligible" } else { "unhealthy" },
+                "sample_age_ms": 10, "max_age_ms": 5000, "checked_at_ms": now,
+                "latency_ewma_us": 1000, "window_checks": 1, "window_failures": 1 - n,
+                "jitter_us": null, "consecutive_successes": n, "consecutive_failures": 1 - n,
+                "completed_checks": 1, "successful_checks": n, "last_error": null,
+                "probe_sent_bytes": 0, "probe_received_bytes": 0, "priority": 0,
+                "active_sessions": 0, "max_sessions": null
+            })
+        })
+        .collect();
+    let stats = json!({
+        "active_tcp": 0, "active_udp": 0, "accepted_tcp": 0,
+        "rejected_connections": 0, "failed_connections": 0,
+        "dropped_datagrams": 0, "forwarded_upload_bytes": 0,
+        "forwarded_download_bytes": 0, "target_health": reports
+    });
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .execute(
+            "UPDATE nodes SET last_seen_ms=?1,stats_json=?2 WHERE id=?3",
+            rusqlite::params![now, stats.to_string(), node],
+        )
+        .unwrap();
+}
+fn a_record(
+    name: &str,
+    content: &str,
+    ttl: u32,
+    health: Option<HealthGate>,
+) -> relay_platform::store::NewDnsRecord {
+    relay_platform::store::NewDnsRecord {
+        name: name.into(),
+        record_type: RecordType::A,
+        content: content.into(),
+        ttl,
+        proxied: false,
+        health,
+    }
+}
+async fn published(mock: &Mock, content: &str) -> bool {
+    mock.records
+        .lock()
+        .await
+        .iter()
+        .any(|record| record.content == content)
+}
+async fn wait_for<F, Fut>(what: &str, mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !condition().await {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+/// A controller store with the health feature on, one node and a provider
+/// pointing at the mock.
+struct Fixture {
+    _temp: tempfile::TempDir,
+    path: std::path::PathBuf,
+    store: Store,
+    admin: relay_platform::store::Actor,
+    node: String,
+    provider: String,
+}
+fn fixture(endpoint: &str, min_ttl: u32) -> Fixture {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("controller.db");
+    let store = Store::open(&path).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    store.set_feature(&admin, "dns-health", true).unwrap();
+    let (node, _enrollment) = store.create_node(&admin, "default", "edge").unwrap();
+    let provider = store
+        .create_dns_provider(
+            &admin,
+            "fixture",
+            ProviderKind::Cloudflare,
+            endpoint,
+            "test-token",
+            min_ttl,
+        )
+        .unwrap();
+    Fixture {
+        _temp: temp,
+        path,
+        store,
+        admin,
+        node: node.id,
+        provider: provider.id,
+    }
+}
+impl Fixture {
+    fn gate(&self, rule: &str) -> Option<HealthGate> {
+        Some(HealthGate {
+            node_id: self.node.clone(),
+            rule_id: rule.into(),
+        })
+    }
+    fn status(&self, record: &str) -> Option<dns::RecordStatus> {
+        self.store.dns_record(&self.admin, record).unwrap().status
+    }
+    fn state(&self, record: &str) -> Option<dns::RecordState> {
+        self.status(record).map(|status| status.state)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_background_sync_confirms_removal_and_restoration_over_the_window() {
+    let (mock, endpoint, mock_stop) = mock_cloudflare("example.com").await;
+    let f = fixture(&endpoint, 0);
+    let window = Duration::from_secs(3);
+    let zone = f
+        .store
+        .create_dns_zone(&f.admin, &f.provider, "example.com", ZoneMode::Apply, 0, 3)
+        .unwrap();
+    let observe = f
+        .store
+        .create_dns_zone(
+            &f.admin,
+            &f.provider,
+            "example.com",
+            ZoneMode::Observe,
+            0,
+            3,
+        )
+        .unwrap();
+    let record = f
+        .store
+        .create_dns_record(
+            &f.admin,
+            &zone.id,
+            a_record("edge.example.com", "203.0.113.40", 300, f.gate("entry")),
+        )
+        .unwrap();
+    let probe = f
+        .store
+        .create_dns_record(
+            &f.admin,
+            &observe.id,
+            a_record("probe.example.com", "203.0.113.41", 300, None),
+        )
+        .unwrap();
+    write_health(&f.path, &f.node, &[("entry", true)]);
+    let healthy_at = Instant::now();
+    let stop = CancellationToken::new();
+    tokio::spawn(dns::run(
+        f.store.clone(),
+        Duration::from_millis(100),
+        Duration::ZERO,
+        stop.clone(),
+    ));
+
+    // A healthy entry is published only after a full healthy window.
+    wait_for("pending restore", || async {
+        f.state(&record.id) == Some(dns::RecordState::PendingRestore)
+    })
+    .await;
+    assert!(!published(&mock, "203.0.113.40").await);
+    let status = f.status(&record.id).unwrap();
+    assert_eq!(status.healthy, Some(true));
+    assert!(status.due_at_ms.unwrap() >= status.since_ms.unwrap() + 3_000);
+    wait_for("creation", || published(&mock, "203.0.113.40")).await;
+    assert!(healthy_at.elapsed() >= window, "{:?}", healthy_at.elapsed());
+    wait_for("published status", || async {
+        f.state(&record.id) == Some(dns::RecordState::Published)
+    })
+    .await;
+
+    // Unchanged records cause neither provider writes nor metadata rewrites.
+    let writes = mock.writes.load(Ordering::SeqCst);
+    let updated_at = f
+        .store
+        .dns_record(&f.admin, &record.id)
+        .unwrap()
+        .updated_at_ms;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(mock.writes.load(Ordering::SeqCst), writes);
+    assert_eq!(
+        f.store
+            .dns_record(&f.admin, &record.id)
+            .unwrap()
+            .updated_at_ms,
+        updated_at
+    );
+    let zone_view = f
+        .store
+        .dns_runtime()
+        .zone_view(f.store.dns_zone(&f.admin, &zone.id).unwrap());
+    let automatic = zone_view.status.last_automatic_ms.unwrap();
+    assert!(relay_platform::model::now_ms() - automatic < 2_000);
+    assert_eq!(zone_view.status.last_trigger, Some(dns::Trigger::Automatic));
+    assert!(zone_view.status.last_error.is_none());
+    // The observe zone is evaluated too, but never written.
+    assert_eq!(f.state(&probe.id), Some(dns::RecordState::WouldCreate));
+    assert!(!published(&mock, "203.0.113.41").await);
+
+    // A failure is held for the window; one healthy sample restarts it.
+    write_health(&f.path, &f.node, &[("entry", false)]);
+    wait_for("pending removal", || async {
+        f.state(&record.id) == Some(dns::RecordState::PendingRemove)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(published(&mock, "203.0.113.40").await, "removed too early");
+    write_health(&f.path, &f.node, &[("entry", true)]);
+    wait_for("healthy sample", || async {
+        f.status(&record.id).and_then(|status| status.healthy) == Some(true)
+    })
+    .await;
+    write_health(&f.path, &f.node, &[("entry", false)]);
+    let failing_again = Instant::now();
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert!(
+        published(&mock, "203.0.113.40").await,
+        "the failing run must restart after a healthy sample"
+    );
+    wait_for("removal", || async {
+        !published(&mock, "203.0.113.40").await
+    })
+    .await;
+    assert!(failing_again.elapsed() >= window);
+    wait_for("removed status", || async {
+        f.state(&record.id) == Some(dns::RecordState::Removed)
+    })
+    .await;
+
+    // Recovery waits for a full healthy window before the record returns.
+    write_health(&f.path, &f.node, &[("entry", true)]);
+    let healed = Instant::now();
+    wait_for("pending restore after removal", || async {
+        f.state(&record.id) == Some(dns::RecordState::PendingRestore)
+    })
+    .await;
+    assert!(!published(&mock, "203.0.113.40").await);
+    wait_for("restoration", || published(&mock, "203.0.113.40")).await;
+    assert!(healed.elapsed() >= window);
+    stop.cancel();
+    mock_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_manual_and_automatic_passes_of_a_zone_never_write_twice() {
+    let (mock, endpoint, mock_stop) = mock_cloudflare("example.com").await;
+    let f = fixture(&endpoint, 0);
+    let zone = f
+        .store
+        .create_dns_zone(&f.admin, &f.provider, "example.com", ZoneMode::Apply, 0, 0)
+        .unwrap();
+    f.store
+        .create_dns_record(
+            &f.admin,
+            &zone.id,
+            a_record("edge.example.com", "203.0.113.50", 300, None),
+        )
+        .unwrap();
+    // Every pass reads an empty zone unless it waits for the previous one.
+    mock.list_delay_ms.store(150, Ordering::SeqCst);
+    let passes: Vec<_> = (0..4)
+        .map(|index| {
+            let store = f.store.clone();
+            let zone = zone.id.clone();
+            tokio::spawn(async move {
+                let http = reqwest::Client::new();
+                if index % 2 == 0 {
+                    dns::reconcile(&store, &http, &zone).await
+                } else {
+                    dns::reconcile_as(&store, &http, &zone, dns::Trigger::Automatic).await
+                }
+            })
+        })
+        .collect();
+    let mut created = 0;
+    for pass in passes {
+        created += pass.await.unwrap().unwrap().created;
+    }
+    assert_eq!(created, 1);
+    assert_eq!(mock.writes.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.records.lock().await.len(), 1);
+    mock_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_mass_failure_guard_pauses_removals_for_one_name() {
+    let (mock, endpoint, mock_stop) = mock_cloudflare("example.com").await;
+    let f = fixture(&endpoint, 0);
+    let zone = f
+        .store
+        .create_dns_zone(&f.admin, &f.provider, "example.com", ZoneMode::Apply, 0, 0)
+        .unwrap();
+    let mut edge = vec![];
+    for (rule, content) in [
+        ("a", "203.0.113.1"),
+        ("b", "203.0.113.2"),
+        ("c", "203.0.113.3"),
+        ("d", "203.0.113.4"),
+    ] {
+        edge.push(
+            f.store
+                .create_dns_record(
+                    &f.admin,
+                    &zone.id,
+                    a_record("edge.example.com", content, 300, f.gate(rule)),
+                )
+                .unwrap(),
+        );
+    }
+    let single = f
+        .store
+        .create_dns_record(
+            &f.admin,
+            &zone.id,
+            a_record("other.example.com", "203.0.113.9", 300, f.gate("other")),
+        )
+        .unwrap();
+    let http = reqwest::Client::new();
+    let health = |failing: &[&str]| {
+        let rules: Vec<(&str, bool)> = ["a", "b", "c", "d", "other"]
+            .into_iter()
+            .map(|rule| (rule, !failing.contains(&rule)))
+            .collect();
+        write_health(&f.path, &f.node, &rules);
+    };
+    health(&[]);
+    let all = dns::reconcile(&f.store, &http, &zone.id).await.unwrap();
+    assert_eq!(all.created, 5, "{all:?}");
+
+    // Three of four edge values fail at once: probably not the entries.
+    // The single-value name is not a "mass" and is removed as before.
+    health(&["a", "b", "c", "other"]);
+    let guarded = dns::reconcile(&f.store, &http, &zone.id).await.unwrap();
+    assert_eq!(guarded.guarded, 3, "{guarded:?}");
+    assert_eq!(guarded.deleted, 1, "{guarded:?}");
+    assert!(
+        guarded
+            .actions
+            .iter()
+            .any(|action| action.action == "guard" && action.record_id == edge[0].id)
+    );
+    assert_eq!(mock.records.lock().await.len(), 4);
+    assert!(!published(&mock, "203.0.113.9").await);
+    assert_eq!(f.state(&edge[0].id), Some(dns::RecordState::HeldGuard));
+    assert_eq!(f.state(&edge[3].id), Some(dns::RecordState::Published));
+    assert_eq!(f.state(&single.id), Some(dns::RecordState::Removed));
+    let status = f
+        .store
+        .dns_runtime()
+        .zone_view(f.store.dns_zone(&f.admin, &zone.id).unwrap())
+        .status;
+    assert_eq!(status.guarded, ["A edge.example.com"]);
+
+    // Exactly half failing is not "more than half": removals proceed.
+    health(&["a", "b"]);
+    let half = dns::reconcile(&f.store, &http, &zone.id).await.unwrap();
+    assert_eq!(half.guarded, 0, "{half:?}");
+    assert_eq!(half.deleted, 2, "{half:?}");
+    assert!(!published(&mock, "203.0.113.1").await);
+    assert!(!published(&mock, "203.0.113.2").await);
+    assert!(published(&mock, "203.0.113.3").await);
+    assert_eq!(f.state(&edge[0].id), Some(dns::RecordState::Removed));
+    assert!(
+        f.store
+            .dns_runtime()
+            .zone_view(f.store.dns_zone(&f.admin, &zone.id).unwrap())
+            .status
+            .guarded
+            .is_empty()
+    );
+    mock_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_provider_minimum_ttl_is_published_without_update_loops() {
+    let (mock, endpoint, mock_stop) = mock_cloudflare("example.com").await;
+    let f = fixture(&endpoint, 60);
+    let zone = f
+        .store
+        .create_dns_zone(&f.admin, &f.provider, "example.com", ZoneMode::Apply, 0, 0)
+        .unwrap();
+    let low = f
+        .store
+        .create_dns_record(
+            &f.admin,
+            &zone.id,
+            a_record("low.example.com", "203.0.113.61", 30, None),
+        )
+        .unwrap();
+    f.store
+        .create_dns_record(
+            &f.admin,
+            &zone.id,
+            a_record("auto.example.com", "203.0.113.62", 1, None),
+        )
+        .unwrap();
+    f.store
+        .create_dns_record(
+            &f.admin,
+            &zone.id,
+            a_record("high.example.com", "203.0.113.63", 120, None),
+        )
+        .unwrap();
+    let mut proxied = a_record("cdn.example.com", "203.0.113.64", 300, None);
+    proxied.proxied = true;
+    f.store
+        .create_dns_record(&f.admin, &zone.id, proxied)
+        .unwrap();
+    let http = reqwest::Client::new();
+    let first = dns::reconcile(&f.store, &http, &zone.id).await.unwrap();
+    assert_eq!(first.created, 4, "{first:?}");
+    let ttl = |records: &[Remote], content: &str| {
+        records
+            .iter()
+            .find(|record| record.content == content)
+            .unwrap()
+            .ttl
+    };
+    {
+        let records = mock.records.lock().await;
+        assert_eq!(ttl(&records, "203.0.113.61"), 60);
+        assert_eq!(
+            ttl(&records, "203.0.113.62"),
+            1,
+            "automatic stays automatic"
+        );
+        assert_eq!(ttl(&records, "203.0.113.63"), 120);
+        assert_eq!(ttl(&records, "203.0.113.64"), 1, "proxied is automatic");
+    }
+    assert_eq!(f.status(&low.id).unwrap().published_ttl, 60);
+    assert_eq!(f.store.dns_record(&f.admin, &low.id).unwrap().ttl, 30);
+    // Raised and proxied TTLs are not differences on the next pass.
+    let second = dns::reconcile(&f.store, &http, &zone.id).await.unwrap();
+    assert_eq!(second.unchanged, 4, "{second:?}");
+    assert_eq!(mock.writes.load(Ordering::SeqCst), 4);
+
+    // Removing the minimum publishes the record's own TTL.
+    let provider = f
+        .store
+        .update_dns_provider(&f.admin, &f.provider, None, None, None, Some(0))
+        .unwrap();
+    assert_eq!(provider.min_ttl, None);
+    let lowered = dns::reconcile(&f.store, &http, &zone.id).await.unwrap();
+    assert_eq!(lowered.updated, 1, "{lowered:?}");
+    assert_eq!(ttl(&mock.records.lock().await, "203.0.113.61"), 30);
+    assert_eq!(
+        rejection(
+            f.store
+                .update_dns_provider(&f.admin, &f.provider, None, None, None, Some(86_401))
+                .unwrap_err()
+        ),
+        400
+    );
+    mock_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_provider_test_lists_zones_for_admins_without_leaking_the_token() {
+    let (_mock, endpoint, mock_stop) = mock_cloudflare("example.com").await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = Store::open(&temp.path().join("controller.db")).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    store
+        .create_user(
+            &admin,
+            "default",
+            "tenant-admin",
+            PASSWORD,
+            relay_platform::store::Role::TenantAdmin,
+        )
+        .unwrap();
+    let (address, stop) = serve(store).await;
+    let origin = format!("http://{address}");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let session = login(&client, &origin, "admin").await;
+    let tenant_session = login(&client, &origin, "tenant-admin").await;
+    let provider: Value = client
+        .post(format!("{origin}/api/v1/dns/providers"))
+        .bearer_auth(&session)
+        .json(&json!({"name": "fixture", "kind": "cloudflare", "endpoint": endpoint, "token": "test-token", "min_ttl": 60}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(provider["min_ttl"], 60, "{provider}");
+    let provider_id = provider["id"].as_str().unwrap();
+    let test_url = format!("{origin}/api/v1/dns/providers/{provider_id}/test");
+
+    let tested = client
+        .post(&test_url)
+        .bearer_auth(&session)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tested.status(), 200);
+    let tested: Value = tested.json().await.unwrap();
+    assert_eq!(tested["ok"], true);
+    assert_eq!(tested["truncated"], false);
+    assert_eq!(
+        tested["zones"],
+        json!([
+            {"id": "023e105f4ecef8ad9ca31a8372d0c353", "name": "example.com"},
+            {"id": "9a7806061c88ada191ed06f989cc3dac", "name": "example.net"}
+        ])
+    );
+    let denied = client
+        .post(&test_url)
+        .bearer_auth(&tenant_session)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), 403);
+
+    // Wrong credentials: a clear provider error, with the token redacted.
+    let secret = "wrong-secret-token-7f3a";
+    let updated = client
+        .put(format!("{origin}/api/v1/dns/providers/{provider_id}"))
+        .bearer_auth(&session)
+        .json(&json!({"token": secret}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), 200);
+    let failed = client
+        .post(&test_url)
+        .bearer_auth(&session)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), 502);
+    let body = failed.text().await.unwrap();
+    assert!(body.contains("Invalid access token"), "{body}");
+    assert!(body.contains("9109"), "{body}");
+    assert!(!body.contains(secret), "{body}");
+
+    // Zones default to a 60 s window and expose their evaluation status.
+    let zone: Value = client
+        .post(format!("{origin}/api/v1/dns/zones"))
+        .bearer_auth(&session)
+        .json(&json!({"provider_id": provider_id, "name": "example.com", "mode": "apply"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(zone["failover_confirm_secs"], 60, "{zone}");
+    let zones: Value = client
+        .get(format!("{origin}/api/v1/dns/zones"))
+        .bearer_auth(&session)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(zones[0]["failover_confirm_secs"], 60, "{zones}");
+    assert!(zones[0]["status"]["last_automatic_ms"].is_null(), "{zones}");
+    let too_long = client
+        .put(format!(
+            "{origin}/api/v1/dns/zones/{}",
+            zone["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&session)
+        .json(&json!({"failover_confirm_secs": 1801}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_long.status(), 400);
+    stop.cancel();
+    mock_stop.cancel();
 }

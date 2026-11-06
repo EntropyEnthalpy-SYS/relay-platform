@@ -42,10 +42,104 @@ pub struct Settings {
     /// Notices are held until this time; incidents still open afterwards are sent then.
     #[serde(default)]
     pub maintenance_until_ms: Option<i64>,
+    /// The resource, expiry, budget and DNS alerts. Absent means the
+    /// defaults, and a save without it keeps the saved rules. Omitted while
+    /// unset, so settings without rules stay readable by older controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Rules>,
 }
 impl Settings {
     pub fn in_maintenance(&self, now: i64) -> bool {
         self.maintenance_until_ms.is_some_and(|until| until > now)
+    }
+}
+
+/// Checks a problem must be found in a row before it opens, at most.
+pub const MAX_CHECKS: u32 = 100;
+const DAY_MS: i64 = 86_400_000;
+/// The summary of an incident closed because its rule was switched off.
+const RULE_DISABLED: &str = "此项告警已停用";
+
+/// When one kind of problem opens an incident.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    pub enabled: bool,
+    /// Percent for CPU, memory and budget use, days for an approaching node
+    /// expiry; absent for problems without a level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<u32>,
+    /// Consecutive checks that must find the problem before it opens. CPU
+    /// and memory are checked once per node report, the others on every
+    /// pass of the alert worker.
+    pub checks: u32,
+}
+
+/// Every rule is off by default, so an upgrade sends no new kinds of notice.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Rules {
+    /// Host CPU use at or above `threshold` percent.
+    pub node_cpu: Rule,
+    /// Host memory use (total minus available) at or above `threshold` percent.
+    pub node_memory: Rule,
+    /// The node profile's expiry is at most `threshold` days away, or passed.
+    pub node_expiring: Rule,
+    /// The node profile's expiry has passed.
+    pub node_expired: Rule,
+    /// A shared budget's committed bytes reach `threshold` percent of its limit.
+    pub budget_near: Rule,
+    /// A shared budget has nothing left to allocate.
+    pub budget_exhausted: Rule,
+    /// A managed DNS record's last provider sync failed.
+    pub dns_sync_failed: Rule,
+}
+impl Default for Rules {
+    fn default() -> Self {
+        let off = |threshold, checks| Rule {
+            enabled: false,
+            threshold,
+            checks,
+        };
+        Self {
+            node_cpu: off(Some(90), 5),
+            node_memory: off(Some(90), 5),
+            node_expiring: off(Some(7), 1),
+            node_expired: off(None, 1),
+            budget_near: off(Some(90), 1),
+            budget_exhausted: off(None, 1),
+            dns_sync_failed: off(None, 1),
+        }
+    }
+}
+impl Rules {
+    pub fn validate(&self) -> Result<()> {
+        for (name, rule, range) in [
+            ("node_cpu", self.node_cpu, Some(1..=100)),
+            ("node_memory", self.node_memory, Some(1..=100)),
+            ("node_expiring", self.node_expiring, Some(1..=365)),
+            ("node_expired", self.node_expired, None),
+            ("budget_near", self.budget_near, Some(1..=100)),
+            ("budget_exhausted", self.budget_exhausted, None),
+            ("dns_sync_failed", self.dns_sync_failed, None),
+        ] {
+            ensure!(
+                (1..=MAX_CHECKS).contains(&rule.checks),
+                "{name}: consecutive checks must be 1..{MAX_CHECKS}"
+            );
+            match (range, rule.threshold) {
+                (Some(range), Some(threshold)) => ensure!(
+                    range.contains(&threshold),
+                    "{name}: threshold must be {}..{}",
+                    range.start(),
+                    range.end()
+                ),
+                (Some(_), None) => anyhow::bail!("{name} needs a threshold"),
+                (None, Some(_)) => anyhow::bail!("{name} has no threshold"),
+                (None, None) => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -90,8 +184,8 @@ pub struct Channel {
     pub id: String,
     pub name: String,
     pub enabled: bool,
-    /// `warning` sends target, configuration and node incidents; `critical`
-    /// only configuration rejections and offline nodes.
+    /// `warning` sends every incident; `critical` only configuration
+    /// rejections, offline and expired nodes and exhausted budgets.
     pub min_severity: Severity,
     pub target: Target,
 }
@@ -238,9 +332,13 @@ impl Channel {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Incident {
+    /// Empty for DNS records, which belong to no tenant.
     pub tenant_id: String,
     pub key: String,
+    /// What the incident is about: a node id, or `budget:<id>` or
+    /// `dns_record:<id>`. Ownership is checked against it.
     pub node_id: String,
+    /// The node's, budget's or DNS record's name.
     pub node_name: String,
     pub severity: Severity,
     pub summary: String,
@@ -284,6 +382,9 @@ struct State {
     deliveries: VecDeque<Delivery>,
     last_event: u64,
     next_delivery: u64,
+    /// By incident key: checks in a row that found the problem, and the
+    /// observation the last one counted.
+    streaks: HashMap<String, (u32, i64)>,
 }
 
 #[derive(Default)]
@@ -308,6 +409,23 @@ enum Change {
         key: String,
         summary: String,
     },
+}
+
+/// One rule's condition for one node, budget or DNS record.
+#[derive(Debug)]
+struct Check {
+    key: String,
+    /// The owner key in the worker's name map.
+    owner: String,
+    rule: Rule,
+    severity: Severity,
+    /// Changes when there is new data; a check whose observation equals the
+    /// one counted last is not counted again.
+    observation: i64,
+    /// The problem is present.
+    holds: bool,
+    /// The incident text while it holds, otherwise the recovery text.
+    summary: String,
 }
 
 impl Alerts {
@@ -391,6 +509,62 @@ impl Alerts {
         }
     }
 
+    /// Counts a rule's check and opens its incident once the problem was
+    /// found on `rule.checks` checks in a row; one check without it resolves.
+    /// A switched-off rule closes its incident.
+    fn check(&self, check: Check, names: &HashMap<String, (String, String)>, now: i64) {
+        let change = if !check.rule.enabled {
+            self.0.lock().unwrap().streaks.remove(&check.key);
+            Change::Resolve {
+                key: check.key,
+                summary: RULE_DISABLED.into(),
+            }
+        } else {
+            let mut state = self.0.lock().unwrap();
+            let streak = state
+                .streaks
+                .entry(check.key.clone())
+                .or_insert((0, check.observation.wrapping_sub(1)));
+            if streak.1 == check.observation {
+                return;
+            }
+            *streak = (
+                if check.holds {
+                    streak.0.saturating_add(1)
+                } else {
+                    0
+                },
+                check.observation,
+            );
+            let found = streak.0;
+            drop(state);
+            match check.holds {
+                false => Change::Resolve {
+                    key: check.key,
+                    summary: check.summary,
+                },
+                true if found >= check.rule.checks => Change::Open {
+                    key: check.key,
+                    node_id: check.owner,
+                    severity: check.severity,
+                    summary: check.summary,
+                },
+                true => return,
+            }
+        };
+        self.apply(change, names, now);
+    }
+
+    /// Forgets the counts of conditions that were not checked in this pass:
+    /// deleted objects and switched-off rules.
+    fn keep_streaks(&self, checked: &std::collections::HashSet<String>) {
+        self.0
+            .lock()
+            .unwrap()
+            .streaks
+            .retain(|key, _| checked.contains(key));
+    }
+
     /// Notices due now: openings not yet announced (after the group wait,
     /// outside maintenance and the hold after the previous notice) and
     /// recoveries of announced ones.
@@ -467,6 +641,7 @@ pub async fn run(store: Store, tick: Duration, stop: CancellationToken) {
         .expect("notification HTTP client");
     let mut interval = tokio::time::interval(tick);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut pass = 0;
     loop {
         tokio::select! {
             biased;
@@ -475,10 +650,15 @@ pub async fn run(store: Store, tick: Duration, stop: CancellationToken) {
         }
         let db = store.clone();
         let loaded = tokio::task::spawn_blocking(move || {
-            Ok::<_, anyhow::Error>((db.alert_config()?, db.alert_nodes()?))
+            Ok::<_, anyhow::Error>((
+                db.alert_config()?,
+                db.alert_nodes()?,
+                db.alert_budgets()?,
+                db.alert_dns_records()?,
+            ))
         })
         .await;
-        let ((settings, channels), nodes) = match loaded {
+        let ((settings, channels), nodes, budgets, records) = match loaded {
             Ok(Ok(loaded)) => loaded,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "alert state unavailable");
@@ -487,10 +667,25 @@ pub async fn run(store: Store, tick: Duration, stop: CancellationToken) {
             Err(_) => return,
         };
         let now = now_ms();
+        pass += 1;
         let alerts = store.alerts();
+        // Owner key to name and tenant. DNS records belong to no tenant, so
+        // only channels for all tenants receive them.
         let names: HashMap<_, _> = nodes
             .iter()
             .map(|n| (n.id.clone(), (n.name.clone(), n.tenant_id.clone())))
+            .chain(budgets.iter().map(|b| {
+                (
+                    format!("budget:{}", b.id),
+                    (b.name.clone(), b.tenant_id.clone()),
+                )
+            }))
+            .chain(records.iter().map(|r| {
+                (
+                    format!("dns_record:{}", r.id),
+                    (r.name.clone(), String::new()),
+                )
+            }))
             .collect();
         alerts.retain_owned(&names);
         let after = alerts.0.lock().unwrap().last_event;
@@ -531,6 +726,13 @@ pub async fn run(store: Store, tick: Duration, stop: CancellationToken) {
                 );
             }
         }
+        let rules = settings.rules.unwrap_or_default();
+        let mut checked = std::collections::HashSet::new();
+        for check in conditions(&rules, &nodes, &budgets, &records, now, pass) {
+            checked.insert(check.key.clone());
+            alerts.check(check, &names, now);
+        }
+        alerts.keep_streaks(&checked);
         let due = alerts.due(settings.in_maintenance(now), now);
         for channel in channels.iter().filter(|c| c.enabled) {
             let batch: Vec<_> = due
@@ -591,6 +793,173 @@ fn change_for(event: &crate::telemetry::Event) -> Option<Change> {
         },
         _ => return None,
     })
+}
+
+/// Every rule's condition on the current state. CPU and memory count one
+/// check per node report, so a report seen on several passes counts once;
+/// a node without a new report keeps its count and its incident. The other
+/// conditions count once per pass (`pass` increases with each).
+fn conditions(
+    rules: &Rules,
+    nodes: &[crate::store::AlertNode],
+    budgets: &[crate::store::AlertBudget],
+    records: &[crate::store::AlertDnsRecord],
+    now: i64,
+    pass: i64,
+) -> Vec<Check> {
+    let mut checks = vec![];
+    let mut add = |key: String, owner: &str, rule: Rule, severity, observation, holds, summary| {
+        checks.push(Check {
+            key,
+            owner: owner.to_string(),
+            rule,
+            severity,
+            observation,
+            holds,
+            summary,
+        })
+    };
+    for node in nodes {
+        let (id, name) = (&node.id, &node.name);
+        if let Some(sample) = &node.usage {
+            if let Some(cpu) = sample.cpu_percent {
+                let rule = rules.node_cpu;
+                let limit = rule.threshold.unwrap_or(100);
+                let holds = f64::from(cpu) >= f64::from(limit);
+                let percent = cpu.floor() as u32;
+                add(
+                    format!("cpu:{id}"),
+                    id,
+                    rule,
+                    Severity::Warning,
+                    sample.at_ms,
+                    holds,
+                    if holds {
+                        format!(
+                            "节点 {name} CPU 使用率 {percent}%，连续 {} 次回报不低于 {limit}%",
+                            rule.checks
+                        )
+                    } else {
+                        format!("节点 {name} CPU 使用率回落到 {percent}%")
+                    },
+                );
+            }
+            if let (Some(total), Some(available)) =
+                (sample.memory_total_bytes, sample.memory_available_bytes)
+                && total > 0
+            {
+                let rule = rules.node_memory;
+                let limit = rule.threshold.unwrap_or(100);
+                let used = u128::from(total.saturating_sub(available));
+                let holds = used * 100 >= u128::from(limit) * u128::from(total);
+                let percent = used * 100 / u128::from(total);
+                add(
+                    format!("memory:{id}"),
+                    id,
+                    rule,
+                    Severity::Warning,
+                    sample.at_ms,
+                    holds,
+                    if holds {
+                        format!(
+                            "节点 {name} 内存使用率 {percent}%，连续 {} 次回报不低于 {limit}%",
+                            rule.checks
+                        )
+                    } else {
+                        format!("节点 {name} 内存使用率回落到 {percent}%")
+                    },
+                );
+            }
+        }
+        let expires = node.expires_at_ms;
+        let days = i64::from(rules.node_expiring.threshold.unwrap_or(0));
+        let passed = |at: i64| at <= now;
+        let summary = |at: i64| match passed(at) {
+            true => format!("节点 {name} 已于 {} 到期", utc(at)),
+            false => format!("节点 {name} 将于 {} 到期", utc(at)),
+        };
+        let extended = format!("节点 {name} 的到期时间已延后或取消");
+        let soon = expires.filter(|at| at.saturating_sub(now) <= days * DAY_MS);
+        add(
+            format!("expiring:{id}"),
+            id,
+            rules.node_expiring,
+            Severity::Warning,
+            pass,
+            soon.is_some(),
+            soon.map_or_else(|| extended.clone(), summary),
+        );
+        let over = expires.filter(|at| passed(*at));
+        add(
+            format!("expired:{id}"),
+            id,
+            rules.node_expired,
+            Severity::Critical,
+            pass,
+            over.is_some(),
+            over.map_or(extended, summary),
+        );
+    }
+    for budget in budgets {
+        let owner = format!("budget:{}", budget.id);
+        let name = &budget.name;
+        // A zero limit is an operator's stop for new allocations, not a surprise.
+        let (limit, committed) = (
+            u128::from(budget.limit_bytes),
+            u128::from(budget.committed_bytes),
+        );
+        let percent = (committed * 100).checked_div(limit).unwrap_or(0);
+        let rule = rules.budget_near;
+        let threshold = u128::from(rule.threshold.unwrap_or(100));
+        let near = limit > 0 && committed * 100 >= threshold * limit;
+        add(
+            format!("budget_near:{}", budget.id),
+            &owner,
+            rule,
+            Severity::Warning,
+            pass,
+            near,
+            if near {
+                format!("共享额度 {name} 已占用 {percent}%，阈值 {threshold}%")
+            } else {
+                format!("共享额度 {name} 占用回落到 {percent}%")
+            },
+        );
+        let exhausted = limit > 0 && committed >= limit;
+        add(
+            format!("budget_exhausted:{}", budget.id),
+            &owner,
+            rules.budget_exhausted,
+            Severity::Critical,
+            pass,
+            exhausted,
+            if exhausted {
+                format!("共享额度 {name} 已用尽，无法再分配流量")
+            } else {
+                format!("共享额度 {name} 恢复可分配")
+            },
+        );
+    }
+    for record in records {
+        let error = record.error.as_deref();
+        add(
+            format!("dns:{}", record.id),
+            &format!("dns_record:{}", record.id),
+            rules.dns_sync_failed,
+            Severity::Warning,
+            pass,
+            error.is_some(),
+            match error {
+                Some(error) => format!(
+                    "DNS 记录 {} 同步失败：{}",
+                    record.name,
+                    error.chars().take(300).collect::<String>()
+                ),
+                None => format!("DNS 记录 {} 同步恢复", record.name),
+            },
+        );
+    }
+    checks
 }
 
 pub fn message(notice: Notice, incident: &Incident) -> String {
@@ -1049,6 +1418,260 @@ mod tests {
         assert!(!text.contains("r problem"));
         assert_eq!(grouped(&batch[..1]), message(Notice::Resolved, &batch[0].1));
         assert!(grouped(&batch[..2]).starts_with("【告警·警告】1 个新问题，1 个已恢复"));
+    }
+
+    fn node(cpu: Option<f32>, at: i64, expires_at_ms: Option<i64>) -> crate::store::AlertNode {
+        crate::store::AlertNode {
+            tenant_id: "default".into(),
+            id: "n".into(),
+            name: "edge-01".into(),
+            last_seen_ms: Some(at),
+            watched: true,
+            expires_at_ms,
+            usage: Some(crate::telemetry::Sample {
+                at_ms: at,
+                forwarded_bytes: 0,
+                active_sessions: 0,
+                failed_connections: 0,
+                cpu_percent: cpu,
+                process_cpu_percent: None,
+                rss_bytes: None,
+                memory_total_bytes: Some(1000),
+                memory_available_bytes: Some(900),
+                probe_latency_us: None,
+                healthy_targets: 0,
+                probed_targets: 0,
+            }),
+        }
+    }
+    fn on(threshold: Option<u32>, checks: u32) -> Rule {
+        Rule {
+            enabled: true,
+            threshold,
+            checks,
+        }
+    }
+
+    #[test]
+    fn a_rule_opens_after_its_consecutive_checks_and_resolves_when_cleared() {
+        let alerts = Alerts::default();
+        let names = HashMap::from([("n".into(), ("edge-01".into(), "default".into()))]);
+        let mut rules = Rules {
+            node_cpu: on(Some(80), 3),
+            ..Rules::default()
+        };
+        let mut pass = 0;
+        let mut report = |rules: &Rules, cpu: f32, at: i64| {
+            pass += 1;
+            for check in conditions(rules, &[node(Some(cpu), at, None)], &[], &[], NOW, pass) {
+                alerts.check(check, &names, NOW + at);
+            }
+            let snapshot = alerts.snapshot();
+            let open: Vec<_> = snapshot.open.iter().map(|i| i.key.clone()).collect();
+            (open, snapshot.resolved)
+        };
+        // Two reports above the threshold; the second seen on three passes
+        // still counts once.
+        report(&rules, 95.0, 1);
+        report(&rules, 95.0, 2);
+        report(&rules, 95.0, 2);
+        assert!(report(&rules, 95.0, 2).0.is_empty());
+        // One report below starts the count again.
+        report(&rules, 79.9, 3);
+        report(&rules, 95.0, 4);
+        assert!(report(&rules, 95.0, 5).0.is_empty());
+        let (open, _) = report(&rules, 80.0, 6);
+        assert_eq!(open, ["cpu:n"]);
+        let incident = &alerts.snapshot().open[0];
+        assert_eq!(
+            (incident.severity, incident.node_name.as_str()),
+            (Severity::Warning, "edge-01")
+        );
+        assert_eq!(
+            incident.summary,
+            "节点 edge-01 CPU 使用率 80%，连续 3 次回报不低于 80%"
+        );
+        let (open, resolved) = report(&rules, 50.4, 7);
+        assert!(open.is_empty());
+        assert_eq!(resolved[0].summary, "节点 edge-01 CPU 使用率回落到 50%");
+
+        // Switched off while the problem lasts: the incident closes and
+        // stays closed however long it lasts.
+        for at in 8..11 {
+            report(&rules, 99.0, at);
+        }
+        assert_eq!(alerts.snapshot().open.len(), 1);
+        rules.node_cpu.enabled = false;
+        for at in 11..20 {
+            let (open, resolved) = report(&rules, 99.0, at);
+            assert!(open.is_empty());
+            assert_eq!(resolved.last().unwrap().summary, RULE_DISABLED);
+        }
+        // Switched on again, it counts from zero.
+        rules.node_cpu.enabled = true;
+        report(&rules, 99.0, 20);
+        assert!(report(&rules, 99.0, 21).0.is_empty());
+        assert_eq!(report(&rules, 99.0, 22).0, ["cpu:n"]);
+    }
+
+    #[test]
+    fn conditions_follow_each_threshold() {
+        let rules = Rules {
+            node_cpu: on(Some(90), 1),
+            node_memory: on(Some(90), 1),
+            node_expiring: on(Some(7), 1),
+            node_expired: on(None, 1),
+            budget_near: on(Some(90), 1),
+            budget_exhausted: on(None, 1),
+            dns_sync_failed: on(None, 1),
+        };
+        let budget = |id: &str, limit_bytes, committed_bytes| crate::store::AlertBudget {
+            tenant_id: "default".into(),
+            id: id.into(),
+            name: id.into(),
+            limit_bytes,
+            committed_bytes,
+        };
+        let record = |id: &str, error: Option<&str>| crate::store::AlertDnsRecord {
+            id: id.into(),
+            name: format!("{id}.example.com A"),
+            error: error.map(Into::into),
+        };
+        let mut nodes = vec![];
+        for (id, available, expires) in [
+            ("full", 100, Some(NOW + 7 * DAY_MS)),
+            ("roomy", 101, Some(NOW + 7 * DAY_MS + 1)),
+            ("over", 900, Some(NOW)),
+            ("open", 900, None),
+        ] {
+            let mut n = node(Some(10.0), NOW, expires);
+            n.id = id.into();
+            n.name = id.into();
+            n.usage.as_mut().unwrap().memory_available_bytes = Some(available);
+            nodes.push(n);
+        }
+        let checks = conditions(
+            &rules,
+            &nodes,
+            &[
+                budget("near", 1000, 900),
+                budget("below", 1000, 899),
+                budget("empty", 1000, 1000),
+                budget("stopped", 0, 0),
+            ],
+            &[record("bad", Some("HTTP 403")), record("good", None)],
+            NOW,
+            1,
+        );
+        let found: Vec<(&str, Severity)> = checks
+            .iter()
+            .filter(|c| c.holds)
+            .map(|c| (c.key.as_str(), c.severity))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("memory:full", Severity::Warning),
+                ("expiring:full", Severity::Warning),
+                ("expiring:over", Severity::Warning),
+                ("expired:over", Severity::Critical),
+                ("budget_near:near", Severity::Warning),
+                ("budget_near:empty", Severity::Warning),
+                ("budget_exhausted:empty", Severity::Critical),
+                ("dns:bad", Severity::Warning),
+            ]
+        );
+        let summary = |key: &str| &checks.iter().find(|c| c.key == key).unwrap().summary;
+        assert_eq!(
+            summary("memory:full"),
+            "节点 full 内存使用率 90%，连续 1 次回报不低于 90%"
+        );
+        assert_eq!(
+            summary("expiring:full"),
+            "节点 full 将于 2023-11-21 22:13:20 UTC 到期"
+        );
+        assert_eq!(
+            summary("expired:over"),
+            "节点 over 已于 2023-11-14 22:13:20 UTC 到期"
+        );
+        assert_eq!(
+            summary("budget_near:near"),
+            "共享额度 near 已占用 90%，阈值 90%"
+        );
+        assert_eq!(
+            summary("budget_exhausted:below"),
+            "共享额度 below 恢复可分配"
+        );
+        assert_eq!(
+            summary("dns:bad"),
+            "DNS 记录 bad.example.com A 同步失败：HTTP 403"
+        );
+        // Budgets and DNS records are owned through prefixed keys.
+        let owner = |key: &str| &checks.iter().find(|c| c.key == key).unwrap().owner;
+        assert_eq!(owner("budget_near:near"), "budget:near");
+        assert_eq!(owner("dns:bad"), "dns_record:bad");
+        assert_eq!(owner("expired:over"), "over");
+    }
+
+    #[test]
+    fn settings_load_without_rules_and_rules_are_validated() {
+        let old: Settings = serde_json::from_str(r#"{"maintenance_until_ms":5}"#).unwrap();
+        assert_eq!(old.rules, None);
+        assert_eq!(
+            serde_json::to_string(&Settings::default()).unwrap(),
+            r#"{"maintenance_until_ms":null}"#,
+            "settings without rules are written as before"
+        );
+        let partial: Settings = serde_json::from_str(
+            r#"{"rules":{"node_cpu":{"enabled":true,"threshold":70,"checks":2}}}"#,
+        )
+        .unwrap();
+        let rules = partial.rules.unwrap();
+        assert_eq!(rules.node_cpu, on(Some(70), 2));
+        assert_eq!(rules.dns_sync_failed, Rules::default().dns_sync_failed);
+        assert!(
+            Rules::default().validate().is_ok()
+                && [
+                    Rules::default().node_cpu,
+                    Rules::default().budget_exhausted,
+                    Rules::default().node_expired,
+                ]
+                .iter()
+                .all(|r| !r.enabled)
+        );
+        assert!(serde_json::from_str::<Settings>(r#"{"rules":{"cpu":{}}}"#).is_err());
+        for broken in [
+            Rules {
+                node_cpu: on(Some(0), 1),
+                ..Rules::default()
+            },
+            Rules {
+                budget_near: on(Some(101), 1),
+                ..Rules::default()
+            },
+            Rules {
+                node_expiring: on(Some(366), 1),
+                ..Rules::default()
+            },
+            Rules {
+                node_memory: on(None, 1),
+                ..Rules::default()
+            },
+            Rules {
+                node_expired: on(Some(1), 1),
+                ..Rules::default()
+            },
+            Rules {
+                dns_sync_failed: on(None, 0),
+                ..Rules::default()
+            },
+            Rules {
+                dns_sync_failed: on(None, MAX_CHECKS + 1),
+                ..Rules::default()
+            },
+        ] {
+            assert!(broken.validate().is_err(), "{broken:?}");
+        }
     }
 
     #[test]

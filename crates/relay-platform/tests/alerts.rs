@@ -181,6 +181,8 @@ async fn target_outages_notify_once_per_incident_through_signed_webhooks() {
             ca_certificate: None,
             tls_directory: None,
             poll_interval: Duration::from_millis(50),
+            controller_addresses: vec![],
+            controller_proxy: None,
         },
         stop.clone(),
     ));
@@ -248,19 +250,67 @@ async fn target_outages_notify_once_per_incident_through_signed_webhooks() {
         [("resolved", "sent"), ("opened", "sent"), ("test", "sent")]
     );
 
-    // Maintenance settings round-trip; deleting the channel stops deliveries.
-    let settings = json!({"maintenance_until_ms": 4_102_444_799_000_i64});
-    let put = client.put(api("alerts/settings")).json(&settings);
-    assert_eq!(status(put.bearer_auth(&session).send().await.unwrap()), 200);
-    let overview = client
-        .get(api("alerts"))
-        .bearer_auth(&session)
-        .send()
-        .await
-        .unwrap();
+    // Rules come with defaults, all off, and are saved by system
+    // administrators only, within their limits.
+    let settings = || async {
+        client
+            .get(api("alerts"))
+            .bearer_auth(&session)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()["settings"]
+            .clone()
+    };
+    let defaults = settings().await["rules"].clone();
     assert_eq!(
-        overview.json::<Value>().await.unwrap()["settings"],
-        settings
+        defaults["node_cpu"],
+        json!({"enabled": false, "threshold": 90, "checks": 5})
+    );
+    assert_eq!(
+        defaults["dns_sync_failed"],
+        json!({"enabled": false, "checks": 1})
+    );
+    let mut rules = defaults.clone();
+    rules["node_cpu"] = json!({"enabled": false, "threshold": 75, "checks": 2});
+    let save = |body: Value, token: &str| {
+        client
+            .put(api("alerts/settings"))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+    };
+    assert_eq!(
+        status(
+            save(json!({"rules": rules}), &operator_session)
+                .await
+                .unwrap()
+        ),
+        403
+    );
+    let mut broken = rules.clone();
+    broken["budget_near"]["threshold"] = 0.into();
+    assert_eq!(
+        status(save(json!({"rules": broken}), &session).await.unwrap()),
+        400
+    );
+    assert_eq!(
+        status(save(json!({"rules": rules}), &session).await.unwrap()),
+        200
+    );
+
+    // Maintenance settings round-trip without touching the saved rules;
+    // deleting the channel stops deliveries.
+    let until = json!(4_102_444_799_000_i64);
+    let put = client
+        .put(api("alerts/settings"))
+        .json(&json!({"maintenance_until_ms": until}));
+    assert_eq!(status(put.bearer_auth(&session).send().await.unwrap()), 200);
+    assert_eq!(
+        settings().await,
+        json!({"maintenance_until_ms": until, "rules": rules})
     );
     let delete = client.delete(api(&format!("alerts/channels/{id}")));
     assert_eq!(
@@ -273,4 +323,161 @@ async fn target_outages_notify_once_per_incident_through_signed_webhooks() {
         404
     );
     stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resource_alerts_need_consecutive_reports_and_resolve_on_their_own() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Store::open(&temp.path().join("controller.db")).unwrap();
+    let admin = db.bootstrap(PASSWORD).unwrap();
+    let (node, token) = db.create_node(&admin, "default", "edge-busy").unwrap();
+    db.enroll(&node.id, &token, &relay_platform::store::secret())
+        .unwrap();
+    let ledger = db
+        .reconcile(
+            &node.id,
+            ReconcileRequest {
+                lease: None,
+                ledger_id: None,
+                after: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap()
+        .ledger_id;
+    let (hook, mut received) = receiver().await;
+    db.save_alert_channel(
+        &admin,
+        None,
+        alerts::Channel {
+            tenant_id: None,
+            id: String::new(),
+            name: "ops".into(),
+            enabled: true,
+            min_severity: relay_platform::telemetry::Severity::Warning,
+            target: alerts::Target::Webhook {
+                url: format!("http://{hook}/hook"),
+                secret: "hook-secret".into(),
+            },
+        },
+    )
+    .unwrap();
+    let rules = |cpu: bool| alerts::Rules {
+        node_cpu: alerts::Rule {
+            enabled: cpu,
+            threshold: Some(80),
+            checks: 3,
+        },
+        node_memory: alerts::Rule {
+            enabled: true,
+            threshold: Some(90),
+            checks: 2,
+        },
+        ..alerts::Rules::default()
+    };
+    db.set_alert_settings(
+        &admin,
+        alerts::Settings {
+            maintenance_until_ms: None,
+            rules: Some(rules(true)),
+        },
+    )
+    .unwrap();
+    let stop = CancellationToken::new();
+    let worker = tokio::spawn(alerts::run(
+        db.clone(),
+        Duration::from_millis(20),
+        stop.clone(),
+    ));
+    // One agent report, then time for the worker to look at it several times.
+    let report = |cpu: f32, available: u64| {
+        let db = db.clone();
+        let (node, ledger) = (node.id.clone(), ledger.clone());
+        async move {
+            db.sync(
+                &node,
+                SyncRequest {
+                    logs: None,
+                    lease: None,
+                    budget: None,
+                    ledger_id: ledger,
+                    need_config: false,
+                    applied_revision: 0,
+                    apply_error: None,
+                    usage: vec![],
+                    stats: EngineStats {
+                        system: Some(relay_platform::system::SystemStats {
+                            cpu_percent: Some(cpu),
+                            memory_total_bytes: Some(1000),
+                            memory_available_bytes: Some(available),
+                            cpus: 2,
+                            ..Default::default()
+                        }),
+                        ..EngineStats::default()
+                    },
+                },
+            )
+            .unwrap();
+            sleep(Duration::from_millis(200)).await;
+        }
+    };
+    let open = || {
+        let mut kinds: Vec<String> = db
+            .alerts()
+            .snapshot()
+            .open
+            .iter()
+            .map(|i| i.key.split(':').next().unwrap().to_owned())
+            .collect();
+        kinds.sort();
+        kinds
+    };
+
+    // Two reports over 80 % CPU, then one under: nothing yet. Memory is at 50 %.
+    report(95.0, 500).await;
+    report(95.0, 500).await;
+    assert!(open().is_empty(), "{:?}", open());
+    report(79.0, 500).await;
+    report(95.0, 500).await;
+    report(95.0, 500).await;
+    assert!(
+        open().is_empty(),
+        "the count starts again after a low report"
+    );
+    // The third report in a row opens CPU; memory needs a second one at 95 %.
+    report(95.0, 50).await;
+    assert_eq!(open(), ["cpu"]);
+    report(95.0, 50).await;
+    assert_eq!(open(), ["cpu", "memory"]);
+    let mut opened = String::new();
+    while !(opened.contains("CPU 使用率 95%") && opened.contains("内存使用率 95%")) {
+        opened += &next(&mut received).await;
+    }
+    assert!(opened.contains("edge-busy"), "{opened}");
+
+    // Back under both thresholds: both resolve and the recovery is sent.
+    report(10.0, 900).await;
+    assert!(open().is_empty());
+    let mut resolved = String::new();
+    while !(resolved.contains("CPU 使用率回落到 10%") && resolved.contains("内存使用率回落到 10%"))
+    {
+        resolved += &next(&mut received).await;
+    }
+    assert!(resolved.starts_with("【已恢复】"), "{resolved}");
+
+    // A switched-off rule opens nothing however long the problem lasts.
+    db.set_alert_settings(
+        &admin,
+        alerts::Settings {
+            maintenance_until_ms: None,
+            rules: Some(rules(false)),
+        },
+    )
+    .unwrap();
+    for _ in 0..5 {
+        report(99.0, 900).await;
+    }
+    assert!(open().is_empty(), "{:?}", open());
+    stop.cancel();
+    worker.await.unwrap();
 }

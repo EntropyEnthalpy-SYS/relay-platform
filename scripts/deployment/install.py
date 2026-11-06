@@ -69,7 +69,7 @@ def settings(role, supplied):
         require(ip.is_loopback or result['behind_tls_proxy'], 'non-loopback controller requires behind_tls_proxy')
         require('[' not in address if ip.version == 4 else address.startswith('[') and address.endswith(']'), 'invalid listen address')
         return result
-    require(set(supplied) <= {'controller', 'node_id', 'poll_seconds', 'protocol_engine', 'tls_directory'} and {'controller', 'node_id'} <= set(supplied), 'agent settings require controller and node_id')
+    require(set(supplied) <= {'controller', 'node_id', 'poll_seconds', 'protocol_engine', 'tls_directory', 'controller_addresses', 'controller_proxy'} and {'controller', 'node_id'} <= set(supplied), 'agent settings require controller and node_id')
     result = {'poll_seconds': 5, **supplied}
     for key in ('protocol_engine', 'tls_directory'):
         if key in result:
@@ -82,7 +82,45 @@ def settings(role, supplied):
     require(url.port is None or 1 <= url.port <= 65535, 'invalid controller port')
     require(url.scheme == 'https' or (url.scheme == 'http' and url.hostname in ('localhost', '127.0.0.1', '::1')), 'remote controller requires HTTPS')
     result['controller'] = result['controller'].rstrip('/')
+    # How the agent reaches the controller when it cannot connect directly;
+    # TLS still verifies the controller's own name. The agent repeats these checks.
+    addresses = result.get('controller_addresses', [])
+    require(isinstance(addresses, list) and len(addresses) <= 8 and len(set(map(str, addresses))) == len(addresses), 'controller_addresses must list at most 8 different host:port strings')
+    for address in addresses:
+        require(isinstance(address, str) and endpoint(address), f'controller address must be host:port or [IPv6]:port: {address!r}')
+    if addresses:
+        try:
+            ipaddress.ip_address(url.hostname)
+            literal = True
+        except ValueError:
+            literal = False
+        require(not literal, 'controller_addresses require a controller URL with a host name')
+        # The agent always dials a port written in the controller URL itself.
+        own = None if url.port in (None, {'https': 443, 'http': 80}[url.scheme]) else url.port
+        require(own is None or all(int(a.rpartition(':')[2]) == own for a in addresses), 'a controller URL with a port needs controller_addresses on that same port')
+    if 'controller_proxy' in result:
+        proxy = result['controller_proxy']
+        parsed = urlsplit(proxy) if isinstance(proxy, str) else None
+        try:
+            port_ok = parsed is not None and parsed.port is not None and parsed.port > 0
+        except ValueError:
+            port_ok = False
+        require(port_ok and parsed.scheme == 'http' and parsed.hostname and not parsed.username and not parsed.password and parsed.path in ('', '/') and not parsed.query and not parsed.fragment and re.fullmatch(r'[A-Za-z0-9.:\[\]/-]+', proxy), 'controller_proxy must be an http://host:port URL without credentials (SOCKS is not supported)')
+        require(not addresses, 'use controller_addresses or controller_proxy, not both')
     return result
+
+
+def endpoint(address):
+    """host:port, [IPv6]:port or IPv4:port with a nonzero port; no shell metacharacters."""
+    host, separator, port = address.rpartition(':')
+    if not separator or not port.isdigit() or not 1 <= int(port) <= 65535:
+        return False
+    if host.startswith('[') and host.endswith(']'):
+        try:
+            return ipaddress.ip_address(host[1:-1]).version == 6
+        except ValueError:
+            return False
+    return bool(re.fullmatch(r'(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?', host))
 
 
 class Layout:
@@ -267,6 +305,10 @@ class Layout:
                 args += ['--ca-certificate', str(folder / 'ca.pem')]
             if config.get('tls_directory'):
                 args += ['--tls-directory', config['tls_directory']]
+            for address in config.get('controller_addresses', []):
+                args += ['--controller-address', address]
+            if config.get('controller_proxy'):
+                args += ['--controller-proxy', config['controller_proxy']]
             if config.get('protocol_engine'):
                 args = ['/usr/bin/env', 'RELAY_PROTOCOL_ENGINE=' + config['protocol_engine'], *args]
         return ('#!/bin/sh\numask 077\nexec ' + shlex.join(args) + '\n').encode()

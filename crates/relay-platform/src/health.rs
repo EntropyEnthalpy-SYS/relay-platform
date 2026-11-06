@@ -456,8 +456,12 @@ impl Observation {
         let expired = rule
             .expires_at_ms
             .is_some_and(|e| e <= crate::model::now_ms());
+        // Probes continue while paused, so `status` stays current for resuming.
+        let paused = target.paused_at(crate::model::now_ms());
         let reason = if expired {
             "expired"
+        } else if paused {
+            "paused"
         } else if full {
             "at_capacity"
         } else {
@@ -490,7 +494,7 @@ impl Observation {
                 .target_address(key.index, key.port)
                 .expect("validated target mapping"),
             status,
-            eligible: status == Status::Healthy && !full && !expired,
+            eligible: status == Status::Healthy && !full && !expired && !paused,
             selection_reason: reason.into(),
             sample_age_ms: s
                 .checked

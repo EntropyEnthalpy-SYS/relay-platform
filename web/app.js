@@ -186,7 +186,7 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     const id = serial++, box = el('fieldset', undefined, 'target-editor'), grid = el('div', undefined, 'form-grid');
     const options = el('details'), tuning = el('div', undefined, 'form-grid');
     options.append(el('summary', translate('目标高级选项：均衡、TLS 与传输')));
-    options.open = !!(target.tls || target.proxy_protocol || target.websocket || target.draining || multipathPaths);
+    options.open = !!(target.tls || target.proxy_protocol || target.websocket || target.draining || target.paused || multipathPaths);
     box.append(el('legend', translate('转发目标')));
     const address = field(grid, `target-address-${id}`, translate('目标地址 / host:port'), target.address); address.placeholder = '203.0.113.10:443';
     const endpoints = (topology?.configs || []).flatMap(config => config.rules.filter(rule => rule.advertise && rule.tenant_id === sourceTenant && rule.id !== currentRule).map(rule => ({ key: `${config.node_id}/${rule.id}`, config, rule })));
@@ -199,6 +199,12 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     const weight = field(tuning, `target-weight-${id}`, translate('权重'), target.weight, 'number'); weight.min = 1; weight.max = 1000;
     const priority = field(tuning, `target-priority-${id}`, translate('优先级（越小越优先，同级按均衡策略）'), target.priority ?? 0, 'number'); priority.min = 0; priority.max = 65535;
     const draining = select(tuning, `target-draining-${id}`, translate('维护排空（新会话优先走其他目标，已有会话保持）'), [['off', translate('正常使用')], ['on', translate('维护排空')]], target.draining ? 'on' : 'off');
+    // A timed pause that already ended loads as not paused, so saving drops it.
+    const pausedNow = !!target.paused && (target.paused_until_ms == null || target.paused_until_ms > Date.now());
+    const pause = select(tuning, `target-pause-${id}`, translate('暂停（不接任何新会话，已有会话保持）'), [['off', translate('不暂停')], ['on', translate('暂停，直到手动恢复')], ['until', translate('暂停到指定时间')]], !pausedNow ? 'off' : target.paused_until_ms ? 'until' : 'on');
+    const pauseUntil = field(tuning, `target-pause-until-${id}`, msg`暂停结束时间（${Intl.DateTimeFormat().resolvedOptions().timeZone}）`, pausedNow && target.paused_until_ms ? localDateTime(target.paused_until_ms) : '', 'datetime-local', false); pauseUntil.step = '0.001';
+    function showPause() { pauseUntil.disabled = pause.value !== 'until'; pauseUntil.required = pause.value === 'until'; warnPaused(); }
+    pause.addEventListener('change', showPause);
     const maximum = field(tuning, `target-max-${id}`, translate('目标会话上限（TCP + UDP，留空不限）'), target.max_sessions, 'number', false); maximum.min = 1; maximum.max = 1000000;
     const prewarm = field(tuning, `target-prewarm-${id}`, translate('预热连接数（提前建好、待用的 TCP 连接，留空关闭；需启用 PROXY）'), target.prewarm, 'number', false); prewarm.min = 1; prewarm.max = 32;
     const mode = select(tuning, `target-mode-${id}`, translate('连接目标的安全方式'), [['plain', translate('普通 TCP / UDP')], ['tls', translate('TLS（验证目标证书）')]], target.tls ? 'tls' : 'plain'); box.append(grid); options.append(tuning);
@@ -221,13 +227,16 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     mp.append(el('p', translate('目标必须汇聚到同一条规则。引用汇聚端口段时，可为各子流填写段内不同端口。不同端口本身不代表独立带宽。'), 'fine'));
     function showMultipath() { const on = !!multipathMode && multipathMode.value !== 'off'; mp.classList.toggle('hidden', !on); mp.querySelectorAll('input').forEach(input => { input.disabled = !on; }); }
     multipathMode?.addEventListener('change', showMultipath); showMultipath();
-    const row = { box, address, via, weight, priority, draining, maximum, prewarm, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws, up, down, bindIp, bindInterface }; rows.push(row);
+    const row = { box, address, via, weight, priority, draining, pause, pauseUntil, maximum, prewarm, mode, name, ca, identity, proxyMode, proxyPlacement, proxyCrc, ws, up, down, bindIp, bindInterface }; rows.push(row); showPause();
     function showSecurity() { const enabled = mode.value === 'tls'; secure.classList.toggle('hidden', !enabled); name.required = enabled; [name, ca, identity].forEach(input => { input.disabled = !enabled; }); }
-    mode.onchange = showSecurity; showSecurity(); options.append(secure, proxyFields, ws.box, mp); box.append(options, button(translate('移除此目标'), () => { multipathMode?.removeEventListener('change', showMultipath); rows.splice(rows.indexOf(row), 1); box.remove(); changed(); }, 'table-action danger')); container.append(box); changed();
+    mode.onchange = showSecurity; showSecurity(); options.append(secure, proxyFields, ws.box, mp); box.append(options, button(translate('移除此目标'), () => { multipathMode?.removeEventListener('change', showMultipath); rows.splice(rows.indexOf(row), 1); box.remove(); warnPaused(); changed(); }, 'table-action danger')); container.append(box); warnPaused(); changed();
   }
-  targets.forEach((target, index) => add(target, multipathPaths?.[index])); form.append(container, button(translate('＋ 添加目标'), () => add()));
+  // Unlike draining, a paused target is never used as a last resort.
+  const allPaused = el('p', translate('全部目标都已暂停：新连接会被拒绝，直到有目标恢复或暂停到期。'), 'error');
+  function warnPaused() { allPaused.classList.toggle('hidden', !rows.length || rows.some(row => row.pause.value === 'off')); }
+  targets.forEach((target, index) => add(target, multipathPaths?.[index])); form.append(container, allPaused, button(translate('＋ 添加目标'), () => add()));
   const read = () => { if (!rows.length) throw new Error(translate('至少保留一个转发目标')); return rows.map(row => {
-    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), max_sessions: row.maximum.value === '' ? null : Number(row.maximum.value), ...(row.draining.value === 'on' ? { draining: true } : {}), ...(row.prewarm.value === '' ? {} : { prewarm: Number(row.prewarm.value) }), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
+    const target = { address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), max_sessions: row.maximum.value === '' ? null : Number(row.maximum.value), ...(row.draining.value === 'on' ? { draining: true } : {}), ...(row.pause.value === 'off' ? {} : { paused: true, ...(row.pause.value === 'until' ? { paused_until_ms: pauseEnd(row.pauseUntil.value) } : {}) }), ...(row.prewarm.value === '' ? {} : { prewarm: Number(row.prewarm.value) }), ...(row.mode.value === 'tls' ? { tls: { server_name: row.name.value.trim(), ca: row.ca.value.trim() || null, identity: row.identity.value.trim() || null } } : {}) };
     if (row.proxyMode.value !== 'off') {
       if (row.proxyPlacement.value === 'inside_tls' && row.mode.value !== 'tls') throw new Error(translate('将 PROXY 放入加密连接前，请启用目标 TLS'));
       target.proxy_protocol = { version: row.proxyMode.value, placement: row.proxyPlacement.value, checksum: row.proxyMode.value === 'v2' && row.proxyCrc.value === 'on' };
@@ -241,6 +250,7 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
     return { upload_weight: Number(row.up.value), download_weight: Number(row.down.value), ...(ip || iface ? { outbound_bind: { ip: ip || null, interface: iface || null } } : {}) };
   });
   read.preview = () => rows.map(row => ({ address: row.address.value.trim(), weight: Number(row.weight.value), priority: Number(row.priority.value), draining: row.draining.value === 'on',
+    ...(row.pause.value === 'off' ? {} : { paused: true, ...(row.pause.value === 'until' && Number.isFinite(new Date(row.pauseUntil.value).getTime()) ? { paused_until_ms: new Date(row.pauseUntil.value).getTime() } : {}) }),
     ...(row.mode.value === 'tls' ? { tls: {} } : {}),
     ...(row.via.value ? { via: { node_id: row.via.value.split('/')[0], rule_id: row.via.value.split('/')[1] } } : {}),
     ...(row.ws.read() ? { websocket: {} } : {}),
@@ -248,6 +258,7 @@ function targetEditor(form, targets, topology, sourceTenant, currentRule, multip
   read.onchange = callback => { changed = callback; };
   return read;
 }
+function pauseEnd(value) { const ms = new Date(value).getTime(); if (!Number.isFinite(ms) || ms <= Date.now()) throw new Error(translate('暂停结束时间必须晚于现在')); return ms; }
 
 function multipathEditor(form, rule) {
   const box = el('details'); box.open = !!(rule.inbound_multipath || rule.outbound_multipath);
@@ -341,7 +352,7 @@ function bits(bytesPerSecond) { let n = bytesPerSecond * 8, i = 0; const u = ['b
 function millis(us) { if (us == null) return '—'; const n = us / 1000; return `${n.toFixed(n < 10 ? 2 : n < 100 ? 1 : 0)} ms`; }
 function ago(at, now) { const s = Math.max(0, Math.round((now - at) / 1000)); return s < 60 ? msg`${s} 秒前` : s < 3600 ? msg`${Math.floor(s / 60)} 分钟前` : msg`${Math.floor(s / 3600)} 小时前`; }
 const probeErrors = localize({ dns: '域名解析失败', transport: '连接、握手或路径检查失败', timeout: '探测超时', io: '收发失败', unexpected_response: '回复不符或提前关闭', expired: '规则已到期' });
-const selectionReasons = localize({ eligible: '参与优先池', standby: '后备候选', unknown: '等待探测确认', unhealthy: '故障排除', recovering: '等待持续成功', stale: '等待新结果', at_capacity: '会话已满', expired: '规则已到期', degraded: '丢包降级', draining: '维护排空' });
+const selectionReasons = localize({ eligible: '参与优先池', standby: '后备候选', unknown: '等待探测确认', unhealthy: '故障排除', recovering: '等待持续成功', stale: '等待新结果', at_capacity: '会话已满', expired: '规则已到期', degraded: '丢包降级', draining: '维护排空', paused: '已暂停 · 不接新连接' });
 // Probe reports by `${node_id}/${rule_id}/${target_index}`; a TCP + UDP rule can report each protocol separately.
 function targetHealth(topology) {
   const health = new Map();
@@ -1311,12 +1322,12 @@ async function renderRules() {
   nodeStatus.append(applicationBadge(state.nodes.find(n => n.id === nodeId)), badge(msg`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? msg`节点总限速 ${mbit(config.rate_bytes_per_sec)}` : translate('节点不限速'), config.rate_bytes_per_sec ? 'orange' : ''));
   nodeTools.append(button(translate('版本历史'), history)); if (canWrite()) nodeTools.append(button(translate('节点总限速'), () => editNodeRate(config)));
   toolbar.append(nodeTools, nodeStatus);
-  const protocols = { tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' }, balances = { weighted_round_robin: translate('加权轮询'), source_hash: translate('来源 IP 哈希'), least_connections: translate('最少连接'), lowest_latency: translate('最低延迟') };
+  const protocols = { tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' }, balances = { weighted_round_robin: translate('加权轮询'), source_hash: translate('来源 IP 哈希'), least_connections: translate('最少连接'), lowest_latency: translate('最低延迟'), random: translate('随机') };
   const p = panel(msg`${state.nodes.find(n => n.id === nodeId).name} 上运行的规则`, translate('一台服务器上的监听端口和服务。多跳转发会在经过的每台服务器上各有一条规则；完整路线见「全部转发」。'));
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p);
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -1338,7 +1349,7 @@ function editNodeRate(baseConfig) {
   modal(translate('节点总限速'), form);
 }
 async function saveRules(rules, baseConfig) { const expected_revision = baseConfig.revision; await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision, rules } }); $('#dialog').close(); notify(translate('配置已发布。请在节点总览确认实际应用修订号。')); await renderRules(); }
-function gatewayConfig(type, listen, uuid, password, vision, security, identity, serverName, handshake, privateKey, shortId, allowPrivate, payload) {
+function gatewayConfig(type, listen, uuid, password, vision, security, identity, serverName, handshake, privateKey, shortId, allowPrivate, payload, options = {}) {
   if (type === 'off') return null;
   if (!['vless', 'hysteria2', 'tuic', 'any_tls', 'trojan', 'vmess'].includes(type)) throw new Error(translate('未知协议'));
   if (payload === 'udp' || (type === 'any_tls' && payload !== 'tcp')) throw new Error(translate('协议入口需要 TCP 控制连接；AnyTLS 当前仅支持 TCP 业务'));
@@ -1352,14 +1363,41 @@ function gatewayConfig(type, listen, uuid, password, vision, security, identity,
     protocol.password = password;
   }
   if (type === 'vless') protocol.vision = vision === 'yes';
+  if (type === 'hysteria2') {
+    if (options.obfs === 'salamander') {
+      const key = options.obfsPassword || '';
+      if (new TextEncoder().encode(key).length < 16 || new TextEncoder().encode(key).length > 256 || /[\x00-\x1f\x7f]/.test(key)) throw new Error(translate('混淆密码需要 16–256 字节，不能含控制字符'));
+      protocol.obfs = { type: 'salamander', password: key };
+    }
+    if (options.masquerade === 'fixed') {
+      const code = Number(options.masqueradeStatus), content = options.masqueradeContent || '';
+      if (!Number.isInteger(code) || code < 200 || code > 599) throw new Error(translate('伪装响应状态码为 200–599'));
+      if (new TextEncoder().encode(content).length > 4096) throw new Error(translate('伪装响应内容最多 4096 字节'));
+      protocol.masquerade = { type: 'string', status_code: code, ...(content ? { content } : {}) };
+    }
+  }
+  if (type === 'tuic') {
+    if (!['bbr', 'cubic', 'new_reno'].includes(options.congestion || 'bbr')) throw new Error(translate('未知拥塞控制算法'));
+    if ((options.congestion || 'bbr') !== 'bbr') protocol.congestion_control = options.congestion;
+    if (options.zeroRtt === 'yes') protocol.zero_rtt_handshake = true;
+  }
   let secure;
   if (security === 'certificate') {
     if (!identity.trim()) throw new Error(translate('请填写节点本地证书编号'));
     secure = { type: 'certificate', identity: identity.trim() };
     if (serverName.trim()) secure.server_name = serverName.trim();
   } else if (security === 'reality' && type === 'vless') {
-    if (!serverName.trim() || !handshake.trim() || !/^[A-Za-z0-9_-]{43}$/.test(privateKey) || !/^(?:[0-9a-f]{2}){1,8}$/i.test(shortId)) throw new Error(translate('Reality 需要服务器名称、握手地址、32 字节 Base64URL 私钥和 2–16 位偶数长度十六进制 short ID'));
-    secure = { type: 'reality', server_name: serverName.trim(), handshake: handshake.trim(), private_key: privateKey, short_id: shortId };
+    const ids = shortId.split(/[\s,]+/).filter(Boolean);
+    if (!serverName.trim() || !handshake.trim() || !/^[A-Za-z0-9_-]{43}$/.test(privateKey) || !ids.length || ids.some(id => !/^(?:[0-9a-f]{2}){1,8}$/i.test(id))) throw new Error(translate('Reality 需要服务器名称、握手地址、32 字节 Base64URL 私钥和 2–16 位偶数长度十六进制 short ID'));
+    if (ids.length > 16 || new Set(ids.map(id => id.toLowerCase())).size !== ids.length) throw new Error(translate('Reality short ID 最多 16 个且不能重复'));
+    secure = { type: 'reality', server_name: serverName.trim(), handshake: handshake.trim(), private_key: privateKey, short_id: ids[0] };
+    if (ids.length > 1) secure.extra_short_ids = ids.slice(1);
+    const drift = String(options.maxTimeDiff ?? '').trim();
+    if (drift) {
+      const secs = Number(drift);
+      if (!Number.isInteger(secs) || secs < 1 || secs > 3600) throw new Error(translate('Reality 最大时钟误差为 1–3600 秒，留空不检查'));
+      secure.max_time_difference_secs = secs;
+    }
   } else throw new Error(translate('Reality 仅支持 VLESS'));
   return { listen, protocol, security: secure, allow_private_destinations: allowPrivate === 'yes' };
 }
@@ -1383,27 +1421,36 @@ function gatewayEditor(spec, payload, publicListen) {
   const serverName = field(fields, 'gateway_sni', translate('客户端 TLS 服务器名称（证书模式留空沿用订阅域名）'), spec?.security.server_name || '', 'text', false);
   const handshake = field(fields, 'gateway_handshake', translate('Reality 握手服务器 host:port'), spec?.security.handshake || '', 'text', false);
   const privateKey = field(fields, 'gateway_private_key', translate('Reality 私钥'), spec?.security.private_key || '', 'password', false);
-  const shortId = field(fields, 'gateway_short_id', 'Reality short ID', spec?.security.short_id || '', 'text', false);
+  const shortId = field(fields, 'gateway_short_id', translate('Reality short ID（可填多个，用逗号分隔；客户端使用第一个）'), [spec?.security.short_id, ...(spec?.security.extra_short_ids || [])].filter(Boolean).join(', '), 'text', false);
+  const maxTimeDiff = field(fields, 'gateway_max_time_diff', translate('Reality 最大时钟误差（秒，留空不检查）'), spec?.security.max_time_difference_secs ?? '', 'number', false); maxTimeDiff.min = 1; maxTimeDiff.max = 3600;
+  const obfs = select(fields, 'gateway_obfs', translate('Hysteria2 混淆'), [['off', translate('关闭')], ['salamander', 'Salamander']], spec?.protocol.obfs ? 'salamander' : 'off');
+  const obfsPassword = field(fields, 'gateway_obfs_password', translate('混淆密码（客户端须相同）'), spec?.protocol.obfs?.password || '', 'password', false);
+  const masquerade = select(fields, 'gateway_masquerade', translate('认证失败时的伪装响应'), [['off', translate('引擎默认（404 Not Found）')], ['fixed', translate('固定响应')]], spec?.protocol.masquerade ? 'fixed' : 'off');
+  const masqueradeStatus = field(fields, 'gateway_masquerade_status', translate('伪装响应状态码'), spec?.protocol.masquerade?.status_code ?? 404, 'number', false); masqueradeStatus.min = 200; masqueradeStatus.max = 599;
+  const masqueradeContent = textarea(fields, 'gateway_masquerade_content', translate('伪装响应内容（可留空，最多 4096 字节）'), spec?.protocol.masquerade?.content || '');
+  const congestion = select(fields, 'gateway_congestion', translate('TUIC 拥塞控制'), [['bbr', 'BBR'], ['cubic', 'CUBIC'], ['new_reno', 'NewReno']], spec?.protocol.congestion_control || 'bbr');
+  const zeroRtt = select(fields, 'gateway_zero_rtt', translate('TUIC 0-RTT 握手'), [['no', translate('关闭')], ['yes', translate('启用 · 重连更快，早期数据可被重放')]], spec?.protocol.zero_rtt_handshake ? 'yes' : 'no');
   const allowPrivate = select(fields, 'gateway_private', translate('内网 / 回环目的地'), [['no', translate('拒绝（推荐）')], ['yes', translate('允许')]], spec?.allow_private_destinations ? 'yes' : 'no');
   const generate = button(translate('生成客户端凭据'), () => {
     uuid.value = crypto.randomUUID();
     password.value = Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, '0')).join('');
+    if (obfs.value === 'salamander') obfsPassword.value = Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2, '0')).join('');
   });
   const keys = button(translate('生成 Reality 密钥'), () => {
     privateKey.value = btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(32)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     shortId.value = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, '0')).join('');
   });
   function show() {
-    const on = type.value !== 'off', reality = security.value === 'reality';
-    for (const [control, visible] of [[uuid, ['vless', 'vmess', 'tuic'].includes(type.value)], [password, ['hysteria2', 'tuic', 'any_tls', 'trojan'].includes(type.value)], [vision, type.value === 'vless'], [identity, !reality], [handshake, reality], [privateKey, reality], [shortId, reality], [security, true], [serverName, true], [allowPrivate, true]]) {
+    const on = type.value !== 'off', reality = security.value === 'reality', hysteria = type.value === 'hysteria2', tuic = type.value === 'tuic';
+    for (const [control, visible] of [[uuid, ['vless', 'vmess', 'tuic'].includes(type.value)], [password, ['hysteria2', 'tuic', 'any_tls', 'trojan'].includes(type.value)], [vision, type.value === 'vless'], [identity, !reality], [handshake, reality], [privateKey, reality], [shortId, reality], [maxTimeDiff, reality], [obfs, hysteria], [obfsPassword, hysteria && obfs.value === 'salamander'], [masquerade, hysteria], [masqueradeStatus, hysteria && masquerade.value === 'fixed'], [masqueradeContent, hysteria && masquerade.value === 'fixed'], [congestion, tuic], [zeroRtt, tuic], [security, true], [serverName, true], [allowPrivate, true]]) {
       control.disabled = !on || !visible; control.parentElement.classList.toggle('hidden', !visible);
     }
     fields.classList.toggle('hidden', !on); generate.disabled = !on; keys.disabled = !on || !reality;
   }
   type.addEventListener('change', () => { if (type.value !== 'vless') security.value = 'certificate'; if (type.value !== 'off') payload.value = type.value === 'any_tls' ? 'tcp' : 'both'; show(); });
-  security.addEventListener('change', show);
+  security.addEventListener('change', show); obfs.addEventListener('change', show); masquerade.addEventListener('change', show);
   box.append(fields, generate, keys, el('p', translate('节点需要安装受支持的协议引擎。面板负责规则权限、流量账本、配额、限速和目的地 ACL。上方监听地址用于客户端连接；来源 ACL 使用实际客户端 IP。订阅请选择 sing-box JSON 或 mihomo YAML。证书模式须让客户端信任签发 CA。Reality 握手与伪装回落流量也计入配额并受目的地限制；请允许握手服务器地址与端口。来源 ACL 不替代握手前的主机防火墙。'), 'fine')); show();
-  return { box, setEnabled(on) { type.value = on ? (type.value === 'off' ? 'vless' : type.value) : 'off'; if (on && !uuid.value) uuid.value = crypto.randomUUID(); show(); }, enabled: () => type.value !== 'off', onchange: f => type.addEventListener('change', f), read: () => gatewayConfig(type.value, publicListen.value, uuid.value, password.value, vision.value, security.value, identity.value, serverName.value, handshake.value, privateKey.value, shortId.value, allowPrivate.value, payload.value) };
+  return { box, setEnabled(on) { type.value = on ? (type.value === 'off' ? 'vless' : type.value) : 'off'; if (on && !uuid.value) uuid.value = crypto.randomUUID(); show(); }, enabled: () => type.value !== 'off', onchange: f => type.addEventListener('change', f), read: () => gatewayConfig(type.value, publicListen.value, uuid.value, password.value, vision.value, security.value, identity.value, serverName.value, handshake.value, privateKey.value, shortId.value, allowPrivate.value, payload.value, { obfs: obfs.value, obfsPassword: obfsPassword.value, masquerade: masquerade.value, masqueradeStatus: masqueradeStatus.value, masqueradeContent: masqueradeContent.value, congestion: congestion.value, zeroRtt: zeroRtt.value, maxTimeDiff: maxTimeDiff.value }) };
 }
 function mptcpConfig(inbound, outbound, protocol) {
   const allowed = ['off', 'prefer', 'require'];
@@ -1442,7 +1489,7 @@ async function editRule(existing, seed = {}) {
   const advertise = field(grid, 'advertise', translate('客户端 / 上一跳连接地址（VPS 公网 IP 或域名:端口）'), r.advertise || '', 'text', !!seed.name && !asTemplate); advertise.placeholder = 'vps.example.com:9000';
   const endPort = field(extraGrid, 'listen_end_port', translate('结束端口（留空只监听一个端口，最多 256 个）'), r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
   const mapping = select(extraGrid, 'port_mapping', translate('端口段的目标映射'), [['fixed', translate('全部入口连接同一目标端口')], ['offset', translate('按入口端口偏移目标端口')]], r.port_mapping || 'fixed');
-  const balance = select(extraGrid, 'balance', translate('目标分配'), [['weighted_round_robin', translate('加权轮询')], ['source_hash', translate('来源 IP 哈希')], ['least_connections', translate('最少连接')], ['lowest_latency', translate('最低延迟（须启用健康探测）')]], r.balance || 'weighted_round_robin'); form.append(grid);
+  const balance = select(extraGrid, 'balance', translate('目标分配'), [['weighted_round_robin', translate('加权轮询')], ['source_hash', translate('来源 IP 哈希')], ['least_connections', translate('最少连接')], ['lowest_latency', translate('最低延迟（须启用健康探测）')], ['random', translate('随机（同优先级内均匀选择，忽略权重）')]], r.balance || 'weighted_round_robin'); form.append(grid);
   // A template runs nowhere until it is used, so it does not name a server here.
   const placement = el('p', '', asTemplate ? 'workflow-callout hidden' : 'workflow-callout'), reachability = el('p', '', 'fine'); form.append(placement, reachability);
   function describePlacement() {
@@ -1754,6 +1801,33 @@ function shareSocks5(rule) {
   [host, port, tag].forEach(input => input.addEventListener('input', update)); update();
   const actions = el('div', undefined, 'dialog-actions'); actions.append(button(translate('复制链接'), async () => { if (!link.textContent) throw new Error(translate('请填写入口的有效 IP 或域名和端口。')); await navigator.clipboard.writeText(link.textContent); notify(translate('SOCKS5 链接已复制。')); }, 'primary'));
   body.append(grid, link, el('p', translate('链接包含认证信息；需要停用时删除规则或修改用户名/密码。'), 'fine'), actions);
+  modal(msg`分享 ${rule.name}`, body);
+}
+// The controller builds gateway links (it derives the Reality public key and
+// never includes the private key) and renders their QR codes.
+function shareGateway(rule, nodeId) {
+  const endpoint = clientEndpoint(rule);
+  const body = el('div'), grid = el('div', undefined, 'form-grid');
+  const host = field(grid, 'host', translate('客户端连接的地址（公网 IP 或域名）'), endpoint.host);
+  const port = field(grid, 'port', translate('端口'), endpoint.port, 'number'); port.min = 1; port.max = 65535;
+  const tag = field(grid, 'tag', translate('客户端里显示的名称'), rule.name); tag.maxLength = 120;
+  const link = el('pre', '', 'secret-box mono'), problem = el('p', '', 'error'), qr = el('img', undefined, 'qr-code');
+  qr.alt = translate('分享链接二维码'); qr.hidden = true;
+  let serial = 0, timer;
+  const update = async () => {
+    const request = ++serial, address = host.value.trim().replace(/^\[|\]$/g, '');
+    link.textContent = ''; problem.textContent = ''; qr.hidden = true;
+    if (!address || !splitEndpoint(`${address.includes(':') ? `[${address}]` : address}:${port.value.trim()}`)) return;
+    const query = new URLSearchParams({ host: address, port: port.value.trim(), name: tag.value.trim() });
+    try {
+      const result = await api(`/nodes/${encodeURIComponent(nodeId)}/rules/${encodeURIComponent(rule.id)}/share?${query}`);
+      if (request !== serial) return;
+      link.textContent = result.uri; qr.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(result.qr_svg)}`; qr.hidden = false;
+    } catch (error) { if (request === serial) problem.textContent = error.message; }
+  };
+  [host, port, tag].forEach(input => input.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(update, 400); })); update();
+  const actions = el('div', undefined, 'dialog-actions'); actions.append(button(translate('关闭对话框'), () => $('#dialog').close()), button(translate('复制链接'), async () => { if (!link.textContent) throw new Error(translate('请填写入口的有效 IP 或域名和端口。')); await navigator.clipboard.writeText(link.textContent); notify(translate('分享链接已复制。')); }, 'primary'));
+  body.append(grid, link, problem, qr, el('p', translate('用客户端扫描二维码或粘贴链接导入。链接包含客户端 UUID / 密码，不含 Reality 私钥；持有者即可使用本节点，请只发给使用者本人。证书模式须让客户端信任签发 CA。AnyTLS 没有通用链接格式，请使用订阅。'), 'fine'), actions);
   modal(msg`分享 ${rule.name}`, body);
 }
 const subscriptionFormats = localize({ sing_box: 'sing-box JSON（SS 与受管协议）', v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'mihomo / Clash Meta（YAML）', surge: 'Surge（完整配置 · 自动更新）', shadowrocket: 'Shadowrocket（ss:// 列表）' });
@@ -2220,18 +2294,19 @@ async function renderDns() {
   const providerNames = Object.fromEntries(providers.map(p => [p.id, p.name]));
   const p = panel(translate('DNS 服务商'), translate('保存 Cloudflare 兼容 API 的地址和令牌。令牌可逆保存以调用服务商，接口只显示是否已设置；仅系统管理员可读写。'), button(translate('＋ 新增服务商'), () => dnsProviderForm(null), 'primary'));
   if (!providers.length) p.append(empty(translate('还没有 DNS 服务商'), translate('先添加服务商，再创建区域和托管记录。')));
-  else p.append(table([translate('名称'), translate('类型'), translate('API 地址'), translate('令牌'), translate('操作')], providers.map(provider => {
-    const actions = el('div'); actions.append(button(translate('编辑'), () => dnsProviderForm(provider), 'table-action'), button(translate('删除'), () => deleteDnsProvider(provider), 'table-action danger'));
-    return [namedCell(provider.name, provider.id), provider.kind, provider.endpoint, provider.token_set ? badge(translate('已设置'), 'green') : badge(translate('未设置'), 'red'), actions];
+  else p.append(table([translate('名称'), translate('类型'), translate('API 地址'), translate('令牌'), translate('最低 TTL'), translate('操作')], providers.map(provider => {
+    const actions = el('div'); actions.append(button(translate('测试'), () => testDnsProvider(provider), 'table-action'), button(translate('编辑'), () => dnsProviderForm(provider), 'table-action'), button(translate('删除'), () => deleteDnsProvider(provider), 'table-action danger'));
+    return [namedCell(provider.name, provider.id), provider.kind, provider.endpoint, provider.token_set ? badge(translate('已设置'), 'green') : badge(translate('未设置'), 'red'), provider.min_ttl ? msg`${provider.min_ttl} 秒` : '—', actions];
   })));
-  const z = panel(translate('DNS 区域'), translate('区域名是服务商的 zone 名称或 ID。观察模式只读取服务商并报告差异；应用模式只管理由本平台创建、带 relay 标记的记录。'), providers.length ? button(translate('＋ 新增区域'), () => dnsZoneForm(null, providers), 'primary') : null);
+  const now = Date.now();
+  const z = panel(translate('DNS 区域'), translate('区域名是服务商的 zone 名称或 ID。控制器每 30 秒自动检查每个区域：应用模式写入差异，观察模式只记录结果、不写服务商。应用模式只管理由本平台创建、带 relay 标记的记录。'), providers.length ? button(translate('＋ 新增区域'), () => dnsZoneForm(null, providers), 'primary') : null);
   if (!zones.length) z.append(empty(translate('还没有 DNS 区域'), translate('添加区域后可以创建 A/AAAA/CNAME 托管记录并执行一次同步。')));
-  else z.append(table([translate('区域'), translate('服务商'), translate('模式'), translate('最少保留'), translate('操作')], zones.map(zone => {
+  else z.append(table([translate('区域'), translate('服务商'), translate('模式'), translate('最少保留'), translate('确认窗口'), translate('自动检查'), translate('操作')], zones.map(zone => {
     const actions = el('div');
     actions.append(button(translate('记录'), async () => { state.dnsZone = zone.id; await renderDns(); }, 'table-action'));
     actions.append(button(translate('立即同步'), () => reconcileDns(zone), 'table-action'));
     actions.append(button(translate('编辑'), () => dnsZoneForm(zone, providers), 'table-action'), button(translate('删除'), () => deleteDnsZone(zone), 'table-action danger'));
-    return [namedCell(zone.name, zone.id), providerNames[zone.provider_id] || zone.provider_id, dnsModes[zone.mode] || zone.mode, zone.min_keep, actions];
+    return [namedCell(zone.name, zone.id), providerNames[zone.provider_id] || zone.provider_id, dnsModes[zone.mode] || zone.mode, zone.min_keep, msg`${zone.failover_confirm_secs ?? 0} 秒`, dnsZoneStatus(zone, now), actions];
   })));
   const pool = featureOn('dns-authoritative') ? await authoritativePanels(nodes) : [];
   if (state.view !== 'dns' || state.actor !== actor) return;
@@ -2248,14 +2323,54 @@ async function renderDns() {
       if (record.type === 'A' || record.type === 'AAAA') actions.append(button('DDNS', () => ddnsRecord(record), 'table-action'));
       actions.append(button(record.enabled ? translate('停用') : translate('启用'), async () => { await api(`/dns/records/${record.id}`, { method: 'PUT', body: { enabled: !record.enabled } }); await renderDns(); }, 'table-action'));
       actions.append(button(translate('删除'), () => deleteDnsRecord(record), 'table-action danger'));
-      const stateBadge = record.last_error ? badge(translate('错误'), 'red') : record.enabled ? badge(translate('启用'), 'green') : badge(translate('停用'), '');
-      return [namedCell(record.name, record.id), record.type, record.content, record.ttl, stateBadge, record.health ? `${record.health.node_id} / ${record.health.rule_id}` : '—', record.provider_record_id || '—', actions];
+      const published = record.status?.published_ttl, ttl = published && published !== record.ttl ? namedCell(String(record.ttl), msg`按服务商最低 ${published} 发布`) : record.ttl;
+      return [namedCell(record.name, record.id), record.type, record.content, ttl, dnsRecordStatus(record, selected, now), record.health ? `${record.health.node_id} / ${record.health.rule_id}` : '—', record.provider_record_id || '—', actions];
     })));
     if (records.some(record => record.last_error)) r.append(el('p', records.filter(record => record.last_error).map(record => `${record.name}: ${record.last_error}`).join('；'), 'error-text'));
     $('#content').replaceChildren(p, z, r, ...pool);
   } else {
     $('#content').replaceChildren(p, z, ...pool);
   }
+}
+const dnsRecordStates = localize({ published: '已发布', pending_remove: '等待确认摘除', pending_restore: '等待确认重建', removed: '已摘除', disabled: '已停用', held_min_keep: '最少保留，暂不删除', held_guard: '过半同时失败，暂停摘除', would_create: '将创建', would_update: '将更新', would_remove: '将摘除', error: '错误' });
+const dnsRecordStateColors = { published: 'green', pending_remove: 'orange', pending_restore: 'orange', removed: 'red', held_min_keep: 'orange', held_guard: 'orange', would_create: 'orange', would_update: 'orange', would_remove: 'orange', error: 'red' };
+// Last evaluation of a zone by this controller process (not kept across restarts).
+function dnsZoneStatus(zone, now) {
+  const status = zone.status || {}, cell = el('div');
+  const last = el('div', status.last_automatic_ms ? ago(status.last_automatic_ms, now) : translate('等待首次自动检查'));
+  if (status.last_automatic_ms) last.title = timestamp(status.last_automatic_ms);
+  cell.append(last);
+  if (status.last_error) cell.append(el('div', status.last_error, 'subline error-text'));
+  if (status.guarded?.length) cell.append(el('div', msg`过半同时失败，暂停摘除：${status.guarded.join(', ')}`, 'subline'));
+  return cell;
+}
+// Why a record is (not) published, from the zone's last evaluation.
+function dnsRecordStatus(record, zone, now) {
+  const status = record.status, cell = el('div');
+  if (!status) {
+    cell.append(record.last_error ? badge(translate('错误'), 'red') : record.enabled ? badge(translate('启用'), 'green') : badge(translate('停用'), ''), el('div', translate('尚未检查'), 'subline'));
+    return cell;
+  }
+  cell.append(badge(dnsRecordStates[status.state] || status.state, dnsRecordStateColors[status.state] || ''));
+  const streak = status.since_ms ? Math.max(0, Math.round((now - status.since_ms) / 1000)) : 0, confirm = zone.failover_confirm_secs ?? 0;
+  const reason = {
+    pending_remove: msg`健康检查已连续失败 ${streak} 秒，满 ${confirm} 秒后摘除`,
+    pending_restore: msg`健康检查已连续通过 ${streak} 秒，满 ${confirm} 秒后重建`,
+    removed: translate('健康检查未通过，不在 DNS 中；持续健康满确认时间后自动重建'),
+    held_min_keep: translate('剩余有效记录会少于“最少保留”，暂不删除'),
+    held_guard: translate('同名记录过半同时失败，更可能是监控或控制链路问题，暂停摘除'),
+  }[status.state];
+  const checked = msg`检查于 ${ago(status.evaluated_at_ms, now)}`;
+  cell.append(el('div', reason ? `${reason} · ${checked}` : checked, reason ? 'subline wrap' : 'subline'));
+  return cell;
+}
+async function testDnsProvider(provider) {
+  const result = await api(`/dns/providers/${provider.id}/test`, { method: 'POST' });
+  const body = el('div');
+  body.append(el('p', result.zones.length ? msg`连接正常，令牌可以看到 ${result.zones.length} 个区域。` : translate('连接正常，但令牌看不到任何区域；请检查令牌的区域权限。')));
+  if (result.truncated) body.append(el('p', translate('区域较多，只列出前 1000 个。'), 'fine'));
+  if (result.zones.length) body.append(table([translate('区域'), 'ID'], result.zones.map(zone => [zone.name, zone.id])));
+  modal(msg`连接测试 · ${provider.name}`, body);
 }
 const poolStates = localize({ serving: '正在应答', updating: '更新中', waiting: '等待节点报告', error: '监听失败', offline: '节点离线' });
 const poolStateColors = { serving: 'green', updating: 'orange', error: 'red', offline: 'red' };
@@ -2366,9 +2481,12 @@ function dnsProviderForm(provider) {
   select(grid, 'kind', translate('服务商类型'), [['cloudflare', translate('Cloudflare 兼容 API')]], provider?.kind || 'cloudflare');
   field(grid, 'endpoint', translate('API 基础地址'), provider?.endpoint || 'https://api.cloudflare.com/client/v4').maxLength = 500;
   const token = field(grid, 'token', provider ? translate('令牌（留空保留原值）') : translate('API 令牌'), '', 'password', false); token.maxLength = 4096;
-  form.append(grid, el('p', translate('令牌只应授予 DNS 编辑权限；接口不会返回令牌原文。HTTP 只允许回环地址用于本机测试。'), 'fine'));
+  const minTtl = field(grid, 'min_ttl', translate('最低 TTL（秒，可选）'), provider?.min_ttl ?? '', 'number', false); minTtl.min = 0; minTtl.max = 86400;
+  form.append(grid, el('p', translate('令牌只应授予 DNS 编辑权限；接口不会返回令牌原文。HTTP 只允许回环地址用于本机测试。'), 'fine'), el('p', translate('最低 TTL：TTL 低于它的记录按最低值发布（例如 Cloudflare 免费套餐为 60 秒）。TTL 1 表示由 Cloudflare 自动决定，不受影响；留空表示不限制。'), 'fine'));
   submit(form, provider ? translate('保存服务商') : translate('添加服务商'), async data => {
     const body = { name: String(data.get('name')).trim(), kind: data.get('kind'), endpoint: String(data.get('endpoint')).trim() };
+    const min = number(data, 'min_ttl');
+    if (min !== null) body.min_ttl = min; else if (provider?.min_ttl) body.min_ttl = 0;
     if (String(data.get('token') || '')) body.token = String(data.get('token'));
     if (provider) await api(`/dns/providers/${provider.id}`, { method: 'PUT', body });
     else await api('/dns/providers', { method: 'POST', body });
@@ -2378,13 +2496,27 @@ function dnsProviderForm(provider) {
 }
 function dnsZoneForm(zone, providers) {
   const form = el('form'), grid = el('div', undefined, 'form-grid');
-  field(grid, 'name', translate('区域名称 / ID'), zone?.name || '').maxLength = 253;
-  select(grid, 'provider_id', translate('服务商'), providers.map(provider => [provider.id, provider.name]), zone?.provider_id || providers[0]?.id || '');
+  const name = field(grid, 'name', translate('区域名称 / ID'), zone?.name || ''); name.maxLength = 253;
+  const providerSelect = select(grid, 'provider_id', translate('服务商'), providers.map(provider => [provider.id, provider.name]), zone?.provider_id || providers[0]?.id || '');
+  // Optional picker: list the zones the provider token can see; manual entry stays possible.
+  const picker = el('div'), pickNote = el('p', translate('可以手动填写，也可以读取服务商的区域列表后选择；Cloudflare 的 API 需要区域 ID。'), 'fine');
+  const resetPicker = () => picker.replaceChildren(button(translate('读取服务商区域'), async () => {
+    const result = await api(`/dns/providers/${providerSelect.value}/test`, { method: 'POST' });
+    if (!result.zones.length) { pickNote.textContent = translate('令牌看不到任何区域，请手动填写。'); return; }
+    const label = el('label', translate('从服务商区域选择')), choice = el('select');
+    for (const [value, text] of [['', translate('手动填写')], ...result.zones.map(item => [item.id, `${item.name} · ${item.id}`])]) { const option = el('option', text); option.value = value; choice.append(option); }
+    choice.value = result.zones.find(item => item.id === name.value || item.name === name.value)?.id || '';
+    choice.addEventListener('change', () => { if (choice.value) name.value = choice.value; });
+    label.append(choice); picker.replaceChildren(label);
+    pickNote.textContent = msg`令牌可以看到 ${result.zones.length} 个区域；选择后填入区域 ID。`;
+  }));
+  resetPicker(); providerSelect.addEventListener('change', resetPicker); grid.append(picker);
   select(grid, 'mode', translate('模式'), Object.entries(dnsModes), zone?.mode || 'observe');
   const keep = field(grid, 'min_keep', translate('最少保留记录数'), zone?.min_keep ?? 1, 'number'); keep.min = 0; keep.max = 1000;
-  form.append(grid, el('p', translate('观察模式适合先核对现有记录。应用模式只创建/更新/删除本平台带 relay 标记的记录，不会接管同名的外部记录。'), 'fine'));
+  const confirm = field(grid, 'failover_confirm_secs', translate('健康摘除确认时间（秒）'), zone?.failover_confirm_secs ?? 60, 'number'); confirm.min = 0; confirm.max = 1800;
+  form.append(grid, pickNote, el('p', translate('观察模式适合先核对现有记录。应用模式只创建/更新/删除本平台带 relay 标记的记录，不会接管同名的外部记录。'), 'fine'), el('p', translate('确认时间：带健康摘除的记录要连续失败这么久才摘除，连续健康这么久才重建（0 表示下一次检查就执行，最长 1800 秒）。同名记录过半同时失败时暂停摘除。'), 'fine'));
   submit(form, zone ? translate('保存区域') : translate('添加区域'), async data => {
-    const body = { name: String(data.get('name')).trim(), provider_id: data.get('provider_id'), mode: data.get('mode'), min_keep: number(data, 'min_keep') };
+    const body = { name: String(data.get('name')).trim(), provider_id: data.get('provider_id'), mode: data.get('mode'), min_keep: number(data, 'min_keep'), failover_confirm_secs: number(data, 'failover_confirm_secs') };
     if (zone) await api(`/dns/zones/${zone.id}`, { method: 'PUT', body });
     else { const created = await api('/dns/zones', { method: 'POST', body }); state.dnsZone = created.id; }
     $('#dialog').close(); notify(translate('DNS 区域已保存。')); await renderDns();
@@ -2404,7 +2536,7 @@ function dnsRecordForm(zone, record, nodes) {
     field(grid, 'health_rule', translate('健康摘除规则 ID（可选）'), record?.health?.rule_id || '').maxLength = 128;
     if (record?.health) select(grid, 'health_clear', translate('健康摘除设置'), [['no', translate('保留现有设置')], ['yes', translate('清除健康摘除')]], 'no');
   }
-  form.append(grid, el('p', gating ? translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。填写节点和规则 ID 后，节点心跳超过 90 秒或没有健康目标时，应用模式会摘除该记录；恢复后自动重建。') : translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。需要按入口健康自动摘除记录时，请系统管理员在「可选功能」中开启 DNS 健康摘除。'), 'fine'));
+  form.append(grid, el('p', gating ? translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。填写节点和规则 ID 后，节点心跳超过 90 秒或没有健康目标、并且持续达到区域的确认时间时，应用模式会自动摘除该记录；持续健康达到确认时间后自动重建。控制器每 30 秒检查一次，同名记录过半同时失败或不足“最少保留”时暂不摘除。') : translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。需要按入口健康自动摘除记录时，请系统管理员在「可选功能」中开启 DNS 健康摘除。'), 'fine'));
   submit(form, record ? translate('保存记录') : translate('添加记录'), async data => {
     const body = { name: String(data.get('name')).trim(), type: data.get('type'), content: String(data.get('content')).trim(), ttl: number(data, 'ttl'), proxied: data.get('proxied') === 'yes' };
     const healthNode = String(data.get('health_node') || ''), healthRule = String(data.get('health_rule') || '').trim();
@@ -2412,7 +2544,7 @@ function dnsRecordForm(zone, record, nodes) {
     else if (healthNode && healthRule) body.health = { node_id: healthNode, rule_id: healthRule };
     if (record) await api(`/dns/records/${record.id}`, { method: 'PUT', body });
     else await api(`/dns/zones/${zone.id}/records`, { method: 'POST', body });
-    $('#dialog').close(); notify(translate('DNS 记录已保存；执行“立即同步”后写入服务商。')); await renderDns();
+    $('#dialog').close(); notify(zone.mode === 'apply' ? translate('DNS 记录已保存；控制器每 30 秒自动同步应用模式区域，也可以点“立即同步”。') : translate('DNS 记录已保存；观察模式只报告差异，不写服务商。')); await renderDns();
   });
   modal(record ? msg`编辑 DNS 记录 · ${record.name}` : translate('新增 DNS 记录'), form);
 }
@@ -2420,6 +2552,7 @@ async function reconcileDns(zone) {
   const result = await api(`/dns/zones/${zone.id}/reconcile`, { method: 'POST' });
   const body = el('div');
   body.append(el('p', msg`${dnsModes[zone.mode]}：观察 ${result.observed} 条，创建 ${result.created}，更新 ${result.updated}，删除 ${result.deleted}，未变 ${result.unchanged}，保留 ${result.kept}，错误 ${result.errors}。`));
+  if (result.pending || result.guarded) body.append(el('p', msg`等待确认 ${result.pending} 条，过半同时失败暂停摘除 ${result.guarded} 条。`));
   if (result.actions.length) body.append(table([translate('记录'), translate('动作'), translate('详情')], result.actions.map(action => [action.record_id, action.action, action.detail])));
   modal(msg`同步结果 · ${zone.name}`, body); await renderDns();
 }
@@ -2445,16 +2578,21 @@ async function renderSubscriptions() {
   const actor = state.actor;
   const subscriptions = await api('/subscriptions');
   if (state.view !== 'subscriptions' || !actor || state.actor !== actor) return;
-  const p = panel(translate('客户端订阅'), translate('把支持的代理规则快照成可撤销的订阅链接。链接只包含客户端连接参数，不包含控制器会话或节点凭据；轮换后旧链接立即失效。'), canWrite() ? button(translate('＋ 新建订阅'), newSubscription, 'primary') : null);
+  const p = panel(translate('客户端订阅'), translate('把支持的代理规则快照成可撤销的订阅链接。链接只包含客户端连接参数，不包含控制器会话或节点凭据；创建后可编辑，链接不变；轮换时可让旧链接在宽限期内继续有效。'), canWrite() ? button(translate('＋ 新建订阅'), () => subscriptionForm(), 'primary') : null);
   if (!subscriptions.length) p.append(empty(translate('还没有订阅链接'), translate('先创建至少一条启用中的 Shadowsocks 或受管协议规则，再按客户端格式生成订阅。')));
   else p.append(table([translate('名称'), translate('格式'), translate('所有者'), translate('到期'), translate('最近使用'), translate('操作')], subscriptions.map(item => {
     const actions = el('div');
     actions.append(button(translate('预览'), () => previewSubscription(item), 'table-action'));
     if (canWrite()) {
+      actions.append(button(translate('编辑'), () => subscriptionForm(item), 'table-action'));
       actions.append(button(translate('轮换链接'), () => rotateSubscription(item), 'table-action'));
       actions.append(button(translate('删除'), () => deleteSubscription(item), 'table-action danger'));
     }
-    return [namedCell(item.name, item.id), subscriptionFormats[item.format] || item.format, item.owner_id, item.expires_at_ms ? timestamp(item.expires_at_ms) : translate('不过期'), item.last_used_ms ? msg`${timestamp(item.last_used_ms)} · ${item.uses} 次` : translate('尚未使用'), actions];
+    const name = namedCell(item.name, item.id);
+    if (item.allow_sources?.length) name.append(el('div', msg`仅限 ${item.allow_sources.length} 个来源网段拉取`, 'subline'));
+    const expiry = el('div'); expiry.append(item.expires_at_ms ? timestamp(item.expires_at_ms) : translate('不过期'));
+    if (item.previous_token_expires_at_ms > Date.now()) expiry.append(el('div', msg`轮换前的旧链接有效至 ${timestamp(item.previous_token_expires_at_ms)}`, 'subline'));
+    return [name, subscriptionFormats[item.format] || item.format, item.owner_id, expiry, item.last_used_ms ? msg`${timestamp(item.last_used_ms)} · ${item.uses} 次` : translate('尚未使用'), actions];
   })));
   if (state.view === 'subscriptions') $('#content').replaceChildren(p);
 }
@@ -2492,7 +2630,7 @@ function parseUpstreamLink(text) {
   return { name, type, server, port, method: first, password: second };
 }
 const MAX_UPSTREAMS = 8;
-function upstreamEditor() {
+function upstreamEditor(initial = []) {
   const box = el('fieldset', undefined, 'upstream-editor');
   box.append(el('legend', translate('我的代理（可选 · 代理链）')), el('p', translate('填入你自己的 SOCKS5 或 Shadowsocks 代理。客户端会先连到中转节点，再经它连接你的代理：客户端 → 中转节点 → 你的代理 → 网站。只有 sing-box、mihomo / Clash Meta 和 Surge 格式能表达这条链；其他格式会在预览中跳过这些代理。'), 'fine'));
   const paste = el('div', undefined, 'upstream-paste');
@@ -2524,7 +2662,8 @@ function upstreamEditor() {
     rows.push(entry); list.append(row); addButton.disabled = rows.length >= MAX_UPSTREAMS;
   };
   paste.append(button(translate('导入链接'), () => { if (!link.value.trim()) return; add(parseUpstreamLink(link.value)); link.value = ''; }));
-  box.append(paste, list, addButton, el('p', translate('你的代理必须能从中转节点访问；节点默认拒绝内网和回环地址。订阅创建后不能修改，需要更改时请新建订阅。'), 'fine'));
+  box.append(paste, list, addButton, el('p', translate('你的代理必须能从中转节点访问；节点默认拒绝内网和回环地址。保存后可随时编辑，订阅链接不变。'), 'fine'));
+  initial.forEach(value => add(value));
   const read = () => {
     const names = new Set();
     return rows.map(row => {
@@ -2539,48 +2678,63 @@ function upstreamEditor() {
   };
   return { box, read };
 }
-async function newSubscription() {
-  const users = state.actor.role === 'viewer' ? [] : await api('/users').catch(() => []);
+// Bare addresses become single-host networks; the API takes CIDR notation.
+function subscriptionSources(text) {
+  return String(text || '').split(/[\s,]+/).filter(Boolean).map(value => value.includes('/') ? value : `${value}/${value.includes(':') ? 128 : 32}`);
+}
+// Creates a link, or edits `item` in place: the edit keeps its token.
+async function subscriptionForm(item) {
+  const editing = !!item, template = item?.template;
+  const users = editing || state.actor.role === 'viewer' ? [] : await api('/users').catch(() => []);
   const form = el('form'), grid = el('div', undefined, 'form-grid');
-  field(grid, 'name', translate('名称（说明用途，如“手机订阅”）')).maxLength = 120;
-  select(grid, 'format', translate('客户端格式'), Object.entries(subscriptionFormats), 'sing_box');
+  field(grid, 'name', translate('名称（说明用途，如“手机订阅”）'), item?.name || '').maxLength = 120;
+  select(grid, 'format', translate('客户端格式'), Object.entries(subscriptionFormats), item?.format || 'sing_box');
   form.append(el('p', translate('订阅按所有者和节点标签收集兼容规则，保存当前端点快照。多跳 SS 请使用「转发规则」中该路径的“客户端链接”；此处不会自动改写入口端口。'), 'workflow-callout'));
-  field(grid, 'prefix', translate('客户端显示名称前缀（可选）'), 'Relay ').maxLength = 64;
-  const host = field(grid, 'host', translate('替换所有节点地址（可选，NAT / 域名场景）'), '', 'text', false); host.maxLength = 253;
-  const tags = field(grid, 'tags', translate('只包含这些节点标签（逗号分隔，留空全部）'), '', 'text', false);
-  select(grid, 'udp', translate('在客户端启用 UDP'), [['yes', translate('启用')], ['no', translate('不启用')]], 'yes');
-  const days = field(grid, 'days', translate('有效天数（1–3650）'), 365, 'number'); days.min = 1; days.max = 3650;
-  if (state.actor.role !== 'viewer' && users.length > 1) {
+  field(grid, 'prefix', translate('客户端显示名称前缀（可选）'), template ? template.name_prefix : 'Relay ', 'text', false).maxLength = 64;
+  const host = field(grid, 'host', translate('替换所有节点地址（可选，NAT / 域名场景）'), template?.host || '', 'text', false); host.maxLength = 253;
+  field(grid, 'tags', translate('只包含这些节点标签（逗号分隔，留空全部）'), (template?.node_tags || []).join(', '), 'text', false);
+  select(grid, 'udp', translate('在客户端启用 UDP'), [['yes', translate('启用')], ['no', translate('不启用')]], !template || template.udp ? 'yes' : 'no');
+  const days = editing ? field(grid, 'days', translate('有效天数（从现在起 1–3650，留空保持当前到期时间）'), '', 'number', false) : field(grid, 'days', translate('有效天数（1–3650）'), 365, 'number'); days.min = 1; days.max = 3650;
+  textarea(grid, 'allow_sources', translate('只允许这些来源拉取（IP 或 CIDR，每行一个，留空不限）'), (item?.allow_sources || []).join('\n'));
+  if (!editing && state.actor.role !== 'viewer' && users.length > 1) {
     const owner = select(grid, 'user_id', translate('订阅所有者'), [['', translate('当前账号')], ...users.map(u => [u.id, `${u.username} · ${roleNames[u.role]}`])], '');
     owner.required = false;
   }
-  const upstreams = upstreamEditor();
-  form.append(grid, upstreams.box, el('p', translate('名称前缀和节点标签会作为快照保存在订阅记录中；节点后续改名不会改变已生成链接的显示名。只读账号不能创建或轮换链接。'), 'fine'));
-  submit(form, translate('创建订阅'), async data => {
+  const upstreams = upstreamEditor(template?.upstreams || []);
+  form.append(grid, upstreams.box, el('p', translate('名称前缀和节点标签会作为快照保存在订阅记录中；节点后续改名不会改变已生成链接的显示名。只读账号不能创建或轮换链接。'), 'fine'), el('p', translate('来源限制按客户端实际地址判断（经本机反向代理时取 X-Forwarded-For 的最后一项）。其他来源拉取时得到与无效链接相同的响应。'), 'fine'));
+  submit(form, editing ? translate('保存修改') : translate('创建订阅'), async data => {
     const chained = upstreams.read();
-    const result = await api('/subscriptions', { method: 'POST', body: {
+    const body = {
       name: String(data.get('name')).trim(),
       format: data.get('format'),
-      expires_in_days: number(data, 'days'),
-      ...(String(data.get('user_id') || '') ? { user_id: String(data.get('user_id')) } : {}),
       template: {
         name_prefix: String(data.get('prefix') || ''),
         host: String(data.get('host') || '').trim() || null,
         node_tags: String(data.get('tags') || '').split(',').map(t => t.trim()).filter(Boolean),
         udp: data.get('udp') === 'yes',
         ...(chained.length ? { upstreams: chained } : {})
-      }
-    }});
+      },
+      allow_sources: subscriptionSources(data.get('allow_sources'))
+    };
+    const expiresInDays = number(data, 'days');
+    if (editing) {
+      await api(`/subscriptions/${item.id}`, { method: 'PUT', body: { ...body, ...(expiresInDays === null ? {} : { expires_in_days: expiresInDays }) } });
+      $('#dialog').close(); notify(translate('订阅已更新，链接不变。'));
+      await renderSubscriptions();
+      return;
+    }
+    const result = await api('/subscriptions', { method: 'POST', body: { ...body, expires_in_days: expiresInDays, ...(String(data.get('user_id') || '') ? { user_id: String(data.get('user_id')) } : {}) } });
     $('#dialog').close();
     showSubscriptionToken(result.subscription.name, result.token);
     await renderSubscriptions();
   });
-  modal(translate('新建客户端订阅'), form);
+  modal(editing ? msg`编辑订阅 · ${item.name}` : translate('新建客户端订阅'), form);
 }
-function showSubscriptionToken(name, token) {
+function showSubscriptionToken(name, token, graceUntil) {
   const body = el('div');
   const url = `${location.origin}/sub/${token}`;
   body.append(el('p', translate('订阅链接只显示这一次。任何持有链接的人都能读取节点连接参数；请像密码一样保存，泄露时立即轮换。'), 'fine'), el('div', url, 'secret-box'));
+  if (graceUntil) body.append(el('p', msg`轮换前的旧链接有效至 ${timestamp(graceUntil)}，之后失效。`, 'fine'));
   const actions = el('div', undefined, 'dialog-actions');
   actions.append(button(translate('关闭对话框'), () => $('#dialog').close()), button(translate('复制链接'), async () => { await navigator.clipboard.writeText(url); notify(translate('订阅链接已复制。')); }, 'primary'));
   body.append(actions);
@@ -2597,10 +2751,17 @@ async function previewSubscription(item) {
   modal(msg`预览 · ${item.name}`, body);
 }
 async function rotateSubscription(item) {
-  if (!await confirmAction(msg`轮换「${item.name}」的订阅链接？旧链接会立即失效，已导入的客户端需要重新导入。`)) return;
-  const result = await api(`/subscriptions/${item.id}/rotate`, { method: 'POST' });
-  showSubscriptionToken(item.name, result.token);
-  await renderSubscriptions();
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  form.append(el('p', msg`为「${item.name}」生成新的订阅链接。已导入的客户端需要改用新链接。`));
+  const grace = field(grid, 'grace_minutes', translate('旧链接继续有效（分钟，0–1440；0 为立即失效）'), 0, 'number'); grace.min = 0; grace.max = 1440;
+  form.append(grid, el('p', translate('宽限期内新旧链接都能拉取，便于逐台更换客户端。只保留本次轮换前的链接：再次轮换时，更早的链接立即失效。'), 'fine'));
+  submit(form, translate('轮换链接'), async data => {
+    const result = await api(`/subscriptions/${item.id}/rotate`, { method: 'POST', body: { grace_minutes: number(data, 'grace_minutes') ?? 0 } });
+    $('#dialog').close();
+    showSubscriptionToken(item.name, result.token, result.subscription.previous_token_expires_at_ms);
+    await renderSubscriptions();
+  });
+  modal(translate('轮换订阅链接'), form);
 }
 async function deleteSubscription(item) {
   if (!await confirmAction(msg`删除订阅「${item.name}」？使用该链接的客户端将立即无法更新。`)) return;
@@ -2891,6 +3052,42 @@ async function renderAudit() { const actor = state.actor; const rows = await api
 const alertKinds = localize({ smtp: 'Email / SMTP', webhook: 'Webhook', telegram: 'Telegram', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' });
 const alertFields = localize({ smtp: [], webhook: [['url', 'Webhook 地址'], ['secret', '签名密钥（可选，HMAC-SHA256）', true]], telegram: [['bot_token', 'Bot Token'], ['chat_id', 'Chat ID']], wecom: [['url', '群机器人 Webhook 地址']], feishu: [['url', '自定义机器人 Webhook 地址'], ['secret', '签名校验密钥（可选）', true]], dingtalk: [['url', '自定义机器人 Webhook 地址'], ['secret', '加签密钥（可选）', true]] });
 const severityNames = localize({ warning: '警告及以上', critical: '仅严重' });
+// Threshold rules, in the order the controller checks them. Ranges match the controller's validation.
+const alertRuleNames = localize({ node_cpu: '节点 CPU 使用率', node_memory: '节点内存使用率', node_expiring: '节点即将到期', node_expired: '节点已到期', budget_near: '共享额度接近上限', budget_exhausted: '共享额度用尽', dns_sync_failed: 'DNS 记录同步失败' });
+const alertRuleLabels = localize({ percent: '阈值（%）', days: '提前天数', reports: '连续回报次数', checks: '连续检查次数' });
+const alertRuleRanges = { node_cpu: 100, node_memory: 100, node_expiring: 365, budget_near: 100 };
+const perReport = key => key === 'node_cpu' || key === 'node_memory';
+function alertRuleRows(rules) {
+  return Object.entries(alertRuleNames).filter(([key]) => rules[key]).map(([key, name]) => {
+    const rule = rules[key], critical = key === 'node_expired' || key === 'budget_exhausted';
+    const threshold = rule.threshold == null ? '—' : key === 'node_expiring' ? msg`${rule.threshold} 天内` : `≥ ${rule.threshold}%`;
+    return [name, badge(rule.enabled ? translate('已启用') : translate('已停用'), rule.enabled ? 'green' : ''), threshold, perReport(key) ? msg`连续 ${rule.checks} 次回报` : msg`连续 ${rule.checks} 次检查`, badge(critical ? translate('严重') : translate('警告'), critical ? 'red' : 'orange')];
+  });
+}
+function editAlertRules(settings) {
+  const form = el('form'), rules = settings.rules;
+  for (const [key, name] of Object.entries(alertRuleNames)) {
+    const rule = rules[key], group = el('fieldset', undefined, 'form-grid'), legend = el('legend');
+    // The rule's own name is the switch's label, so each section reads "☐ Node CPU usage".
+    checkbox(legend, `${key}.enabled`, name).checked = rule.enabled;
+    legend.firstChild.className = 'inline-check'; group.append(legend);
+    if (rule.threshold != null) { const input = field(group, `${key}.threshold`, key === 'node_expiring' ? alertRuleLabels.days : alertRuleLabels.percent, rule.threshold, 'number'); input.min = 1; input.max = alertRuleRanges[key]; }
+    const checks = field(group, `${key}.checks`, perReport(key) ? alertRuleLabels.reports : alertRuleLabels.checks, rule.checks, 'number'); checks.min = 1; checks.max = 100;
+    form.append(group);
+  }
+  form.append(el('p', translate('CPU 和内存在节点每次回报时检查一次，其他每 2 秒检查一次。连续达到次数才告警，一次检查正常就自动恢复。'), 'fine'));
+  submit(form, translate('保存规则'), async data => {
+    const next = {};
+    for (const key of Object.keys(alertRuleNames)) {
+      next[key] = { enabled: data.get(`${key}.enabled`) === 'on', checks: number(data, `${key}.checks`) };
+      if (rules[key].threshold != null) next[key].threshold = number(data, `${key}.threshold`);
+    }
+    // The maintenance window is part of the same settings; keep it as it is.
+    await api('/alerts/settings', { method: 'PUT', body: { maintenance_until_ms: settings.maintenance_until_ms ?? null, rules: next } });
+    $('#dialog').close(); notify(translate('告警规则已保存。')); await renderAlerts();
+  });
+  modal(translate('告警规则'), form);
+}
 // Alerts of the last 24 hours, one lane per node; an alert that is still open runs to now.
 function incidentTimeline(incidents, now) {
   const span = 86_400_000, start = now - span, lanes = new Map(), box = el('div', undefined, 'timeline');
@@ -2932,12 +3129,17 @@ async function renderAlerts() {
   if (!channels.length) list.append(empty(translate('还没有通知通道'), translate('系统管理员可添加 Email、Webhook 或聊天机器人通道。'), can_manage ? button(translate('＋ 添加通道'), () => editAlertChannel(), 'primary') : null));
   else list.append(table([translate('名称'), translate('租户范围'), translate('类型'), translate('发送到'), translate('级别'), translate('状态'), translate('操作')], channels.map(c => { const ops = el('div', undefined, 'row-actions'); if (can_manage) ops.append(button(translate('测试'), async () => { notify(msg`正在向 ${c.name} 发送测试消息…`); try { await api(`/alerts/channels/${c.id}/test`, { method: 'POST' }); notify(msg`测试消息已发送到 ${c.name}，请确认已收到。`); } finally { await renderAlerts(); } }, 'table-action'), button(translate('编辑'), () => editAlertChannel(c), 'table-action'), button(translate('删除'), async () => { if (!await confirmAction(msg`删除通知通道“${c.name}”？`)) return; await api(`/alerts/channels/${c.id}`, { method: 'DELETE' }); await renderAlerts(); }, 'table-action danger')); return [namedCell(c.name, c.secret_set ? translate('已设置密钥') : translate('未设置密钥')), c.tenant_id || translate('全部租户'), alertKinds[c.kind], el('span', c.destination, 'mono'), severityNames[c.min_severity], badge(c.enabled ? translate('已启用') : translate('已停用'), c.enabled ? 'green' : ''), ops]; })));
   grid.append(list);
+  if (settings.rules) {
+    const rules = panel(translate('告警规则'), translate('除目标不可用、配置拒绝和节点离线外，还可以按阈值通知节点资源、节点到期、共享额度和 DNS 同步问题。默认全部关闭；问题消失后自动恢复。'), can_manage ? button(translate('编辑规则'), () => editAlertRules(settings), 'primary') : null);
+    rules.append(table([translate('告警类型'), translate('状态'), translate('阈值'), translate('连续次数'), translate('级别')], alertRuleRows(settings.rules)));
+    grid.append(rules);
+  }
   const levels = { warning: [translate('警告'), 'orange'], critical: [translate('严重'), 'red'] };
   const incidentRows = (items, resolved) => items.map(i => [resolved ? `${timestamp(i.resolved_at_ms)} · ${ago(i.resolved_at_ms, now)}` : `${timestamp(i.opened_at_ms)} · ${ago(i.opened_at_ms, now)}`, i.node_name, badge(...(levels[i.severity] || [i.severity])), el('span', incidentMessage(i), 'wrap'), i.repeats ? msg`${i.repeats} 次` : '—', resolved ? (i.last_notice_ms ? translate('已通知恢复') : translate('未通知')) : i.notified ? badge(translate('已通知'), 'green') : badge(maintaining ? translate('维护中暂缓') : translate('等待发送'), 'orange')]);
   const open = panel(translate('当前告警'), translate('仍未恢复的问题。控制器重启后会在 1 分钟内重新检测。'));
-  open.append(incidents.open.length ? table([translate('开始'), translate('节点'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.open, false)) : empty(translate('一切正常'), translate('没有未恢复的告警。')));
+  open.append(incidents.open.length ? table([translate('开始'), translate('对象'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.open, false)) : empty(translate('一切正常'), translate('没有未恢复的告警。')));
   grid.append(open);
-  if (!charts && incidents.resolved.length) { const done = panel(translate('最近恢复'), translate('最近 200 条，保存在控制器内存中。')); done.append(table([translate('恢复'), translate('节点'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.resolved.slice(0, 50), true))); grid.append(done); }
+  if (!charts && incidents.resolved.length) { const done = panel(translate('最近恢复'), translate('最近 200 条，保存在控制器内存中。')); done.append(table([translate('恢复'), translate('对象'), translate('级别'), translate('内容'), translate('反复'), translate('通知')], incidentRows(incidents.resolved.slice(0, 50), true))); grid.append(done); }
   const statusNames = { cancelled: [translate('已取消'), ''], sent: [translate('已送达'), 'green'], failed: [translate('失败'), 'red'], retrying: [translate('重试中'), 'orange'], pending: [translate('发送中'), ''] }, noticeNames = { opened: translate('告警'), resolved: translate('恢复'), test: translate('测试') };
   const log = panel(translate('发送记录'), translate('失败会在 10 秒、1 分钟、5 分钟后重试。最近 200 条。'));
   log.append(incidents.deliveries.length ? table([translate('时间'), translate('通道'), translate('类型'), translate('结果'), translate('尝试'), translate('错误')], incidents.deliveries.slice(0, 100).map(d => [timestamp(d.created_at_ms), d.channel_name, d.incidents > 1 ? msg`${noticeNames[d.notice]} · 合并 ${d.incidents} 条` : noticeNames[d.notice], badge(...statusNames[d.status]), String(d.attempts), d.error ? Object.assign(el('span', d.error, 'clip mono'), { title: d.error }) : '—'])) : empty(translate('还没有发送记录'), translate('发送测试消息或出现告警后会显示在这里。')));
@@ -2961,7 +3163,7 @@ function editAlertChannel(existing) {
   field(form, 'name', translate('名称（如“值班群”）'), existing?.name).maxLength = 80;
   field(form, 'tenant_id', translate('租户 ID（留空表示全部租户）'), existing?.tenant_id || '', 'text', false);
   const kindSelect = select(form, 'kind', translate('类型'), Object.entries(alertKinds), kind);
-  select(form, 'min_severity', translate('通知级别'), [['warning', translate('警告及以上（目标不可用、配置拒绝、节点离线）')], ['critical', translate('仅严重（配置拒绝、节点离线）')]], existing?.min_severity || 'warning');
+  select(form, 'min_severity', translate('通知级别'), [['warning', translate('警告及以上（全部告警）')], ['critical', translate('仅严重（配置拒绝、节点离线或到期、共享额度用尽）')]], existing?.min_severity || 'warning');
   const enabled = el('label', translate('启用'), 'inline-check'), check = el('input'); check.type = 'checkbox'; check.name = 'enabled'; check.checked = existing?.enabled ?? true; enabled.prepend(check); form.append(enabled);
   const box = el('div', undefined, 'alert-fields'); form.append(box);
   const fillFields = () => { box.replaceChildren(); const keep = existing && kindSelect.value === existing.kind;
@@ -2988,7 +3190,8 @@ function editAlertChannel(existing) {
   modal(existing ? msg`编辑通知通道 · ${existing.name}` : translate('添加通知通道'), form);
 }
 // WireGuard networks: nodes join with the key their agent reports; devices get a configuration once.
-const wgStates = localize({ up: '已连通', updating: '更新中', waiting: '等待节点报告', error: '出错', offline: '节点离线', connected: '已连接', idle: '未连接' });
+const wgStates = localize({ up: '已连通', updating: '更新中', waiting: '等待节点报告', error: '出错', offline: '节点离线', connected: '已连接', idle: '未连接', disabled: '已停用' });
+const wgList = value => String(value || '').split(/[\s,]+/).filter(Boolean);
 const wgStateColors = { up: 'green', connected: 'green', updating: 'orange', error: 'red', offline: 'red' };
 async function renderWireguard() {
   const actor = state.actor;
@@ -3007,18 +3210,25 @@ function wireguardNetworkPanel(network, view) {
   const actions = el('div', undefined, 'panel-actions');
   actions.append(button(translate('＋ 节点'), () => wireguardNodeForm(network, null, view), 'primary'), button(translate('＋ 设备'), () => wireguardDeviceForm(network, null)), button(translate('编辑'), () => wireguardNetworkForm(network)), button(translate('删除'), () => deleteWireguard(msg`删除网络「${network.name}」及其全部成员？各节点会移除这个 WireGuard 接口，设备配置随之失效。`, `/wireguard/networks/${network.id}`, translate('网络已删除。')), 'subtle danger'));
   const p = panel(msg`网络 · ${network.name}`, msg`${network.cidr} · 接口 ${network.interface} · UDP 端口 ${network.listen_port} · MTU ${network.mtu} · 中继 ${network.relay_in_use ? label(network.relay_in_use) : translate('无')}${network.relay || !network.relay_in_use ? '' : translate('（自动）')}`, actions), body = el('div', undefined, 'panel-body');
+  if (network.dns?.length) body.append(el('p', msg`设备配置中的 DNS：${network.dns.join(', ')}`, 'fine'));
   body.append(el('h3', translate('成员')));
   if (!network.members.length) body.append(el('p', translate('先加入一台有公网端点的节点。'), 'muted'));
   else body.append(table([translate('名称'), translate('类型'), translate('网内地址'), translate('公网端点'), translate('状态'), translate('操作')], network.members.map(member => {
     const buttons = el('div');
     if (member.kind === 'node') buttons.append(button(translate('编辑'), () => wireguardNodeForm(network, member, view), 'table-action'));
-    else buttons.append(button(translate('编辑'), () => wireguardDeviceForm(network, member), 'table-action'), button(translate('新密钥'), () => rekeyWireguard(member), 'table-action'));
+    else buttons.append(button(translate('编辑'), () => wireguardDeviceForm(network, member), 'table-action'), button(member.enabled === false ? translate('启用') : translate('停用'), async () => {
+      // Name and entry node go along, or the controller would pick the relay as entry node.
+      await api(`/wireguard/members/${member.id}`, { method: 'PUT', body: { kind: 'device', name: member.name, via: member.via, enabled: member.enabled === false } });
+      notify(member.enabled === false ? translate('设备已启用，原有配置可以继续使用。') : translate('设备已停用：各节点移除它，密钥保留。')); await renderWireguard();
+    }, 'table-action'), button(translate('新密钥'), () => rekeyWireguard(member), 'table-action'));
     buttons.append(button(translate('移除'), () => deleteWireguard(msg`从网络移除「${member.label}」？`, `/wireguard/members/${member.id}`, translate('成员已移除。')), 'table-action danger'));
     const status = el('div'); status.append(badge(wgStates[member.state] || member.state, wgStateColors[member.state] || ''));
-    if (member.error) status.append(el('span', member.error, 'wrap error-text'));
+    // The panel words the device error the controller reports; agent errors show as sent.
+    if (member.error) status.append(el('span', member.kind === 'device' && member.error.includes('preshared keys') ? translate('入口节点的 Agent 版本过旧，不会写入预共享密钥，设备无法连接。请升级该 Agent。') : member.error, 'wrap error-text'));
     const kind = member.kind === 'node' ? translate('节点') : msg`设备 · 经 ${label(member.via)}`;
     const endpoint = member.endpoint || (member.kind === 'node' ? translate('无（在 NAT 后）') : '—');
-    return [namedCell(member.label, member.listen_port ? msg`UDP 端口 ${member.listen_port}` : ''), kind, member.address, endpoint, status, buttons];
+    const detail = member.listen_port ? msg`UDP 端口 ${member.listen_port}` : member.preshared_key ? translate('已设预共享密钥') : '';
+    return [namedCell(member.label, detail), kind, member.address, endpoint, status, buttons];
   })));
   if (network.pairs.length) {
     body.append(el('h3', translate('成员之间的连接')), table([translate('成员'), translate('路径'), translate('最近握手'), translate('接收 / 发送')], network.pairs.map(pair => {
@@ -3049,9 +3259,10 @@ function wireguardNetworkForm(network) {
   const port = field(grid, 'listen_port', translate('UDP 端口'), network?.listen_port ?? 51820, 'number'); port.min = 1; port.max = 65535;
   const mtu = field(grid, 'mtu', 'MTU', network?.mtu ?? 1420, 'number'); mtu.min = 1280; mtu.max = 1420;
   if (network) select(grid, 'relay', translate('中继节点'), [['', translate('自动（网内地址最小的公网节点）')], ...network.members.filter(m => m.kind === 'node' && m.endpoint).map(m => [m.id, m.label])], network.relay || '');
+  field(grid, 'dns', translate('设备使用的 DNS 服务器（可选，最多 4 个 IP，用逗号分隔）'), (network?.dns || []).join(', '), 'text', false);
   form.append(grid, el('p', translate('地址段不能与服务器已有的网段重叠，否则节点会拒绝创建接口并显示原因。有公网端点的节点需要在防火墙放行这里的 UDP 端口。'), 'fine'));
   submit(form, network ? translate('保存网络') : translate('新建网络'), async data => {
-    const body = { name: String(data.get('name')).trim(), listen_port: number(data, 'listen_port'), mtu: number(data, 'mtu') };
+    const body = { name: String(data.get('name')).trim(), listen_port: number(data, 'listen_port'), mtu: number(data, 'mtu'), dns: wgList(data.get('dns')) };
     if (!cidr.disabled) body.cidr = String(data.get('cidr')).trim();
     if (network) body.relay = data.get('relay') || null;
     if (network) await api(`/wireguard/networks/${network.id}`, { method: 'PUT', body });
@@ -3084,18 +3295,29 @@ function wireguardDeviceForm(network, member) {
   field(grid, 'name', translate('设备名称'), member?.name || '').maxLength = 64;
   select(grid, 'via', translate('入口节点'), member ? hubs.map(h => [h.id, h.label]) : [['', translate('自动（中继节点）')], ...hubs.map(h => [h.id, h.label])], member?.via || '');
   if (!member) field(grid, 'public_key', translate('设备自己的公钥（可选，留空由面板生成密钥）'), '', 'text', false).maxLength = 44;
+  field(grid, 'allowed_ips', translate('经隧道访问的地址段（AllowedIPs，用逗号分隔；留空为本网络地址段）'), (member?.allowed_ips || []).join(', '), 'text', false);
+  const keepalive = field(grid, 'keepalive', translate('保活间隔（秒，0 为关闭，留空为 25）'), member?.keepalive ?? '', 'number', false); keepalive.min = 0; keepalive.max = 65535;
+  checkbox(grid, 'enabled', translate('启用')).checked = member?.enabled !== false;
+  if (!member) checkbox(grid, 'preshared_key', translate('同时生成预共享密钥（PresharedKey；入口节点的 Agent 需支持）'));
   form.append(grid, el('p', translate('面板生成密钥时，配置和二维码只显示这一次，面板只保存公钥。用 WireGuard 应用扫描二维码或导入配置即可。'), 'fine'));
   submit(form, member ? translate('保存设备') : translate('添加设备'), async data => {
-    const body = { kind: 'device', name: String(data.get('name')).trim(), via: data.get('via') || null };
-    if (member) { await api(`/wireguard/members/${member.id}`, { method: 'PUT', body }); $('#dialog').close(); notify(translate('设备已保存。入口节点改变后，请给设备生成新密钥并重新导入配置。')); }
-    else { const issued = await api(`/wireguard/networks/${network.id}/members`, { method: 'POST', body: { ...body, public_key: String(data.get('public_key')).trim() || null } }); $('#dialog').close(); showWireguardConfig(issued); }
+    const body = { kind: 'device', name: String(data.get('name')).trim(), via: data.get('via') || null, allowed_ips: wgList(data.get('allowed_ips')), keepalive: number(data, 'keepalive') ?? 25, enabled: data.get('enabled') === 'on' };
+    if (body.keepalive > 65535) throw new Error(translate('保活间隔必须为 0–65535 秒'));
+    if (member) { await api(`/wireguard/members/${member.id}`, { method: 'PUT', body }); $('#dialog').close(); notify(translate('设备已保存。入口节点、AllowedIPs 或保活间隔改变后，请给设备生成新密钥并重新导入配置。')); }
+    else { const issued = await api(`/wireguard/networks/${network.id}/members`, { method: 'POST', body: { ...body, public_key: String(data.get('public_key')).trim() || null, preshared_key: data.get('preshared_key') === 'on' } }); $('#dialog').close(); showWireguardConfig(issued); }
     await renderWireguard();
   });
   modal(member ? msg`编辑设备 · ${member.name}` : msg`添加设备 · ${network.name}`, form);
 }
-async function rekeyWireguard(member) {
-  if (!await confirmAction(msg`给「${member.label}」生成新密钥？旧配置会立即失效，需要在设备上重新导入。`)) return;
-  showWireguardConfig(await api(`/wireguard/members/${member.id}/rekey`, { method: 'POST' })); await renderWireguard();
+function rekeyWireguard(member) {
+  const form = el('form');
+  form.append(el('p', msg`给「${member.label}」生成新密钥？旧配置会立即失效，需要在设备上重新导入。`));
+  checkbox(form, 'preshared_key', translate('同时生成预共享密钥（PresharedKey；入口节点的 Agent 需支持）')).checked = !!member.preshared_key;
+  submit(form, translate('生成新密钥'), async data => {
+    const issued = await api(`/wireguard/members/${member.id}/rekey`, { method: 'POST', body: { preshared_key: data.get('preshared_key') === 'on' } });
+    $('#dialog').close(); showWireguardConfig(issued); await renderWireguard();
+  });
+  modal(translate('新密钥'), form);
 }
 function showWireguardConfig(issued) {
   const body = el('div');
@@ -3462,7 +3684,18 @@ const diagramIssues = localize({
   targets: '请添加至少一个最终目标或下一跳。', target: '目标需要有效的主机与端口，不能使用通配地址。',
   protocol: '下一跳未覆盖本跳的 TCP / UDP 协议，请逐跳匹配。', tenant: '所有节点与规则所有者必须属于同一租户。',
   mismatch: '目标地址与下一跳公布的地址不一致，请重新选择下一跳。', duplicate: '每一跳请选择不同的 VPS。',
+  paused: '全部目标都已暂停，新连接会被拒绝。',
 });
+// A paused target takes no new sessions; a timed pause ends on the agent's clock.
+function targetPaused(target, now = Date.now()) { return !!target.paused && (target.paused_until_ms == null || now < target.paused_until_ms); }
+function pauseLabel(until) { return until ? msg`暂停至 ${new Date(until).toLocaleString(getLanguage(), { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })}` : translate('已暂停'); }
+// The rule table's note on paused targets, or '' when none is paused.
+function pausedTargets(rule) {
+  const paused = rule.targets.filter(t => targetPaused(t));
+  if (!paused.length) return '';
+  if (rule.targets.length === 1) return pauseLabel(paused[0].paused_until_ms);
+  return paused.length === rule.targets.length ? translate('全部目标已暂停') : msg`${paused.length} 个目标已暂停`;
+}
 function forwardingPathView(options = {}) {
   const box = el('section', undefined, 'forwarding-diagram'); box.setAttribute('aria-label', translate('转发路径预览'));
   let cards = [];
@@ -3514,6 +3747,7 @@ function forwardingPathView(options = {}) {
           const label = [protocols[child.protocol] || '—', child.transport].filter(Boolean);
           if (item.children.length > 1 && !item.aggregate) label.push(`${translate('权重')} ${child.weight}`, `${translate('优先级')} ${child.priority}`);
           if (child.draining) label.push(translate('维护排空'));
+          if (child.paused) label.push(pauseLabel(child.pausedUntil));
           branch.append(edge(label), tree(child.next)); branches.append(branch);
         }
         wrap.append(branches);
@@ -3632,7 +3866,7 @@ function routeChips(model, health = new Map(), nodes = new Map(), conns = new Ma
       used ? (inbound ? msg`最近 1 小时入站 TCP 连接建立（TLS、PROXY、WebSocket）：${connSummary(counts)}` : msg`最近 1 小时真实 TCP 连接：${connSummary(counts)}`) : ''].filter(Boolean).join('\n');
     return label;
   };
-  const link = (reports, counts, inbound) => { const box = el('span', undefined, 'route-link'); box.append(probe(reports, counts, inbound), arrow()); return box; };
+  const link = (reports, counts, inbound, note) => { const box = el('span', undefined, 'route-link'); box.append(probe(reports, counts, inbound)); if (note) box.append(el('span', note, 'route-note')); box.append(arrow()); return box; };
   line.append(el('span', translate('客户端'), 'route-chip route-end'));
   const entry = model.root.kind === 'node' && conns.get(hopKey(model.root.node_id, model.root.rule_id));
   let next = entry?.attempts ? [[], entry, true] : null;
@@ -3653,14 +3887,14 @@ function routeChips(model, health = new Map(), nodes = new Map(), conns = new Ma
       item.children.map((child, i) => ({ child, reports: health.get(key(i)) || [], counts: counts(child, i) })).sort((a, b) => a.child.priority - b.child.priority).forEach(({ child, reports, counts }) => {
         // TCP and UDP are selected separately; name the protocol only when their roles differ.
         const reason = r => selectionReasons[r.selection_reason] || r.selection_reason, same = new Set(reports.map(reason)).size === 1;
-        const row = el('span', undefined, 'route-candidate'), roles = same ? [reason(reports[0])] : reports.map(r => `${r.protocol.toUpperCase()} ${reason(r)}`);
+        const row = el('span', undefined, 'route-candidate'), roles = child.paused ? [pauseLabel(child.pausedUntil)] : same ? [reason(reports[0])] : reports.map(r => `${r.protocol.toUpperCase()} ${reason(r)}`);
         row.append(el('span', child.next.kind === 'node' ? child.next.name : child.address || translate('待填写'), child.next.kind === 'node' ? 'route-candidate-name' : 'route-candidate-name mono'));
         if (roles.length) row.append(el('span', roles.join(' / '), 'route-role'));
         row.append(probe(reports, counts)); list.append(row);
       });
       line.append(arrow(), list); break;
     }
-    next = item.children.length ? [health.get(key(0)) || [], counts(item.children[0], 0)] : null; item = item.children[0]?.next;
+    next = item.children.length ? [health.get(key(0)) || [], counts(item.children[0], 0), false, item.children[0].paused ? pauseLabel(item.children[0].pausedUntil) : null] : null; item = item.children[0]?.next;
   }
   return line;
 }
@@ -4046,7 +4280,7 @@ async function renderHealth() {
     panelHealth.append(body);
   } else panelHealth.append(table([translate('规则 / 目标'), translate('端口 / 成功条件'), translate('观测状态'), translate('选路原因'), translate('优先级 / 会话'), translate('耗时 / 丢包 · 抖动'), translate('连续成功 / 失败'), translate('诊断')], snapshot.reports.map(r => {
     const diagnostic = el('details'); diagnostic.append(el('summary', r.last_error ? errors[r.last_error] : translate('查看探测统计')), el('p', msg`完成 ${r.completed_checks} 次，成功 ${r.successful_checks} 次`), el('p', msg`结果年龄 ${r.sample_age_ms === null ? '—' : msg`${(r.sample_age_ms / 1000).toFixed(1)} 秒`}，有效期 ${(r.max_age_ms / 1000).toFixed(1)} 秒`), el('p', msg`源节点探测应用量：发送 ${bytes(r.probe_sent_bytes)} / 接收 ${bytes(r.probe_received_bytes)}`), el('p', msg`节点记录时间：${timestamp(r.checked_at_ms)}`));
-    return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), namedCell(String(r.listen_port), kinds[r.probe_kind]), badge(statuses[r.status], r.eligible ? 'green' : 'orange'), r.selection_reason === 'degraded' ? namedCell(translate('丢包降级'), translate('同级暂作后备')) : r.selection_reason === 'draining' ? namedCell(translate('维护排空'), translate('仅作最后备用')) : reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? translate('不限')}`, namedCell(r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.window_checks ? msg`丢包 ${Math.round(100 * r.window_failures / r.window_checks)}% · 抖动 ${r.jitter_us == null ? '—' : `${(r.jitter_us / 1000).toFixed(2)} ms`}` : translate('尚无探测')), `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
+    return [namedCell(snapshot.rule_names?.[r.rule_id] || r.rule_id, r.target_address), namedCell(String(r.listen_port), kinds[r.probe_kind]), badge(statuses[r.status], r.eligible ? 'green' : 'orange'), r.selection_reason === 'degraded' ? namedCell(translate('丢包降级'), translate('同级暂作后备')) : r.selection_reason === 'draining' ? namedCell(translate('维护排空'), translate('仅作最后备用')) : r.selection_reason === 'paused' ? namedCell(translate('已暂停'), translate('不接新连接 · 探测继续')) : reasons[r.selection_reason] || r.selection_reason, `${r.priority} / ${r.active_sessions} / ${r.max_sessions ?? translate('不限')}`, namedCell(r.latency_ewma_us === null ? '—' : `${(r.latency_ewma_us / 1000).toFixed(2)} ms`, r.window_checks ? msg`丢包 ${Math.round(100 * r.window_failures / r.window_checks)}% · 抖动 ${r.jitter_us == null ? '—' : `${(r.jitter_us / 1000).toFixed(2)} ms`}` : translate('尚无探测')), `${r.consecutive_successes} / ${r.consecutive_failures}`, diagnostic];
   })));
   if (!charts) { $('#content').replaceChildren(toolbar, panelHealth); return; }
   const series = nodeSeries(telemetry.nodes.find(t => t.id === selected)?.samples || [], telemetry.generated_at_ms), trends = el('div', undefined, 'chart-grid');

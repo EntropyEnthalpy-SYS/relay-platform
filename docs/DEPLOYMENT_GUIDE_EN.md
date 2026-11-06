@@ -270,6 +270,35 @@ journalctl -u relay-platform-agent -n 20 --no-pager
 
 Within a few seconds the node shows as online in **Nodes**. The token is used only once. After enrollment, the node keeps its identity in `/var/lib/relay-platform/agent/`, and restarts or reboots don't need a new token.
 
+### Servers that cannot reach the panel directly
+
+Some servers cannot open a connection to the panel's address, for example in mainland China or on IX-only lines, while another server can. The node's agent can then connect through that other server without having to trust it. Add one of these to `agent.json`:
+
+- `controller_addresses`: a list of `host:port` addresses to connect to instead of the addresses `panel.example.com` resolves to. They are tried in order: when an address refuses the TCP connection or doesn't answer within its share of the 5-second connect timeout, the agent moves on to the next one. The agent still names `panel.example.com` in TLS and checks the panel's certificate, so the relay only passes encrypted TCP along and can neither read nor change it. Host names in the list are looked up for every new connection.
+- `controller_proxy`: an HTTP proxy that supports `CONNECT`, as `http://host:port`. Every request to the panel goes through it, and TLS again runs end to end inside the tunnel. SOCKS5 is not supported: the agent's HTTP client is built without SOCKS, so use an HTTP proxy or a relay. A user name and password in the proxy URL are refused because they would be visible in the process list; use a proxy that admits the server by its IP address.
+
+Use one or the other, not both. Either way, the agent never reads proxy environment variables such as `HTTPS_PROXY`.
+
+```json
+{"controller": "https://panel.example.com", "node_id": "PASTE_THE_NODE_ID", "poll_seconds": 5,
+ "controller_addresses": ["relay-hk.example.net:30443", "203.0.113.20:30443"]}
+```
+
+The installer turns this into `relay agent --controller https://panel.example.com --controller-address relay-hk.example.net:30443 --controller-address 203.0.113.20:30443 …`; `controller_proxy` becomes `--controller-proxy`. A few rules:
+
+- The `controller` URL must use a host name, not an IP address. TLS checks that name, and an IP address in the URL is dialed directly.
+- If the `controller` URL contains a port, such as `https://panel.example.com:8443`, every relay must listen on that same port. Without a port in the URL, relays may use any port.
+- You can add or change these settings when you upgrade a node; only `controller` and `node_id` are fixed.
+
+**Use an existing Relay node as the relay.** Any enrolled node that reaches the panel directly can forward for the others:
+
+1. In **Forwarding rules**, add a rule on that node: protocol **TCP**, listen on a free port such as `0.0.0.0:30443` (or on the panel URL's port if it names one), and a single target `panel.example.com:443`, the panel's public HTTPS address. Leave TLS, PROXY protocol and WebSocket off for both the rule and the target: the bytes must reach the panel's web server unchanged.
+2. Under **Allowed sources**, list the addresses of the servers that will use it, so the port doesn't open your panel to everyone. Don't give the rule a quota or an expiry date that could cut off the nodes behind it.
+3. Open the port in that node's firewall (and in the provider's security group).
+4. Install the agent on the server behind it with `controller_addresses` set to `RELAY_NODE_ADDRESS:30443`, then check `journalctl -u relay-platform-agent -n 50 --no-pager`. The node comes online as usual.
+
+The panel's web server sees the relay's IP address as the client address of these connections. List a second relay if you have one: while no relay is reachable, a node in Availability-first mode keeps forwarding with its last configuration but receives no changes.
+
 ## 8. Create a first forwarding rule
 
 Create a rule on the new node in **Forwarding rules**. Then open the rule's port in the **node's** firewall; the installer never changes firewalls. New nodes pick ports from 20000–29999 by default. Sections 5–7 of the [panel tutorial](PANEL_TUTORIAL_EN.md#5-create-a-first-forwarding-test-on-one-vps) walk through a complete first test, including checking that traffic really takes the expected path.
@@ -321,7 +350,8 @@ Then copy the archive to another machine. It contains passwords and keys, so kee
 | `preflight` shows `"ready": false` | Read `errors`: not running as root, port already in use, too little disk space, or a package built for a different CPU type. |
 | `remote controller requires HTTPS` | `agent.json` must use `https://…`. Plain `http://` is only allowed for `127.0.0.1` or `localhost`. |
 | Caddy or certbot can't get a certificate | The domain must point at this server, and ports 80 and 443 must be reachable from the internet. Check with `getent hosts panel.example.com`. |
-| Node never shows as online | Run `journalctl -u relay-platform-agent -n 50 --no-pager` on the node, and check that `curl -sI https://panel.example.com` works from the node. A token works only once: if it was lost or already used, delete the never-enrolled node in the panel and enroll it again. |
+| Node never shows as online | Run `journalctl -u relay-platform-agent -n 50 --no-pager` on the node, and check that `curl -sI https://panel.example.com` works from the node. If it doesn't, see [servers that cannot reach the panel directly](#servers-that-cannot-reach-the-panel-directly). A token works only once: if it was lost or already used, delete the never-enrolled node in the panel and enroll it again. |
+| Forgot the `admin` password | Stop the panel (`python3 scripts/relay_deploy.py stop --role controller`), run `sudo -u relayp-controller /opt/relay-platform/roles/controller/current/relay reset-password --state /var/lib/relay-platform/controller --user admin`, start the panel again and sign in with the new password from `/var/lib/relay-platform/controller/admin-password.secret`. The command never prints the password and ends that user's sessions and API tokens; see [controller recovery](RECOVERY.md). |
 | Sign-in says `too many login attempts` | Wait five minutes. The panel allows 30 sign-in attempts per 5 minutes from each visitor. Behind Caddy or nginx on the same server, it recognizes visitors by the `X-Forwarded-For` header the web server adds; both configurations above add it. Before 0.141.2, all visitors behind the web server shared one limit. |
 | Panel page doesn't load | Run `systemctl status relay-platform-controller`, `curl -s http://127.0.0.1:18090/` on the server, and check the web server's status (`systemctl status caddy` or `nginx`). |
 | A rule doesn't carry traffic | Open the rule's port in the node's firewall, and in the hosting provider's firewall or security group if it has one. |

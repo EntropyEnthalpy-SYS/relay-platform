@@ -6,7 +6,7 @@ use anyhow::Context;
 use common::*;
 use relay_platform::{
     engine::Engine,
-    gateway::{Config, Security, WireProtocol},
+    gateway::{Config, CongestionControl, Masquerade, Obfuscation, Security, WireProtocol},
     model::*,
     store::Store,
 };
@@ -65,6 +65,8 @@ fn reality_exports_only_client_material_and_debug_redacts_credentials() {
         handshake: "127.0.0.1:443".into(),
         private_key: private.clone(),
         short_id: "aabbccdd".into(),
+        extra_short_ids: vec![],
+        max_time_difference_secs: None,
     };
     let export = gw.client_outbound("relay.test", "client").unwrap();
     assert_eq!(export["tls"]["reality"]["public_key"], public);
@@ -124,10 +126,14 @@ async fn five_protocols_carry_udp_through_native_acl_and_accounting() {
         vless(),
         WireProtocol::Hysteria2 {
             password: "test-udp-password-1234".into(),
+            obfs: None,
+            masquerade: None,
         },
         WireProtocol::Tuic {
             uuid: "bf000d23-0752-40b4-affe-68f7707a9661".into(),
             password: "test-udp-password-1234".into(),
+            congestion_control: CongestionControl::default(),
+            zero_rtt_handshake: false,
         },
         WireProtocol::Trojan {
             password: "test-udp-password-1234".into(),
@@ -365,11 +371,14 @@ async fn reality_vision_authenticates_against_an_owned_tls13_handshake_origin() 
         uuid: "bf000d23-0752-40b4-affe-68f7707a9661".into(),
         vision: true,
     });
+    // Clients present the first short ID; the server accepts all of them.
     r.protocol_gateway.as_mut().unwrap().security = Security::Reality {
         server_name: "relay.test".into(),
         handshake: origin.to_string(),
         private_key: URL_SAFE_NO_PAD.encode([11; 32]),
         short_id: "0123456789abcdef".into(),
+        extra_short_ids: vec!["aa".into(), "fedcba98".into()],
+        max_time_difference_secs: Some(60),
     };
     engine.apply(config(r.clone())).await.unwrap();
     let echo = tcp_echo().await;
@@ -401,6 +410,8 @@ async fn reality_vision_authenticates_against_an_owned_tls13_handshake_origin() 
         handshake: origin.to_string(),
         private_key: URL_SAFE_NO_PAD.encode([12; 32]),
         short_id: "0123456789abcdef".into(),
+        extra_short_ids: vec![],
+        max_time_difference_secs: None,
     };
     let (mut bad, local) = client(&executable, &certs.root, &wrong, false).await;
     assert!(request(local, echo.address, b"wrong-key").await.is_err());
@@ -518,7 +529,7 @@ async fn client(
                 *uuid = "bf000d23-0752-40b4-affe-68f7707a9662".into()
             }
             WireProtocol::Tuic { password, .. }
-            | WireProtocol::Hysteria2 { password }
+            | WireProtocol::Hysteria2 { password, .. }
             | WireProtocol::AnyTls { password }
             | WireProtocol::Trojan { password } => *password = "incorrect-password-1234".into(),
         }
@@ -613,10 +624,19 @@ async fn six_tls_protocols_forward_through_native_accounting_and_reject_wrong_cr
         vless(),
         WireProtocol::Hysteria2 {
             password: password.clone(),
+            obfs: Some(Obfuscation::Salamander {
+                password: "test-obfuscation-password-5678".into(),
+            }),
+            masquerade: Some(Masquerade::Fixed {
+                status_code: 404,
+                content: "not found".into(),
+            }),
         },
         WireProtocol::Tuic {
             uuid: uuid.clone(),
             password: password.clone(),
+            congestion_control: CongestionControl::Cubic,
+            zero_rtt_handshake: true,
         },
         WireProtocol::AnyTls {
             password: password.clone(),
@@ -773,10 +793,16 @@ async fn independent_mihomo_client_uses_exported_tls_configs_for_tcp_and_udp() {
         vless(),
         WireProtocol::Hysteria2 {
             password: "independent-client-password".into(),
+            obfs: Some(Obfuscation::Salamander {
+                password: "independent-obfuscation-password".into(),
+            }),
+            masquerade: None,
         },
         WireProtocol::Tuic {
             uuid: "bf000d23-0752-40b4-affe-68f7707a9661".into(),
             password: "independent-client-password".into(),
+            congestion_control: CongestionControl::NewReno,
+            zero_rtt_handshake: true,
         },
         WireProtocol::AnyTls {
             password: "independent-client-password".into(),

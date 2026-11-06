@@ -8,7 +8,7 @@
 //! never leave it; device keys are made by the panel and shown once.
 use anyhow::{Context, Result, anyhow, ensure};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ipnet::Ipv4Net;
+use ipnet::{IpNet, Ipv4Net};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -27,6 +27,11 @@ pub const PREFIX: &str = "rwg-";
 pub const KEEPALIVE: u16 = 25;
 pub const DEFAULT_PORT: u16 = 51820;
 pub const DEFAULT_MTU: u16 = 1420;
+pub const MAX_DNS_SERVERS: usize = 4;
+pub const MAX_ALLOWED_IPS: usize = 32;
+/// An all-zero preshared key is WireGuard's "none"; writing it clears a
+/// key a peer had before.
+const NO_PRESHARED_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -46,6 +51,9 @@ pub struct Network {
     /// endpoint; `None` picks the public node with the lowest address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
+    /// DNS servers written into device configurations; none by default.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns: Vec<IpAddr>,
     pub updated_at_ms: i64,
 }
 
@@ -72,7 +80,26 @@ pub struct Member {
     /// Devices only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>,
+    /// Devices only: a disabled device is left out of every node's peers.
+    /// Its key stays, so enabling it again needs no new configuration.
+    #[serde(default = "enabled")]
+    pub enabled: bool,
+    /// Devices only: what the device sends into the tunnel; empty means the
+    /// network's range.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_ips: Vec<IpNet>,
+    /// Devices only: seconds between keepalives, 0 for none; `None` is 25.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keepalive: Option<u16>,
+    /// Devices only: the preshared key shared with the hub. Stored apart
+    /// from the member (`wg_psk:<id>`) and set only to render peers and the
+    /// configuration, so no view or reply carries it.
+    #[serde(skip)]
+    pub preshared_key: Option<String>,
     pub updated_at_ms: i64,
+}
+fn enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +115,10 @@ pub struct NetworkInput {
     pub listen_port: Option<u16>,
     #[serde(default)]
     pub relay: Option<String>,
+    /// DNS server addresses for device configurations; absent keeps them,
+    /// empty removes them.
+    #[serde(default)]
+    pub dns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +141,30 @@ pub struct MemberInput {
     /// A device's own public key; without one the panel makes the key pair.
     #[serde(default)]
     pub public_key: Option<String>,
+    /// Devices only; absent keeps the current state (on for a new device).
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Devices only: ranges such as `10.88.0.0/24` or `0.0.0.0/0`; absent
+    /// keeps them, empty means the network's range.
+    #[serde(default)]
+    pub allowed_ips: Option<Vec<String>>,
+    /// Devices only: keepalive seconds, 0 for none; absent keeps it (25 for
+    /// a new device).
+    #[serde(default)]
+    pub keepalive: Option<u16>,
+    /// Devices only, when the device is added: the panel makes a preshared
+    /// key for the device and its hub. It changes only with a new key.
+    #[serde(default)]
+    pub preshared_key: Option<bool>,
+}
+
+/// A new key for a device. Without a body the device keeps having, or not
+/// having, a preshared key; a new one is made with the new key.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RekeyInput {
+    #[serde(default)]
+    pub preshared_key: Option<bool>,
 }
 
 /// A new device or new device key: the configuration holds the private key
@@ -154,6 +209,11 @@ pub struct Peer {
     pub allowed_ips: Vec<Ipv4Net>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive: Option<u16>,
+    /// A device's preshared key, on its hub's entry only. A device gets one
+    /// only while its hub reports `preshared_keys`; older agents would
+    /// ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preshared_key: Option<String>,
 }
 
 /// What the agent reports back. Sent only to a controller that sent a
@@ -169,6 +229,10 @@ pub struct Report {
     /// traversal probes use; agents before 0.139.0 cannot.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub probes: bool,
+    /// The agent writes peers' preshared keys; agents before this field
+    /// cannot, so the panel gives devices behind them none.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preshared_keys: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
     /// The digest of the desired state last applied; what failed is in
@@ -224,10 +288,14 @@ pub struct MemberView {
     /// The node's or device's name.
     pub label: String,
     /// Nodes: offline, waiting (no report yet), error, updating or up.
-    /// Devices: connected or idle.
+    /// Devices: connected, idle, disabled, or error when the hub cannot
+    /// apply the device's preshared key.
     pub state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Devices: a preshared key is set; the key itself is never shown again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub preshared_key: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct PairView {
@@ -322,6 +390,64 @@ pub fn public_key(private_key: &str) -> Result<String> {
 }
 pub fn valid_key(text: &str) -> bool {
     text.len() == 44 && decode_key(text).is_ok()
+}
+/// A new preshared key, like `wg genpsk`.
+pub fn preshared_key() -> String {
+    let mut key = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
+    STANDARD.encode(key)
+}
+
+/// DNS server addresses for device configurations.
+pub fn dns_servers(list: &[String]) -> Result<Vec<IpAddr>> {
+    ensure!(
+        list.len() <= MAX_DNS_SERVERS,
+        "at most {MAX_DNS_SERVERS} DNS servers"
+    );
+    let mut servers = vec![];
+    for text in list {
+        let ip: IpAddr = text
+            .trim()
+            .parse()
+            .map_err(|_| anyhow!("DNS servers are IP addresses, such as 1.1.1.1: {text}"))?;
+        let ip = crate::model::canonical_ip(ip);
+        ensure!(
+            !ip.is_unspecified() && !ip.is_multicast() && ip != IpAddr::V4(Ipv4Addr::BROADCAST),
+            "{ip} cannot be a DNS server"
+        );
+        ensure!(
+            !servers.contains(&ip),
+            "the DNS server {ip} is listed twice"
+        );
+        servers.push(ip);
+    }
+    Ok(servers)
+}
+
+/// The ranges a device sends into the tunnel. A bare address is one host.
+pub fn allowed_ips(list: &[String]) -> Result<Vec<IpNet>> {
+    ensure!(
+        list.len() <= MAX_ALLOWED_IPS,
+        "at most {MAX_ALLOWED_IPS} allowed IP ranges"
+    );
+    let mut nets = vec![];
+    for text in list {
+        let text = text.trim();
+        let net = text
+            .parse::<IpNet>()
+            .or_else(|_| text.parse::<IpAddr>().map(IpNet::from))
+            .map_err(|_| {
+                anyhow!("allowed IPs are ranges such as 10.88.0.0/24 or 0.0.0.0/0: {text}")
+            })?;
+        ensure!(
+            net == net.trunc(),
+            "start the range at its first address: {}",
+            net.trunc()
+        );
+        ensure!(!nets.contains(&net), "the range {net} is listed twice");
+        nets.push(net);
+    }
+    Ok(nets)
 }
 
 /// The link a node uses for `network`.
@@ -469,9 +595,10 @@ pub fn render(
     else {
         return Ok(None);
     };
+    // A disabled device has no key here, so no node has an entry or a route for it.
     let key = |m: &Member| match m.kind {
         Kind::Node => m.node_id.as_ref().and_then(|n| keys.get(n)).cloned(),
-        Kind::Device => m.public_key.clone(),
+        Kind::Device => m.public_key.clone().filter(|_| m.enabled),
     };
     let relay = relay(network, members);
     let mut peers: BTreeMap<String, Peer> = BTreeMap::new();
@@ -488,6 +615,8 @@ pub fn render(
                 allowed_ips: vec![],
                 keepalive: (me.endpoint.is_none() && carrier.endpoint.is_some())
                     .then_some(KEEPALIVE),
+                // Only devices have one, and only their hub routes to them directly.
+                preshared_key: carrier.preshared_key.clone(),
             })
             .allowed_ips
             .push(Ipv4Net::new(address, 32).unwrap());
@@ -524,6 +653,7 @@ pub fn render(
             endpoint: None,
             allowed_ips: vec![],
             keepalive: None,
+            preshared_key: None,
         });
         peer.endpoint = punch.endpoint.clone();
         peer.keepalive = Some(KEEPALIVE);
@@ -548,9 +678,9 @@ pub fn render(
         mtu: network.mtu,
         listen_port: me.listen_port.unwrap_or(network.listen_port),
         forwarding: relay.is_some_and(|r| r.id == me.id)
-            || members
-                .iter()
-                .any(|m| m.kind == Kind::Device && m.via.as_deref() == Some(me.id.as_str())),
+            || members.iter().any(|m| {
+                m.kind == Kind::Device && m.enabled && m.via.as_deref() == Some(me.id.as_str())
+            }),
         peers,
     }))
 }
@@ -575,11 +705,17 @@ pub fn wg_config(interface: &Interface, private_key: &str) -> String {
         if let Some(seconds) = peer.keepalive {
             text.push_str(&format!("PersistentKeepalive = {seconds}\n"));
         }
+        // Written for every peer: `wg syncconf` keeps a key the line leaves out.
+        text.push_str(&format!(
+            "PresharedKey = {}\n",
+            peer.preshared_key.as_deref().unwrap_or(NO_PRESHARED_KEY)
+        ));
     }
     text
 }
 
-/// A wg-quick file for a device: everything in the network goes to its hub.
+/// A wg-quick file for a device: by default everything in the network goes
+/// to its hub; the device's allowed IPs replace the network's range.
 pub fn device_config(
     network: &Network,
     device: &Member,
@@ -587,15 +723,37 @@ pub fn device_config(
     hub: &Member,
     hub_key: &str,
 ) -> String {
-    format!(
-        "[Interface]\nPrivateKey = {}\nAddress = {}/{}\nMTU = {}\n\n[Peer]\nPublicKey = {hub_key}\nEndpoint = {}\nAllowedIPs = {}\nPersistentKeepalive = {KEEPALIVE}\n",
+    let mut text = format!(
+        "[Interface]\nPrivateKey = {}\nAddress = {}/{}\n",
         private_key.unwrap_or("<the device's own private key>"),
         device.address,
         network.cidr.prefix_len(),
-        network.mtu,
+    );
+    if !network.dns.is_empty() {
+        let servers: Vec<String> = network.dns.iter().map(ToString::to_string).collect();
+        text.push_str(&format!("DNS = {}\n", servers.join(", ")));
+    }
+    text.push_str(&format!(
+        "MTU = {}\n\n[Peer]\nPublicKey = {hub_key}\n",
+        network.mtu
+    ));
+    if let Some(key) = &device.preshared_key {
+        text.push_str(&format!("PresharedKey = {key}\n"));
+    }
+    let allowed: Vec<String> = match device.allowed_ips.as_slice() {
+        [] => vec![network.cidr.to_string()],
+        nets => nets.iter().map(ToString::to_string).collect(),
+    };
+    text.push_str(&format!(
+        "Endpoint = {}\nAllowedIPs = {}\n",
         hub.endpoint.as_deref().unwrap_or_default(),
-        network.cidr,
-    )
+        allowed.join(", ")
+    ));
+    match device.keepalive.unwrap_or(KEEPALIVE) {
+        0 => {}
+        seconds => text.push_str(&format!("PersistentKeepalive = {seconds}\n")),
+    }
+    text
 }
 
 /// The lowest host address of `cidr` that no member holds.
@@ -700,6 +858,10 @@ mod tests {
             listen_port: None,
             via: None,
             public_key: (kind == Kind::Device).then(|| format!("key-{id}")),
+            enabled: true,
+            allowed_ips: vec![],
+            keepalive: None,
+            preshared_key: None,
             updated_at_ms: 0,
         }
     }
@@ -711,6 +873,7 @@ mod tests {
             mtu: 1420,
             listen_port: 51820,
             relay: relay.map(str::to_string),
+            dns: vec![],
             updated_at_ms: 0,
         }
     }
@@ -887,7 +1050,7 @@ mod tests {
         let text = wg_config(&a, "PRIVATE");
         assert_eq!(
             text,
-            "[Interface]\nPrivateKey = PRIVATE\nListenPort = 51820\n\n[Peer]\nPublicKey = key-p\nAllowedIPs = 10.88.0.1/32\nEndpoint = 203.0.113.1:51820\nPersistentKeepalive = 25\n"
+            "[Interface]\nPrivateKey = PRIVATE\nListenPort = 51820\n\n[Peer]\nPublicKey = key-p\nAllowedIPs = 10.88.0.1/32\nEndpoint = 203.0.113.1:51820\nPersistentKeepalive = 25\nPresharedKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n"
         );
         let first = Desired::new(true, vec![a.clone()]);
         let mut moved = a;
@@ -901,5 +1064,150 @@ mod tests {
             free_address(network(None).cidr, &members),
             Some(Ipv4Addr::new(10, 88, 0, 3))
         );
+    }
+
+    #[test]
+    fn device_settings_reach_its_configuration_and_its_hub_only() {
+        let hub = member("p", Kind::Node, 1, Some("203.0.113.1:51820"));
+        let mut device = member("d", Kind::Device, 9, None);
+        device.via = Some("p".into());
+        // The defaults write exactly what earlier versions wrote.
+        assert_eq!(
+            device_config(&network(None), &device, Some("PRIV"), &hub, "key-p"),
+            "[Interface]\nPrivateKey = PRIV\nAddress = 10.88.0.9/24\nMTU = 1420\n\n[Peer]\nPublicKey = key-p\nEndpoint = 203.0.113.1:51820\nAllowedIPs = 10.88.0.0/24\nPersistentKeepalive = 25\n"
+        );
+        let mut net = network(None);
+        net.dns = dns_servers(&["1.1.1.1".into(), " 2606:4700:4700::1111 ".into()]).unwrap();
+        device.allowed_ips = allowed_ips(&["10.88.0.0/24".into(), "0.0.0.0/0".into()]).unwrap();
+        device.keepalive = Some(0);
+        device.preshared_key = Some("PSK".into());
+        assert_eq!(
+            device_config(&net, &device, None, &hub, "key-p"),
+            "[Interface]\nPrivateKey = <the device's own private key>\nAddress = 10.88.0.9/24\nDNS = 1.1.1.1, 2606:4700:4700::1111\nMTU = 1420\n\n[Peer]\nPublicKey = key-p\nPresharedKey = PSK\nEndpoint = 203.0.113.1:51820\nAllowedIPs = 10.88.0.0/24, 0.0.0.0/0\n"
+        );
+        device.keepalive = Some(40);
+        assert!(
+            device_config(&net, &device, None, &hub, "key-p")
+                .ends_with("AllowedIPs = 10.88.0.0/24, 0.0.0.0/0\nPersistentKeepalive = 40\n")
+        );
+
+        // The hub's entry for the device carries the preshared key; the
+        // other node reaches the device through the hub without it.
+        let members = vec![hub, member("a", Kind::Node, 2, None), device];
+        let keys = keys(&members);
+        let p = render(&net, &members, &keys, "node-p", &none())
+            .unwrap()
+            .unwrap();
+        let entry = p.peers.iter().find(|e| e.public_key == "key-d").unwrap();
+        assert_eq!(entry.preshared_key.as_deref(), Some("PSK"));
+        let text = wg_config(&p, "K");
+        assert!(
+            text.contains("PublicKey = key-d\nAllowedIPs = 10.88.0.9/32\nPresharedKey = PSK\n")
+        );
+        assert!(text.contains(&format!(
+            "PublicKey = key-a\nAllowedIPs = 10.88.0.2/32\nPresharedKey = {NO_PRESHARED_KEY}\n"
+        )));
+        let a = render(&net, &members, &keys, "node-a", &none())
+            .unwrap()
+            .unwrap();
+        assert!(a.peers.iter().all(|e| e.preshared_key.is_none()));
+        assert_eq!(
+            peers(&a),
+            ["key-p 203.0.113.1:51820 25 10.88.0.1,10.88.0.9"]
+        );
+        let wire = serde_json::to_value(&a).unwrap();
+        assert!(
+            wire["peers"][0].get("preshared_key").is_none(),
+            "older agents get exactly the fields they know"
+        );
+    }
+
+    #[test]
+    fn a_disabled_device_leaves_every_peer_list_and_comes_back() {
+        let mut device = member("d", Kind::Device, 9, None);
+        device.via = Some("p".into());
+        let mut members = vec![
+            member("p", Kind::Node, 1, Some("203.0.113.1:51820")),
+            member("q", Kind::Node, 3, Some("203.0.113.3:51820")),
+            member("a", Kind::Node, 2, None),
+            device,
+        ];
+        let keys = keys(&members);
+        // `q` relays, so `p` forwards only for its device.
+        let net = network(Some("q"));
+        let state = |members: &[Member]| {
+            let p = render(&net, members, &keys, "node-p", &none())
+                .unwrap()
+                .unwrap();
+            let a = render(&net, members, &keys, "node-a", &none())
+                .unwrap()
+                .unwrap();
+            (p.forwarding, peers(&p), peers(&a))
+        };
+        let enabled = state(&members);
+        assert_eq!(
+            enabled,
+            (
+                true,
+                vec![
+                    "key-a - 0 10.88.0.2".to_string(),
+                    "key-d - 0 10.88.0.9".to_string(),
+                    "key-q 203.0.113.3:51820 0 10.88.0.3".to_string(),
+                ],
+                vec![
+                    "key-p 203.0.113.1:51820 25 10.88.0.1,10.88.0.9".to_string(),
+                    "key-q 203.0.113.3:51820 25 10.88.0.3".to_string(),
+                ]
+            )
+        );
+        members[3].enabled = false;
+        assert_eq!(
+            state(&members),
+            (
+                false,
+                vec![
+                    "key-a - 0 10.88.0.2".to_string(),
+                    "key-q 203.0.113.3:51820 0 10.88.0.3".to_string(),
+                ],
+                vec![
+                    "key-p 203.0.113.1:51820 25 10.88.0.1".to_string(),
+                    "key-q 203.0.113.3:51820 25 10.88.0.3".to_string(),
+                ]
+            )
+        );
+        members[3].enabled = true;
+        assert_eq!(state(&members), enabled);
+    }
+
+    #[test]
+    fn dns_servers_and_allowed_ips_are_checked() {
+        assert_eq!(
+            dns_servers(&["::ffff:9.9.9.9".into()]).unwrap(),
+            ["9.9.9.9".parse::<IpAddr>().unwrap()]
+        );
+        for bad in [
+            vec!["dns.example.com"],
+            vec!["0.0.0.0"],
+            vec!["224.0.0.1"],
+            vec!["1.1.1.1", "1.1.1.1"],
+            vec!["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9"],
+        ] {
+            let list: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+            assert!(dns_servers(&list).is_err(), "{bad:?}");
+        }
+        let nets =
+            allowed_ips(&["10.88.0.0/24".into(), "192.168.1.7".into(), "::/0".into()]).unwrap();
+        let text: Vec<String> = nets.iter().map(ToString::to_string).collect();
+        assert_eq!(text, ["10.88.0.0/24", "192.168.1.7/32", "::/0"]);
+        for bad in [
+            vec!["10.88.0.1/24"],
+            vec!["10.88.0.0/33"],
+            vec!["office"],
+            vec!["0.0.0.0/0", "0.0.0.0/0"],
+        ] {
+            let list: Vec<String> = bad.iter().map(|s| s.to_string()).collect();
+            assert!(allowed_ips(&list).is_err(), "{bad:?}");
+        }
+        assert!(allowed_ips(&vec!["10.0.0.0/8".to_string(); MAX_ALLOWED_IPS + 1]).is_err());
     }
 }

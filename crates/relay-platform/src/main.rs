@@ -7,7 +7,11 @@ use relay_platform::{
     model::NodeConfig,
     store::{Store, private_directory, secret, write_secret},
 };
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
@@ -324,6 +328,15 @@ enum Command {
         tls_directory: Option<PathBuf>,
         #[arg(long,default_value_t=5,value_parser=clap::value_parser!(u64).range(1..=300))]
         poll_seconds: u64,
+        /// Connect to this HOST:PORT instead of the controller host's own
+        /// address, e.g. a TCP relay; repeat for fallbacks tried in order.
+        /// TLS still verifies the controller's name end to end.
+        #[arg(long = "controller-address", value_name = "HOST:PORT")]
+        controller_addresses: Vec<String>,
+        /// Send every controller request through this HTTP CONNECT proxy
+        /// (http://host:port). Environment proxy variables are never used.
+        #[arg(long, value_name = "URL", conflicts_with = "controller_addresses")]
+        controller_proxy: Option<String>,
     },
     /// Run the same forwarding engine without a controller.
     Standalone {
@@ -349,6 +362,23 @@ enum Command {
         database: PathBuf,
         #[arg(long)]
         output: PathBuf,
+    },
+    /// Set a new random password for a controller user while the controller
+    /// is stopped. Writes it to a private file and never prints it; the
+    /// user's sessions and API tokens are revoked.
+    ResetPassword {
+        #[arg(long, visible_alias = "state-dir", default_value = "state/controller")]
+        state: PathBuf,
+        /// The controller's recovery log (defaults to STATE/recovery.log, as for `server`).
+        #[arg(long)]
+        recovery_log: Option<PathBuf>,
+        /// Username whose password is replaced, e.g. admin.
+        #[arg(long)]
+        user: String,
+        /// Private file for the new password (defaults to STATE/USER-password.secret);
+        /// an existing file is replaced.
+        #[arg(long)]
+        password_file: Option<PathBuf>,
     },
     /// Restore a controller backup by replaying its latest log and head manifest.
     Restore {
@@ -1096,6 +1126,14 @@ async fn main() -> Result<()> {
                 Duration::from_secs(60),
                 stop.clone(),
             ));
+            // Provider DNS: every 30 s, after the 90 s heartbeat window so that
+            // agents report before their health gates are judged.
+            tokio::spawn(relay_platform::dns::run(
+                store.clone(),
+                Duration::from_secs(30),
+                Duration::from_secs(90),
+                stop.clone(),
+            ));
             let history = tokio::spawn(relay_platform::history::run(
                 store.clone(),
                 Duration::from_secs(60),
@@ -1116,6 +1154,15 @@ async fn main() -> Result<()> {
             stop.cancel();
             let _ = history.await;
         }
+        Command::ResetPassword {
+            state,
+            recovery_log,
+            user,
+            password_file,
+        } => {
+            let report = reset_password(&state, recovery_log, &user, password_file)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Restore {
             backup,
             recovery_log,
@@ -1133,6 +1180,8 @@ async fn main() -> Result<()> {
             ca_certificate,
             tls_directory,
             poll_seconds,
+            controller_addresses,
+            controller_proxy,
         } => {
             private_directory(&state)?;
             let store = Store::open(&state.join("agent.sqlite"))?;
@@ -1145,6 +1194,8 @@ async fn main() -> Result<()> {
                     ca_certificate,
                     tls_directory: Some(tls_directory.unwrap_or_else(|| state.join("tls"))),
                     poll_interval: Duration::from_secs(poll_seconds),
+                    controller_addresses,
+                    controller_proxy,
                 },
                 stop,
             )
@@ -1194,6 +1245,86 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+/// `relay reset-password`. Writes go through the store's recovery log like
+/// any controller write, so a later `relay restore` replays the reset.
+fn reset_password(
+    state: &Path,
+    recovery_log: Option<PathBuf>,
+    user: &str,
+    password_file: Option<PathBuf>,
+) -> Result<serde_json::Value> {
+    ensure!(relay_platform::model::identifier(user), "invalid username");
+    let database = state.join("controller.sqlite");
+    ensure!(
+        database.is_file(),
+        "{} has no controller database",
+        state.display()
+    );
+    // Opening the database as another account (often root) would leave files
+    // the service account cannot open, so the controller would not start.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::fs::metadata(&database)?.uid();
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let effective = unsafe { nix::libc::geteuid() };
+        ensure!(
+            owner == effective,
+            "run reset-password as the account that owns {} (uid {owner}), e.g. with sudo -u",
+            database.display()
+        );
+    }
+    let store = Store::open(&database)?;
+    let _instance = store
+        .lock_instance()
+        .context("stop the controller before resetting a password")?;
+    ensure!(
+        store.metadata("kind")?.as_deref() == Some("controller"),
+        "{} is not a controller database",
+        database.display()
+    );
+    store
+        .enable_recovery_log(&recovery_log.unwrap_or_else(|| state.join("recovery.log")))
+        .context("open the controller's recovery log (pass the server's --recovery-log if it is elsewhere)")?;
+    ensure!(!store.needs_bootstrap()?, "the controller has no users yet");
+    let path = password_file.unwrap_or_else(|| state.join(format!("{user}-password.secret")));
+    let directory = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .context("password file needs a file name")?
+        .to_string_lossy();
+    // The new password is durable in a private file before it is committed.
+    let temporary = directory.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
+    let password = secret();
+    write_secret(&temporary, password.as_bytes())?;
+    let reset = match store.reset_password_offline(user, &password) {
+        Ok(reset) => reset,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    std::fs::rename(&temporary, &path)
+        .and_then(|()| std::fs::File::open(directory)?.sync_all())
+        .with_context(|| {
+            format!(
+                "the password was changed; it is in {} because it could not be moved to {}",
+                temporary.display(),
+                path.display()
+            )
+        })?;
+    Ok(serde_json::json!({
+        "user": reset.username,
+        "user_id": reset.user_id,
+        "password_file": path,
+        "revoked_sessions": reset.revoked_sessions,
+        "revoked_api_tokens": reset.revoked_api_tokens,
+        "disabled": reset.disabled,
+    }))
 }
 async fn read_config(path: &PathBuf) -> Result<NodeConfig> {
     serde_json::from_slice(&tokio::fs::read(path).await?).context("invalid configuration JSON")

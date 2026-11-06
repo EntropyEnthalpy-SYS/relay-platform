@@ -8,7 +8,7 @@ use crate::commerce::{
     WebhookView, discount_for, validate_adjustment, validate_coupon, validate_gift_code,
     validate_plan,
 };
-pub(super) use entitlements::{clear_lapse, live_count, plan_lapsed, plan_managed};
+pub(super) use entitlements::{clear_lapse, live_count, plan, plan_lapsed, plan_managed};
 
 fn plan_key(id: &str) -> String {
     format!("commerce_plan:{id}")
