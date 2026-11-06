@@ -412,6 +412,21 @@ Each shared rule shows **Shared rule · N lines**, the state of every line, its 
 
 Each line listens on the listen IP from its server's connection defaults, or on every address. Speed limits and quotas apply to each line separately. A shared rule does not choose an entry for your clients and does not fail over between entries; use DNS or subscriptions for that. Shared rules use one port, not port ranges, and do not cover managed protocol services. See [Shared rules](SHARED_RULES.md).
 
+#### Server groups and saved chains
+
+An **endpoint group** is one layer of candidate servers, for example your relay servers in Hong Kong or your exit servers in Japan. The servers of a group are alternatives: the previous hop picks one of them, and traffic does not pass through them one after another. A **chain** puts groups in order as layers, so one forwarding runs client → entry server → a layer 1 server → a layer 2 server → … → destination. Save the layout once and reuse it for every new forwarding. The **Endpoint groups & chains** section sits below **Shared rules** on **All forwarding**.
+
+1. Click **＋ New endpoint group**, enter a name and add the servers under **Member servers (in order)** with **Add server**. **Move up**, **Move down** and **Remove** change the list. Make one group per layer.
+2. Click **＋ New chain**. For each layer choose **Layer N · endpoint group** and **How the previous hop chooses in this layer**, which is one of the balancing modes above; **＋ Add layer** adds the next layer. Leave **Enabled: new forwardings can be built from this chain** ticked.
+3. Click **New forwarding from this chain** on the chain, or **＋ New forwarding** → **From a saved chain** → **Use a saved chain**. Choose the chain, the entry server, a name, the protocol, the destination and, if you like, the entry port; the panel picks the remaining ports and addresses from each server's connection defaults.
+4. Click **Preview changes** to see the whole path diagram and the change on every server, then **Publish these changes**. The entry and every server of every layer get one new ordinary rule that targets all servers of the next layer; the last layer targets the destination. All servers change together: if a port is taken or a server's configuration changed since the preview, nothing is published.
+
+A forwarding built from a chain shows **Chain · name** on **All forwarding**, and the chain lists it under **Forwardings built from this chain**. You can edit, disable or delete its rules like any other multi-hop forwarding.
+
+Limits: a group has 1–32 servers of one tenant; a chain has 1–6 layers; a group can be only one layer of a chain and a server can be in only one layer; the entry server cannot be in the chain; one forwarding can touch at most 64 servers. Chains build plain TCP/UDP forwarding only, without WS/WSS tunnels, multipath or managed protocol services between servers. A layer that chooses by **Lowest latency** gets a connect probe automatically and needs TCP. Disabled chains cannot build new forwardings.
+
+Changing a group or a chain does **not** change forwardings already built from it. When a layer's group has gained or lost servers since a forwarding was built, the chain's list marks the forwarding **Group members changed** and names the servers added and removed, and its card on **All forwarding** shows the same mark. To use the new members, build the forwarding again from the chain and then delete the old one. A group that a chain uses cannot be deleted; deleting a chain keeps every rule built from it. See [Endpoint groups and chains](CHAINS.md) (Chinese).
+
 ### Proxy services and protocols
 
 Proxy services let the client choose the destination. They have no fixed targets, and by default they refuse to connect to loopback, private and link-local addresses. All of them use the same quotas, speed limits, source and destination rules and metering as ordinary forwarding.

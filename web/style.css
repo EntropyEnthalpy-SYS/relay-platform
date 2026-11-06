@@ -1199,3 +1199,11 @@ body[data-overview-layout="workspace"] .globe-list { max-height: 310px; }
   .log-text { flex-basis: 100%; }
   .diagnostics-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+.chain-members, .chain-layers { margin: 0; padding-left: 18px; }
+.chain-members > li + li, .chain-layers > li + li { margin-top: 4px; }
+.chain-members .badge { margin-left: 6px; }
+.chain-editor-list { margin: 8px 0; padding-left: 20px; }
+.chain-members.chain-editor-list > li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.chain-row-tools { display: inline-flex; gap: 6px; }
+.chain-layers.chain-editor-list > li { margin: 10px 0; padding: 2px 12px 10px; border: 1px solid var(--line); border-radius: 10px; }
+.chain-layers.chain-editor-list .toolbar { margin: 0; justify-content: flex-end; }

@@ -244,6 +244,8 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     } else if path.starts_with("nodes")
         || path.starts_with("configurations/")
         || path.starts_with("shared-rules")
+        || path.starts_with("endpoint-groups")
+        || path.starts_with("chains")
     {
         Scope::NodesWrite
     } else if path.starts_with("budgets") {
@@ -367,6 +369,21 @@ pub fn router(state: AppState) -> Router {
             axum::routing::put(update_shared_rule).delete(delete_shared_rule),
         )
         .route("/api/v1/shared-rules/{id}/pause", post(pause_shared_rule))
+        .route(
+            "/api/v1/endpoint-groups",
+            get(endpoint_groups).post(create_endpoint_group),
+        )
+        .route(
+            "/api/v1/endpoint-groups/{id}",
+            axum::routing::put(update_endpoint_group).delete(delete_endpoint_group),
+        )
+        .route("/api/v1/chains", get(chains).post(create_chain))
+        .route(
+            "/api/v1/chains/{id}",
+            axum::routing::put(update_chain).delete(delete_chain),
+        )
+        .route("/api/v1/chains/{id}/plan", post(plan_chain))
+        .route("/api/v1/chains/{id}/apply", post(apply_chain))
         .route("/api/v1/users", get(users).post(create_user))
         .route(
             "/api/v1/users/{user}/revoke-sessions",
@@ -1204,6 +1221,102 @@ async fn delete_shared_rule(
     })
     .await?;
     Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn endpoint_groups(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::chain::GroupView>> {
+    Ok(Json(
+        database(state.store, move |db| db.endpoint_groups(&actor)).await?,
+    ))
+}
+async fn create_endpoint_group(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::chain::GroupInput>,
+) -> ApiResult<crate::chain::GroupView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_endpoint_group(&actor, input)
+        })
+        .await?,
+    ))
+}
+async fn update_endpoint_group(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::chain::GroupInput>,
+) -> ApiResult<crate::chain::GroupView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_endpoint_group(&actor, &id, input)
+        })
+        .await?,
+    ))
+}
+async fn delete_endpoint_group(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_endpoint_group(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn chains(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::chain::ChainView>> {
+    Ok(Json(
+        database(state.store, move |db| db.chains(&actor)).await?,
+    ))
+}
+async fn create_chain(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::chain::ChainInput>,
+) -> ApiResult<crate::chain::ChainView> {
+    Ok(Json(
+        database(state.store, move |db| db.create_chain(&actor, input)).await?,
+    ))
+}
+async fn update_chain(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::chain::ChainInput>,
+) -> ApiResult<crate::chain::ChainView> {
+    Ok(Json(
+        database(state.store, move |db| db.update_chain(&actor, &id, input)).await?,
+    ))
+}
+async fn delete_chain(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_chain(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn plan_chain(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::chain::BuildInput>,
+) -> ApiResult<crate::chain::ChainPlan> {
+    Ok(Json(
+        database(state.store, move |db| db.plan_chain(&actor, &id, input)).await?,
+    ))
+}
+async fn apply_chain(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<crate::chain::BuildInput>,
+) -> ApiResult<crate::chain::ChainApplied> {
+    Ok(Json(
+        database(state.store, move |db| db.apply_chain(&actor, &id, input)).await?,
+    ))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

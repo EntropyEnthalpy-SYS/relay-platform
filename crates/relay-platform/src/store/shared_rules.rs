@@ -354,7 +354,7 @@ fn owner<'a>(rule: &'a Rule, actor: &'a Actor) -> &'a str {
         &rule.owner_id
     }
 }
-fn node_name(conn: &Connection, node: &str) -> Result<Option<String>> {
+pub(super) fn node_name(conn: &Connection, node: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row("SELECT name FROM nodes WHERE id=?1", [node], |r| r.get(0))
         .optional()?)

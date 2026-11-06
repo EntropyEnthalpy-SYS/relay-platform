@@ -1281,6 +1281,11 @@ function chooseSetup() {
     }
     group.append(grid); body.append(group);
   }
+  // Layers of candidate servers saved as a chain; planned by the controller.
+  const chained = el('section', undefined, 'setup-group'), chainGrid = el('div', undefined, 'setup-cards'), chainCard = button('', () => useChain(), 'setup-card');
+  chainCard.dataset.recipe = 'chain';
+  chainCard.append(el('span', translate('端点组 · 按层'), 'setup-scope'), el('strong', translate('使用已保存的转发链'), 'setup-title'), el('span', translate('选择入口和一条已保存的转发链：每层的服务器互为候选，地址和端口自动分配。'), 'setup-text'), el('span', translate('客户端 → 入口 → 第 1 层候选 → … → 最后一层候选 → 固定目标'), 'setup-route'));
+  chainGrid.append(chainCard); chained.append(el('h3', translate('按已保存的转发链')), chainGrid); body.append(chained);
   const more = el('div', undefined, 'setup-more'), copy = el('div');
   copy.append(el('strong', translate('需要其他协议或已有模板？')), el('p', translate('高级规则支持 SOCKS5、HTTP CONNECT、VLESS / Reality、Hysteria2 等全部选项。'), 'fine'));
   const links = el('div', undefined, 'toolbar'); links.append(button(translate('其他协议 / 高级规则'), () => startSetup('advanced')));
@@ -3938,8 +3943,9 @@ async function editDiagramRule(ref) {
 }
 async function renderTopology() {
   const actor = state.actor;
-  const [snapshot, recent, sharedRules] = await Promise.all([api('/topology'), monitoringHistory('1h'), api('/shared-rules')]);
+  const [snapshot, recent, sharedRules, groups, chains] = await Promise.all([api('/topology'), monitoringHistory('1h'), api('/shared-rules'), api('/endpoint-groups'), api('/chains')]);
   if (state.view !== 'topology' || !actor || state.actor !== actor) return;
+  const chainUses = new Map(chains.flatMap(chain => chain.uses.map(use => [`${use.entry_node_id}/${use.entry_rule_id}`, { chain, use }])));
   const names = new Map(snapshot.nodes.map(node => [node.id, node.name])), byId = new Map(snapshot.nodes.map(node => [node.id, node])), health = targetHealth(snapshot), conns = hopTotals(recent);
   const rules = new Map(snapshot.configs.flatMap(config => config.rules.map(rule => [`${config.node_id}/${rule.id}`, rule])));
   const roots = forwardingPathRoots(snapshot), ids = new Set();
@@ -3963,6 +3969,8 @@ async function renderTopology() {
     tags.append(badge(nodeIds.length > 1 ? msg`多跳 · ${nodeIds.length} 台服务器` : translate('单台服务器')), badge({ tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' }[model.root.protocol] || '—'));
     if (rule && !rule.enabled) tags.append(badge(translate('已停用'), 'orange'));
     if (model.issues.length) tags.append(badge(msg`需要检查 ${model.issues.length} 项`, 'orange'));
+    const origin = chainUses.get(key);
+    if (origin) tags.append(badge(msg`转发链 · ${origin.chain.name}`, 'blue'), ...(origin.use.out_of_date ? [badge(translate('组成员已变化'), 'orange')] : []));
     title.append(el('h3', rule?.name || translate('转发路径')), tags);
     const tools = el('div', undefined, 'path-actions');
     if (canWrite()) tools.append(button(nodeIds.length > 1 ? translate('编辑入口') : translate('编辑'), () => editDiagramRule(root), 'table-action'));
@@ -3992,7 +4000,7 @@ async function renderTopology() {
   }
   const status = panel(translate('节点应用状态'), translate('配置在控制器一次提交，各节点异步应用。修订一致不代表业务探测成功；改向前需停用相关链路，并确认涉及节点的全部活跃会话归零。'));
   status.append(table([translate('节点'), translate('实际 / 期望修订'), translate('活跃 TCP / UDP'), translate('回报'), translate('应用结果')], snapshot.nodes.filter(node => ids.has(node.id)).map(node => [node.name, `${node.applied_revision} / ${node.desired_revision}`, online(node) ? `${node.stats.active_tcp} / ${node.stats.active_udp}` : '—', timestamp(node.last_seen_ms), node.apply_error || applicationBadge(node).textContent])));
-  if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, sharedRulesPanel(sharedRules, snapshot.nodes), ...(roots.length ? [status] : []));
+  if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, sharedRulesPanel(sharedRules, snapshot.nodes), chainsPanel(groups, chains, snapshot.nodes), ...(roots.length ? [status] : []));
 }
 // One line per path: client, each server with its connect address, then the target.
 // The arrow after a server shows that server's latest probe of the next hop and the
@@ -4091,8 +4099,9 @@ async function hopHistory(box, model, name) {
   grid.append(el('span'), axis, el('span'));
   box.replaceChildren(head, grid);
 }
-async function previewTopology(snapshot, input, summary = '', back = null, diagramRoots = [], editHop = null) {
-  const preview = await api('/configurations/preview', { method: 'POST', body: input });
+// `source` lets a caller supply its own checked preview and publish step (saved chains).
+async function previewTopology(snapshot, input, summary = '', back = null, diagramRoots = [], editHop = null, source = {}) {
+  const preview = source.preview || await api('/configurations/preview', { method: 'POST', body: input });
   const body = el('div');
   const combined = { ...snapshot, configs: snapshot.configs.map(config => preview.configs.find(updated => updated.node_id === config.node_id) || config) };
   for (const root of diagramRoots) {
@@ -4103,7 +4112,7 @@ async function previewTopology(snapshot, input, summary = '', back = null, diagr
   body.append(el('p', translate('下面是服务器校验后的变更。发布会同时提交期望配置；节点应用结果请在「转发规则」页逐项确认。')), table([translate('节点'), translate('修订'), translate('新增 / 修改 / 删除规则')], preview.changes.map(change => [snapshot.nodes.find(node => node.id === change.node_id)?.name || change.node_id, `${change.from_revision} → ${change.to_revision}`, `${change.added.length} / ${change.modified.length} / ${change.removed.length}`])));
   for (const change of preview.changes) for (const diff of change.rule_changes) { const details = el('details'); details.append(el('summary', msg`${diff.after?.name || diff.before?.name} · 查看发布前后配置`), el('pre', JSON.stringify({ before: diff.before, after: diff.after }, null, 2))); body.append(details); }
   if (back) body.append(button(translate('返回编辑'), back));
-  body.append(button(translate('发布这些变更'), async () => { await api('/configurations/publish', { method: 'POST', body: input }); $('#dialog').close(); notify(translate('期望配置已同时提交，正在等待各节点应用。')); await navigate('topology'); }, 'primary'));
+  body.append(button(translate('发布这些变更'), async () => { await (source.publish ? source.publish() : api('/configurations/publish', { method: 'POST', body: input })); $('#dialog').close(); notify(translate('期望配置已同时提交，正在等待各节点应用。')); await navigate('topology'); }, 'primary'));
   modal(translate('发布前检查'), body);
 }
 async function changeTopologyComponent(snapshot, seed, enabled) {
@@ -4149,6 +4158,192 @@ async function deleteChainedRule(nodeId, rule) {
   const body = el('div');
   body.append(el('p', msg`「${rule.name}」是一条多服务器转发中的一跳，前面的服务器仍指向它，所以不能单独删除。请在「全部转发」里删除整条转发：它会先停止整条路线，再移除各跳规则。`, 'workflow-callout'), button(translate('打开全部转发'), async () => { $('#dialog').close(); await navigate('topology'); }, 'primary'));
   modal(msg`删除「${rule.name}」`, body);
+}
+// Endpoint groups and saved chains. A group is one layer of candidate servers: its members are
+// alternatives the previous hop chooses between, not consecutive hops. A chain orders groups into
+// layers. Building a forwarding from a chain is the controller's plan; the panel reviews it in the
+// usual publish preview and applies it in one batch.
+const chainBalances = localize([['weighted_round_robin', '加权轮询（默认）'], ['source_hash', '来源 IP 哈希'], ['least_connections', '最少连接'], ['lowest_latency', '最低延迟（仅 TCP，自动加连接探测）'], ['random', '随机']]);
+const balanceNames = localize({ weighted_round_robin: '加权轮询', source_hash: '来源 IP 哈希', least_connections: '最少连接', lowest_latency: '最低延迟', random: '随机' });
+function memberNames(members) { return members.map(member => member.node_name || member.node_id).join(' · ') || '—'; }
+// Listed on "All forwarding"; `nodes` names the servers of out-of-date changes.
+function chainsPanel(groups, chains, nodes) {
+  const names = new Map(nodes.map(node => [node.id, node.name])), named = ids => ids.map(id => names.get(id) || id).join(' · ');
+  const actions = el('div', undefined, 'toolbar');
+  if (canWrite()) actions.append(button(translate('＋ 新建端点组'), () => openEndpointGroup()), button(translate('＋ 新建转发链'), () => openChain(), groups.length ? 'primary' : 'subtle'));
+  const p = panel(translate('端点组与转发链'), translate('端点组是一层候选服务器：组内服务器互为备选，由上一跳按这一层的均衡方式选择其中一台，不是依次经过。转发链把端点组按顺序排成多层。在“新建转发”中选择“使用已保存的转发链”：入口和每层的每台服务器各得一条普通规则，指向下一层的全部服务器。'), canWrite() ? actions : null);
+  const body = el('div', undefined, 'panel-body');
+  body.append(el('h3', translate('已保存的端点组')));
+  if (!groups.length) body.append(el('p', translate('还没有端点组。为每一层（例如中转层、落地层）分别新建一个组。'), 'fine'));
+  else body.append(table([translate('名称'), translate('成员服务器（按顺序）'), translate('使用此组的转发链'), translate('操作')], groups.map(group => {
+    const name = el('div'); name.append(el('strong', group.name), el('div', group.description || msg`${group.members.length} 台服务器`, 'subline'));
+    const members = el('ol', undefined, 'chain-members');
+    for (const member of group.members) { const row = el('li', member.node_name || member.node_id); if (member.missing) row.append(badge(translate('服务器已删除'), 'red')); members.append(row); }
+    const tools = el('div');
+    if (canWrite()) tools.append(button(translate('编辑'), () => openEndpointGroup(group), 'table-action'), button(translate('删除'), () => deleteEndpointGroup(group), 'table-action danger'));
+    return [name, members, group.used_by.map(chain => chain.name).join(' · ') || '—', tools];
+  })));
+  body.append(el('h3', translate('已保存的转发链')));
+  if (!chains.length) body.append(el('p', groups.length ? translate('还没有转发链。点击“新建转发链”，按顺序选择每一层的端点组。') : translate('先新建端点组，再把它们按顺序组成转发链。'), 'fine'));
+  else body.append(table([translate('名称'), translate('层（按顺序）'), translate('用此链创建的转发'), translate('操作')], chains.map(chain => {
+    const name = el('div'); name.append(el('strong', chain.name), badge(chain.enabled ? translate('已启用') : translate('已停用'), chain.enabled ? 'green' : 'orange'));
+    const layers = el('ol', undefined, 'chain-layers');
+    chain.layers.forEach(layer => { const row = el('li'); row.append(el('strong', layer.group_name || layer.group_id), el('span', ` · ${balanceNames[layer.balance] || layer.balance}`), el('div', memberNames(layer.members), 'subline')); layers.append(row); });
+    const uses = el('div', undefined, 'shared-line-status');
+    for (const use of chain.uses) {
+      const row = el('div');
+      row.append(el('span', msg`${use.name || translate('已删除的转发')} · 入口 ${use.entry_node_name || use.entry_node_id}`));
+      if (use.missing) row.append(badge(translate('转发已删除'), 'red'));
+      else if (use.out_of_date) row.append(badge(translate('组成员已变化'), 'orange'));
+      uses.append(row);
+      for (const change of use.changes) uses.append(el('div', [msg`第 ${change.layer} 层`, change.added.length ? msg`新增 ${named(change.added)}` : '', change.removed.length ? msg`移除 ${named(change.removed)}` : ''].filter(Boolean).join(' · '), 'subline warning'));
+    }
+    if (!chain.uses.length) uses.append(el('span', '—'));
+    const tools = el('div');
+    if (canWrite()) {
+      if (chain.enabled) tools.append(button(translate('用此链新建转发'), () => useChain(chain.id), 'table-action'));
+      tools.append(button(translate('编辑'), () => openChain(chain), 'table-action'), button(translate('删除'), () => deleteChain(chain), 'table-action danger'));
+    }
+    return [name, layers, uses, tools];
+  })));
+  if (chains.some(chain => chain.uses.some(use => use.out_of_date))) body.append(el('p', translate('已创建的转发不会随端点组自动更新。“组成员已变化”表示创建之后组里增加或移除了服务器；要使用新的成员，请用此链重新创建转发，再删除旧转发。'), 'workflow-callout warning'));
+  p.append(body);
+  return p;
+}
+// An ordered member list: Up and Down set the order, Add offers servers of the group's tenant.
+async function openEndpointGroup(view = null) {
+  const nodes = await api('/nodes'); state.nodes = nodes;
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'group_name', translate('组名称'), view?.name || '').maxLength = 120;
+  field(grid, 'group_description', translate('说明（可留空）'), view?.description || '', 'text', false).maxLength = 2000;
+  form.append(grid, el('p', translate('一个端点组是转发链中的一层。组内服务器互为备选：上一跳按这一层的均衡方式选择其中一台，不会依次经过它们。请为每一层分别建组，不要把不同层的服务器放进同一个组。'), 'workflow-callout'));
+  const members = view ? view.members.filter(member => !member.missing).map(member => member.node_id) : [];
+  const missing = view ? view.members.length - members.length : 0;
+  if (missing) form.append(el('p', msg`${missing} 台服务器已删除，保存时从组中移除。`, 'fine'));
+  const box = el('fieldset', undefined, 'shared-lines'), list = el('ol', undefined, 'chain-members chain-editor-list'), adder = el('div', undefined, 'shared-port-row');
+  box.append(el('legend', translate('成员服务器（按顺序）')), list, adder);
+  const choice = select(adder, 'group_add', translate('添加服务器'), [], '');
+  const add = button(translate('添加'), () => { if (choice.value && !members.includes(choice.value)) members.push(choice.value); draw(); });
+  adder.append(add); form.append(box);
+  const name = id => nodes.find(node => node.id === id)?.name || id;
+  function draw() {
+    list.replaceChildren();
+    members.forEach((id, index) => {
+      const row = el('li'), tools = el('span', undefined, 'chain-row-tools');
+      const up = button(translate('上移'), () => { [members[index - 1], members[index]] = [members[index], members[index - 1]]; draw(); }, 'table-action'); up.disabled = index === 0;
+      const down = button(translate('下移'), () => { [members[index], members[index + 1]] = [members[index + 1], members[index]]; draw(); }, 'table-action'); down.disabled = index === members.length - 1;
+      tools.append(up, down, button(translate('移除'), () => { members.splice(index, 1); draw(); }, 'table-action'));
+      row.append(el('span', `${index + 1}. ${name(id)}`), tools); list.append(row);
+    });
+    if (!members.length) list.append(el('li', translate('还没有成员服务器。'), 'fine'));
+    const tenant = nodes.find(node => node.id === members[0])?.tenant_id;
+    const available = nodes.filter(node => !members.includes(node.id) && (!tenant || node.tenant_id === tenant));
+    choice.replaceChildren(...available.map(node => { const option = el('option', node.name || node.id); option.value = node.id; return option; }));
+    choice.value = available[0]?.id || '';
+    add.disabled = !available.length || members.length >= 32;
+  }
+  draw();
+  submit(form, view ? translate('保存端点组') : translate('创建端点组'), async data => {
+    if (!members.length) throw new Error(translate('请至少添加一台服务器。'));
+    const body = { name: String(data.get('group_name')).trim(), description: String(data.get('group_description') || '').trim(), members: [...members] };
+    await api(view ? `/endpoint-groups/${encodeURIComponent(view.id)}` : '/endpoint-groups', { method: view ? 'PUT' : 'POST', body });
+    $('#dialog').close(); notify(view ? translate('端点组已保存。已用转发链创建的转发保持不变，若成员变化会标为“组成员已变化”。') : translate('端点组已创建。')); await refresh();
+  });
+  modal(view ? msg`编辑端点组 · ${view.name}` : translate('新建端点组'), form);
+}
+async function deleteEndpointGroup(view) {
+  if (view.used_by.length) throw new Error(msg`转发链 ${view.used_by.map(chain => chain.name).join(' · ')} 使用此组，请先从转发链中移除它。`);
+  if (!await confirmAction(msg`删除端点组「${view.name}」？服务器和规则不受影响。`)) return;
+  await api(`/endpoint-groups/${encodeURIComponent(view.id)}`, { method: 'DELETE' });
+  notify(translate('端点组已删除。')); await refresh();
+}
+// Layers in order; each picks a group and the balance its candidates are chosen with.
+async function openChain(view = null) {
+  const groups = await api('/endpoint-groups');
+  if (!groups.length) throw new Error(translate('先新建端点组，再把它们按顺序组成转发链。'));
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  field(grid, 'chain_name', translate('转发链名称'), view?.name || '').maxLength = 120;
+  form.append(grid);
+  const enabled = checkbox(form, 'chain_enabled', translate('启用：可以用此链创建新的转发'));
+  enabled.checked = view ? view.enabled : true; enabled.parentElement.classList.add('inline-check');
+  form.append(el('p', translate('入口从第 1 层的服务器中选择一台，第 1 层再从第 2 层中选择一台，依此类推，最后一层连接目标。每层的均衡方式决定上一跳如何在这一层的服务器中选择。一个端点组只能作为一层，同一台服务器不能出现在两层中；最多 6 层。修改转发链不会改变已经创建的转发。'), 'workflow-callout'));
+  const layers = view ? view.layers.map(layer => ({ group_id: layer.group_id, balance: layer.balance })) : [{ group_id: groups[0].id, balance: 'weighted_round_robin' }];
+  const list = el('ol', undefined, 'chain-layers chain-editor-list');
+  const addLayer = button(translate('＋ 添加层'), () => { layers.push({ group_id: (groups.find(group => !layers.some(layer => layer.group_id === group.id)) || groups[0]).id, balance: 'weighted_round_robin' }); draw(); });
+  form.append(list, addLayer);
+  function draw() {
+    list.replaceChildren();
+    layers.forEach((layer, index) => {
+      const row = el('li'), fields = el('div', undefined, 'form-grid'), tools = el('div', undefined, 'toolbar');
+      const group = select(fields, `layer_group_${index}`, msg`第 ${index + 1} 层 · 端点组`, groups.map(item => [item.id, msg`${item.name}（${item.members.length} 台）`]), layer.group_id);
+      group.addEventListener('change', () => { layer.group_id = group.value; draw(); });
+      const balance = select(fields, `layer_balance_${index}`, translate('上一跳在这一层中的选择方式'), chainBalances, layer.balance);
+      balance.addEventListener('change', () => { layer.balance = balance.value; });
+      const up = button(translate('上移'), () => { [layers[index - 1], layers[index]] = [layers[index], layers[index - 1]]; draw(); }); up.disabled = index === 0;
+      const down = button(translate('下移'), () => { [layers[index], layers[index + 1]] = [layers[index + 1], layers[index]]; draw(); }); down.disabled = index === layers.length - 1;
+      const remove = button(translate('移除此层'), () => { layers.splice(index, 1); draw(); }); remove.disabled = layers.length === 1;
+      tools.append(up, down, remove);
+      row.append(fields, el('p', memberNames(groups.find(item => item.id === layer.group_id)?.members || []), 'fine'), tools); list.append(row);
+    });
+    addLayer.disabled = layers.length >= 6;
+  }
+  draw();
+  submit(form, view ? translate('保存转发链') : translate('创建转发链'), async data => {
+    const body = { name: String(data.get('chain_name')).trim(), enabled: enabled.checked, layers: layers.map(layer => ({ group_id: layer.group_id, balance: layer.balance })) };
+    await api(view ? `/chains/${encodeURIComponent(view.id)}` : '/chains', { method: view ? 'PUT' : 'POST', body });
+    $('#dialog').close(); notify(view ? translate('转发链已保存；已经创建的转发保持不变。') : translate('转发链已创建。')); await refresh();
+  });
+  modal(view ? msg`编辑转发链 · ${view.name}` : translate('新建转发链'), form);
+}
+async function deleteChain(view) {
+  if (!await confirmAction(msg`删除转发链「${view.name}」？用它创建的 ${view.uses.length} 条转发及其规则保持不变，只是不再显示来自此链。`)) return;
+  await api(`/chains/${encodeURIComponent(view.id)}`, { method: 'DELETE' });
+  notify(translate('转发链已删除；用它创建的转发保持不变。')); await refresh();
+}
+// New forwarding from a saved chain: the controller plans every rule and endpoint, the usual
+// publish preview shows the path, and publishing applies the plan's revisions in one batch.
+async function useChain(chainId = null) {
+  const [snapshot, chains, users] = await Promise.all([api('/topology'), api('/chains'), api('/users')]);
+  state.nodes = snapshot.nodes;
+  const usable = chains.filter(chain => chain.enabled), title = translate('使用已保存的转发链');
+  if (!usable.length) { modal(title, empty(translate('还没有可用的转发链'), translate('先在「全部转发」页下方的“端点组与转发链”中新建端点组和转发链，并确认转发链已启用。'), button(translate('前往全部转发'), async () => { $('#dialog').close(); await navigate('topology'); }, 'primary'))); return; }
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  form.append(el('p', translate('选择转发链和入口服务器。控制器按链为每台服务器生成规则并自动分配端口；先预览整条路径，再确认发布。所有服务器一次提交，任何一台失败都不会修改。'), 'workflow-callout'));
+  const chainField = select(grid, 'chain', translate('转发链'), usable.map(chain => [chain.id, chain.name]), usable.some(chain => chain.id === chainId) ? chainId : usable[0].id);
+  const entry = select(grid, 'entry_node_id', translate('入口服务器（客户端连接这里）'), [], '');
+  field(grid, 'name', translate('转发名称'), '').maxLength = 100;
+  const protocol = select(grid, 'protocol', translate('传输协议（TCP / UDP）'), [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], 'both');
+  field(grid, 'target', translate('最终目标（IP 或域名:端口）'), '').placeholder = 'destination.example.com:443';
+  const port = field(grid, 'entry_port', translate('入口端口（留空自动分配）'), '', 'number', false); port.min = 1; port.max = 65535;
+  const advanced = el('details'); advanced.append(el('summary', translate('高级选项：规则所有者')));
+  const owner = select(advanced, 'owner', translate('规则所有者（须与所有节点同一租户）'), users.map(user => [user.id, `${user.username} · ${user.tenant_id}`]), state.actor.id);
+  const route = el('p', '', 'workflow-callout'), layers = el('div');
+  form.append(grid, advanced, el('h3', translate('转发链的各层'), 'setup-step'), route, layers);
+  form.append(el('p', translate('只创建普通 TCP / UDP 转发，节点之间不加 WS / WSS 隧道或多路径。端口按已保存的配置避让，预览不会占用端口；防火墙需允许所示端口。'), 'fine'));
+  function show() {
+    const chain = usable.find(item => item.id === chainField.value), inside = new Set(chain.layers.flatMap(layer => layer.members.map(member => member.node_id)));
+    const candidates = snapshot.nodes.filter(node => node.tenant_id === chain.tenant_id && !inside.has(node.id)), previous = entry.value;
+    entry.replaceChildren(...candidates.map(node => { const option = el('option', node.name); option.value = node.id; return option; }));
+    entry.value = (candidates.find(node => node.id === previous) || candidates.find(node => node.id === state.selectedNode) || candidates[0])?.id || '';
+    const latency = chain.layers.some(layer => layer.balance === 'lowest_latency');
+    if (latency) protocol.value = 'tcp'; protocol.disabled = latency;
+    route.textContent = [translate('客户端'), translate('入口'), ...chain.layers.map((layer, index) => msg`第 ${index + 1} 层（${layer.members.length} 台候选 · ${balanceNames[layer.balance] || layer.balance}）`), translate('目标')].join(' → ');
+    layers.replaceChildren(table([translate('层'), translate('端点组'), translate('候选服务器'), translate('选择方式')], chain.layers.map((layer, index) => [String(index + 1), layer.group_name || layer.group_id, memberNames(layer.members), balanceNames[layer.balance] || layer.balance])));
+    if (!candidates.length) layers.append(el('p', translate('这个租户中没有链外的服务器可以作为入口。'), 'error'));
+  }
+  chainField.addEventListener('change', show); show();
+  submit(form, translate('预览发布内容'), async data => {
+    const chain = usable.find(item => item.id === chainField.value), rawPort = String(data.get('entry_port') ?? '').trim();
+    if (!entry.value) throw new Error(translate('这个租户中没有链外的服务器可以作为入口。'));
+    const body = { entry_node_id: entry.value, name: String(data.get('name')).trim(), protocol: protocol.value, target: String(data.get('target')).trim(), entry_port: rawPort ? Number(rawPort) : null };
+    if (owner.value && owner.value !== state.actor.id) body.owner_id = owner.value;
+    const path = `/chains/${encodeURIComponent(chain.id)}`, plan = await api(`${path}/plan`, { method: 'POST', body });
+    const expected_revisions = Object.fromEntries(plan.batch.updates.map(update => [update.node_id, update.expected_revision]));
+    const summary = msg`「${body.name}」经过 ${chain.layers.length} 层，在 ${plan.hops.length} 台服务器上各新建一条规则；客户端连接 ${plan.hops[0].advertise}。发布时如果任何一台服务器的配置已变化，全部不修改，请重新预览。`;
+    await previewTopology(snapshot, plan.batch, summary, () => modal(title, form), [{ node_id: body.entry_node_id, rule_id: plan.entry_rule_id }], null,
+      { preview: plan.preview, publish: () => api(`${path}/apply`, { method: 'POST', body: { ...body, expected_revisions } }) });
+  });
+  modal(title, form);
 }
 async function newTopologyChain(snapshot, preset = {}) {
   const minimum = preset.single ? 1 : 2;
