@@ -1050,6 +1050,15 @@ details.path-details[open] { padding-bottom: 14px; }
 .rollout-row label { margin: 0; }
 .rollout-row .subline { margin: 0 0 0 4px; }
 .rollout-row input:not([type="checkbox"]) { font-family: var(--mono); font-size: 12px; }
+.shared-lines { background: var(--surface-2); }
+.shared-lines legend { color: var(--accent); }
+.shared-line-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 0 14px; }
+.shared-line-list label { margin: 8px 0; }
+.shared-port-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; }
+.shared-port-row label { flex: 0 1 220px; margin: 8px 0 0; }
+.shared-line-status { display: flex; flex-direction: column; gap: 4px; }
+.shared-line-status > div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.shared-entries .mono { white-space: nowrap; overflow-wrap: normal; }
 .globe-body { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 260px; min-height: 0; }
 .globe { position: relative; height: 440px; min-width: 0; background: radial-gradient(ellipse at 50% 50%, color-mix(in srgb, var(--blue) 6%, transparent), transparent 70%); overflow: hidden; }
 .globe canvas { display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }

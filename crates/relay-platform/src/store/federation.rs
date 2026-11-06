@@ -89,6 +89,14 @@ pub(super) fn active_count(conn: &Connection) -> Result<usize> {
     )?)
 }
 
+/// Port ranges that shares not yet revoked hold on `node`.
+pub(super) fn reserved_ports(conn: &Connection, node: &str) -> Result<Vec<(u16, u16)>> {
+    Ok(all::<Grant>(conn, "grant")?
+        .into_iter()
+        .filter(|grant| grant.node_id == node && grant.state != State::Revoked)
+        .map(|grant| (grant.port_start, grant.port_end))
+        .collect())
+}
 fn overlaps(ip: IpAddr, start: u16, end: u16, rule: &Rule) -> bool {
     let last = rule.listen_end_port.unwrap_or(rule.listen.port());
     (ip == rule.listen.ip() || ip.is_unspecified() || rule.listen.ip().is_unspecified())

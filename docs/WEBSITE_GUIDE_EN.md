@@ -393,6 +393,25 @@ You cannot change the listener, reachable address, next hop or transport of a pu
 - **Multipath aggregation:** Relay's own multipath protocol carries one connection over up to eight mutually authenticated TCP subflows between two servers, either splitting data across them or copying it to each, with separate upload and download weights per path. Each path can leave through its own source address or interface. Different ports do not guarantee independent links; your servers' routing has to provide separate paths. See [Multipath](MULTIPATH.md).
 - **Linux MPTCP** (optional feature): each rule can set inbound and outbound MPTCP to off, prefer or require. **MPTCP extra paths** lets a server use additional local addresses for MPTCP, once its permission file is installed. See [MPTCP](MPTCP.md).
 
+#### One rule on several entry servers
+
+When the same service should be reachable through several entry servers, make it a **shared rule**. Each entry server is a *line*. Every line runs the same rule on the same port, and you create, edit, pause and delete it once. The **Shared rules** section sits below the list on both **All forwarding** and **By server**.
+
+1. Click **＋ New shared rule**. The usual rule editor opens with **1. Name, lines and port** at the top.
+2. Enter a name and tick the servers under **Lines (entry servers)**.
+3. Click **Auto pick** to get the lowest port that is free on every selected server inside their port ranges, or type a port and click **Check**. The table shows for each line whether the server is online, its port range, whether the port is free, and whether the rule passes validation. A port outside a server's range is only a warning, so a shared port such as 443 is fine. Checking does not reserve the port; saving checks again.
+4. Fill in the targets, protocol and limits as for any rule, then click **Create and publish to every line**. All servers change together: if the port is taken on one line, nothing is published and the table names that line.
+
+To turn an existing rule into a shared rule, open **By server** and click **Extend to several lines…** on the rule. It becomes the first line and keeps its ID, port and traffic counters; the servers you tick get a copy on the same port.
+
+Each shared rule shows **Shared rule · N lines**, the state of every line, its entry addresses with **Copy all**, and **Edit**, **Pause** / **Resume** and **Delete**:
+
+- **Edit** changes every line at once and can add or remove lines. Changing the port moves every line to the new port and restarts each line's traffic counters, so move your clients first.
+- Each server still holds an ordinary rule, and you can edit or delete it on its own. The shared rule then shows **Lines differ** with the fields that differ, or marks the line as gone; the next **Save to every line** makes them the same again.
+- **Delete** lists the lines and ports it removes. Tick **Delete only the shared rule and keep the rule on each line as an ordinary rule** to keep the rules.
+
+Each line listens on the listen IP from its server's connection defaults, or on every address. Speed limits and quotas apply to each line separately. A shared rule does not choose an entry for your clients and does not fail over between entries; use DNS or subscriptions for that. Shared rules use one port, not port ranges, and do not cover managed protocol services. See [Shared rules](SHARED_RULES.md).
+
 ### Proxy services and protocols
 
 Proxy services let the client choose the destination. They have no fixed targets, and by default they refuse to connect to loopback, private and link-local addresses. All of them use the same quotas, speed limits, source and destination rules and metering as ordinary forwarding.

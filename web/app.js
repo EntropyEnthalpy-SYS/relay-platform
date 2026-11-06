@@ -1311,7 +1311,7 @@ async function startSetup(id) {
 
 async function renderRules() {
   const actor = state.actor;
-  const nodes = await api('/nodes');
+  const [nodes, sharedRules] = await Promise.all([api('/nodes'), api('/shared-rules')]);
   if (state.view !== 'rules' || !actor || state.actor !== actor) return;
   state.nodes = nodes; const content = $('#content');
   if (!state.nodes.length) { content.replaceChildren(empty(translate('还没有节点'), translate('先注册节点，再创建规则。'), button(translate('前往节点管理'), () => navigate('nodes'), 'primary'))); return; }
@@ -1327,8 +1327,8 @@ async function renderRules() {
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [namedCell(rule.name, rule.id), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
-  content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p);
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p, sharedRulesPanel(sharedRules, state.nodes));
 }
 // Rules by server and complete paths are two views of the same configuration.
 function forwardingTabs(view, count) {
@@ -1467,32 +1467,172 @@ function mptcpEditor(value) {
   box.append(el('p', translate('MPTCP 需要 Linux 内核与对端支持。额外路径由节点网络配置决定；协商成功不代表已聚合多条线路。更改入口模式前请先停用并发布规则。'), 'fine'));
   return { box, gateway(on) { inbound.parentElement.classList.toggle('hidden', on); inbound.disabled = on; }, read: (protocol, gateway = false) => mptcpConfig(gateway ? 'off' : inbound.value, outbound.value, protocol) };
 }
+// Shared rules: one rule kept on several entry servers ("lines") with one listen port.
+// The lines editor picks servers and the port; Auto pick and Check ask the controller for a
+// per-line precheck, which reserves nothing.
+function sharedLinesEditor(form, nodes, options) {
+  const box = el('fieldset', undefined, 'shared-lines'), list = el('div', undefined, 'shared-line-list'), checks = [];
+  box.append(el('legend', translate('线路（入口服务器）')));
+  for (const node of nodes) {
+    const label = el('label', undefined, 'inline-check'), input = el('input');
+    input.type = 'checkbox'; input.value = node.id; input.checked = options.selected.includes(node.id);
+    label.append(input, document.createTextNode(node.name || node.id)); list.append(label); checks.push(input);
+  }
+  box.append(list);
+  const row = el('div', undefined, 'shared-port-row'), port = field(row, 'shared_port', translate('统一监听端口'), options.port ?? '', 'number', !options.fixedPort);
+  port.min = 1; port.max = 65535; port.disabled = !!options.fixedPort;
+  if (!options.fixedPort) row.append(button(translate('自动选号'), () => check(true)));
+  row.append(button(translate('检查'), () => check(false)));
+  const report = el('div', undefined, 'shared-precheck');
+  box.append(row, el('p', options.fixedPort ? translate('新线路沿用原规则的端口；检查只核对所选的新线路。') : translate('自动选号从所选服务器转发端口范围的交集中，挑选在全部线路上都空闲的最小端口；也可以手动填写后点击“检查”。预检不会预占端口，保存时会重新检查。'), 'fine'), report);
+  form.append(box);
+  const names = new Map(nodes.map(node => [node.id, node.name || node.id]));
+  const selected = () => checks.filter(input => input.checked).map(input => input.value);
+  function readPort() {
+    const value = Number(port.value);
+    if (!Number.isInteger(value) || value < 1 || value > 65535) throw new Error(translate('请输入 1 到 65535 之间的端口。'));
+    return value;
+  }
+  async function check(auto) {
+    const node_ids = selected();
+    if (!node_ids.length) throw new Error(translate('请至少选择一台服务器。'));
+    const body = { node_ids, listen_port: auto ? null : readPort(), rule: await options.readRule() };
+    if (options.id) body.id = options.id;
+    const result = await api('/shared-rules/precheck', { method: 'POST', body });
+    if (auto && result.listen_port) port.value = String(result.listen_port);
+    const summary = result.ok ? msg`端口 ${result.listen_port} 在全部 ${result.lines.length} 条线路上可用。` : result.error || translate('部分线路未通过预检，请查看下表。');
+    report.replaceChildren(el('p', summary, result.ok ? 'workflow-callout' : 'workflow-callout warning'), table([translate('线路'), translate('在线'), translate('端口范围'), translate('端口空闲'), translate('配置校验')], result.lines.map(line => [
+      line.node_name, badge(line.online ? translate('在线') : translate('离线'), line.online ? 'green' : 'orange'),
+      line.in_range ? `${line.port_start}–${line.port_end}` : msg`${line.port_start}–${line.port_end} · 不在范围内（仅提示）`,
+      badge(line.port_free ? translate('空闲') : translate('已占用'), line.port_free ? 'green' : 'red'),
+      line.valid ? badge(translate('通过'), 'green') : namedCell(translate('未通过'), line.error || '—')])));
+    return result;
+  }
+  return {
+    box, selected, port: readPort, check,
+    showErrors(lines) { report.replaceChildren(el('p', translate('以下线路未通过检查，没有发布任何修改：'), 'workflow-callout warning'), table([translate('线路'), translate('原因')], lines.map(line => [names.get(line.node_id) || line.node_id, line.error]))); },
+  };
+}
+const listenPort = listen => Number(String(listen).split(':').pop());
+function ruleNameCell(rule, membership) {
+  const cell = namedCell(rule.name, rule.id);
+  if (membership) cell.append(badge(msg`共同规则 · ${membership.members.length} 条线路`, 'blue'));
+  return cell;
+}
+function sharedTarget(rule) {
+  if (!rule) return '—';
+  if (rule.inbound_shadowsocks) return translate('Shadowsocks 代理服务');
+  if (rule.inbound_socks5) return translate('SOCKS5 代理服务');
+  if (rule.inbound_http_connect) return translate('HTTP CONNECT 代理服务');
+  if (rule.inbound_http2_connect) return 'HTTP/2 CONNECT';
+  return namedCell(rule.targets[0]?.address || '—', rule.targets.length > 1 ? msg`${rule.targets.length} 个目标` : translate('单一目标'));
+}
+// Listed on both forwarding pages; `nodes` supplies each line's application state.
+function sharedRulesPanel(rules, nodes) {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const p = panel(translate('共同规则'), translate('同一条规则运行在多台入口服务器（线路）上，使用同一个监听端口；创建、修改、暂停和删除一次作用于全部线路。每条线路上的成员仍是普通规则，客户端连接任意一个入口地址即可。'), canWrite() ? button(translate('＋ 新建共同规则'), () => openSharedRule(), 'primary') : null);
+  if (!rules.length) { p.append(el('p', translate('还没有共同规则。点击“新建共同规则”，或在「按服务器」的规则操作中选择“扩展到多条线路…”。'), 'fine')); return p; }
+  p.append(table([translate('名称'), translate('线路与状态'), translate('入口地址'), translate('目标'), translate('操作')], rules.map(view => {
+    const present = view.members.filter(member => !member.missing), entries = present.map(member => member.entry).filter(Boolean);
+    const name = el('div'); name.append(el('strong', view.name), el('div', msg`共同规则 · ${view.members.length} 条线路`, 'subline'));
+    if (view.drift.length) name.append(badge(translate('线路配置不一致'), 'orange'), el('div', msg`不同的字段：${view.drift.join(', ')}`, 'subline mono'));
+    const lines = el('div', undefined, 'shared-line-status');
+    for (const member of view.members) {
+      const row = el('div'), node = byId.get(member.node_id);
+      row.append(el('span', `${member.node_name || member.node_id} · ${member.rule ? listenPort(member.rule.listen) : view.listen_port}`), member.missing ? badge(translate('规则或服务器已不存在'), 'red') : !member.rule.enabled ? badge(translate('已暂停'), 'orange') : node ? applicationBadge(node) : badge('—'));
+      if (member.drift.length) row.append(badge(translate('与第一条线路不同'), 'orange'));
+      lines.append(row);
+    }
+    const entryCell = el('div', undefined, 'shared-entries');
+    for (const member of present) entryCell.append(el('div', member.entry || msg`${member.node_name || member.node_id}：未设置转发地址`, member.entry ? 'mono' : 'fine'));
+    if (entries.length) entryCell.append(button(translate('复制全部'), async () => { await navigator.clipboard.writeText(entries.join('\n')); notify(msg`已复制 ${entries.length} 个入口地址。`); }, 'table-action'));
+    const tools = el('div');
+    if (canWrite()) {
+      const paused = present.length > 0 && present.every(member => !member.rule.enabled);
+      tools.append(button(translate('编辑'), () => openSharedRule(view), 'table-action'), button(paused ? translate('恢复运行') : translate('暂停'), () => pauseSharedRule(view, !paused), 'table-action'), button(translate('删除'), () => deleteSharedRule(view), 'table-action danger'));
+    }
+    return [name, lines, entryCell, sharedTarget(present[0]?.rule), tools];
+  })));
+  return p;
+}
+// The form is the rule editor in shared mode; the common fields start from the first present line.
+async function openSharedRule(view = null) {
+  const nodes = await api('/nodes'); state.nodes = nodes;
+  const first = view?.members.find(member => !member.missing);
+  const reference = first?.node_id || (nodes.find(node => node.id === state.selectedNode) || nodes[0])?.id;
+  if (!reference) throw new Error(translate('先注册节点，再创建规则。'));
+  const config = await api(`/nodes/${encodeURIComponent(reference)}/config`);
+  await editRule(undefined, { ...(first?.rule || {}), name: view?.name || '', shared: { id: view?.id || null, name: view?.name || '', reference: config, selected: view ? view.members.filter(member => !member.missing).map(member => member.node_id) : [], port: view?.listen_port ?? null, drift: view?.drift || [], missing: view ? view.members.length - view.members.filter(member => !member.missing).length : 0 } });
+}
+async function pauseSharedRule(view, paused) {
+  if (paused && !await confirmAction(msg`暂停「${view.name}」的全部 ${view.members.filter(member => !member.missing).length} 条线路？这些规则会停止接受新连接。`)) return;
+  await api(`/shared-rules/${encodeURIComponent(view.id)}/pause`, { method: 'POST', body: { paused } });
+  notify(paused ? translate('全部线路已暂停。') : translate('全部线路已恢复。')); await refresh();
+}
+function deleteSharedRule(view) {
+  const form = el('form'), present = view.members.filter(member => !member.missing), list = el('ul');
+  form.append(el('p', present.length ? msg`删除「${view.name}」会删除下列 ${present.length} 条线路上的规则并终止其会话，历史账本保留：` : translate('全部线路都已不存在，删除只移除共同规则本身。'), 'workflow-callout warning'));
+  for (const member of present) list.append(el('li', msg`${member.node_name || member.node_id} · 端口 ${listenPort(member.rule.listen)}`));
+  form.append(list);
+  const keep = checkbox(form, 'keep_rules', translate('只删除共同规则，保留各线路上的规则，之后作为普通规则单独管理'));
+  submit(form, translate('删除'), async () => {
+    await api(`/shared-rules/${encodeURIComponent(view.id)}${keep.checked ? '?keep_rules=true' : ''}`, { method: 'DELETE' });
+    $('#dialog').close(); notify(keep.checked ? translate('共同规则已删除，各线路上的规则保留。') : translate('共同规则及其全部线路上的规则已删除。')); await refresh();
+  });
+  modal(msg`删除共同规则 · ${view.name}`, form, 'confirm');
+}
+// An ordinary rule becomes the first line and keeps its id, port and counters.
+function extendRule(config, rule) {
+  const tenant = state.nodes.find(node => node.id === config.node_id)?.tenant_id, nodes = state.nodes.filter(node => node.tenant_id === tenant && node.id !== config.node_id);
+  if (!nodes.length) throw new Error(translate('同一租户中没有其他服务器可以添加。'));
+  const form = el('form'), port = listenPort(rule.listen);
+  form.append(el('p', msg`「${rule.name}」会成为共同规则的第一条线路，保留规则编号、端口 ${port} 和流量统计；所选服务器上会新建配置相同、端口相同的规则。`, 'workflow-callout'));
+  const lines = sharedLinesEditor(form, nodes, { selected: [], port, fixedPort: true, readRule: async () => rule });
+  submit(form, translate('扩展到所选线路'), async () => {
+    const add_node_ids = lines.selected();
+    if (!add_node_ids.length) throw new Error(translate('请至少选择一台服务器。'));
+    try { await api('/shared-rules/from-rule', { method: 'POST', body: { node_id: config.node_id, rule_id: rule.id, add_node_ids } }); }
+    catch (error) { if (error.detail?.lines) lines.showErrors(error.detail.lines); throw error; }
+    $('#dialog').close(); notify(msg`「${rule.name}」已扩展为共同规则，全部线路已同时提交。`); await refresh();
+  });
+  modal(msg`扩展到多条线路 · ${rule.name}`, form);
+}
 async function editRule(existing, seed = {}) {
-  let baseConfig = state.config, nodeLoad = null;
+  const shared = seed.shared; let baseConfig = shared?.reference || state.config, nodeLoad = null;
   const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || seed, asTemplate = seed.template;
   if (asTemplate) {
     form.append(el('h3', translate('1. 模板名称与用途'), 'setup-step'));
     const about = el('div', undefined, 'form-grid'); field(about, 'template_name', translate('模板名称'), asTemplate.name || '').maxLength = 120;
     field(about, 'template_description', translate('模板说明（可留空）'), asTemplate.description || '', 'text', false).maxLength = 2000;
     form.append(about, el('p', translate('模板保存下方的规则内容。使用模板时再选择服务器、填写名称和监听地址；这里不会发布任何配置。'), 'workflow-callout'));
-  } else form.append(el('h3', translate('1. 选择运行 VPS 与服务'), 'setup-step'));
+  } else form.append(el('h3', shared ? translate('1. 名称、线路与端口') : translate('1. 选择运行 VPS 与服务'), 'setup-step'));
   const extraGrid = el('div', undefined, 'form-grid');
   if ([r.inbound_shadowsocks, r.inbound_socks5, r.inbound_http_connect, r.inbound_http2_connect, r.protocol_gateway].filter(Boolean).length > 1) throw new Error(translate('每条规则只能启用一种代理入口'));
   const tenant = state.nodes.find(n => n.id === baseConfig.node_id).tenant_id;
   const runOn = select(grid, 'run_on', asTemplate ? translate('参考服务器（只用于选择下一跳，不会发布）') : translate('运行节点 / VPS'), state.nodes.filter(n => n.tenant_id === tenant).map(n => [n.id, n.name || n.id]), baseConfig.node_id);
   runOn.disabled = !!existing;
-  const purpose = select(grid, 'rule_purpose', translate('规则用途'), localize([['forward', '端口转发 · 入口或中转'], ['ss', 'Shadowsocks · 出口代理服务'], ['socks5', 'SOCKS5 · 代理服务'], ['http', 'HTTP CONNECT · 代理服务'], ['h2', 'HTTP/2 CONNECT · 代理服务'], ['gateway', '受管协议 · VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess']]), serviceKind(r));
+  if (shared) sectionVisible(runOn.parentElement, false);
+  const purpose = select(grid, 'rule_purpose', translate('规则用途'), localize([['forward', '端口转发 · 入口或中转'], ['ss', 'Shadowsocks · 出口代理服务'], ['socks5', 'SOCKS5 · 代理服务'], ['http', 'HTTP CONNECT · 代理服务'], ['h2', 'HTTP/2 CONNECT · 代理服务'], ['gateway', '受管协议 · VLESS / Reality / Hysteria2 / TUIC / AnyTLS / Trojan / VMess']]).filter(([kind]) => !shared || kind !== 'gateway'), serviceKind(r));
   const ruleName = field(grid, 'name', translate('规则名称'), r.name || ''); ruleName.maxLength = 120;
   if (asTemplate) sectionVisible(ruleName.parentElement, false);
   const protocolControl = select(grid, 'protocol', translate('传输协议（TCP / UDP）'), [['tcp', 'TCP'], ['udp', 'UDP'], ['both', 'TCP + UDP']], r.protocol || 'tcp');
   const listenControl = field(grid, 'listen', translate('监听地址'), r.protocol_gateway?.listen || r.listen || '127.0.0.1:9000');
-  const advertise = field(grid, 'advertise', translate('客户端 / 上一跳连接地址（VPS 公网 IP 或域名:端口）'), r.advertise || '', 'text', !!seed.name && !asTemplate); advertise.placeholder = 'vps.example.com:9000';
+  const advertise = field(grid, 'advertise', translate('客户端 / 上一跳连接地址（VPS 公网 IP 或域名:端口）'), r.advertise || '', 'text', !!seed.name && !asTemplate && !shared); advertise.placeholder = 'vps.example.com:9000';
   const endPort = field(extraGrid, 'listen_end_port', translate('结束端口（留空只监听一个端口，最多 256 个）'), r.listen_end_port, 'number', false); endPort.min = 1; endPort.max = 65535;
   const mapping = select(extraGrid, 'port_mapping', translate('端口段的目标映射'), [['fixed', translate('全部入口连接同一目标端口')], ['offset', translate('按入口端口偏移目标端口')]], r.port_mapping || 'fixed');
   const balance = select(extraGrid, 'balance', translate('目标分配'), [['weighted_round_robin', translate('加权轮询')], ['source_hash', translate('来源 IP 哈希')], ['least_connections', translate('最少连接')], ['lowest_latency', translate('最低延迟（须启用健康探测）')], ['random', translate('随机（同优先级内均匀选择，忽略权重）')]], r.balance || 'weighted_round_robin'); form.append(grid);
   // A template runs nowhere until it is used, so it does not name a server here.
   const placement = el('p', '', asTemplate ? 'workflow-callout hidden' : 'workflow-callout'), reachability = el('p', '', 'fine'); form.append(placement, reachability);
+  // A shared rule runs on every chosen line; each line keeps its own listen host.
+  const lines = shared ? sharedLinesEditor(form, state.nodes.filter(n => n.tenant_id === tenant), { id: shared.id, selected: shared.selected, port: shared.port, readRule: () => readRule(new FormData(form)) }) : null;
+  if (shared) {
+    sectionVisible(listenControl.parentElement, false);
+    if (shared.id) form.append(el('p', translate('修改统一监听端口时，全部线路一起换号，各线路的流量统计重新开始；请先安排客户端改用新端口。'), 'fine'));
+    if (shared.drift.length) form.append(el('p', msg`线路配置不一致：${shared.drift.join(', ')}。保存会把这些字段统一为当前表单的值（表单取自第一条线路）。`, 'workflow-callout warning'));
+    if (shared.missing) form.append(el('p', msg`${shared.missing} 条线路的规则或服务器已不存在，保存时会从共同规则中移除。`, 'fine'));
+  }
   function describePlacement() {
+    if (shared) { placement.textContent = translate('共同规则在每条所选线路上各运行一条相同的规则：监听地址取服务器转发设置中的监听 IP，未设置时监听全部地址。'); reachability.textContent = translate('发布配置不会自动修改防火墙；请在每台服务器上放行这个端口。'); return; }
     const node = state.nodes.find(n => n.id === runOn.value);
     placement.textContent = purpose.value === 'forward' ? msg`运行于 ${node.name}：将流量转发到下方目标。多跳转发请在“新建转发”中选择多跳方式。` : purpose.value === 'gateway' ? msg`服务运行于 ${node.name}。此节点须先安装受支持的协议引擎并准备证书或 Reality 配置；保存规则不会自动下载安装引擎。` : msg`代理服务运行于 ${node.name}，由此节点连接客户端请求的目的地。Agent 已内置该服务，无需另装服务端。`;
     reachability.textContent = splitEndpoint(listenControl.value)?.loopback ? translate('当前监听仅限本机。其他 VPS 无法直接连接；跨 VPS 请使用可达网卡地址，并允许对应端口。') : translate('监听地址属于所选 VPS；可达地址用于客户端或上一跳连接。发布配置不会自动修改防火墙。');
@@ -1530,9 +1670,9 @@ async function editRule(existing, seed = {}) {
       });
     }
     balance.parentElement.classList.toggle('hidden', server);
-    sectionVisible(advertise.parentElement, !gateway.enabled());
-    sectionVisible(endPort.parentElement, !gateway.enabled());
-    sectionVisible(mapping.parentElement, !server);
+    sectionVisible(advertise.parentElement, !gateway.enabled() && !shared);
+    sectionVisible(endPort.parentElement, !gateway.enabled() && !shared);
+    sectionVisible(mapping.parentElement, !server && !shared);
     mptcp.gateway(gateway.enabled());
     if (proxyInput) sectionVisible(proxyInput, !gateway.enabled());
     for (const [kind, editor] of Object.entries(services)) { sectionVisible(editor.box, purpose.value === kind); if (purpose.value === kind) editor.box.open = true; }
@@ -1615,7 +1755,7 @@ async function editRule(existing, seed = {}) {
   }
   const options = el('details'); options.append(el('summary', translate('配额、端口范围与高级选项')), extraGrid, mptcp.box, routing, transport, inboundWs.box, proxyInput, limits, details);
   form.append(options);
-  const pathView = forwardingPathView(); if (!asTemplate) form.append(el('h3', translate('3. 检查并预览发布'), 'setup-step'), pathView.box);
+  const pathView = forwardingPathView(); if (!asTemplate && !shared) form.append(el('h3', translate('3. 检查并预览发布'), 'setup-step'), pathView.box);
   function redrawPath() {
     const data = new FormData(form), draft = { id: r.id || 'draft', tenant_id: tenant, protocol: protocolControl.value,
       listen: listenControl.value, advertise: purpose.value === 'gateway' ? null : advertise.value, listen_end_port: endPort.value, port_mapping: mapping.value,
@@ -1636,6 +1776,15 @@ async function editRule(existing, seed = {}) {
     await previewTopology(topology, { updates: [{ node_id: baseConfig.node_id, expected_revision: baseConfig.revision, rules: rulesFor(rule) }] }, '',
       () => modal(existing ? translate('编辑节点规则') : translate('添加节点规则或代理服务'), form), [{ node_id: baseConfig.node_id, rule_id: rule.id }]);
   }));
+  if (shared) {
+    submit(form, shared.id ? translate('保存到全部线路') : translate('创建并发布到全部线路'), async data => {
+      const rule = await readRule(data), body = { name: rule.name, node_ids: lines.selected(), listen_port: lines.port(), rule };
+      if (!body.node_ids.length) throw new Error(translate('请至少选择一台服务器。'));
+      try { await api(shared.id ? `/shared-rules/${encodeURIComponent(shared.id)}` : '/shared-rules', { method: shared.id ? 'PUT' : 'POST', body }); }
+      catch (error) { if (error.detail?.lines) lines.showErrors(error.detail.lines); throw error; }
+      $('#dialog').close(); notify(translate('共同规则已保存，全部线路的期望配置已同时提交。')); await refresh();
+    }); modal(shared.id ? msg`编辑共同规则 · ${shared.name}` : translate('新建共同规则'), form); return;
+  }
   if (asTemplate) {
     submit(form, translate('保存模板'), async data => {
       const rule = { ...await readRule(data), name: String(data.get('template_name')).trim() }, body = { tenant_id: asTemplate.id ? asTemplate.tenant_id : state.actor.role === 'system_admin' ? null : state.actor.tenant_id, name: String(data.get('template_name')).trim(), description: String(data.get('template_description')).trim(), rule, variables: asTemplate.variables || {} };
@@ -3789,7 +3938,7 @@ async function editDiagramRule(ref) {
 }
 async function renderTopology() {
   const actor = state.actor;
-  const [snapshot, recent] = await Promise.all([api('/topology'), monitoringHistory('1h')]);
+  const [snapshot, recent, sharedRules] = await Promise.all([api('/topology'), monitoringHistory('1h'), api('/shared-rules')]);
   if (state.view !== 'topology' || !actor || state.actor !== actor) return;
   const names = new Map(snapshot.nodes.map(node => [node.id, node.name])), byId = new Map(snapshot.nodes.map(node => [node.id, node])), health = targetHealth(snapshot), conns = hopTotals(recent);
   const rules = new Map(snapshot.configs.flatMap(config => config.rules.map(rule => [`${config.node_id}/${rule.id}`, rule])));
@@ -3843,7 +3992,7 @@ async function renderTopology() {
   }
   const status = panel(translate('节点应用状态'), translate('配置在控制器一次提交，各节点异步应用。修订一致不代表业务探测成功；改向前需停用相关链路，并确认涉及节点的全部活跃会话归零。'));
   status.append(table([translate('节点'), translate('实际 / 期望修订'), translate('活跃 TCP / UDP'), translate('回报'), translate('应用结果')], snapshot.nodes.filter(node => ids.has(node.id)).map(node => [node.name, `${node.applied_revision} / ${node.desired_revision}`, online(node) ? `${node.stats.active_tcp} / ${node.stats.active_udp}` : '—', timestamp(node.last_seen_ms), node.apply_error || applicationBadge(node).textContent])));
-  if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, ...(roots.length ? [status] : []));
+  if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, sharedRulesPanel(sharedRules, snapshot.nodes), ...(roots.length ? [status] : []));
 }
 // One line per path: client, each server with its connect address, then the target.
 // The arrow after a server shows that server's latest probe of the next hop and the

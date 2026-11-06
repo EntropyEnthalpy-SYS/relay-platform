@@ -31,6 +31,7 @@ mod leases;
 mod node_profiles;
 mod recovery;
 mod reservations;
+mod shared_rules;
 mod subscriptions;
 mod sync;
 mod templates;
@@ -599,7 +600,8 @@ impl Store {
     /// Deletes a node that can no longer run: it holds no credential or live
     /// lease, and no other node, DNS record, template or budget points at it.
     /// Its rules, usage and configuration history go with it; the audit log,
-    /// rollout history and the used-credential fence are kept.
+    /// rollout history and the used-credential fence are kept. A shared rule
+    /// with a line on it shows that line as missing.
     pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
         const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
         let mut conn = self.0.lock().unwrap();
@@ -623,7 +625,7 @@ impl Store {
         let reference: Option<String> = tx
             .query_row(
                 &format!("SELECT 'node '||n.name FROM nodes n JOIN config_history c ON c.node_id=n.id AND c.revision IN (n.desired_revision,n.applied_revision) WHERE n.id<>?1 AND instr(c.config_json,?1)>0
-                 UNION ALL SELECT key FROM metadata WHERE instr(value,?1)>0 AND NOT ({OWNED}) AND key NOT GLOB 'retired_node_*' AND key NOT GLOB 'rollout:*'
+                 UNION ALL SELECT key FROM metadata WHERE instr(value,?1)>0 AND NOT ({OWNED}) AND key NOT GLOB 'retired_node_*' AND key NOT GLOB 'rollout:*' AND key NOT GLOB 'shared_rule:*'
                  UNION ALL SELECT 'budget '||id FROM budgets WHERE scope='node' AND scope_id=?1
                  UNION ALL SELECT 'budget grant '||id FROM budget_grants WHERE node_id=?1
                  UNION ALL SELECT 'budget request '||request_id FROM cancelled_budget_requests WHERE node_id=?1

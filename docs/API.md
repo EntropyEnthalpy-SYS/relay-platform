@@ -645,3 +645,21 @@ Public routes the receiving panel calls on the owner (`Authorization: Bearer <64
 | POST | `/federation/peer/grant/ack` | `statement` the receiver saw → `{ok:true}` |
 
 A revoked share or an unknown secret returns 401; all peer routes return 409 while the owner's `federation` switch is off. `PUT /features/federation {enabled:false}` returns 409 while any share is not revoked or any received share is kept.
+
+## Shared rules
+
+One forwarding rule kept on several entry servers ("lines") with the same listen port; see [SHARED_RULES.md](SHARED_RULES.md). Each line holds an ordinary rule on its node, so agents and the rule format are unchanged; the controller keeps only the membership record in metadata (`shared_rule:<id>`). Reads need a session or a token with `read`; every other route needs a writable role and, for tokens, `nodes:write`, like rules. A shared rule belongs to the tenant of its lines; all lines must share one tenant, and other tenants get 404. Audit actions are `shared_rule.create`, `shared_rule.update`, `shared_rule.pause` and `shared_rule.delete`.
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| GET | `/shared-rules` | `[{id, tenant_id, name, listen_port, created_at_ms, updated_at_ms, drift:[path], members:[{node_id, rule_id, node_name, missing, rule, entry, drift:[path]}]}]` |
+| POST | `/shared-rules/precheck` | `{node_ids, listen_port\|null, rule, id?}` → `{listen_port, ok, error, lines:[{node_id, node_name, online, in_range, port_start, port_end, port_free, valid, error}]}`; reserves nothing. `listen_port: null` picks the lowest port inside every line's forwarding range (default 20000–29999) that is free on all of them; `id` (when editing) keeps that shared rule's own lines from counting as taken |
+| POST | `/shared-rules` | `{name, node_ids, listen_port, rule}`: 1–32 distinct nodes; one new rule per node, published in one batch |
+| POST | `/shared-rules/from-rule` | `{node_id, rule_id, add_node_ids}`: the rule becomes the first line and keeps its id, port and counters; copies go to the added nodes on the same port. 409 when the rule already belongs to a shared rule |
+| PUT | `/shared-rules/{id}` | `{name, node_ids, listen_port, rule}`: the full set of lines; sets the common fields on every line, adds and removes lines, and gives every line a new meter epoch when the port changes. An empty `node_ids` is 400 |
+| POST | `/shared-rules/{id}/pause` | `{paused}`: sets `enabled` on every line in one batch |
+| DELETE | `/shared-rules/{id}` | Deletes every line's rule in one batch and the record; `?keep_rules=true` deletes only the record → `{ok:true}` |
+
+`rule` is a rule object whose common fields apply to every line. `id`, `tenant_id`, `meter_epoch`, `name` and `listen` may be left out: the outer `name` and `listen_port` win, and each line gets its own identity, its node's forwarding listen IP (or `0.0.0.0`) and keeps its own `advertise`. An omitted `owner_id` means the caller. Port ranges (`listen_end_port`) and managed protocol gateways are refused with 400. `port_free` counts every rule on the node whose port or range contains the port, enabled or not, plus gateway ports and the port ranges of cross-panel shares; `in_range` is advice only. `entry` is the node's forwarding host with the port, else the rule's `advertise`, else a specific listen address, else `null`. `drift` lists common-field paths (such as `targets[0].address` or `listen_port`) where a line differs from the first present line; `missing` lines lost their rule or node and are dropped from the record by the next save.
+
+Errors: 400 invalid input, 403 permission, 404 unknown or invisible, 409 conflicts (the port is taken on a line, a revision changed, the rule already belongs to a shared rule). When the cause is on particular lines the body adds `lines: [{node_id, error}]`; nothing is changed on any line.

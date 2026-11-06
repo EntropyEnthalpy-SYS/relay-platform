@@ -149,7 +149,13 @@ impl IntoResponse for ApiError {
                 "internal operation failed".into(),
             )
         };
-        (status, Json(serde_json::json!({"error":message}))).into_response()
+        let mut body = serde_json::json!({"error":message});
+        if let Some(lines) = self.0.downcast_ref::<crate::shared_rule::LineErrors>()
+            && status != StatusCode::INTERNAL_SERVER_ERROR
+        {
+            body["lines"] = serde_json::json!(lines.0);
+        }
+        (status, Json(body)).into_response()
     }
 }
 type ApiResult<T> = Result<Json<T>, ApiError>;
@@ -235,7 +241,10 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
     }
     let needed = if method == Method::GET || method == Method::HEAD {
         Scope::Read
-    } else if path.starts_with("nodes") || path.starts_with("configurations/") {
+    } else if path.starts_with("nodes")
+        || path.starts_with("configurations/")
+        || path.starts_with("shared-rules")
+    {
         Scope::NodesWrite
     } else if path.starts_with("budgets") {
         Scope::BudgetsWrite
@@ -347,6 +356,17 @@ pub fn router(state: AppState) -> Router {
             post(allocate_endpoints),
         )
         .route("/api/v1/configurations/publish", post(publish_batch))
+        .route(
+            "/api/v1/shared-rules",
+            get(shared_rules).post(create_shared_rule),
+        )
+        .route("/api/v1/shared-rules/precheck", post(precheck_shared_rule))
+        .route("/api/v1/shared-rules/from-rule", post(extend_rule))
+        .route(
+            "/api/v1/shared-rules/{id}",
+            axum::routing::put(update_shared_rule).delete(delete_shared_rule),
+        )
+        .route("/api/v1/shared-rules/{id}/pause", post(pause_shared_rule))
         .route("/api/v1/users", get(users).post(create_user))
         .route(
             "/api/v1/users/{user}/revoke-sessions",
@@ -1061,6 +1081,129 @@ async fn publish_batch(
     Ok(Json(
         database(state.store, move |db| db.publish_configs(&actor, batch)).await?,
     ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedRuleBody {
+    name: String,
+    node_ids: Vec<String>,
+    listen_port: u16,
+    rule: serde_json::Value,
+}
+impl SharedRuleBody {
+    fn input(self) -> anyhow::Result<crate::shared_rule::SharedRuleInput> {
+        Ok(crate::shared_rule::SharedRuleInput {
+            name: self.name,
+            node_ids: self.node_ids,
+            listen_port: self.listen_port,
+            rule: crate::shared_rule::rule_from_json(self.rule)?,
+        })
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedRulePrecheck {
+    #[serde(default)]
+    id: Option<String>,
+    node_ids: Vec<String>,
+    listen_port: Option<u16>,
+    rule: serde_json::Value,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedRulePause {
+    paused: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedRuleDelete {
+    #[serde(default)]
+    keep_rules: bool,
+}
+async fn shared_rules(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::shared_rule::SharedRuleView>> {
+    Ok(Json(
+        database(state.store, move |db| db.shared_rules(&actor)).await?,
+    ))
+}
+async fn precheck_shared_rule(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<SharedRulePrecheck>,
+) -> ApiResult<crate::shared_rule::Precheck> {
+    Ok(Json(
+        database(state.store, move |db| {
+            let input = crate::shared_rule::PrecheckInput {
+                id: input.id,
+                node_ids: input.node_ids,
+                listen_port: input.listen_port,
+                rule: crate::shared_rule::rule_from_json(input.rule)?,
+            };
+            db.precheck_shared_rule(&actor, input)
+        })
+        .await?,
+    ))
+}
+async fn create_shared_rule(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<SharedRuleBody>,
+) -> ApiResult<crate::shared_rule::SharedRuleView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_shared_rule(&actor, input.input()?)
+        })
+        .await?,
+    ))
+}
+async fn extend_rule(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(input): Json<crate::shared_rule::FromRuleInput>,
+) -> ApiResult<crate::shared_rule::SharedRuleView> {
+    Ok(Json(
+        database(state.store, move |db| db.extend_rule(&actor, input)).await?,
+    ))
+}
+async fn update_shared_rule(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<SharedRuleBody>,
+) -> ApiResult<crate::shared_rule::SharedRuleView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_shared_rule(&actor, &id, input.input()?)
+        })
+        .await?,
+    ))
+}
+async fn pause_shared_rule(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(input): Json<SharedRulePause>,
+) -> ApiResult<crate::shared_rule::SharedRuleView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.pause_shared_rule(&actor, &id, input.paused)
+        })
+        .await?,
+    ))
+}
+async fn delete_shared_rule(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Query(query): Query<SharedRuleDelete>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| {
+        db.delete_shared_rule(&actor, &id, query.keep_rules)
+    })
+    .await?;
+    Ok(Json(serde_json::json!({"ok": true})))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

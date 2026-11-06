@@ -78,7 +78,7 @@ fn retirement_barrier(
     }
     Ok(())
 }
-fn prepare(
+pub(super) fn prepare(
     conn: &Connection,
     clocks: &mut leases::LeaseClocks,
     actor: &Actor,
