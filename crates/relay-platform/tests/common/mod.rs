@@ -88,6 +88,7 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         allow_destination_ports: vec![],
         deny_destination_ports: vec![],
         deny_sources: vec![],
+        reverse_tunnel: None,
     }
 }
 pub fn config(rule: Rule) -> NodeConfig {

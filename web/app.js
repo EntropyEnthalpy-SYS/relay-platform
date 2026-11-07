@@ -1332,7 +1332,7 @@ async function renderRules() {
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p, sharedRulesPanel(sharedRules, state.nodes));
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -1522,6 +1522,7 @@ const listenPort = listen => Number(String(listen).split(':').pop());
 function ruleNameCell(rule, membership) {
   const cell = namedCell(rule.name, rule.id);
   if (membership) cell.append(badge(msg`共同规则 · ${membership.members.length} 条线路`, 'blue'));
+  if (rule.reverse_tunnel) cell.append(badge(translate('反向隧道公网端'), 'blue'));
   return cell;
 }
 function sharedTarget(rule) {
@@ -3943,12 +3944,12 @@ async function editDiagramRule(ref) {
 }
 async function renderTopology() {
   const actor = state.actor;
-  const [snapshot, recent, sharedRules, groups, chains] = await Promise.all([api('/topology'), monitoringHistory('1h'), api('/shared-rules'), api('/endpoint-groups'), api('/chains')]);
+  const [snapshot, recent, sharedRules, groups, chains, tunnels] = await Promise.all([api('/topology'), monitoringHistory('1h'), api('/shared-rules'), api('/endpoint-groups'), api('/chains'), api('/reverse-tunnels')]);
   if (state.view !== 'topology' || !actor || state.actor !== actor) return;
   const chainUses = new Map(chains.flatMap(chain => chain.uses.map(use => [`${use.entry_node_id}/${use.entry_rule_id}`, { chain, use }])));
   const names = new Map(snapshot.nodes.map(node => [node.id, node.name])), byId = new Map(snapshot.nodes.map(node => [node.id, node])), health = targetHealth(snapshot), conns = hopTotals(recent);
   const rules = new Map(snapshot.configs.flatMap(config => config.rules.map(rule => [`${config.node_id}/${rule.id}`, rule])));
-  const roots = forwardingPathRoots(snapshot), ids = new Set();
+  const roots = forwardingRootsWithoutTunnels(snapshot), ids = new Set();
   const actions = el('div');
   if (canWrite() && roots.length) actions.append(button(translate('批量编辑'), () => editTopologyBatch(snapshot)));
   const p = panel(translate('从客户端到目标'), translate('每一行是一条完整转发：客户端连接入口，经过一台或多台服务器到达目标。展开可查看路径图，点击图中的服务器即可编辑那一段。'), actions);
@@ -4000,7 +4001,7 @@ async function renderTopology() {
   }
   const status = panel(translate('节点应用状态'), translate('配置在控制器一次提交，各节点异步应用。修订一致不代表业务探测成功；改向前需停用相关链路，并确认涉及节点的全部活跃会话归零。'));
   status.append(table([translate('节点'), translate('实际 / 期望修订'), translate('活跃 TCP / UDP'), translate('回报'), translate('应用结果')], snapshot.nodes.filter(node => ids.has(node.id)).map(node => [node.name, `${node.applied_revision} / ${node.desired_revision}`, online(node) ? `${node.stats.active_tcp} / ${node.stats.active_udp}` : '—', timestamp(node.last_seen_ms), node.apply_error || applicationBadge(node).textContent])));
-  if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, sharedRulesPanel(sharedRules, snapshot.nodes), chainsPanel(groups, chains, snapshot.nodes), ...(roots.length ? [status] : []));
+  if (state.view === 'topology') $('#content').replaceChildren(forwardingTabs('topology', roots.length), p, sharedRulesPanel(sharedRules, snapshot.nodes), chainsPanel(groups, chains, snapshot.nodes), reverseTunnelsPanel(tunnels), ...(roots.length ? [status] : []));
 }
 // One line per path: client, each server with its connect address, then the target.
 // The arrow after a server shows that server's latest probe of the next hop and the
@@ -4158,6 +4159,160 @@ async function deleteChainedRule(nodeId, rule) {
   const body = el('div');
   body.append(el('p', msg`「${rule.name}」是一条多服务器转发中的一跳，前面的服务器仍指向它，所以不能单独删除。请在「全部转发」里删除整条转发：它会先停止整条路线，再移除各跳规则。`, 'workflow-callout'), button(translate('打开全部转发'), async () => { $('#dialog').close(); await navigate('topology'); }, 'primary'));
   modal(msg`删除「${rule.name}」`, body);
+}
+// Reverse tunnels (NAT traversal). A public server accepts users on a public port; a private server
+// behind NAT that cannot accept inbound connections keeps an outbound, encrypted tunnel to it and
+// hands each user to a target it can reach. The public end is an ordinary rule on the public server,
+// metered and limited like any rule; the tunnel decides its port, protocol, target and switch.
+const tunnelProtocols = { tcp: 'TCP', udp: 'UDP', tcp_udp: 'TCP + UDP' };
+// The controller and the agents explain a waiting or failed tunnel in English; known reasons are
+// shown in the panel's language, others as they are.
+const tunnelReasons = {
+  'the public server was deleted': '公网服务器已删除',
+  'the private server was deleted': '内网服务器已删除',
+  "the public server's agent is too old for reverse tunnels; upgrade it": 'Agent 版本过旧：公网服务器的 Agent 不支持反向隧道，请升级',
+  "the private server's agent is too old for reverse tunnels; upgrade it": 'Agent 版本过旧：内网服务器的 Agent 不支持反向隧道，请升级',
+  'the public server has not connected to the panel yet': '公网服务器尚未连接面板',
+  'the private server has not connected to the panel yet': '内网服务器尚未连接面板',
+  "waiting for the public server's key": '等待公网服务器的密钥',
+  "the public server has no forwarding host, so the private server cannot reach the tunnel port; set it in the public server's forwarding settings": '公网服务器没有设置转发地址，内网服务器无法连接隧道端口；请在公网服务器的转发设置中填写',
+  'the public server is offline': '公网服务器离线',
+  'the private server is offline': '内网服务器离线',
+  "waiting for the public server's configuration": '等待公网服务器应用配置',
+  'waiting for the private server to connect': '等待内网服务器连入',
+  'the public server does not have this tunnel yet': '公网服务器尚未收到这条隧道',
+  'the public server rejected the tunnel token': '公网服务器拒绝了隧道令牌',
+  "the public server's key does not match its reported fingerprint": '公网服务器的密钥与其回报的指纹不符',
+};
+// A reverse tunnel's public end is listed with its tunnel, not as a forwarding path of its own.
+function forwardingRootsWithoutTunnels(snapshot) {
+  const ends = new Set((snapshot.configs || []).flatMap(config => config.rules.filter(rule => rule.reverse_tunnel).map(rule => `${config.node_id}/${rule.id}`)));
+  return forwardingPathRoots(snapshot).filter(root => !ends.has(`${root.node_id}/${root.rule_id}`));
+}
+function tunnelReason(reason) { return reason ? translate(tunnelReasons[reason] || reason) : ''; }
+function tunnelDuration(secs) { return secs < 60 ? msg`${secs} 秒` : secs < 3600 ? msg`${Math.floor(secs / 60)} 分钟` : secs < 86400 ? msg`${Math.floor(secs / 3600)} 小时` : msg`${Math.floor(secs / 86400)} 天`; }
+function reverseTunnelsPanel(tunnels) {
+  const p = panel(translate('反向隧道（NAT 穿透）'), translate('内网服务器在 NAT 或家庭路由器之后、无法接受入站连接时使用：它主动连出，与公网服务器保持一条加密隧道；用户连接公网服务器的公网端口，每个连接经隧道送到内网服务器能访问的目标。'), canWrite() ? button(translate('＋ 新建反向隧道'), () => openReverseTunnel(), 'primary') : null);
+  if (!tunnels.length) { p.append(el('p', translate('还没有反向隧道。两台服务器都需要运行支持反向隧道的 Agent。'), 'fine')); return p; }
+  const states = { connected: [translate('已连接'), 'green'], waiting: [translate('等待中'), 'orange'], error: [translate('异常'), 'red'], disabled: [translate('已停用'), ''] };
+  const server = (missing, name, id, ...details) => { const cell = el('div'); cell.append(el('strong', missing ? id : name || id), ...details.map(detail => el('div', detail, 'subline mono'))); if (missing) cell.append(badge(translate('服务器已删除'), 'red')); return cell; };
+  p.append(table([translate('名称 · 协议'), translate('公网服务器 · 端口'), translate('内网服务器 · 目标'), translate('状态'), translate('用户入口地址'), translate('流量'), translate('操作')], tunnels.map(view => {
+    const name = el('div'); name.append(el('strong', view.name), el('div', tunnelProtocols[view.protocol] || view.protocol, 'subline'));
+    const [label, color] = states[view.state] || [view.state, ''], stateCell = el('div');
+    stateCell.append(badge(label, color));
+    if (view.state === 'connected' && view.connected_for_secs != null) stateCell.append(el('div', msg`已建立 ${tunnelDuration(view.connected_for_secs)}`, 'subline'));
+    if (view.reason) stateCell.append(el('div', tunnelReason(view.reason), 'subline wrap'));
+    const entry = el('div');
+    // The button sits in its own box so the address itself never wraps.
+    if (view.entry) { const copy = el('div'); copy.append(button(translate('复制'), async () => { await navigator.clipboard.writeText(view.entry); notify(msg`已复制 ${view.entry}。`); }, 'table-action')); entry.append(el('div', view.entry, 'mono'), copy); }
+    else entry.append(el('div', translate('未设置转发地址'), 'fine'));
+    const tools = el('div');
+    if (canWrite()) {
+      if (!view.public_missing && !view.private_missing) {
+        tools.append(button(translate('编辑'), () => openReverseTunnel(view), 'table-action'));
+        if (view.rule_id) tools.append(button(translate('访问与限速'), () => limitReverseTunnel(view), 'table-action'));
+        tools.append(button(view.enabled ? translate('停用') : translate('启用'), () => switchReverseTunnel(view), 'table-action'));
+      }
+      tools.append(button(translate('删除'), () => deleteReverseTunnel(view), 'table-action danger'));
+    }
+    const traffic = el('div'); traffic.append(el('div', `↑ ${bytes(view.upload_bytes)}`), el('div', `↓ ${bytes(view.download_bytes)}`));
+    return [name, server(view.public_missing, view.public_node_name, view.public_node_id, msg`公网端口 ${view.public_port}`, msg`隧道端口 ${view.tunnel_port}`), server(view.private_missing, view.private_node_name, view.private_node_id, view.target), stateCell, entry, traffic, tools];
+  })));
+  return p;
+}
+// The request body of a tunnel; `enabled` stays as it was when editing.
+function readReverseTunnel(data, view) {
+  const port = key => { const text = String(data.get(key) ?? '').trim(), value = Number(text); if (!/^\d+$/.test(text) || value < 1 || value > 65535) throw new Error(translate('端口必须是 1 到 65535 之间的整数。')); return value; };
+  const name = String(data.get('tunnel_name') || '').trim(), target = String(data.get('target') || '').trim(), listen = String(data.get('listen_ip') || '').trim();
+  if (!name) throw new Error(translate('请填写名称。'));
+  if (!data.get('private_node_id')) throw new Error(translate('请选择内网服务器：它必须与公网服务器属于同一租户，且不是同一台服务器。'));
+  if (!/^(\[[0-9a-fA-F:.]+\]|[^\s:[\]/]+):\d{1,5}$/.test(target)) throw new Error(translate('目标必须是 host:端口，例如 127.0.0.1:8080 或 192.168.10.20:8080。'));
+  const body = { name, public_node_id: data.get('public_node_id'), private_node_id: data.get('private_node_id'), public_port: port('public_port'), listen_ip: listen || null, protocol: data.get('protocol'), target, tunnel_port: port('tunnel_port'), enabled: view ? view.enabled : true };
+  if (body.public_port === body.tunnel_port) throw new Error(translate('公网端口和隧道端口不能相同。'));
+  return body;
+}
+async function openReverseTunnel(view = null) {
+  const [nodes, tunnels] = await Promise.all([api('/nodes'), api('/reverse-tunnels')]); state.nodes = nodes;
+  if (nodes.length < 2) throw new Error(translate('反向隧道需要两台服务器：一台公网服务器和一台内网服务器。'));
+  const form = el('form'), grid = el('div', undefined, 'form-grid'), named = list => list.map(node => [node.id, node.name || node.id]);
+  field(grid, 'tunnel_name', translate('名称'), view?.name || '').maxLength = 120;
+  const publicNode = select(grid, 'public_node_id', translate('公网服务器（接受用户连接）'), named(nodes), view?.public_node_id || (nodes.find(node => node.id === state.selectedNode) || nodes[0]).id);
+  const privateNode = select(grid, 'private_node_id', translate('内网服务器（在 NAT 后，主动连出）'), [], '');
+  const portRow = el('div', undefined, 'shared-port-row');
+  const port = field(portRow, 'public_port', translate('公网端口（用户连接）'), view?.public_port ?? '', 'number'); port.min = 1; port.max = 65535;
+  portRow.append(button(translate('自动选择'), autoPort)); grid.append(portRow);
+  const target = field(grid, 'target', translate('目标（内网服务器看到的 host:端口）'), view?.target || ''); target.placeholder = '127.0.0.1:8080';
+  select(grid, 'protocol', translate('协议'), [['tcp', 'TCP'], ['udp', 'UDP'], ['tcp_udp', 'TCP + UDP']], view?.protocol || 'tcp');
+  form.append(grid);
+  const advanced = el('details', undefined, 'advanced-options'), more = el('div', undefined, 'form-grid');
+  advanced.append(el('summary', translate('高级选项')), more);
+  const tunnelPort = field(more, 'tunnel_port', translate('隧道端口（内网服务器连出到公网服务器的端口，同一台公网服务器上的隧道共用）'), view?.tunnel_port ?? 29123, 'number'); tunnelPort.min = 1; tunnelPort.max = 65535;
+  field(more, 'listen_ip', translate('公网端口的监听 IP（留空使用公网服务器转发设置中的监听 IP）'), view?.listen_ip || '', 'text', false).placeholder = '0.0.0.0';
+  if (view?.listen_ip || (view && view.tunnel_port !== 29123)) advanced.open = true;
+  form.append(advanced);
+  const help = el('ul', undefined, 'fine tunnel-help');
+  for (const text of [translate('公网端口给用户连接；隧道端口给内网服务器主动连出。'), translate('目标里的 127.0.0.1 指内网服务器自己；也可以填写内网服务器能访问的局域网地址，例如 192.168.10.20:8080。'), translate('请在公网服务器的云防火墙 / 安全组中放行公网端口和隧道端口（隧道端口只需 TCP；协议含 UDP 时公网端口还需放行 UDP）。'), translate('隧道使用 TLS 加密：内网服务器校验公网服务器回报的密钥指纹，再用这条隧道独有的令牌认证。令牌只发给这两台服务器，不会显示。')]) help.append(el('li', text));
+  form.append(help);
+  if (view) form.append(el('p', translate('更换公网或内网服务器会生成新的隧道令牌；更换公网端口后，流量统计从新的周期开始。'), 'fine'));
+  function drawPrivate() {
+    const tenant = nodes.find(node => node.id === publicNode.value)?.tenant_id, keep = privateNode.value || view?.private_node_id;
+    const choices = nodes.filter(node => node.tenant_id === tenant && node.id !== publicNode.value);
+    privateNode.replaceChildren(...named(choices).map(([id, text]) => { const option = el('option', text); option.value = id; return option; }));
+    privateNode.value = choices.some(node => node.id === keep) ? keep : choices[0]?.id || '';
+  }
+  publicNode.addEventListener('change', drawPrivate); drawPrivate();
+  // The lowest port of the public server's forwarding range that no rule and no other tunnel holds there.
+  async function autoPort() {
+    const node = nodes.find(n => n.id === publicNode.value), range = node?.profile?.settings?.forwarding;
+    if (!range) throw new Error(translate('公网服务器没有设置转发端口范围；请手动填写公网端口，或先在服务器的转发设置中设置端口范围。'));
+    const config = await api(`/nodes/${encodeURIComponent(node.id)}/config`), taken = new Set([Number(tunnelPort.value)]);
+    for (const rule of config.rules) {
+      if (view && rule.reverse_tunnel === view.id) continue;
+      const start = listenPort(rule.listen), end = rule.listen_end_port || start;
+      for (let p = start; p <= end; p++) taken.add(p);
+      if (rule.protocol_gateway) taken.add(listenPort(rule.protocol_gateway.listen));
+    }
+    for (const other of tunnels) if (other.id !== view?.id && other.public_node_id === node.id) taken.add(other.public_port).add(other.tunnel_port);
+    for (let p = range.port_start; p <= range.port_end; p++) if (!taken.has(p)) { port.value = String(p); return; }
+    throw new Error(translate('公网服务器的转发端口范围内没有空闲端口。'));
+  }
+  submit(form, view ? translate('保存反向隧道') : translate('创建反向隧道'), async data => {
+    const body = readReverseTunnel(data, view);
+    await api(view ? `/reverse-tunnels/${encodeURIComponent(view.id)}` : '/reverse-tunnels', { method: view ? 'PUT' : 'POST', body });
+    $('#dialog').close(); notify(view ? translate('反向隧道已保存，两台服务器在下次同步时生效。') : translate('反向隧道已创建。两台服务器的 Agent 就绪后自动建立隧道。')); await refresh();
+  });
+  modal(view ? msg`编辑反向隧道 · ${view.name}` : translate('新建反向隧道'), form);
+}
+async function switchReverseTunnel(view) {
+  if (view.enabled && !await confirmAction(msg`停用「${view.name}」？公网端口会关闭，进行中的连接会断开，内网服务器停止连出。`)) return;
+  const { name, public_node_id, private_node_id, public_port, protocol, target, tunnel_port } = view;
+  await api(`/reverse-tunnels/${encodeURIComponent(view.id)}`, { method: 'PUT', body: { name, public_node_id, private_node_id, public_port, listen_ip: view.listen_ip ?? null, protocol, target, tunnel_port, enabled: !view.enabled } });
+  notify(view.enabled ? translate('反向隧道已停用。') : translate('反向隧道已启用。')); await refresh();
+}
+async function deleteReverseTunnel(view) {
+  if (!await confirmAction(msg`删除反向隧道「${view.name}」？公网端口会关闭，内网服务器停止连出；历史账本保留。`)) return;
+  await api(`/reverse-tunnels/${encodeURIComponent(view.id)}`, { method: 'DELETE' });
+  notify(translate('反向隧道已删除。')); await refresh();
+}
+// Source rules and limits of the public end, the rule fields a tunnel leaves to the operator.
+async function limitReverseTunnel(view) {
+  const path = `/nodes/${encodeURIComponent(view.public_node_id)}/config`, config = await api(path), rule = config.rules.find(r => r.id === view.rule_id);
+  if (!rule) throw new Error(translate('公网端还没有运行；两台服务器就绪后再设置。'));
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  textarea(grid, 'allow_sources', translate('允许来源 CIDR（留空允许所有未拒绝来源，每行一个）'), (rule.allow_sources || []).join('\n'));
+  textarea(grid, 'deny_sources', translate('拒绝来源 CIDR（优先于允许列表，每行一个）'), (rule.deny_sources || []).join('\n'));
+  field(grid, 'rate_bytes_per_sec', translate('合并速率 / bytes/s（留空不限）'), rule.rate_bytes_per_sec ?? '', 'number', false).min = 1;
+  const most = field(grid, 'max_connections', translate('TCP 最大连接'), rule.max_connections ?? 4096, 'number'); most.min = 1; most.max = 1000000;
+  form.append(grid, el('p', translate('这些限制作用于公网端口上的用户连接，与普通规则相同；流量计入公网服务器的流量账本。'), 'fine'));
+  submit(form, translate('保存'), async data => {
+    const lines = key => String(data.get(key) || '').split('\n').map(s => s.trim()).filter(Boolean), rate = String(data.get('rate_bytes_per_sec') || '').trim(), most = Number(data.get('max_connections'));
+    if (rate && !(Number.isInteger(Number(rate)) && Number(rate) >= 1)) throw new Error(translate('速率必须是正整数 bytes/s，留空不限。'));
+    if (!(Number.isInteger(most) && most >= 1 && most <= 1000000)) throw new Error(translate('TCP 最大连接必须在 1 到 1000000 之间。'));
+    const changed = { ...rule, allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources'), rate_bytes_per_sec: rate ? Number(rate) : null, max_connections: most };
+    await api(path, { method: 'PUT', body: { expected_revision: config.revision, rules: config.rules.map(r => r.id === rule.id ? changed : r) } });
+    $('#dialog').close(); notify(translate('访问与限速已发布到公网服务器。')); await refresh();
+  });
+  modal(msg`访问与限速 · ${view.name}`, form);
 }
 // Endpoint groups and saved chains. A group is one layer of candidate servers: its members are
 // alternatives the previous hop chooses between, not consecutive hops. A chain orders groups into

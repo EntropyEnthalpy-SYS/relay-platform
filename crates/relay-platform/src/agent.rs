@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 mod budget_recovery;
 mod credentials;
 mod lease_client;
+mod reverse_tunnel;
 mod wireguard;
 use credentials::SharedCredential;
 
@@ -334,6 +335,10 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     )?;
     // Reported only to a controller that sent a desired state.
     let mut overlay_report: Option<crate::wireguard::Report> = None;
+    let mut tunnels = reverse_tunnel::Tunnels::new(&store, engine.reverse_tunnels().clone())?;
+    // Reported only to a controller that sent tunnels, as older ones reject
+    // the unknown field.
+    let mut tunnel_reporting = false;
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
@@ -362,7 +367,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 let body: serde_json::Value = bounded_json(response).await?;
                 Ok::<_, anyhow::Error>((
                     body["desired_revision"].as_u64().unwrap_or(0),
-                    body["wireguard_changed"] == true,
+                    body["wireguard_changed"] == true || body["reverse_tunnels_changed"] == true,
                 ))
             };
             match watched.await {
@@ -370,7 +375,8 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     seen = revision;
                     published.notify_one();
                 }
-                // NAT traversal moved a path: sync now so both sides switch together.
+                // NAT traversal moved a path, or a reverse tunnel changed:
+                // sync now so both sides switch together.
                 Ok((_, true)) => published.notify_one(),
                 Ok(_) => {}
                 Err(error) => {
@@ -501,6 +507,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     stats.mptcp_paths = mptcp_report.clone();
                     stats.authoritative_dns = dns_reporting.then(|| dns.report());
                     stats.wireguard = overlay_report.clone();
+                    stats.reverse_tunnel = tunnel_reporting.then(|| tunnels.report());
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -542,6 +549,13 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                                 Some(desired) => Some(overlay.reconcile(&store, desired).await),
                                 None => None,
                             };
+                            // An older controller sends none: no tunnels.
+                            tunnel_reporting = synced.reverse_tunnels.is_some();
+                            if let Err(error) = tunnels
+                                .reconcile(&store, &synced.reverse_tunnels.unwrap_or_default())
+                            {
+                                tracing::warn!(%error, "reverse tunnels not applied");
+                            }
                             // An older controller sends none: stop answering.
                             dns_reporting = synced.authoritative_dns.is_some();
                             let served = synced.authoritative_dns.unwrap_or_default();

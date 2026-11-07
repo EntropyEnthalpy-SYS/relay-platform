@@ -1012,6 +1012,7 @@ mod tests {
             allow_destination_ports: vec![],
             deny_destination_ports: vec![],
             deny_sources: vec![],
+            reverse_tunnel: None,
         }
     }
     fn candidates() -> Vec<Candidate> {

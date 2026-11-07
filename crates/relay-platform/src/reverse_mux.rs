@@ -30,6 +30,8 @@ use tokio_rustls::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub mod managed;
+
 const MAX_LINE: usize = 512;
 const AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1615,10 +1617,44 @@ async fn client_mux_udp_mode(
     Ok(())
 }
 
+/// Where a client connects the streams and datagrams that the server opens.
+#[derive(Clone)]
+enum ClientTargets {
+    /// The command-line client: one TCP target and an optional UDP mode.
+    Fixed { tcp: String, udp: Option<UdpMode> },
+    /// Panel-managed tunnels: OPEN names its tunnel after the feature word,
+    /// and only the tunnels in `routes` are served. Attach replies go to
+    /// `replies`.
+    Managed {
+        routes: managed::Routes,
+        replies: mpsc::UnboundedSender<Frame>,
+    },
+}
+
 async fn client_read_loop(
-    mut reader: ControlRead,
+    reader: ControlRead,
     target: String,
     udp_mode: Option<UdpMode>,
+    writer: Writer,
+    sessions: Sessions,
+    cancel: CancellationToken,
+) {
+    client_read_loop_with(
+        reader,
+        ClientTargets::Fixed {
+            tcp: target,
+            udp: udp_mode,
+        },
+        writer,
+        sessions,
+        cancel,
+    )
+    .await
+}
+
+async fn client_read_loop_with(
+    mut reader: ControlRead,
+    targets: ClientTargets,
     writer: Writer,
     sessions: Sessions,
     cancel: CancellationToken,
@@ -1629,9 +1665,36 @@ async fn client_read_loop(
             frame = read_frame(&mut reader) => frame,
             _ = cancel.cancelled() => return,
         };
+        if let (ClientTargets::Managed { replies, .. }, Ok(Some((kind, id, payload)))) =
+            (&targets, &frame)
+            && managed::is_reply(*kind)
+        {
+            let _ = replies.send((*kind, *id, payload.clone()));
+            continue;
+        }
         match frame {
             Ok(Some((OPEN, id, payload))) => {
-                if payload == UDP_FEATURE {
+                // The command-line client compares the whole payload, as before.
+                let (udp, flow_control, target, udp_mode) = match &targets {
+                    ClientTargets::Fixed { tcp, udp } => (
+                        payload == UDP_FEATURE,
+                        payload == FLOW_CONTROL_V1,
+                        tcp.clone(),
+                        udp.clone(),
+                    ),
+                    ClientTargets::Managed { routes, .. } => match managed::route(routes, &payload)
+                    {
+                        Some(route) => route,
+                        None => {
+                            let writer = writer.clone();
+                            tokio::spawn(async move {
+                                let _ = write_frame(&writer, FAIL, id, b"unknown tunnel").await;
+                            });
+                            continue;
+                        }
+                    },
+                };
+                if udp {
                     let (sender, receiver) = mpsc::channel(STREAM_QUEUE_CAPACITY);
                     let inbox = UdpInbox {
                         sender,
@@ -1658,7 +1721,7 @@ async fn client_read_loop(
                     continue;
                 }
                 let stream_cancel = cancel.child_token();
-                let flow = StreamFlow::new(payload == FLOW_CONTROL_V1);
+                let flow = StreamFlow::new(flow_control);
                 let (data_tx, data_rx) = mpsc::channel(STREAM_QUEUE_CAPACITY);
                 let old = sessions.lock().await.insert(
                     id,
@@ -1672,7 +1735,6 @@ async fn client_read_loop(
                     cancel.cancel();
                     return;
                 }
-                let target = target.clone();
                 let writer = writer.clone();
                 let sessions = sessions.clone();
                 tokio::spawn(async move {
@@ -1802,10 +1864,28 @@ async fn client_udp_session(
 ) -> Result<()> {
     let mode = mode.context("UDP mode is not enabled on this client")?;
     let socket = tokio::time::timeout(CONNECT_TIMEOUT, async {
-        let socket = UdpSocket::bind("0.0.0.0:0").await?;
-        if let UdpMode::Fixed(target) = &mode {
-            socket.connect(target).await?;
-        }
+        let socket = if let UdpMode::Fixed(target) = &mode {
+            // IPv4 first, as before; a target with only IPv6 addresses gets
+            // an IPv6 socket.
+            let addresses: Vec<SocketAddr> =
+                tokio::net::lookup_host(target.as_str()).await?.collect();
+            let address = addresses
+                .iter()
+                .find(|address| address.is_ipv4())
+                .or_else(|| addresses.first())
+                .copied()
+                .ok_or_else(|| std::io::Error::other("UDP target has no address"))?;
+            let socket = UdpSocket::bind(if address.is_ipv4() {
+                "0.0.0.0:0"
+            } else {
+                "[::]:0"
+            })
+            .await?;
+            socket.connect(address).await?;
+            socket
+        } else {
+            UdpSocket::bind("0.0.0.0:0").await?
+        };
         Ok::<_, std::io::Error>(Arc::new(socket))
     })
     .await

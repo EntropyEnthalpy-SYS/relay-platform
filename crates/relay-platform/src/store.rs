@@ -32,6 +32,7 @@ mod leases;
 mod node_profiles;
 mod recovery;
 mod reservations;
+mod reverse_tunnels;
 mod shared_rules;
 mod subscriptions;
 mod sync;
@@ -98,6 +99,8 @@ pub struct Store(
     Arc<Mutex<std::collections::HashSet<String>>>,
     Arc<Mutex<crate::wireguard::punch::Traversal>>,
     Arc<crate::dns::Runtime>,
+    /// Nodes whose reverse tunnels changed since their last watch.
+    Arc<Mutex<std::collections::HashSet<String>>>,
 );
 #[derive(Default)]
 struct BudgetSignals {
@@ -317,6 +320,7 @@ impl Store {
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
             Arc::new(Mutex::new(leases::LeaseClocks::default())),
+            Arc::default(),
             Arc::default(),
             Arc::default(),
             Arc::default(),
@@ -605,7 +609,7 @@ impl Store {
     /// with a line on it, an endpoint group with it as a member and a chain
     /// use with a hop on it show it as missing.
     pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
-        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
+        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         require_node(&tx, actor, node, true)?;
@@ -627,7 +631,7 @@ impl Store {
         let reference: Option<String> = tx
             .query_row(
                 &format!("SELECT 'node '||n.name FROM nodes n JOIN config_history c ON c.node_id=n.id AND c.revision IN (n.desired_revision,n.applied_revision) WHERE n.id<>?1 AND instr(c.config_json,?1)>0
-                 UNION ALL SELECT key FROM metadata WHERE instr(value,?1)>0 AND NOT ({OWNED}) AND key NOT GLOB 'retired_node_*' AND key NOT GLOB 'rollout:*' AND key NOT GLOB 'shared_rule:*' AND key NOT GLOB 'endpoint_group:*' AND key NOT GLOB 'chain_use:*'
+                 UNION ALL SELECT key FROM metadata WHERE instr(value,?1)>0 AND NOT ({OWNED}) AND key NOT GLOB 'retired_node_*' AND key NOT GLOB 'rollout:*' AND key NOT GLOB 'shared_rule:*' AND key NOT GLOB 'endpoint_group:*' AND key NOT GLOB 'chain_use:*' AND key NOT GLOB 'reverse_tunnel:*'
                  UNION ALL SELECT 'budget '||id FROM budgets WHERE scope='node' AND scope_id=?1
                  UNION ALL SELECT 'budget grant '||id FROM budget_grants WHERE node_id=?1
                  UNION ALL SELECT 'budget request '||request_id FROM cancelled_budget_requests WHERE node_id=?1
@@ -653,6 +657,8 @@ impl Store {
         ] {
             tx.execute(statement, [node])?;
         }
+        // Its tunnels can no longer run: their public ends go.
+        let published = reverse_tunnels::node_deleted(&tx, &mut self.3.lock().unwrap(), node)?;
         audit(
             &tx,
             &actor.id,
@@ -661,6 +667,9 @@ impl Store {
             &serde_json::json!({ "name": name }).to_string(),
         )?;
         tx.commit()?;
+        if published {
+            self.2.config.notify_waiters();
+        }
         leases::deleted(&mut self.3.lock().unwrap(), node);
         self.4.forget(node);
         Ok(())
@@ -1031,8 +1040,8 @@ impl Store {
         self.2.config.notified()
     }
     /// The node's desired revision, and whether its WireGuard interfaces
-    /// changed since its last sync (answered yes once).
-    pub fn node_watch(&self, credential: &str) -> Result<(u64, bool)> {
+    /// or its reverse tunnels changed since its last sync (answered yes once).
+    pub fn node_watch(&self, credential: &str) -> Result<(u64, bool, bool)> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let node = leases::authenticated(&tx, credential)?;
@@ -1041,7 +1050,11 @@ impl Store {
             [&node],
             |r| r.get(0),
         )?;
-        Ok((revision, self.8.lock().unwrap().take_wake(&node)))
+        Ok((
+            revision,
+            self.8.lock().unwrap().take_wake(&node),
+            reverse_tunnels::take_wake(&self.10, &node),
+        ))
     }
     /// A NAT traversal step changed some node's interfaces: its watch returns
     /// so it syncs at once, and both sides switch paths close together.

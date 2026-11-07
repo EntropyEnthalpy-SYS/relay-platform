@@ -136,6 +136,7 @@ impl Counters {
             mptcp_paths: None,
             authoritative_dns: None,
             wireguard: None,
+            reverse_tunnel: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),
@@ -974,6 +975,7 @@ impl Drop for TargetGuard {
 }
 
 struct RuleResources {
+    reverse: Arc<crate::reverse_mux::managed::Server>,
     gateway_auth: Option<socks5::ServerConfig>,
     mptcp: Arc<crate::mptcp::Tracker>,
     node_rate: Arc<Limiter>,
@@ -982,6 +984,8 @@ struct RuleResources {
 }
 
 struct RuntimeRule {
+    /// Where a reverse tunnel's public end opens its paths.
+    reverse: Option<Arc<crate::reverse_mux::managed::Server>>,
     mptcp: Arc<crate::mptcp::Tracker>,
     shadowsocks: Option<shadowsocks::Server>,
     socks5: Option<socks5::Server>,
@@ -1048,6 +1052,10 @@ impl RuntimeRule {
         let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(spec.rate_bytes_per_sec)));
         let target_active = shared.target_counters(&spec.targets);
         Self {
+            reverse: spec
+                .reverse_tunnel
+                .as_ref()
+                .map(|_| resources.reverse.clone()),
             shadowsocks: spec.inbound_shadowsocks.as_ref().map(|config| {
                 shadowsocks::Server::with_salts(
                     config,
@@ -1556,6 +1564,7 @@ pub struct Engine {
     routes: Arc<Routes>,
     node_rate: Arc<Limiter>,
     user_limits: UserLimits,
+    reverse: Arc<crate::reverse_mux::managed::Server>,
 }
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -1606,7 +1615,13 @@ impl Engine {
             routes: Arc::new(Routes::default()),
             node_rate: Arc::new(Limiter::new(None)),
             user_limits: UserLimits::default(),
+            reverse: Arc::default(),
         }
+    }
+    /// The public ends of reverse tunnels: the agent keeps their listeners;
+    /// rules with `reverse_tunnel` open their paths here.
+    pub fn reverse_tunnels(&self) -> &Arc<crate::reverse_mux::managed::Server> {
+        &self.reverse
     }
     /// Holds each controller share until `sent + LEASE`, `sent` being when
     /// the sync request left, so it never outlives the controller's view.
@@ -1831,6 +1846,7 @@ impl Engine {
                     resolver,
                     self.routes.clone(),
                     RuleResources {
+                        reverse: self.reverse.clone(),
                         gateway_auth: gateway_plan
                             .as_ref()
                             .and_then(|p| p.auth.get(&spec.id))
@@ -2197,6 +2213,7 @@ impl Engine {
         }
         self.tasks.close();
         self.tasks.wait().await;
+        self.reverse.shutdown();
         self.health_runtimes.lock().unwrap().clear();
         self.meter.barrier().await?;
         Ok(())
@@ -2641,6 +2658,17 @@ async fn try_target(
     stats: &Counters,
     deadline: Instant,
 ) -> Result<(BoxStream, LoopGuard), (SetupFailure, String)> {
+    if let (Some(tunnel), Some(server)) = (&rule.spec.reverse_tunnel, &rule.reverse) {
+        let idle = Duration::from_secs(rule.spec.idle_timeout_secs);
+        return match timeout_at(deadline, server.open_stream(tunnel, idle)).await {
+            Ok(Ok(stream)) => Ok((Box::new(stream), LoopGuard::none())),
+            Ok(Err(error)) => Err((SetupFailure::Other, error.to_string())),
+            Err(_) => Err((
+                SetupFailure::Timeout,
+                "reverse tunnel connection timed out".into(),
+            )),
+        };
+    }
     let mut last = None;
     let target = rule
         .spec
@@ -3894,10 +3922,40 @@ async fn udp_listener(
     }
 }
 
+/// Where a UDP session sends: a connected socket, or a reverse tunnel's
+/// datagram association.
+enum UdpOutlet {
+    Socket(UdpSocket),
+    Tunnel(crate::reverse_mux::managed::Datagrams),
+}
+impl UdpOutlet {
+    async fn send(&self, payload: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Socket(socket) => socket.send(payload).await,
+            Self::Tunnel(tunnel) => tunnel.send(payload).await.map(|()| payload.len()),
+        }
+    }
+    async fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Socket(socket) => socket.recv(buffer).await,
+            Self::Tunnel(tunnel) => {
+                let payload = tunnel.recv().await.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "reverse tunnel association closed",
+                    )
+                })?;
+                let size = payload.len().min(buffer.len());
+                buffer[..size].copy_from_slice(&payload[..size]);
+                Ok(size)
+            }
+        }
+    }
+}
 struct UdpTarget {
     index: usize,
     health: Option<Arc<Observation>>,
-    socket: UdpSocket,
+    socket: UdpOutlet,
     header: Vec<u8>,
     wire_limit: usize,
     _target_guard: TargetGuard,
@@ -3909,6 +3967,23 @@ async fn udp_target(
     inlet: ListenerKey,
 ) -> Result<UdpTarget> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
+    if let (Some(tunnel), Some(server)) = (&rule.spec.reverse_tunnel, &rule.reverse) {
+        let guard = rule
+            .target_guard(0)
+            .context("the tunnel's target has no free session")?;
+        let datagrams = timeout_at(deadline, server.open_datagrams(tunnel))
+            .await
+            .context("reverse tunnel connection timed out")??;
+        return Ok(UdpTarget {
+            index: 0,
+            health: None,
+            socket: UdpOutlet::Tunnel(datagrams),
+            header: vec![],
+            wire_limit: 65507,
+            _target_guard: guard,
+            _route_guard: LoopGuard::none(),
+        });
+    }
     let mut last = None;
     for index in rule.order(info.source, inlet) {
         let Some(guard) = rule.target_guard(index) else {
@@ -3946,7 +4021,7 @@ async fn udp_target(
                             .health
                             .as_ref()
                             .map(|h| h.point(index, inlet.address.port(), false).clone()),
-                        socket,
+                        socket: UdpOutlet::Socket(socket),
                         header,
                         wire_limit: if address.is_ipv4() { 65507 } else { 65527 },
                         _target_guard: guard,

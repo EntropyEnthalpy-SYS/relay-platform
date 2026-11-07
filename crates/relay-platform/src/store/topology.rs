@@ -116,6 +116,7 @@ pub(super) fn prepare(
             rate_bytes_per_sec: update.rate_bytes_per_sec.unwrap_or(old.rate_bytes_per_sec),
         };
         federation::merge(conn, &config.node_id, &tenant, &mut config.rules)?;
+        reverse_tunnels::merge(conn, &config.node_id, &mut config.rules)?;
         config.validate().map_err(bad_input)?;
         if config
             .rules

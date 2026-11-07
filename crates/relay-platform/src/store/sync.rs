@@ -19,9 +19,13 @@ impl Store {
             request.budget.as_ref().map(|b| b.run_id.as_str()),
         )?;
         let report = Report::of(&mut request);
-        let (mut response, stored_seen) = apply_sync(&tx, node, request, &self.6, &self.8)?;
+        let (mut response, stored_seen, tunnels_changed) =
+            apply_sync(&tx, node, request, &self.6, &self.8, &self.3, &self.10)?;
         tx.commit()?;
         self.wake_wireguard_watches();
+        if tunnels_changed {
+            self.2.config.notify_waiters();
+        }
         response.log_cursor = Some(report.record(&self.4, node, stored_seen));
         response.authoritative_dns =
             Some(super::dns_authoritative::snapshot(&conn, &self.4, node)?);
@@ -40,6 +44,7 @@ impl Store {
         let tx = conn.transaction()?;
         let mut responses = Vec::with_capacity(inputs.len());
         let mut reports = vec![];
+        let mut tunnels_changed = false;
         for (credential, mut input) in inputs {
             tx.execute_batch("SAVEPOINT agent_sync_request")?;
             let result = (|| {
@@ -61,7 +66,9 @@ impl Store {
                     input.budget.as_ref().map(|b| b.run_id.as_str()),
                 )?;
                 let report = Report::of(&mut input);
-                let (response, stored_seen) = apply_sync(&tx, &node, input, &self.6, &self.8)?;
+                let (response, stored_seen, changed) =
+                    apply_sync(&tx, &node, input, &self.6, &self.8, &self.3, &self.10)?;
+                tunnels_changed |= changed;
                 reports.push((node, report, stored_seen, responses.len()));
                 Ok(response)
             })();
@@ -76,6 +83,9 @@ impl Store {
         }
         tx.commit()?;
         self.wake_wireguard_watches();
+        if tunnels_changed {
+            self.2.config.notify_waiters();
+        }
         for (node, report, stored_seen, index) in reports {
             let cursor = report.record(&self.4, &node, stored_seen);
             if let Ok(response) = &mut responses[index] {
@@ -121,13 +131,20 @@ fn apply_sync(
     request: SyncRequest,
     rates: &std::sync::Mutex<super::user_rates::UserRates>,
     traversal: &std::sync::Mutex<crate::wireguard::punch::Traversal>,
-) -> Result<(SyncResponse, Option<i64>)> {
+    clocks: &std::sync::Mutex<leases::LeaseClocks>,
+    tunnel_wakes: &std::sync::Mutex<std::collections::HashSet<String>>,
+) -> Result<(SyncResponse, Option<i64>, bool)> {
     if request.usage.len() > 1024
         || request.stats.user_rates.len() > 1024
         || request.apply_error.as_ref().is_some_and(|e| e.len() > 2048)
         || request
             .stats
             .wireguard
+            .as_ref()
+            .is_some_and(|r| !r.within_limits())
+        || request
+            .stats
+            .reverse_tunnel
             .as_ref()
             .is_some_and(|r| !r.within_limits())
     {
@@ -222,6 +239,20 @@ fn apply_sync(
     } else {
         stored_seen
     };
+    // A tunnel that became ready publishes its public end; this node then
+    // gets the new revision with this reply.
+    let tunnels_changed = super::reverse_tunnels::observe(
+        tx,
+        &mut clocks.lock().unwrap(),
+        tunnel_wakes,
+        node,
+        request.stats.reverse_tunnel.as_ref(),
+    )?;
+    let desired: u64 = tx.query_row(
+        "SELECT desired_revision FROM nodes WHERE id=?1",
+        [node],
+        |r| r.get(0),
+    )?;
     let config = if request.need_config || desired != request.applied_revision {
         Some(serde_json::from_str(&tx.query_row(
             "SELECT config_json FROM config_history WHERE node_id=?1 AND revision=?2",
@@ -253,6 +284,7 @@ fn apply_sync(
             // Rendered after the commit, from the newest health reports.
             authoritative_dns: None,
             wireguard: Some(super::wireguard::desired(tx, node, &traversal)?),
+            reverse_tunnels: Some(super::reverse_tunnels::desired(tx, node)?),
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,
@@ -263,5 +295,6 @@ fn apply_sync(
             log_cursor: None,
         },
         stored_seen,
+        tunnels_changed,
     ))
 }

@@ -212,7 +212,8 @@ pub fn validate(configs: &[NodeConfig]) -> Result<Graph> {
     let mut outgoing: BTreeMap<RuleRef, BTreeSet<RuleRef>> = BTreeMap::new();
     let mut incoming: BTreeMap<RuleRef, usize> = rules.keys().cloned().map(|r| (r, 0)).collect();
     let mut edges = Vec::new();
-    for (reference, rule) in &rules {
+    // A reverse tunnel's target is on its private server, not in this graph.
+    for (reference, rule) in rules.iter().filter(|(_, r)| r.reverse_tunnel.is_none()) {
         for target in &rule.targets {
             let (host, port) = endpoint(&target.address)?;
             if let Some(next) = &target.via {

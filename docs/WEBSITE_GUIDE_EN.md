@@ -539,9 +539,19 @@ On the server, the agent only acts after you install `wireguard-tools` and the `
 
 ### Reverse tunnels and router port mapping
 
-These are command-line tools that run outside the panel. They have no rule metering or panel-managed limits. On an installed server the program is `/opt/relay-platform/roles/agent/current/relay`.
+**Reverse tunnels** (Forwarding rules → All forwarding → **Reverse tunnels (NAT traversal)**) publish a service on a server that cannot accept inbound connections, such as a server behind a home router or carrier-grade NAT. Both ends are servers in the panel:
 
-**Reverse tunnels** publish a service on a server that cannot accept inbound connections. A public server listens for clients, and the private server connects out to it. On the public server:
+- The **public server** accepts users on the **public port**.
+- The **private server** connects out to the public server's **tunnel port** and keeps one encrypted tunnel connection to it. It hands each user connection to the **target**, a `host:port` it can reach: `127.0.0.1:8080` is the private server itself, and `192.168.10.20:8080` is another machine on its LAN.
+
+Click **New reverse tunnel**, choose the public and the private server (both in one tenant), and set the public port (**Auto** picks the lowest free port in the public server's forwarding range), the target and the protocol (TCP, UDP or TCP + UDP). **Advanced** holds the tunnel port (29123 by default, shared by every tunnel on one public server) and the listen IP of the public port. Open both ports in the public server's cloud firewall or security group; the tunnel port needs TCP only. The public server needs a forwarding host in its connection defaults, because that is the address the private server dials.
+
+- The tunnel runs on TLS. The public server makes its own key and reports only its fingerprint; the private server pins that fingerprint and then authenticates with a random token per tunnel that the panel sends only to the two servers and never shows.
+- The list shows each tunnel's state: **Waiting** with the reason (for example *Agent too old* or *Waiting for the public server's key*), **Connected** with how long, **Error** with the reason, or **Disabled**. It also shows the entry address with **Copy** and the traffic.
+- The public end is an ordinary rule on the public server, so traffic goes into the usage ledger and **Access & limits** sets allowed and denied sources, the rate limit and the connection limit. Disabling a tunnel closes the public port; the private server stops connecting out on its next sync and reconnects with backoff whenever the tunnel drops.
+- Both servers need agents of this version or newer. See [Reverse tunnels](REVERSE_TUNNELS.md).
+
+**Manual option: the command-line tools.** `relay reverse-mux-server` and `relay reverse-mux-client` run the same tunnel protocol outside the panel, with a shared token file instead of panel-managed keys, and without rule metering or panel-managed limits. On an installed server the program is `/opt/relay-platform/roles/agent/current/relay`. On the public server:
 
 ```bash
 printf '%s\n' 'long-random-token' > /etc/relay/reverse.token
@@ -561,7 +571,7 @@ relay reverse-mux-client \
   --token-file /etc/relay/reverse.token
 ```
 
-Clients connect to `PUBLIC:19011`. One control connection carries many client connections. Options add TLS or mutual TLS for the control connection, TLS on the public port, allowed public CIDRs, stream and idle limits and UDP. See [Reverse tunnels](REVERSE.md).
+Clients connect to `PUBLIC:19011`. One control connection carries many client connections. Options add TLS or mutual TLS for the control connection, TLS on the public port, allowed public CIDRs, stream and idle limits and UDP. See [Reverse tunnels (command line)](REVERSE.md).
 
 **Router port mapping:** `relay nat-map` (NAT-PMP), `relay pcp-map` (PCP) and `relay upnp-map` (UPnP IGD) ask a home router to open a port, and `--renew` keeps the mapping alive. They currently request UDP mappings only and support IPv4 only. See [NAT port mapping](NAT.md).
 
@@ -679,8 +689,9 @@ The panel checks that each upstream target matches the next hop's reachable addr
 
 The agent only makes outbound HTTPS connections to the panel, so enrollment, configuration and reporting work behind any NAT. What needs planning is how traffic reaches the server's listeners.
 
+- **Reverse tunnel (recommended):** under **All forwarding → Reverse tunnels (NAT traversal)**, create a tunnel with a public server as the entry and the home server as the private server. Users connect to the public server's port; the home server connects out and delivers each connection to a service on itself (`127.0.0.1:…`) or on its LAN. Nothing needs to be opened on the home router. The public end is metered and limited like any rule. See [Reverse tunnels and router port mapping](#reverse-tunnels-and-router-port-mapping).
 - **Router port forwarding:** forward the rule's port on the router, then set the server's reachable address to the router's public IP and the mapped port, as in the previous scenario. `relay nat-map`, `relay pcp-map` and `relay upnp-map` can request the mapping from routers that support NAT-PMP, PCP or UPnP, but only for UDP. Map TCP ports on the router by hand.
-- **Use the home server as a target only:** a public entry server can forward to a service that the home server publishes through a **reverse tunnel** (`reverse-mux-client` at home, `reverse-mux-server` on the public server). The tunnel itself has no rule metering.
+- **Manual reverse tunnel:** `reverse-mux-client` at home and `reverse-mux-server` on the public server, without the panel. The tunnel itself has no rule metering.
 - **WireGuard networking:** add the home server as a member without a public endpoint. It reaches the other members through a public relay server, or directly when **NAT traversal** succeeds. A forwarding rule can then use the home server's WireGuard address as its target. This combination is not part of the automated tests, so check it with a real client.
 
 Carrier-grade NAT usually blocks inbound mappings, and its port behaviour often defeats hole punching, so plan on a relay or a reverse tunnel there.

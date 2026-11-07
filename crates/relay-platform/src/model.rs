@@ -405,6 +405,12 @@ pub struct Rule {
     /// Destination port denylist; evaluated before the allowlist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_destination_ports: Vec<String>,
+    /// The public end of this panel-managed reverse tunnel: the one target
+    /// is connected by the tunnel's private server, not by this node. Only
+    /// agents that report the capability get such rules; older agents
+    /// reject the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_tunnel: Option<String>,
 }
 
 impl Rule {
@@ -446,6 +452,37 @@ impl Rule {
     pub fn validate(&self) -> Result<()> {
         if let Some(gateway) = &self.protocol_gateway {
             gateway.validate(self)?;
+        }
+        if let Some(tunnel) = &self.reverse_tunnel {
+            ensure!(identifier(tunnel), "invalid reverse tunnel id");
+            ensure!(
+                self.targets.len() == 1
+                    && self.targets.iter().all(|t| t.via.is_none()
+                        && t.tls.is_none()
+                        && t.proxy_protocol.is_none()
+                        && t.websocket.is_none()
+                        && t.prewarm.is_none()),
+                "a reverse tunnel's public end has one target, reached through the tunnel"
+            );
+            ensure!(
+                self.listen_end_port.is_none()
+                    && self.port_mapping == PortMapping::Fixed
+                    && self.advertise.is_none()
+                    && self.protocol_gateway.is_none()
+                    && self.inbound_tls.is_none()
+                    && self.inbound_proxy.is_none()
+                    && self.inbound_websocket.is_none()
+                    && self.inbound_shadowsocks.is_none()
+                    && self.inbound_socks5.is_none()
+                    && self.inbound_http_connect.is_none()
+                    && self.inbound_http2_connect.is_none()
+                    && self.inbound_multipath.is_none()
+                    && self.outbound_multipath.is_none()
+                    && self.outbound_bind.is_none()
+                    && self.dns_cache.is_none()
+                    && self.health_check.is_none(),
+                "a reverse tunnel's public end is a plain listener on one port"
+            );
         }
         if let Some(policy) = self.mptcp {
             policy.validate(self.protocol.tcp())?;
@@ -721,8 +758,9 @@ impl Rule {
                 "paused_until_ms requires paused and a positive time"
             );
             ensure!(targets.insert(&target.address), "duplicate target");
+            // A tunnel's target is on another server.
             ensure!(
-                target.address != self.listen.to_string(),
+                self.reverse_tunnel.is_some() || target.address != self.listen.to_string(),
                 "direct forwarding loop"
             );
         }
@@ -953,6 +991,9 @@ pub struct EngineStats {
     /// Sent only after the controller sent [`SyncResponse::wireguard`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard: Option<crate::wireguard::Report>,
+    /// Sent only after the controller sent [`SyncResponse::reverse_tunnels`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_tunnel: Option<crate::reverse_tunnel::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1153,6 +1194,10 @@ pub struct SyncResponse {
     /// no network or the feature is off. `None` from older controllers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard: Option<crate::wireguard::Desired>,
+    /// The reverse tunnels this node serves or dials; empty when none.
+    /// `None` from older controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverse_tunnels: Option<crate::reverse_tunnel::Desired>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

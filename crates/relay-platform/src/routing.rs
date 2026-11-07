@@ -62,7 +62,12 @@ impl Topology {
                 bucket.push(endpoint);
             }
         }
-        for rule in config.rules.iter().filter(|r| r.enabled) {
+        // A reverse tunnel's target is on the private server, not here.
+        for rule in config
+            .rules
+            .iter()
+            .filter(|r| r.enabled && r.reverse_tunnel.is_none())
+        {
             for address in rule.listen_addresses() {
                 for index in 0..rule.targets.len() {
                     let Ok(target) = rule
@@ -215,6 +220,12 @@ impl Routes {
     }
 }
 pub(crate) struct LoopGuard(Option<(Arc<Routes>, Endpoint, Endpoint)>);
+impl LoopGuard {
+    /// For a path that leaves this node by other means, such as a tunnel.
+    pub fn none() -> Self {
+        Self(None)
+    }
+}
 impl Drop for LoopGuard {
     fn drop(&mut self) {
         if let Some((routes, source, destination)) = &self.0 {

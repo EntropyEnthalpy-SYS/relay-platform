@@ -255,7 +255,8 @@ fn plan(
             rule.listen = SocketAddr::new(bind_ip(defaults.as_ref()), desired.port);
             rule.meter_epoch = Uuid::new_v4().to_string();
         }
-        let reserved = federation::reserved_ports(conn, node)?;
+        let mut reserved = federation::reserved_ports(conn, node)?;
+        reserved.extend(reverse_tunnels::reserved_ports(conn, node)?);
         if taken(
             config,
             &reserved,
@@ -444,7 +445,8 @@ impl Store {
             )?;
             let (last_seen, _) = self.4.current(node, last_seen, stats);
             let range = port_range(forwarding(&conn, node)?.as_ref());
-            let reserved = federation::reserved_ports(&conn, node)?;
+            let mut reserved = federation::reserved_ports(&conn, node)?;
+            reserved.extend(reverse_tunnels::reserved_ports(&conn, node)?);
             nodes.push((node, name, last_seen, range, reserved));
         }
         let port = input.listen_port.or_else(|| {

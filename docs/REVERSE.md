@@ -1,5 +1,7 @@
 # 反向 TCP 隧道：会话池与单连接多路复用
 
+在面板中选择两台服务器、由控制器管理密钥和令牌的反向隧道见 [REVERSE_TUNNELS.md](REVERSE_TUNNELS.md)，它使用本文的多路复用协议；本文是手工运行的命令行工具。
+
 0.53.0 增加最小反向 TCP 隧道，0.57.0 增加会话池并发，0.82.0 增加独立的单连接多路复用协议。旧 `reverse-server`/`reverse-client` 仍是一条控制连接承载一个公网连接；新 `reverse-mux-server`/`reverse-mux-client` 在一条控制连接上用长度前缀帧复用多个公网连接。两者都不是 WireGuard。
 
 ## 使用

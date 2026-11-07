@@ -3,7 +3,7 @@ import { t as translate, msg, localize, searchAliases } from '/assets/i18n.js';
 export const pageInfo = localize({
   overview: ['总览', 'NETWORK OVERVIEW', '节点在哪里、是否在线、流量走向哪里，一页看清。', 'observability', 'dashboard monitor globe map 总览 监控 地球 地图'],
   nodes: ['转发配置', 'STEP 1 · SERVERS', '第一步：接入服务器。管理每台服务器的位置、身份、默认地址与运行许可。', 'quickstart', 'server agent location 服务器 注册 位置'],
-  topology: ['转发配置', 'STEP 2 · FORWARDING', '第二步：建立转发。每条转发从客户端出发，经过一台或多台服务器到达目标。', 'rules', 'chain route path forward 链路 路径 转发 多跳'],
+  topology: ['转发配置', 'STEP 2 · FORWARDING', '第二步：建立转发。每条转发从客户端出发，经过一台或多台服务器到达目标。', 'rules', 'chain route path forward reverse tunnel nat 链路 路径 转发 多跳 反向隧道 内网穿透'],
   rules: ['转发配置', 'STEP 2 · FORWARDING', '同一份转发配置，按服务器列出它上面运行的监听端口和服务。', 'rules', 'proxy gateway vless reality tuic hysteria2 socks http2 代理 网关 节点规则'],
   wireguard: ['转发配置', 'WIREGUARD NETWORKS', '把节点和设备连进同一个私有网络。没有公网地址的节点经中继节点互通，设备扫码加入。', 'rules', 'wireguard vpn mesh overlay nat relay device 组网 隧道 设备 中继'],
   federation: ['转发配置', 'CROSS-PANEL SHARING', '把节点上的一段端口共享给另一个面板，或接收其他面板共享的端口。对方用邀请码接入，限制由共享方决定。', 'rules', 'federation share invite peer panel 共享 邀请码 跨面板 对方'],

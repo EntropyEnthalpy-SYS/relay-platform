@@ -319,6 +319,15 @@ fn free_ports(
             );
         }
     }
+    if let Some((port, _)) = reverse_tunnels::reserved_ports(conn, node)?
+        .into_iter()
+        .find(|(port, _)| (start..=end).contains(port))
+    {
+        return reject(
+            409,
+            format!("port {port} on this node is held by a reverse tunnel"),
+        );
+    }
     Ok(())
 }
 fn set_rate(tx: &Transaction<'_>, user: &str, rate: Option<u64>) -> Result<()> {

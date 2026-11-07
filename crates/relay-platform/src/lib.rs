@@ -31,6 +31,7 @@ pub mod pcp;
 pub mod proxy;
 pub mod reverse;
 pub mod reverse_mux;
+pub mod reverse_tunnel;
 mod routing;
 pub mod shadowsocks;
 mod shadowsocks_uot;

@@ -246,6 +246,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
         || path.starts_with("shared-rules")
         || path.starts_with("endpoint-groups")
         || path.starts_with("chains")
+        || path.starts_with("reverse-tunnels")
     {
         Scope::NodesWrite
     } else if path.starts_with("budgets") {
@@ -384,6 +385,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/chains/{id}/plan", post(plan_chain))
         .route("/api/v1/chains/{id}/apply", post(apply_chain))
+        .route(
+            "/api/v1/reverse-tunnels",
+            get(reverse_tunnels).post(create_reverse_tunnel),
+        )
+        .route(
+            "/api/v1/reverse-tunnels/{id}",
+            axum::routing::put(update_reverse_tunnel).delete(delete_reverse_tunnel),
+        )
         .route("/api/v1/users", get(users).post(create_user))
         .route(
             "/api/v1/users/{user}/revoke-sessions",
@@ -1222,6 +1231,58 @@ async fn delete_shared_rule(
     .await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
+async fn reverse_tunnels(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::reverse_tunnel::TunnelView>> {
+    Ok(Json(
+        database(state.store, move |db| db.reverse_tunnels(&actor)).await?,
+    ))
+}
+/// A body that does not parse is invalid input (400), like the other
+/// checks of a tunnel.
+fn tunnel_input(body: serde_json::Value) -> anyhow::Result<crate::reverse_tunnel::TunnelInput> {
+    serde_json::from_value(body).map_err(|error| {
+        Rejection {
+            status: 400,
+            message: format!("invalid reverse tunnel: {error}"),
+        }
+        .into()
+    })
+}
+async fn create_reverse_tunnel(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::reverse_tunnel::TunnelView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_reverse_tunnel(&actor, tunnel_input(body)?)
+        })
+        .await?,
+    ))
+}
+async fn update_reverse_tunnel(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::reverse_tunnel::TunnelView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_reverse_tunnel(&actor, &id, tunnel_input(body)?)
+        })
+        .await?,
+    ))
+}
+async fn delete_reverse_tunnel(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_reverse_tunnel(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
 async fn endpoint_groups(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -1885,14 +1946,17 @@ async fn watch_config(
     loop {
         let published = state.store.config_published();
         let credential = token.clone();
-        let (revision, wireguard_changed) =
+        let (revision, wireguard_changed, tunnels_changed) =
             database(state.store.clone(), move |db| db.node_watch(&credential)).await?;
         let mut reply = serde_json::json!({ "desired_revision": revision });
         if wireguard_changed {
             reply["wireguard_changed"] = true.into();
         }
+        if tunnels_changed {
+            reply["reverse_tunnels_changed"] = true.into();
+        }
         let reply = Json(reply);
-        if revision > query.after || wireguard_changed {
+        if revision > query.after || wireguard_changed || tunnels_changed {
             return Ok(reply);
         }
         tokio::select! {
