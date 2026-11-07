@@ -392,11 +392,13 @@ impl Store {
 fn usage(conn: &Connection, owner: &str) -> Result<Usage> {
     let mut usage = Usage::default();
     if let Some(budget) = super::budgets::user_budget(conn, owner)? {
-        usage.used_bytes = Some(budget.consumed_bytes);
+        // A plan that resets reports the current cycle: use and room since its start.
+        let baseline = super::commerce::cycle_baseline(conn, owner, &budget.id)?.unwrap_or(0);
+        usage.used_bytes = Some(budget.consumed_bytes.saturating_sub(baseline));
         // A plan without a traffic cap raises the limit to the counter
         // maximum; there is no total to report.
         if budget.limit_bytes < MAX_COUNTER {
-            usage.total_bytes = Some(budget.limit_bytes);
+            usage.total_bytes = Some(budget.limit_bytes.saturating_sub(baseline));
         }
     }
     if let Some(plan) = super::commerce::plan(conn, owner)? {

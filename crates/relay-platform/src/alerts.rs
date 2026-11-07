@@ -933,7 +933,12 @@ fn conditions(
             Severity::Critical,
             pass,
             exhausted,
-            if exhausted {
+            if let Some(reason) = budget.top_up_failure.filter(|_| exhausted) {
+                format!(
+                    "共享额度 {name} 已用尽，无法再分配流量；自动补流量未执行：{}",
+                    reason.summary()
+                )
+            } else if exhausted {
                 format!("共享额度 {name} 已用尽，无法再分配流量")
             } else {
                 format!("共享额度 {name} 恢复可分配")
@@ -1531,6 +1536,7 @@ mod tests {
             name: id.into(),
             limit_bytes,
             committed_bytes,
+            top_up_failure: None,
         };
         let record = |id: &str, error: Option<&str>| crate::store::AlertDnsRecord {
             id: id.into(),
@@ -1557,6 +1563,10 @@ mod tests {
                 budget("near", 1000, 900),
                 budget("below", 1000, 899),
                 budget("empty", 1000, 1000),
+                crate::store::AlertBudget {
+                    top_up_failure: Some(crate::commerce::TopUpFailureReason::InsufficientBalance),
+                    ..budget("dry", 1000, 1000)
+                },
                 budget("stopped", 0, 0),
             ],
             &[record("bad", Some("HTTP 403")), record("good", None)],
@@ -1578,6 +1588,8 @@ mod tests {
                 ("budget_near:near", Severity::Warning),
                 ("budget_near:empty", Severity::Warning),
                 ("budget_exhausted:empty", Severity::Critical),
+                ("budget_near:dry", Severity::Warning),
+                ("budget_exhausted:dry", Severity::Critical),
                 ("dns:bad", Severity::Warning),
             ]
         );
@@ -1601,6 +1613,15 @@ mod tests {
         assert_eq!(
             summary("budget_exhausted:below"),
             "共享额度 below 恢复可分配"
+        );
+        // A plan cycle that ran out says why its automatic top-up did not run.
+        assert_eq!(
+            summary("budget_exhausted:dry"),
+            "共享额度 dry 已用尽，无法再分配流量；自动补流量未执行：钱包余额不足"
+        );
+        assert_eq!(
+            summary("budget_exhausted:empty"),
+            "共享额度 empty 已用尽，无法再分配流量"
         );
         assert_eq!(
             summary("dns:bad"),

@@ -468,6 +468,45 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 
 回调 body：`{payment_id,status:"paid"|"failed",external_id,amount_cents}`；`X-Relay-Signature` 为原始 JSON 的 HMAC-SHA256 十六进制（可带 `sha256=`）。重复同状态回调幂等；金额不符/状态冲突/错误签名 4xx。外部支付成功订单 `channel=external`，钱包不变；钱包订单退款仍走 `/orders/{id}/refund`，外部订单该接口 409。其他 `/commerce/*` 仍仅登录会话。详见 [COMMERCE.md](COMMERCE.md)。
 
+## 套餐流量周期与自动补流量
+
+需要开启可选功能 `plan-entitlements`：关闭时套餐字段可以保存但不起作用，下表中的写接口返回 409。与其他 `/commerce/*` 一样只接受登录会话，API 令牌一律 403。业务规则见 [COMMERCE.md](COMMERCE.md#流量重置周期)，账本关系见 [BUDGETS.md](BUDGETS.md#套餐流量周期与自动补流量)。
+
+套餐（`POST /commerce/plans`、`PUT /commerce/plans/{id}`，仅系统管理员）新增两个可选字段，PUT 省略时恢复默认：
+
+| 字段 | 取值 |
+| --- | --- |
+| `traffic_reset` | `"none"`（默认）、`"billing"` 或 `{"every_days":N}`，N 为 1..366 |
+| `top_up` | `null`（默认）或 `{"bytes":正整数,"price_cents":0..1000000000000,"max_per_cycle":1..1000}`；需要 `traffic_bytes` 且 `traffic_reset` 不是 `"none"` |
+
+无效取值返回 400（套餐的其他校验错误也改为 400）。订单新增 `kind`（`"plan"` 或 `"top_up"`）以及 `traffic_reset`、`top_up` 快照；补流量订单由控制器创建，状态为 `paid`、`duration_days` 为 0、`traffic_bytes` 为补充量，`POST /commerce/orders/{id}/refund` 对它返回 409。补流量扣款出现在 `GET /commerce/wallet` 的流水里：`kind` 为 `purchase`，`reference` 为 `top_up:<用户>:<周期序号>:<次数>`。仍有效的套餐与要购买套餐的 `traffic_reset` 不同时，`POST /commerce/orders` 返回 409。
+
+| 方法 | 路径 | 权限 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/commerce/entitlement` | 本人 | 自己的权益；无权益时为 `null` |
+| GET | `/commerce/entitlements` | 系统管理员 | 全部权益 |
+| POST | `/commerce/entitlements/{user}/activate` | 本人或系统管理员 | 等待额度的套餐立即生效 |
+| PUT | `/commerce/entitlements/{user}/auto-top-up` | 本人或系统管理员 | 请求 `{"enabled":true\|false}`，返回权益；没有权益时 404 |
+| POST | `/commerce/entitlements/{user}/reset` | 系统管理员 | 无请求体；立即开始新周期并返回权益。套餐不重置、已到期或分配处于恢复隔离时 409 |
+
+权益对象新增 `auto_top_up`、`cycles`（已开始的周期数）和内部状态 `cycle`（`policy`、`anchor_ms`、`started_at_ms`、`baseline_bytes`、`allowance_bytes`、`top_ups`、`top_up_bytes`、`last_failure`）。套餐重置且未到期时还返回计算后的 `current_cycle`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `policy` | 本周期的 `traffic_reset` |
+| `started_at_ms` / `ends_at_ms` | 周期开始；下次重置或到期，取先到者 |
+| `next_reset_at_ms` | 下次重置；到期前不再重置时为 `null` |
+| `allowance_bytes` | 每周期流量加本周期补流量；不限时为 `null` |
+| `top_up_bytes` | 本周期补流量合计 |
+| `used_bytes` | 本周期已上报的用量 |
+| `reserved_bytes` | 节点已领取、尚未上报的预留 |
+| `remaining_bytes` | 本周期还可分配的字节；不限时为 `null` |
+| `top_ups` | 本周期补流量次数；上限是 `top_up.max_per_cycle` |
+| `top_up` | 当前订单的补流量设置，未配置时为 `null` |
+| `last_failure` | `{"reason","at_ms"}` 或 `null`；`reason` 为 `not_configured`、`switched_off`、`cap_reached`、`insufficient_balance` |
+
+用户只能读取和切换自己的权益；租户管理员、只读用户和 API 令牌不能读取或修改他人的周期，也不能重置流量（403）。审计动作：`commerce.entitlement.reset`、`commerce.entitlement.auto_top_up`、`commerce.top_up`、`commerce.top_up.fail`。
+
 ## 0.29.0 工单
 
 | 方法 | 路径 | 说明 |

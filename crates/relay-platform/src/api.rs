@@ -496,6 +496,14 @@ pub fn router(state: AppState) -> Router {
             post(activate_entitlement),
         )
         .route(
+            "/api/v1/commerce/entitlements/{user}/auto-top-up",
+            axum::routing::put(set_auto_top_up),
+        )
+        .route(
+            "/api/v1/commerce/entitlements/{user}/reset",
+            post(reset_entitlement_traffic),
+        )
+        .route(
             "/api/v1/commerce/wallets/{user}/adjust",
             post(adjust_wallet),
         )
@@ -3294,6 +3302,10 @@ struct CommercePlanInput {
     traffic_bytes: Option<u64>,
     #[serde(default = "commerce_enabled")]
     enabled: bool,
+    #[serde(default)]
+    traffic_reset: crate::commerce::TrafficReset,
+    #[serde(default)]
+    top_up: Option<crate::commerce::TopUp>,
 }
 fn commerce_enabled() -> bool {
     true
@@ -3307,6 +3319,8 @@ impl From<CommercePlanInput> for crate::commerce::PlanInput {
             duration_days: value.duration_days,
             traffic_bytes: value.traffic_bytes,
             enabled: value.enabled,
+            traffic_reset: value.traffic_reset,
+            top_up: value.top_up,
         }
     }
 }
@@ -3400,6 +3414,36 @@ async fn activate_entitlement(
     Ok(Json(
         database(state.store, move |db| {
             db.activate_entitlement(&actor, &user)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AutoTopUp {
+    enabled: bool,
+}
+async fn set_auto_top_up(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+    Json(input): Json<AutoTopUp>,
+) -> ApiResult<crate::commerce::EntitlementView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.set_auto_top_up(&actor, &user, input.enabled)
+        })
+        .await?,
+    ))
+}
+async fn reset_entitlement_traffic(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(user): Path<String>,
+) -> ApiResult<crate::commerce::EntitlementView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.reset_entitlement_traffic(&actor, &user)
         })
         .await?,
     ))

@@ -4,11 +4,14 @@ use super::*;
 mod entitlements;
 use crate::commerce::{
     CURRENCY, Coupon, CouponInput, GiftCode, GiftCodeInput, LedgerEntry, LedgerKind, Order,
-    OrderStatus, Payment, PaymentChannel, PaymentStatus, Plan, PlanInput, Wallet, WalletView,
-    WebhookView, discount_for, validate_adjustment, validate_coupon, validate_gift_code,
-    validate_plan,
+    OrderKind, OrderStatus, Payment, PaymentChannel, PaymentStatus, Plan, PlanInput, Wallet,
+    WalletView, WebhookView, discount_for, validate_adjustment, validate_coupon,
+    validate_gift_code, validate_plan,
 };
-pub(super) use entitlements::{clear_lapse, live_count, plan, plan_lapsed, plan_managed};
+pub(super) use entitlements::{
+    clear_lapse, cycle_baseline, live_count, plan, plan_lapsed, plan_managed, top_up,
+    top_up_failure,
+};
 
 fn plan_key(id: &str) -> String {
     format!("commerce_plan:{id}")
@@ -196,6 +199,10 @@ fn require_admin(actor: &Actor) -> Result<()> {
     }
     Ok(())
 }
+/// An invalid plan is the caller's mistake.
+fn valid_plan(input: &PlanInput) -> Result<()> {
+    validate_plan(input).or_else(|error| reject(400, error.to_string()))
+}
 fn require_user(actor: &Actor, user: &str) -> Result<()> {
     if actor.id != user && actor.role != Role::SystemAdmin {
         return reject(403, "wallet belongs to another user");
@@ -215,7 +222,7 @@ impl Store {
     }
     pub fn create_commerce_plan(&self, actor: &Actor, input: PlanInput) -> Result<Plan> {
         require_admin(actor)?;
-        validate_plan(&input)?;
+        valid_plan(&input)?;
         let plan = Plan {
             id: Uuid::new_v4().to_string(),
             name: input.name,
@@ -225,6 +232,8 @@ impl Store {
             traffic_bytes: input.traffic_bytes,
             enabled: input.enabled,
             created_at_ms: now_ms(),
+            traffic_reset: input.traffic_reset,
+            top_up: input.top_up,
         };
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
@@ -235,7 +244,7 @@ impl Store {
     }
     pub fn update_commerce_plan(&self, actor: &Actor, id: &str, input: PlanInput) -> Result<Plan> {
         require_admin(actor)?;
-        validate_plan(&input)?;
+        valid_plan(&input)?;
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let mut plan = read_plan(&tx, id)?.context("plan not found")?;
@@ -245,6 +254,8 @@ impl Store {
         plan.duration_days = input.duration_days;
         plan.traffic_bytes = input.traffic_bytes;
         plan.enabled = input.enabled;
+        plan.traffic_reset = input.traffic_reset;
+        plan.top_up = input.top_up;
         write_json(&tx, &plan_key(&plan.id), &plan)?;
         audit(&tx, &actor.id, "commerce.plan.update", &plan.id, "{}")?;
         tx.commit()?;
@@ -344,6 +355,7 @@ impl Store {
         if !plan.enabled {
             return reject(409, "plan is disabled");
         }
+        entitlements::require_same_reset(&tx, &actor.id, plan.traffic_reset)?;
         let subtotal_cents = plan.price_cents;
         let mut discount_cents = 0;
         let mut applied_coupon = None;
@@ -365,6 +377,7 @@ impl Store {
             applied_coupon = Some(code);
         }
         let order = Order {
+            kind: OrderKind::Plan,
             id: Uuid::new_v4().to_string(),
             user_id: actor.id.clone(),
             plan_id: plan.id.clone(),
@@ -381,6 +394,8 @@ impl Store {
             created_at_ms: now_ms(),
             paid_at_ms: None,
             refunded_at_ms: None,
+            traffic_reset: plan.traffic_reset,
+            top_up: plan.top_up,
         };
         write_order(&tx, &order)?;
         audit(&tx, &actor.id, "commerce.order.create", &order.id, "{}")?;
@@ -446,6 +461,12 @@ impl Store {
             return reject(
                 409,
                 "external payments must be refunded through the payment provider",
+            );
+        }
+        if order.kind == OrderKind::TopUp {
+            return reject(
+                409,
+                "top-up traffic belongs to its cycle and is not refunded; adjust the wallet instead",
             );
         }
         if order.amount_cents > 0 {

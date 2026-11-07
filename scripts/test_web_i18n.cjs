@@ -26,6 +26,7 @@ assert.equal(i18n.incidentMessage({ key: 'expired:n1', summary: '节点 东京 �
 assert.equal(i18n.incidentMessage({ key: 'budget_near:b1', summary: '共享额度 东京 占用回落到 10%' }), 'Shared budget 东京 is back down to 10% committed');
 assert.equal(i18n.incidentMessage({ key: 'dns:r1', summary: 'DNS 记录 a.example.com A 同步失败：原始诊断 {0}' }), 'DNS record a.example.com A failed to sync: 原始诊断 {0}');
 assert.equal(i18n.incidentMessage({ key: 'budget_exhausted:b1', summary: '此项告警已停用' }), 'This alert rule was switched off');
+assert.equal(i18n.incidentMessage({ key: 'budget_exhausted:b1', summary: '共享额度 东京 已用尽，无法再分配流量；自动补流量未执行：钱包余额不足' }), 'Shared budget 东京 is exhausted; no more traffic can be allocated. Automatic top-up did not run: the wallet balance is too low');
 assert.equal(i18n.incidentMessage({ key: 'node:n1', summary: '此项告警已停用' }), '此项告警已停用');
 const opaque = '节点管理 <img onerror=alert(1)> {1} $&';
 assert.equal(i18n.msg(['删除「', '」会终止其会话，历史账本保留。'], opaque), `Deleting “${opaque}” terminates its sessions. Ledger history is preserved.`);

@@ -24,6 +24,8 @@ fn plan_input(price_cents: i64) -> PlanInput {
         duration_days: 30,
         traffic_bytes: Some(100 * 1024 * 1024 * 1024),
         enabled: true,
+        traffic_reset: Default::default(),
+        top_up: None,
     }
 }
 

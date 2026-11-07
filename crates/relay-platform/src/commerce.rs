@@ -1,7 +1,7 @@
 //! Minimal commerce core: plans, a single-currency wallet ledger, orders paid
 //! from the wallet, refunds, and (optional feature) plan entitlements that turn
-//! a paid order into the buyer's traffic budget. Commissions and taxes are not
-//! implemented.
+//! a paid order into the buyer's traffic budget, with traffic reset cycles and
+//! automatic top-ups. Commissions and taxes are not implemented.
 use crate::model::now_ms;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,39 @@ pub struct Plan {
     pub traffic_bytes: Option<u64>,
     pub enabled: bool,
     pub created_at_ms: i64,
+    /// Stored plans from before cycles have none: one allowance for the whole plan.
+    #[serde(default)]
+    pub traffic_reset: TrafficReset,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_up: Option<TopUp>,
 }
+/// When a plan's traffic starts again (only with plan entitlements).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficReset {
+    /// One allowance for the whole plan; renewals add traffic.
+    #[default]
+    None,
+    /// At each billing boundary: activation, then the end of every paid period.
+    Billing,
+    /// Every N days (1..=366) from the start of the first cycle.
+    EveryDays(u16),
+}
+impl TrafficReset {
+    pub fn resets(self) -> bool {
+        self != Self::None
+    }
+}
+/// Traffic bought from the wallet when a cycle runs out. It belongs to the
+/// current cycle only and never extends the plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TopUp {
+    pub bytes: u64,
+    pub price_cents: i64,
+    pub max_per_cycle: u32,
+}
+pub const MAX_TOP_UPS_PER_CYCLE: u32 = 1_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CouponKind {
@@ -144,8 +176,20 @@ pub enum OrderStatus {
     Paid,
     Refunded,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrderKind {
+    /// A plan bought or renewed by the user.
+    #[default]
+    Plan,
+    /// Traffic bought automatically for the current cycle; paid on creation.
+    TopUp,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Order {
+    /// Orders stored before top-ups are plan orders.
+    #[serde(default)]
+    pub kind: OrderKind,
     pub id: String,
     pub user_id: String,
     pub plan_id: String,
@@ -172,6 +216,11 @@ pub struct Order {
     pub paid_at_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refunded_at_ms: Option<i64>,
+    /// The plan's reset policy and top-up when the order was created.
+    #[serde(default)]
+    pub traffic_reset: TrafficReset,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_up: Option<TopUp>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -194,8 +243,13 @@ pub struct EntitlementGrant {
     pub granted_at_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at_ms: Option<i64>,
+    #[serde(default)]
+    pub traffic_reset: TrafficReset,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_up: Option<TopUp>,
 }
-/// A user's plan window. Renewals stack: traffic adds up and days extend the expiry.
+/// A user's plan window. Renewals stack: days extend the expiry; without a
+/// reset policy traffic adds up, with one each cycle gets the latest plan's traffic.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Entitlement {
     pub user_id: String,
@@ -203,10 +257,89 @@ pub struct Entitlement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_id: Option<String>,
     /// Allowance outside the plans: an adopted budget's limit, or the bytes
-    /// already committed when a lapsed plan is renewed.
+    /// already committed when a lapsed plan is renewed. Unused by cycles.
     pub base_bytes: u64,
     pub expires_at_ms: i64,
     pub grants: Vec<EntitlementGrant>,
+    /// "Top up automatically when used up", switched by the user.
+    #[serde(default)]
+    pub auto_top_up: bool,
+    /// Cycles started so far, across windows; numbers top-up ledger references.
+    #[serde(default)]
+    pub cycles: u64,
+    /// The current traffic cycle of a plan that resets; none otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<TrafficCycle>,
+}
+/// One reset period. The budget's ledger never goes back: a cycle's room is
+/// `baseline_bytes + allowance + top-ups`, never below the committed bytes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrafficCycle {
+    pub policy: TrafficReset,
+    /// `every_days` boundaries fall on `anchor_ms + k · N days`.
+    pub anchor_ms: i64,
+    pub started_at_ms: i64,
+    /// The budget's consumed bytes when the cycle began. Reservations that
+    /// servers held then count against this cycle.
+    pub baseline_bytes: u64,
+    /// The plan's traffic per cycle; none is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowance_bytes: Option<u64>,
+    pub top_ups: u32,
+    pub top_up_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<TopUpFailure>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopUpFailureReason {
+    /// The plan has no top-up.
+    NotConfigured,
+    /// The user has not switched on automatic top-up.
+    SwitchedOff,
+    /// This cycle already had `max_per_cycle` top-ups.
+    CapReached,
+    /// The wallet balance is below the top-up price.
+    InsufficientBalance,
+}
+impl TopUpFailureReason {
+    /// The Chinese text used in alert summaries.
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::NotConfigured => "套餐未配置自动补流量",
+            Self::SwitchedOff => "用户未开启自动补流量",
+            Self::CapReached => "本周期补流量次数已达上限",
+            Self::InsufficientBalance => "钱包余额不足",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopUpFailure {
+    pub reason: TopUpFailureReason,
+    pub at_ms: i64,
+}
+/// The current cycle as the user sees it.
+#[derive(Clone, Debug, Serialize)]
+pub struct CycleView {
+    pub policy: TrafficReset,
+    pub started_at_ms: i64,
+    /// The next reset, or the plan's expiry when that comes first.
+    pub ends_at_ms: i64,
+    /// None when the plan expires before another reset.
+    pub next_reset_at_ms: Option<i64>,
+    /// The plan's traffic per cycle plus this cycle's top-ups; none is unlimited.
+    pub allowance_bytes: Option<u64>,
+    pub top_up_bytes: u64,
+    /// Reported use since the cycle began.
+    pub used_bytes: u64,
+    /// Reservations servers hold that they have not reported as used yet.
+    pub reserved_bytes: u64,
+    /// What the controller can still hand out this cycle; none is unlimited.
+    pub remaining_bytes: Option<u64>,
+    pub top_ups: u32,
+    /// The plan's top-up, with `max_per_cycle` as the cap.
+    pub top_up: Option<TopUp>,
+    pub last_failure: Option<TopUpFailure>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct EntitlementView {
@@ -215,6 +348,9 @@ pub struct EntitlementView {
     pub username: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<crate::budget::Budget>,
+    /// Present while a plan that resets is active or waiting for its budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_cycle: Option<CycleView>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct WalletView {
@@ -229,6 +365,8 @@ pub struct PlanInput {
     pub duration_days: u32,
     pub traffic_bytes: Option<u64>,
     pub enabled: bool,
+    pub traffic_reset: TrafficReset,
+    pub top_up: Option<TopUp>,
 }
 pub fn validate_coupon(input: &CouponInput) -> Result<()> {
     let code = input.code.trim().to_ascii_uppercase();
@@ -338,6 +476,30 @@ pub fn validate_plan(input: &PlanInput) -> Result<()> {
         input.traffic_bytes.is_none_or(|bytes| bytes > 0),
         "plan traffic must be positive when set"
     );
+    if let TrafficReset::EveryDays(days) = input.traffic_reset {
+        ensure!(
+            (1..=366).contains(&days),
+            "traffic reset interval must be 1..366 days"
+        );
+    }
+    if let Some(top_up) = input.top_up {
+        ensure!(
+            input.traffic_reset.resets() && input.traffic_bytes.is_some(),
+            "a top-up needs a plan whose traffic is limited and resets"
+        );
+        ensure!(
+            top_up.bytes > 0 && top_up.bytes <= crate::model::MAX_COUNTER,
+            "top-up traffic must be positive"
+        );
+        ensure!(
+            (0..=MAX_AMOUNT_CENTS).contains(&top_up.price_cents),
+            "top-up price is out of range"
+        );
+        ensure!(
+            (1..=MAX_TOP_UPS_PER_CYCLE).contains(&top_up.max_per_cycle),
+            "top-ups per cycle must be 1..1000"
+        );
+    }
     Ok(())
 }
 pub fn validate_reference(reference: &str) -> Result<()> {
@@ -366,8 +528,8 @@ pub fn now() -> i64 {
     now_ms()
 }
 
-/// Expires plans whose days have run out and retries plans waiting for their
-/// budget, once per `tick`.
+/// Expires plans whose days have run out, retries plans waiting for their
+/// budget and starts due traffic cycles, once per `tick`.
 pub async fn run_entitlements(
     store: crate::store::Store,
     tick: std::time::Duration,

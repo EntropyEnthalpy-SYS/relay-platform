@@ -4,7 +4,7 @@ mod recovery_admin;
 use crate::budget::*;
 use std::collections::{HashMap, HashSet};
 
-fn paused(conn: &Connection) -> Result<bool> {
+pub(super) fn paused(conn: &Connection) -> Result<bool> {
     Ok(conn
         .query_row(
             "SELECT value FROM metadata WHERE key='budget_allocation_paused'",
@@ -584,8 +584,22 @@ pub(super) fn exchange(
         if result.allocation_paused || super::commerce::plan_lapsed(tx, &budget.id)? {
             continue;
         }
-        let bytes = (budget.limit_bytes - budget.committed_bytes)
-            .min(budget.quantum_bytes.max(request.minimum_bytes));
+        // A plan cycle that cannot fill this reservation buys its top-up
+        // first, in this transaction, so traffic does not stall at the end of
+        // a cycle and concurrent requests cannot buy twice.
+        let wanted = budget.quantum_bytes.max(request.minimum_bytes);
+        let budget = if budget.limit_bytes - budget.committed_bytes < wanted
+            && super::commerce::top_up(tx, &budget)?
+        {
+            tx.query_row(
+                &format!("{BUDGET_SELECT} WHERE b.id=?1"),
+                [&budget.id],
+                budget_row,
+            )?
+        } else {
+            budget
+        };
+        let bytes = (budget.limit_bytes - budget.committed_bytes).min(wanted);
         if bytes == 0 {
             continue;
         }

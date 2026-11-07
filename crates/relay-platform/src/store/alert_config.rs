@@ -42,13 +42,16 @@ pub struct AlertNode {
     /// The newest report's resources; none before a report reaches this controller.
     pub usage: Option<crate::telemetry::Sample>,
 }
-/// A shared budget as the alert worker sees it.
+/// A shared budget as the alert worker sees it. A plan budget that resets
+/// reports its current cycle: both byte counts start at the cycle's baseline.
 pub struct AlertBudget {
     pub tenant_id: String,
     pub id: String,
     pub name: String,
     pub limit_bytes: u64,
     pub committed_bytes: u64,
+    /// Why a plan's automatic top-up for this budget's cycle did not run.
+    pub top_up_failure: Option<crate::commerce::TopUpFailureReason>,
 }
 /// A managed DNS record as the alert worker sees it. Records belong to no tenant.
 pub struct AlertDnsRecord {
@@ -98,20 +101,42 @@ impl Store {
     }
     pub fn alert_budgets(&self) -> Result<Vec<AlertBudget>> {
         let conn = self.0.lock().unwrap();
-        let mut q =
-            conn.prepare("SELECT tenant_id,id,name,limit_bytes,committed_bytes FROM budgets")?;
+        let mut q = conn.prepare(
+            "SELECT tenant_id,id,name,limit_bytes,committed_bytes,scope,scope_id FROM budgets",
+        )?;
         let rows = q
             .query_map([], |r| {
-                Ok(AlertBudget {
-                    tenant_id: r.get(0)?,
-                    id: r.get(1)?,
-                    name: r.get(2)?,
-                    limit_bytes: r.get(3)?,
-                    committed_bytes: r.get(4)?,
-                })
+                Ok((
+                    AlertBudget {
+                        tenant_id: r.get(0)?,
+                        id: r.get(1)?,
+                        name: r.get(2)?,
+                        limit_bytes: r.get(3)?,
+                        committed_bytes: r.get(4)?,
+                        top_up_failure: None,
+                    },
+                    r.get::<_, String>(5)? == "user",
+                    r.get::<_, String>(6)?,
+                ))
             })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(rows)
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(mut budget, user, scope_id)| {
+                if user {
+                    // A plan that resets is judged on its current cycle, not
+                    // on the counters of every cycle before it.
+                    if let Some(baseline) =
+                        super::commerce::cycle_baseline(&conn, &scope_id, &budget.id)?
+                    {
+                        budget.limit_bytes = budget.limit_bytes.saturating_sub(baseline);
+                        budget.committed_bytes = budget.committed_bytes.saturating_sub(baseline);
+                    }
+                    budget.top_up_failure =
+                        super::commerce::top_up_failure(&conn, &scope_id, &budget.id)?;
+                }
+                Ok(budget)
+            })
+            .collect()
     }
     /// Read straight from the stored records, so the alert worker depends
     /// on nothing but their id, name, type and last error.

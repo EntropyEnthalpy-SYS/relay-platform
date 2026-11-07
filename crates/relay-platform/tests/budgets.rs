@@ -549,6 +549,8 @@ fn expired_plan_budget_stays_closed_after_reservations_return_and_renewal_reopen
                 duration_days: 30,
                 traffic_bytes: Some(1_000),
                 enabled: true,
+                traffic_reset: Default::default(),
+                top_up: None,
             },
         )
         .unwrap();

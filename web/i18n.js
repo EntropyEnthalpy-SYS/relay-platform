@@ -73,6 +73,7 @@ export function eventMessage(event) {
     budget_near: [/^共享额度 (.+) 已占用 (\d+)%，阈值 (\d+)%$/, match => msg`共享额度 ${match[1]} 已占用 ${match[2]}%，阈值 ${match[3]}%`],
     budget_below: [/^共享额度 (.+) 占用回落到 (\d+)%$/, match => msg`共享额度 ${match[1]} 占用回落到 ${match[2]}%`],
     budget_exhausted: [/^共享额度 (.+) 已用尽，无法再分配流量$/, match => msg`共享额度 ${match[1]} 已用尽，无法再分配流量`],
+    budget_top_up_failed: [/^共享额度 (.+) 已用尽，无法再分配流量；自动补流量未执行：(.+)$/, match => msg`共享额度 ${match[1]} 已用尽，无法再分配流量；自动补流量未执行：${t(match[2])}`],
     budget_available: [/^共享额度 (.+) 恢复可分配$/, match => msg`共享额度 ${match[1]} 恢复可分配`],
     dns_failed: [/^DNS 记录 (.+?) 同步失败：([\s\S]*)$/, match => msg`DNS 记录 ${match[1]} 同步失败：${match[2]}`],
     dns_synced: [/^DNS 记录 (.+) 同步恢复$/, match => msg`DNS 记录 ${match[1]} 同步恢复`],
@@ -87,7 +88,7 @@ const expiry = ['expiry_soon', 'expiry_passed', 'expiry_cleared', 'rule_disabled
 const incidentKinds = {
   target: ['target_down', 'target_recovered', 'target_removed'], config: ['config_rejected', 'config_recovered'], node: ['node_silent', 'node_reported'],
   cpu: ['cpu_high', 'cpu_normal', 'rule_disabled'], memory: ['memory_high', 'memory_normal', 'rule_disabled'], expiring: expiry, expired: expiry,
-  budget_near: ['budget_near', 'budget_below', 'rule_disabled'], budget_exhausted: ['budget_exhausted', 'budget_available', 'rule_disabled'], dns: ['dns_failed', 'dns_synced', 'rule_disabled'],
+  budget_near: ['budget_near', 'budget_below', 'rule_disabled'], budget_exhausted: ['budget_exhausted', 'budget_top_up_failed', 'budget_available', 'rule_disabled'], dns: ['dns_failed', 'dns_synced', 'rule_disabled'],
 };
 export function incidentMessage(incident) {
   const source = String(incident.key).split(':')[0];

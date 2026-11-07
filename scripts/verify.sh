@@ -26,6 +26,7 @@ for RELAY_TEST_LANGUAGE in zh-CN en; do
     node scripts/test_web_shared_rules.cjs web/app.js
     node scripts/test_web_chains.cjs web/app.js
     node scripts/test_web_reverse_tunnels.cjs web/app.js
+    node scripts/test_web_traffic_cycles.cjs web/app.js
     node scripts/test_web_smtp.cjs web/app.js
     node scripts/test_web_views.cjs web/index.html web/app.js
 done

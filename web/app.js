@@ -2186,7 +2186,32 @@ async function openTicket(id) {
 const orderStatuses = localize({ pending: '待支付', paid: '已支付', refunded: '已退款' });
 const orderChannels = localize({ wallet: '钱包', external: '外部支付' });
 const ledgerKinds = localize({ adjustment: '调整', credit: '充值', purchase: '购买', refund: '退款' });
+const orderKinds = localize({ plan: '套餐购买', top_up: '补流量' });
+// The controller's reasons for not topping up; the alert texts use the same words.
+const topUpFailures = localize({ not_configured: '套餐未配置自动补流量', switched_off: '用户未开启自动补流量', cap_reached: '本周期补流量次数已达上限', insufficient_balance: '钱包余额不足' });
 function money(cents) { return `¥${(cents / 100).toFixed(2)}`; }
+function trafficResetLabel(reset) {
+  if (reset === 'billing') return translate('跟随计费周期');
+  if (reset?.every_days) return msg`每 ${reset.every_days} 天重置`;
+  return translate('不重置');
+}
+function topUpLabel(topUp) { return topUp ? msg`每次 ${bytes(topUp.bytes)} · ${money(topUp.price_cents)} · 每周期最多 ${topUp.max_per_cycle} 次` : translate('未配置'); }
+function planCycleCell(plan) {
+  const n = el('div'); n.append(el('div', trafficResetLabel(plan.traffic_reset)));
+  if (plan.top_up) n.append(el('div', msg`补流量 ${bytes(plan.top_up.bytes)} · ${money(plan.top_up.price_cents)}`, 'subline'), el('div', msg`每周期最多 ${plan.top_up.max_per_cycle} 次`, 'subline'));
+  return n;
+}
+function day(ms) { return new Date(ms).toLocaleDateString(getLanguage()); }
+function topUpCount(cycle) { return cycle.top_up ? `${cycle.top_ups} / ${cycle.top_up.max_per_cycle}` : translate('未配置'); }
+async function switchAutoTopUp(item, enabled) {
+  await api(`/commerce/entitlements/${item.user_id}/auto-top-up`, { method: 'PUT', body: { enabled } });
+  notify(enabled ? translate('已开启自动补流量。') : translate('已关闭自动补流量。')); await renderCommerce();
+}
+async function resetTraffic(item) {
+  if (!await confirmAction(msg`立即重置 ${item.username || item.user_id} 的本周期流量？已用流量清零并从现在开始新周期，本周期的补流量一并清零，到期时间不变。`)) return;
+  await api(`/commerce/entitlements/${item.user_id}/reset`, { method: 'POST' });
+  notify(translate('流量已重置，新周期从现在开始。')); await renderCommerce();
+}
 const entitlementStates = localize({ active: ['生效中', 'green'], awaiting_budget: ['等待额度', 'orange'], lapsed: ['已到期', ''] });
 function entitlementBadge(value) { const [label, color] = entitlementStates[value] || [value, '']; return badge(label, color); }
 function planUsage(budget) {
@@ -2196,12 +2221,26 @@ function planUsage(budget) {
 }
 async function activatePlan(user) { await api(`/commerce/entitlements/${user}/activate`, { method: 'POST' }); notify(translate('套餐已生效。')); await renderCommerce(); }
 function myPlanPanel(item) {
-  const p = panel(translate('我的套餐'), translate('购买的套餐会把流量和天数加到你的流量额度。续费会叠加流量并顺延到期时间；到期后不再发放新流量。'));
+  const cycle = item?.current_cycle;
+  const p = panel(translate('我的套餐'), cycle ? translate('此套餐按周期重置流量：每个周期从套餐流量重新开始，未用完的流量不结转；续费只顺延到期时间。') : translate('购买的套餐会把流量和天数加到你的流量额度。续费会叠加流量并顺延到期时间；到期后不再发放新流量。'));
   if (!item) { p.append(empty(translate('还没有生效的套餐'), translate('从下方选择套餐购买，付款后自动生效。'))); return p; }
   const board = el('div', undefined, 'alert-status diagnostics-board'), budget = item.budget, unlimited = budget && budget.limit_bytes >= 9223372036854775807;
   const [label, color] = entitlementStates[item.state] || [item.state, ''];
-  for (const [name, value, tone] of [[translate('状态'), label, color], [translate('到期'), new Date(item.expires_at_ms).toLocaleDateString(getLanguage()), ''], [translate('已用'), budget ? bytes(budget.consumed_bytes) : '—', ''], [translate('额度'), !budget ? '—' : unlimited ? translate('不限') : bytes(budget.limit_bytes), '']]) { const tile = el('div', undefined, `alert-stat ${tone}`); tile.append(el('div', value, 'metric-value'), el('div', name, 'metric-label')); board.append(tile); }
+  const tiles = cycle
+    ? [[translate('状态'), label, color], [translate('到期'), day(item.expires_at_ms), ''], [translate('本周期已用'), bytes(cycle.used_bytes), ''], [translate('本周期额度'), cycle.allowance_bytes === null ? translate('不限') : bytes(cycle.allowance_bytes), ''], [translate('剩余'), cycle.remaining_bytes === null ? translate('不限') : bytes(cycle.remaining_bytes), cycle.remaining_bytes === 0 ? 'red' : ''], [translate('下次重置'), cycle.next_reset_at_ms ? day(cycle.next_reset_at_ms) : translate('到期前不再重置'), ''], [translate('本周期补流量'), topUpCount(cycle), '']]
+    : [[translate('状态'), label, color], [translate('到期'), day(item.expires_at_ms), ''], [translate('已用'), budget ? bytes(budget.consumed_bytes) : '—', ''], [translate('额度'), !budget ? '—' : unlimited ? translate('不限') : bytes(budget.limit_bytes), '']];
+  for (const [name, value, tone] of tiles) { const tile = el('div', undefined, `alert-stat ${tone}`); tile.append(el('div', value, 'metric-value'), el('div', name, 'metric-label')); board.append(tile); }
   p.append(board);
+  if (cycle) {
+    const body = el('div', undefined, 'panel-body'), actions = el('div', undefined, 'panel-actions');
+    body.append(el('p', msg`本周期 ${day(cycle.started_at_ms)} – ${day(cycle.ends_at_ms)} · ${trafficResetLabel(cycle.policy)}。`, 'fine'));
+    if (cycle.reserved_bytes) body.append(el('p', msg`服务器已领取、尚未上报的 ${bytes(cycle.reserved_bytes)} 也占用本周期流量。`, 'fine'));
+    body.append(el('p', cycle.top_up ? msg`自动补流量：${topUpLabel(cycle.top_up)}。本周期流量用完时从钱包扣款，补充的流量只属于本周期，重置时清零，不延长到期时间。` : translate('此套餐没有自动补流量。'), 'fine'));
+    if (cycle.last_failure) body.append(el('p', msg`上次未能自动补流量：${topUpFailures[cycle.last_failure.reason] || cycle.last_failure.reason}（${timestamp(cycle.last_failure.at_ms)}）`, 'workflow-callout'));
+    actions.append(item.auto_top_up ? button(translate('关闭自动补流量'), () => switchAutoTopUp(item, false), 'table-action') : button(translate('开启“用完自动补流量”'), () => switchAutoTopUp(item, true), 'primary'));
+    actions.append(badge(item.auto_top_up ? translate('自动补流量已开启') : translate('自动补流量未开启'), item.auto_top_up ? 'green' : ''));
+    body.append(actions); p.append(body);
+  }
   if (item.state === 'awaiting_budget') {
     const note = el('div', undefined, 'panel-body'), actions = el('div', undefined, 'panel-actions');
     actions.append(button(translate('立即生效'), () => activatePlan(item.user_id), 'primary'));
@@ -2223,26 +2262,32 @@ async function renderCommerce() {
   if (!wallet.entries.length) p.append(el('p', translate('还没有资金流水。'), 'muted'));
   const plansPanel = panel(translate('套餐'), translate('价格以人民币分保存；购买订单保存套餐快照，后续改价不影响已创建订单。'), state.actor.role === 'system_admin' ? button(translate('＋ 新建套餐'), () => planForm(null), 'primary') : null);
   if (!plans.length) plansPanel.append(empty(translate('暂无可用套餐'), translate('管理员创建并启用套餐后，用户可以创建订单。')));
-  else plansPanel.append(table([translate('套餐'), translate('说明'), translate('价格'), translate('时长'), translate('流量'), translate('操作')], plans.map(plan => {
+  else plansPanel.append(table([translate('套餐'), translate('说明'), translate('价格'), translate('时长'), translate('流量'), translate('流量重置'), translate('操作')], plans.map(plan => {
     const actions = el('div'); actions.append(button(translate('钱包购买'), () => buyPlan(plan), 'table-action'), button(translate('创建待支付订单'), () => createPendingOrder(plan), 'table-action'));
     if (state.actor.role === 'system_admin') actions.append(button(translate('编辑'), () => planForm(plan), 'table-action'), button(translate('删除'), () => deletePlan(plan), 'table-action danger'));
-    return [namedCell(plan.name, plan.id), plan.description || '—', money(plan.price_cents), msg`${plan.duration_days} 天`, plan.traffic_bytes ? bytes(plan.traffic_bytes) : translate('不限'), actions];
+    return [namedCell(plan.name, plan.id), plan.description || '—', money(plan.price_cents), msg`${plan.duration_days} 天`, plan.traffic_bytes ? bytes(plan.traffic_bytes) : translate('不限'), planCycleCell(plan), actions];
   })));
   const ordersPanel = panel(translate('订单'), entitled ? translate('支付成功的订单会自动把套餐的流量和天数加到购买者的流量额度；退款会扣回该订单的流量和天数，已用的流量不退回。') : translate('订单只记录计费结果。系统管理员在「可选功能」中开启“套餐权益”后，支付成功的订单会自动发放套餐的流量和天数。'), null);
   if (!orders.length) ordersPanel.append(empty(translate('还没有订单'), translate('选择套餐购买后会生成订单。')));
-  else ordersPanel.append(table([translate('套餐'), translate('金额'), translate('状态'), translate('通道'), translate('创建'), translate('支付/退款'), translate('操作')], orders.map(order => {
+  else ordersPanel.append(table([translate('套餐'), translate('类型'), translate('金额'), translate('状态'), translate('通道'), translate('创建'), translate('支付/退款'), translate('操作')], orders.map(order => {
     const actions = el('div');
     if (order.status === 'pending') actions.append(button(translate('钱包支付'), async () => { await api(`/commerce/orders/${order.id}/pay`, { method: 'POST' }); notify(translate('订单已支付。')); await renderCommerce(); }, 'table-action'), button(translate('外部支付'), () => externalPayment(order), 'table-action'));
-    if (order.status === 'paid' && order.channel === 'wallet' && state.actor.role === 'system_admin') actions.append(button(translate('退款'), async () => { if (!await confirmAction(msg`退款 ${money(order.amount_cents)} 到用户钱包？`)) return; await api(`/commerce/orders/${order.id}/refund`, { method: 'POST' }); notify(translate('订单已退款。')); await renderCommerce(); }, 'table-action danger'));
-    return [order.plan_name, money(order.amount_cents), badge(orderStatuses[order.status] || order.status, order.status === 'paid' ? 'green' : order.status === 'refunded' ? 'orange' : ''), orderChannels[order.channel] || order.channel || translate('钱包'), timestamp(order.created_at_ms), order.paid_at_ms ? timestamp(order.paid_at_ms) : order.refunded_at_ms ? timestamp(order.refunded_at_ms) : '—', actions];
+    if (order.status === 'paid' && order.channel === 'wallet' && order.kind !== 'top_up' && state.actor.role === 'system_admin') actions.append(button(translate('退款'), async () => { if (!await confirmAction(msg`退款 ${money(order.amount_cents)} 到用户钱包？`)) return; await api(`/commerce/orders/${order.id}/refund`, { method: 'POST' }); notify(translate('订单已退款。')); await renderCommerce(); }, 'table-action danger'));
+    const kind = order.kind === 'top_up' ? msg`补流量 ${bytes(order.traffic_bytes)}` : orderKinds[order.kind] || orderKinds.plan;
+    return [order.plan_name, kind, money(order.amount_cents), badge(orderStatuses[order.status] || order.status, order.status === 'paid' ? 'green' : order.status === 'refunded' ? 'orange' : ''), orderChannels[order.channel] || order.channel || translate('钱包'), timestamp(order.created_at_ms), order.paid_at_ms ? timestamp(order.paid_at_ms) : order.refunded_at_ms ? timestamp(order.refunded_at_ms) : '—', actions];
   })));
   const panels = [p, ...(entitled ? [myPlanPanel(mine)] : []), plansPanel, ordersPanel];
   if (entitled && admin) {
     const e = panel(translate('套餐权益'), translate('每位购买者一行。等待额度表示已付款，但购买者仍有运行中的规则，暂停规则后会在一分钟内自动生效。'));
     if (!entitlements.length) e.append(empty(translate('还没有套餐权益'), translate('开启后支付成功的订单会出现在这里。')));
-    else e.append(table([translate('用户'), translate('状态'), translate('到期'), translate('已用 / 额度'), translate('订单'), translate('操作')], entitlements.map(item => {
-      const actions = el('div'); if (item.state === 'awaiting_budget') actions.append(button(translate('立即生效'), () => activatePlan(item.user_id), 'table-action'));
-      return [namedCell(item.username || item.user_id, item.user_id), entitlementBadge(item.state), timestamp(item.expires_at_ms), planUsage(item.budget), String(item.grants.filter(g => !g.revoked_at_ms).length), actions];
+    else e.append(table([translate('用户'), translate('状态'), translate('到期'), translate('已用 / 额度'), translate('本周期'), translate('订单'), translate('操作')], entitlements.map(item => {
+      const actions = el('div'), cycle = item.current_cycle; if (item.state === 'awaiting_budget') actions.append(button(translate('立即生效'), () => activatePlan(item.user_id), 'table-action'));
+      if (cycle) actions.append(button(translate('立即重置流量'), () => resetTraffic(item), 'table-action danger'), button(item.auto_top_up ? translate('关闭补流量') : translate('开启补流量'), () => switchAutoTopUp(item, !item.auto_top_up), 'table-action'));
+      const usage = cycle ? meter(cycle.allowance_bytes ? (cycle.used_bytes + cycle.reserved_bytes) / Math.max(1, cycle.allowance_bytes) : 0, `${bytes(cycle.used_bytes)} / ${cycle.allowance_bytes === null ? translate('不限') : bytes(cycle.allowance_bytes)}`) : planUsage(item.budget);
+      const period = cycle ? namedCell(`${day(cycle.started_at_ms)} – ${day(cycle.ends_at_ms)}`, cycle.next_reset_at_ms ? msg`下次重置 ${day(cycle.next_reset_at_ms)}` : translate('到期前不再重置')) : '—';
+      if (cycle) period.append(el('div', item.auto_top_up ? translate('自动补流量已开启') : translate('自动补流量未开启'), 'subline'), el('div', msg`本周期补流量 ${topUpCount(cycle)}`, 'subline'));
+      if (cycle?.last_failure) period.append(el('div', topUpFailures[cycle.last_failure.reason] || cycle.last_failure.reason, 'subline'));
+      return [namedCell(item.username || item.user_id, item.user_id), entitlementBadge(item.state), timestamp(item.expires_at_ms), usage, period, String(item.grants.filter(g => !g.revoked_at_ms).length), actions];
     })));
     panels.push(e);
   }
@@ -2356,10 +2401,26 @@ function planForm(plan) {
   const days = field(grid, 'days', translate('时长 / 天'), plan?.duration_days ?? 30, 'number'); days.min = 1; days.max = 3650;
   field(grid, 'traffic', translate('流量 / bytes（留空不限）'), plan?.traffic_bytes ?? '', 'number', false).min = 1;
   select(grid, 'enabled', translate('状态'), [['yes', translate('启用')], ['no', translate('停用')]], plan?.enabled === false ? 'no' : 'yes');
-  form.append(grid, el('p', translate('价格转换为人民币分保存；已有订单使用创建时快照。'), 'fine'));
+  const reset = plan?.traffic_reset, every = reset?.every_days;
+  select(grid, 'reset', translate('流量重置'), [['none', translate('不重置（流量用到到期）')], ['billing', translate('跟随计费周期')], ['every_days', translate('每 N 天重置')]], every ? 'every_days' : reset === 'billing' ? 'billing' : 'none');
+  const interval = field(grid, 'reset_days', translate('重置间隔 / 天（1..366）'), every ?? '', 'number', false); interval.min = 1; interval.max = 366;
+  field(grid, 'top_up_bytes', translate('自动补流量：每次 / bytes（留空不提供）'), plan?.top_up?.bytes ?? '', 'number', false).min = 1;
+  const topUpPrice = field(grid, 'top_up_price', translate('每次补流量价格（元）'), plan?.top_up ? (plan.top_up.price_cents / 100).toFixed(2) : '', 'number', false); topUpPrice.min = 0; topUpPrice.step = '0.01';
+  const topUpMax = field(grid, 'top_up_max', translate('每周期最多补流量次数（1..1000）'), plan?.top_up?.max_per_cycle ?? '', 'number', false); topUpMax.min = 1; topUpMax.max = 1000;
+  form.append(grid, el('p', translate('价格转换为人民币分保存；已有订单使用创建时快照。'), 'fine'), el('p', translate('需要开启“套餐权益”。重置时本周期流量重新从套餐流量开始，未用完的不结转；跟随计费周期在每个已付费周期结束时重置。自动补流量需要设置流量和重置方式，用户开启后，本周期流量用完时从钱包扣款补充；补充的流量在下次重置时清零，不延长到期时间。'), 'fine'));
   submit(form, plan ? translate('保存套餐') : translate('创建套餐'), async data => {
-    const body = { name: String(data.get('name')).trim(), description: String(data.get('description')), price_cents: Math.round(Number(data.get('price')) * 100), duration_days: number(data, 'days'), traffic_bytes: number(data, 'traffic'), enabled: data.get('enabled') === 'yes' };
+    const body = { name: String(data.get('name')).trim(), description: String(data.get('description')), price_cents: Math.round(Number(data.get('price')) * 100), duration_days: number(data, 'days'), traffic_bytes: number(data, 'traffic'), enabled: data.get('enabled') === 'yes', traffic_reset: 'none', top_up: null };
     if (!Number.isSafeInteger(body.price_cents) || body.price_cents < 0) throw new Error(translate('价格无效'));
+    const policy = String(data.get('reset')), days = number(data, 'reset_days');
+    if (policy === 'every_days') { if (!(days >= 1 && days <= 366)) throw new Error(translate('重置间隔须为 1..366 天')); body.traffic_reset = { every_days: days }; } else if (policy === 'billing') body.traffic_reset = 'billing';
+    const topUpBytes = number(data, 'top_up_bytes');
+    if (topUpBytes !== null) {
+      if (body.traffic_reset === 'none' || body.traffic_bytes === null) throw new Error(translate('自动补流量需要设置流量和流量重置方式'));
+      const price = Math.round(Number(data.get('top_up_price')) * 100), max = number(data, 'top_up_max');
+      if (!(topUpBytes > 0) || String(data.get('top_up_price') ?? '').trim() === '' || !Number.isSafeInteger(price) || price < 0) throw new Error(translate('请填写有效的补流量大小和价格'));
+      if (!(max >= 1 && max <= 1000)) throw new Error(translate('每周期最多补流量次数须为 1..1000'));
+      body.top_up = { bytes: topUpBytes, price_cents: price, max_per_cycle: max };
+    }
     if (plan) await api(`/commerce/plans/${plan.id}`, { method: 'PUT', body });
     else await api('/commerce/plans', { method: 'POST', body });
     $('#dialog').close(); notify(translate('套餐已保存。')); await renderCommerce();

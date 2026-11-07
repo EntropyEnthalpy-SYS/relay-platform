@@ -791,6 +791,8 @@ async fn usage_header_reports_the_owners_budget_and_plan() {
                 duration_days: 30,
                 traffic_bytes: Some(100 * GIB),
                 enabled: true,
+                traffic_reset: Default::default(),
+                top_up: None,
             },
         )
         .unwrap();
@@ -871,6 +873,48 @@ async fn usage_header_reports_the_owners_budget_and_plan() {
         Some("download=0; total=1048576")
     );
     assert_eq!(header(&daves), None);
+    // Carol buys a plan that resets weekly after using 300 bytes: her header
+    // reports the current cycle, not the budget's lifetime counters.
+    let weekly = store
+        .create_commerce_plan(
+            &admin,
+            relay_platform::commerce::PlanInput {
+                name: "Weekly".into(),
+                description: String::new(),
+                price_cents: 0,
+                duration_days: 28,
+                traffic_bytes: Some(GIB),
+                enabled: true,
+                traffic_reset: relay_platform::commerce::TrafficReset::EveryDays(7),
+                top_up: None,
+            },
+        )
+        .unwrap();
+    let set_carols_use = |bytes: u64| {
+        rusqlite::Connection::open(temp.path().join("controller.db"))
+            .unwrap()
+            .execute(
+                "UPDATE budgets SET committed_bytes=?1,consumed_bytes=?1 WHERE scope='user' AND scope_id=?2",
+                rusqlite::params![bytes, carol.id],
+            )
+            .unwrap();
+    };
+    set_carols_use(300);
+    let (_, carol_session) = store.login("carol", PASSWORD).unwrap();
+    let order = store.create_order(&carol_session, &weekly.id).unwrap();
+    store.pay_order(&carol_session, &order.id).unwrap();
+    set_carols_use(800);
+    let carols_plan = store
+        .entitlement(&carol_session, &carol.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        header(&carols),
+        Some(format!(
+            "download=500; total={GIB}; expire={}",
+            carols_plan.entitlement.expires_at_ms / 1000
+        ))
+    );
 
     let (address, stop) = serve(store.clone()).await;
     let client = reqwest::Client::builder().no_proxy().build().unwrap();

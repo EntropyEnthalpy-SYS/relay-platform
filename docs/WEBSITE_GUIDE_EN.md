@@ -497,6 +497,17 @@ When several limits apply, the strictest wins. Under a busy speed limit, bandwid
 
 With the optional **Plan entitlements** feature, a paid plan order becomes the buyer's traffic budget: renewals add traffic and extend the expiry, and refunds remove that order's traffic and days. See [Wallet, plans, orders](#wallet-plans-orders-discount-codes-and-gift-codes).
 
+#### Plan traffic cycles and automatic top-up
+
+With **Plan entitlements** on, a plan can give its traffic per cycle instead of once, and can sell extra traffic from the wallet when a cycle runs out.
+
+- **Plan editor** (**Wallet & orders → ＋ New plan** or **Edit**): **Traffic reset** is **No reset (traffic lasts until expiry)**, the default and the behaviour of every existing plan; **Follows the billing period**, which resets at the end of every paid period; or **Every N days** with **Reset interval / days (1..366)**. For automatic top-up fill in **Automatic top-up: bytes per top-up (blank for none)**, **Price per top-up (CNY)** and **Top-ups per cycle at most (1..1000)**. A top-up needs the plan's traffic and a reset policy. The **Plans** list shows both in its **Traffic reset** column.
+- **Each cycle** starts again with the plan's traffic. Unused traffic does not carry over, and a renewal extends the expiry without adding traffic. The panel checks for due resets every minute. If it was down across several resets, it resets once into the current cycle.
+- **My plan** shows **Used this cycle**, **This cycle's traffic** (including top-ups), **Remaining**, **Next reset**, **Top-ups this cycle** against the cap, and the dates of the current cycle. Traffic that servers have reserved but not reported yet also counts against the cycle, including reservations they held when the cycle began. Users switch top-up on with **Turn on “Top up automatically when used up”** and off with **Turn off automatic top-up**.
+- **Automatic top-up** runs when a cycle has less than one reservation left and the user has switched it on. The wallet is charged, a **Top-up** order appears under **Orders** (**Type**), and the cycle's traffic rises at once. A top-up never extends the expiry, is cleared at the next reset, and cannot be refunded with **Refund**; adjust the wallet instead. When it cannot run, **My plan** shows why under **Last automatic top-up did not run**: the plan has no automatic top-up, it is switched off, this cycle's limit is reached, or the wallet balance is too low. The shared budget then runs out and raises the **Shared budget exhausted** alert with the same reason; the **Shared budget near its limit** alert also counts from the start of the cycle.
+- **Plan entitlements** (system administrators) shows each user's **Current cycle** with the next reset, whether automatic top-up is on, the top-ups used against the cap and the last failure. **Reset traffic now** starts a new cycle from now and clears its top-ups without changing the expiry; **Turn on top-up** and **Turn off top-up** switch automatic top-up for that user.
+- A user with an active plan cannot buy a plan that resets differently until the current one ends. Shared budgets keep counting every cycle's bytes; cycle numbers appear on **Wallet & orders** and in client subscription usage. See [Commerce](COMMERCE.md) and [Shared budgets](BUDGETS.md).
+
 ### Access control
 
 - **Source addresses:** each rule has allowed and denied source CIDR lists. Denied entries win. A blank allow list admits every source that is not denied. On a relay hop, the source is usually the previous server.
