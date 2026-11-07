@@ -1944,6 +1944,48 @@ async fn dns_webhook_generations_survive_restarts_and_follow_the_receiver() {
             .last_error
             .is_none()
     );
+
+    // A zone still in use cannot leave the provider's zone list.
+    let shrink = store.update_dns_provider(
+        &admin,
+        &provider,
+        None,
+        None,
+        None,
+        None,
+        dns::WebhookSettings {
+            zones: Some(vec!["example.net".into()]),
+            timeout_secs: None,
+        },
+    );
+    assert_eq!(rejection(shrink.unwrap_err()), 409);
+
+    // A new receiver URL gets every unchanged set again, in a generation it
+    // started; the old receiver hears nothing more.
+    let (moved, moved_endpoint, moved_stop) = mock_receiver(&["example.com"]).await;
+    let old_requests = receiver.requests();
+    store
+        .update_dns_provider(
+            &admin,
+            &provider,
+            None,
+            Some(&moved_endpoint),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    let resent = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((resent.created, resent.errors), (1, 0), "{resent:?}");
+    assert_eq!(moved.events(), ["generation.start", "record_set.put"]);
+    assert_eq!(
+        moved.set("edge.example.com", "A"),
+        Some((300, vec!["203.0.113.4".into()]))
+    );
+    assert_eq!(receiver.requests(), old_requests);
+    let settled = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(settled.unchanged, 1, "{settled:?}");
+    moved_stop.cancel();
     receiver_stop.cancel();
 }
 

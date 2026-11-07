@@ -50,6 +50,16 @@ fn webhook_settings(
             .iter()
             .map(|zone| crate::dns::webhook_zone_name(zone).or_else(invalid))
             .collect::<Result<_>>()?;
+        if let Some(zone) = all::<Zone>(conn, "dns_zone:")?.into_iter().find(|zone| {
+            zone.provider_id == provider.id
+                && crate::dns::webhook_zone_name(&zone.name)
+                    .is_ok_and(|name| !zones.contains(&name))
+        }) {
+            return reject(
+                409,
+                format!("zone {} still uses this DNS webhook provider", zone.name),
+            );
+        }
         provider.zones = zones.into_iter().collect();
     }
     if let Some(value) = settings.timeout_secs {
@@ -398,9 +408,26 @@ impl Store {
             provider.token = value.into();
         }
         webhook_settings(&tx, &mut provider, webhook)?;
+        // A new receiver URL has acknowledged nothing yet: forget what the
+        // old one acknowledged so the next pass sends every set again.
+        let new_receiver = provider.kind == ProviderKind::Webhook
+            && read_provider(&tx, id)?.is_some_and(|old| old.endpoint != provider.endpoint);
+        if new_receiver {
+            for zone in all::<Zone>(&tx, "dns_zone:")? {
+                if zone.provider_id == provider.id {
+                    tx.execute(
+                        "DELETE FROM metadata WHERE key=?1",
+                        [webhook_zone_key(&zone.id)],
+                    )?;
+                }
+            }
+        }
         write_provider(&tx, &provider)?;
         audit(&tx, &actor.id, "dns.provider.update", &provider.id, "{}")?;
         tx.commit()?;
+        if new_receiver {
+            self.dns_runtime().forget_webhook_session(&provider.id);
+        }
         Ok(ProviderView::from(&provider))
     }
     pub fn delete_dns_provider(&self, actor: &Actor, id: &str) -> Result<()> {
@@ -736,8 +763,22 @@ impl Store {
     pub(crate) fn dns_webhook_state(&self, zone_id: &str) -> Result<WebhookState> {
         read_webhook_state(&self.0.lock().unwrap(), zone_id)
     }
-    pub(crate) fn set_dns_webhook_state(&self, zone_id: &str, state: &WebhookState) -> Result<()> {
+    /// Keeps what `url` acknowledged, unless the zone or its provider changed
+    /// receiver (or was deleted) while the request was in flight.
+    pub(crate) fn set_dns_webhook_state(
+        &self,
+        zone_id: &str,
+        url: &str,
+        state: &WebhookState,
+    ) -> Result<()> {
         let conn = self.0.lock().unwrap();
+        let Some(zone) = read_zone(&conn, zone_id)? else {
+            return Ok(());
+        };
+        if read_provider(&conn, &zone.provider_id)?.is_none_or(|provider| provider.endpoint != url)
+        {
+            return Ok(());
+        }
         if state.is_empty() {
             conn.execute(
                 "DELETE FROM metadata WHERE key=?1",

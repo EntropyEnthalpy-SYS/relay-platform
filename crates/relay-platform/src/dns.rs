@@ -906,7 +906,8 @@ impl WebhookZone {
             .min()
             .unwrap_or(empty_ttl);
         self.put(key, values.into_iter().collect(), ttl).await?;
-        self.store.set_dns_webhook_state(&self.zone_id, &entries)?;
+        self.store
+            .set_dns_webhook_state(&self.zone_id, &self.hook.url, &entries)?;
         *self.entries.lock().unwrap() = entries;
         Ok(())
     }
@@ -1215,6 +1216,10 @@ impl Runtime {
             .entry(provider_id.to_owned())
             .or_default()
             .clone()
+    }
+    /// After a receiver URL change: the next write starts a generation there.
+    pub(crate) fn forget_webhook_session(&self, provider_id: &str) {
+        self.webhooks.lock().unwrap().remove(provider_id);
     }
     pub fn zone_view(&self, zone: Zone) -> ZoneView {
         let status = self
