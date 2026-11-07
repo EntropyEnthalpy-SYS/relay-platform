@@ -184,6 +184,7 @@ impl Counters {
             rate_limits: None,
             speed_test: None,
             live_connections: None,
+            egress_proxy: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),
@@ -1001,6 +1002,8 @@ struct RuntimeRule {
     target_active: Vec<Arc<AtomicUsize>>,
     /// Per target: until when (ms since [`clock`]) a real connect failure keeps it last.
     target_cooldown: Vec<AtomicU64>,
+    /// Per egress proxy server, like `target_cooldown`.
+    egress_cooldown: Vec<AtomicU64>,
     /// Target that `lowest_latency` currently sends new sessions to.
     preferred: AtomicUsize,
     /// The rule's owner; a node cap rotates between owners.
@@ -1091,6 +1094,12 @@ impl RuntimeRule {
             health: HealthSet::new(&spec),
             prewarm: PrewarmSet::new(&spec),
             target_cooldown: spec.targets.iter().map(|_| AtomicU64::new(0)).collect(),
+            egress_cooldown: spec
+                .egress_proxy
+                .iter()
+                .flat_map(|egress| &egress.servers)
+                .map(|_| AtomicU64::new(0))
+                .collect(),
             preferred: AtomicUsize::new(usize::MAX),
             user: user_key(&spec.tenant_id, &spec.owner_id),
             user_limit: resources.user_limit,
@@ -1128,6 +1137,23 @@ impl RuntimeRule {
             clock() + TARGET_COOLDOWN.as_millis() as u64,
             Ordering::Relaxed,
         );
+    }
+    /// Egress proxy servers in their configured order, those that failed in
+    /// the last [`TARGET_COOLDOWN`] last.
+    fn egress_order(&self) -> Vec<usize> {
+        let now = clock();
+        let (ready, cooling): (Vec<usize>, Vec<usize>) = (0..self.egress_cooldown.len())
+            .partition(|&index| self.egress_cooldown[index].load(Ordering::Relaxed) <= now);
+        [ready, cooling].concat()
+    }
+    fn egress_failed(&self, index: usize) {
+        self.egress_cooldown[index].store(
+            clock() + TARGET_COOLDOWN.as_millis() as u64,
+            Ordering::Relaxed,
+        );
+    }
+    fn egress_recovered(&self, index: usize) {
+        self.egress_cooldown[index].store(0, Ordering::Relaxed);
     }
     fn order(&self, source: SocketAddr, inlet: ListenerKey) -> Vec<usize> {
         let targets = &self.spec.targets;
@@ -2396,6 +2422,7 @@ fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
         || old.inbound_socks5 != new.inbound_socks5
         || old.inbound_http_connect != new.inbound_http_connect
         || old.inbound_http2_connect != new.inbound_http2_connect
+        || old.egress_proxy != new.egress_proxy
         || old.allow_destinations != new.allow_destinations
         || old.deny_destinations != new.deny_destinations
         || old.targets.iter().any(|previous| {
@@ -2985,53 +3012,11 @@ async fn resolve_destination(rule: &RuntimeRule, endpoint: &str) -> Result<Vec<S
     Ok(addresses)
 }
 
-/// Connects a Shadowsocks client to the destination it named.
-async fn connect_destination(
-    rule: &RuntimeRule,
-    server: &shadowsocks::Server,
-    destination: &shadowsocks::Destination,
-    inlet: ListenerKey,
-    session: &Live,
-) -> Result<BoxStream> {
-    let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
-    timeout_at(deadline, async {
-        let mut last = None;
-        for address in resolve_destination(rule, &destination.to_string()).await? {
-            if !server.permits(address.ip()) {
-                last = Some(
-                    DestinationDenied(format!("{destination} is not a public address")).into(),
-                );
-                continue;
-            }
-            let route = rule.routes.reserve(inlet, address)?;
-            match network::connect_tcp(
-                rule.spec.outbound_bind.as_ref(),
-                address,
-                rule.spec.mptcp_outbound(),
-            )
-            .await
-            {
-                Ok(stream) => {
-                    stream.set_nodelay(true)?;
-                    let mptcp = rule.mptcp.track(
-                        &stream,
-                        rule.spec.mptcp_outbound(),
-                        &rule.spec.id,
-                        "outbound",
-                    )?;
-                    session.set_remote(address);
-                    return Ok(transport::hold(Box::new(stream), (route, mptcp)));
-                }
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(last.unwrap_or_else(|| anyhow::anyhow!("{destination} has no addresses")))
-    })
-    .await
-    .context("destination connection timed out")?
-}
-
-async fn connect_http_connect_destination(
+/// Connects a proxy client to the destination it named. Every inbound whose
+/// clients choose the destination (SOCKS5, HTTP CONNECT, HTTP/2 CONNECT and
+/// Shadowsocks) dials here: directly, or through the rule's egress proxy.
+/// `allow_private` is the inbound's choice to reach non-public addresses.
+async fn connect_proxy_destination(
     rule: &RuntimeRule,
     allow_private: bool,
     destination: &shadowsocks::Destination,
@@ -3039,6 +3024,24 @@ async fn connect_http_connect_destination(
     session: &Live,
 ) -> Result<BoxStream> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
+    if let Some(egress) = &rule.spec.egress_proxy {
+        return timeout_at(
+            deadline,
+            connect_through_egress(
+                rule,
+                egress,
+                allow_private,
+                destination,
+                inlet,
+                session,
+                deadline,
+            ),
+        )
+        .await
+        .with_context(|| {
+            format!("connection to {destination} through the egress proxy timed out")
+        })?;
+    }
     timeout_at(deadline, async {
         let mut last = None;
         for address in resolve_destination(rule, &destination.to_string()).await? {
@@ -3074,7 +3077,154 @@ async fn connect_http_connect_destination(
         Err(last.unwrap_or_else(|| anyhow::anyhow!("{destination} has no addresses")))
     })
     .await
-    .context("HTTP CONNECT destination connection timed out")?
+    .context("destination connection timed out")?
+}
+
+/// What the egress proxy is asked to connect to. The rule's destination
+/// rules apply first, as without the proxy. A name goes to the proxy as a
+/// name when the rule can judge it by name and port alone; when private
+/// addresses are refused (the inbound's default) or address entries could
+/// match, the name is resolved here and the permitted addresses are sent
+/// instead, so the proxy reaches nothing the rule would not.
+async fn egress_requests(
+    rule: &RuntimeRule,
+    allow_private: bool,
+    destination: &shadowsocks::Destination,
+) -> Result<Vec<shadowsocks::Destination>> {
+    if let shadowsocks::Destination::Domain(name, port) = destination {
+        match rule.destination.decide_name(name, *port) {
+            Some(false) => {
+                return Err(DestinationDenied(format!(
+                    "destination denied by rule policy: {destination}"
+                ))
+                .into());
+            }
+            Some(true) if allow_private => return Ok(vec![destination.clone()]),
+            _ => {}
+        }
+    }
+    let addresses: Vec<_> = resolve_destination(rule, &destination.to_string())
+        .await?
+        .into_iter()
+        .filter(|address| allow_private || shadowsocks::public(address.ip()))
+        .map(shadowsocks::Destination::Ip)
+        .collect();
+    if addresses.is_empty() {
+        return Err(DestinationDenied(format!("{destination} is not a public address")).into());
+    }
+    Ok(addresses)
+}
+
+/// Reaches `destination` through the rule's egress proxy: one connection to
+/// the proxy per address to try, each opened by [`open_egress`]. The
+/// session's remote is the proxy, its next hop.
+async fn connect_through_egress(
+    rule: &RuntimeRule,
+    egress: &crate::egress::Config,
+    allow_private: bool,
+    destination: &shadowsocks::Destination,
+    inlet: ListenerKey,
+    session: &Live,
+    deadline: Instant,
+) -> Result<BoxStream> {
+    let mut last = None;
+    for request in egress_requests(rule, allow_private, destination).await? {
+        let (mut stream, address, route, server) =
+            open_egress(rule, egress, inlet, deadline).await?;
+        match crate::egress::connect(&mut stream, server, &request).await {
+            Ok(()) => {
+                configure_http2_socket(&stream, rule)?;
+                let mptcp = rule.mptcp.track(
+                    &stream,
+                    rule.spec.mptcp_outbound(),
+                    &rule.spec.id,
+                    "outbound",
+                )?;
+                session.set_remote(address);
+                return Ok(transport::hold(Box::new(stream), (route, mptcp)));
+            }
+            // The next address may be reachable; the proxy said why this one is not.
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("{destination} has no addresses")))
+}
+
+/// Connects to the first of the egress proxy's servers that accepts the
+/// connection and the credentials, with the rule's outbound bind. Servers
+/// that failed in the last [`TARGET_COOLDOWN`] are tried after the others,
+/// and each server gets its share of the time left, so one that does not
+/// answer leaves time for the next. A refusal (wrong credentials, not a
+/// SOCKS5 server) ends the attempt: the other servers share the
+/// credentials.
+async fn open_egress<'a>(
+    rule: &RuntimeRule,
+    egress: &'a crate::egress::Config,
+    inlet: ListenerKey,
+    deadline: Instant,
+) -> Result<(TcpStream, SocketAddr, LoopGuard, &'a str)> {
+    let order = rule.egress_order();
+    let mut last = None;
+    for (position, &index) in order.iter().enumerate() {
+        let server = egress.servers[index].as_str();
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let share = now + (deadline - now) / (order.len() - position) as u32;
+        let attempt = async {
+            let mut last = None;
+            for address in rule.resolver.resolve(server).await.map_err(|error| {
+                anyhow::anyhow!("egress proxy {server} cannot be resolved: {error}")
+            })? {
+                let route = rule.routes.reserve(inlet, address)?;
+                match network::connect_tcp(
+                    rule.spec.outbound_bind.as_ref(),
+                    address,
+                    rule.spec.mptcp_outbound(),
+                )
+                .await
+                {
+                    Ok(mut stream) => {
+                        stream.set_nodelay(true)?;
+                        crate::egress::greet(&mut stream, egress, server)
+                            .await
+                            .map_err(|error| match error.downcast::<crate::egress::Refusal>() {
+                                Ok(refusal) => refusal.into(),
+                                Err(error) => anyhow::anyhow!(
+                                    "egress proxy {server} closed the connection: {error}"
+                                ),
+                            })?;
+                        return Ok((stream, address, route));
+                    }
+                    Err(error) => {
+                        last = Some(anyhow::anyhow!(
+                            "egress proxy {server} is unreachable: {error}"
+                        ))
+                    }
+                }
+            }
+            Err(last.unwrap_or_else(|| anyhow::anyhow!("egress proxy {server} has no addresses")))
+        };
+        match timeout_at(share, attempt).await {
+            Ok(Ok((stream, address, route))) => {
+                rule.egress_recovered(index);
+                return Ok((stream, address, route, server));
+            }
+            Ok(Err(error)) if error.is::<crate::egress::Refusal>() => return Err(error),
+            Ok(Err(error)) => {
+                rule.egress_failed(index);
+                last = Some(error);
+            }
+            Err(_) => {
+                rule.egress_failed(index);
+                last = Some(anyhow::anyhow!(
+                    "egress proxy {server} did not answer in time"
+                ));
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no egress proxy server answered in time")))
 }
 
 async fn socks5_udp_association(
@@ -3304,51 +3454,6 @@ async fn socks5_udp_replies(
             }
         }
     }
-}
-
-async fn connect_socks5_destination(
-    rule: &RuntimeRule,
-    server: &socks5::Server,
-    destination: &shadowsocks::Destination,
-    inlet: ListenerKey,
-    session: &Live,
-) -> Result<BoxStream> {
-    let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
-    timeout_at(deadline, async {
-        let mut last = None;
-        for address in resolve_destination(rule, &destination.to_string()).await? {
-            if !server.permits(address.ip()) {
-                last = Some(
-                    DestinationDenied(format!("{destination} is not a public address")).into(),
-                );
-                continue;
-            }
-            let route = rule.routes.reserve(inlet, address)?;
-            match network::connect_tcp(
-                rule.spec.outbound_bind.as_ref(),
-                address,
-                rule.spec.mptcp_outbound(),
-            )
-            .await
-            {
-                Ok(stream) => {
-                    stream.set_nodelay(true)?;
-                    let mptcp = rule.mptcp.track(
-                        &stream,
-                        rule.spec.mptcp_outbound(),
-                        &rule.spec.id,
-                        "outbound",
-                    )?;
-                    session.set_remote(address);
-                    return Ok(transport::hold(Box::new(stream), (route, mptcp)));
-                }
-                Err(error) => last = Some(error),
-            }
-        }
-        Err(last.unwrap_or_else(|| anyhow::anyhow!("{destination} has no addresses")))
-    })
-    .await
-    .context("SOCKS5 destination connection timed out")?
 }
 
 async fn open_multipath_path(
@@ -3581,7 +3686,7 @@ async fn tcp_session(
                         StatusCode::TOO_MANY_REQUESTS
                     })?;
                     session.set_destination(&destination.to_string());
-                    match connect_http_connect_destination(
+                    match connect_proxy_destination(
                         &rule,
                         config.allow_private_destinations,
                         &destination,
@@ -3657,7 +3762,7 @@ async fn tcp_session(
             }
         };
         session.set_destination(&destination.to_string());
-        let target = match connect_http_connect_destination(
+        let target = match connect_proxy_destination(
             &rule,
             rule.spec
                 .inbound_http_connect
@@ -3700,6 +3805,11 @@ async fn tcp_session(
         };
         let (destination, bound) = match request {
             socks5::Request::Connect(destination) => (Some(destination), None),
+            // A BIND peer would connect to this node, around the egress proxy.
+            socks5::Request::Bind(_) if rule.spec.egress_proxy.is_some() => {
+                let _ = socks5::reply(&mut client, 7).await;
+                return Ok(());
+            }
             socks5::Request::Bind(requested) => {
                 let listener = match network::tcp_listener(
                     SocketAddr::new(local_bind_ip(info.destination.ip()), 0),
@@ -3797,7 +3907,14 @@ async fn tcp_session(
         let target = match (destination, bound) {
             (Some(destination), None) => {
                 session.set_destination(&destination.to_string());
-                match connect_socks5_destination(&rule, server, &destination, inlet, session).await
+                match connect_proxy_destination(
+                    &rule,
+                    server.allows_private(),
+                    &destination,
+                    inlet,
+                    session,
+                )
+                .await
                 {
                     Ok(target) => {
                         socks5::reply(&mut client, 0).await?;
@@ -3843,7 +3960,15 @@ async fn tcp_session(
             return uot::relay(ss_session, version, rule, meter, stats, inlet, session).await;
         }
         session.set_destination(&destination.to_string());
-        let target = match connect_destination(&rule, server, &destination, inlet, session).await {
+        let target = match connect_proxy_destination(
+            &rule,
+            server.allows_private(),
+            &destination,
+            inlet,
+            session,
+        )
+        .await
+        {
             Ok(target) => target,
             Err(error) => {
                 stats.destination_refused(&rule, session, &error);

@@ -413,6 +413,9 @@ impl Server {
     pub fn permits(&self, ip: IpAddr) -> bool {
         self.allow_private || public(ip)
     }
+    pub fn allows_private(&self) -> bool {
+        self.allow_private
+    }
     /// Reads the request by `deadline`. A request that is late, malformed,
     /// forged or replayed is drained until the client closes, without
     /// replying, so a probe cannot learn how many bytes were read.

@@ -25,6 +25,7 @@ mod credentials;
 mod diagnostics;
 mod dns;
 mod dns_authoritative;
+mod egress_proxies;
 mod endpoint_allocation;
 mod features;
 mod federation;
@@ -185,6 +186,9 @@ pub struct Node {
     /// The agent reported that it keeps live connections and block records.
     #[serde(default)]
     pub connections_support: bool,
+    /// The agent reported that it reaches destinations through egress proxies.
+    #[serde(default)]
+    pub egress_proxy_support: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -620,6 +624,7 @@ impl Store {
                 rate_limit_support: false,
                 speed_test_support: false,
                 connections_support: false,
+                egress_proxy_support: false,
             },
             token,
         ))
@@ -631,7 +636,7 @@ impl Store {
     /// with a line on it, an endpoint group with it as a member and a chain
     /// use with a hop on it show it as missing.
     pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
-        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1,'rate_limit_node:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
+        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1,'rate_limit_node:'||?1,'egress_proxy_node:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         require_node(&tx, actor, node, true)?;
@@ -790,6 +795,7 @@ impl Store {
                 rate_limit_support: false,
                 speed_test_support: false,
                 connections_support: false,
+                egress_proxy_support: false,
             })
         })?;
         let mut nodes: Vec<Node> = rows.collect::<rusqlite::Result<_>>()?;
@@ -803,6 +809,7 @@ impl Store {
             node.rate_limit_support = rate_limits::supported(&conn, &node.id)?;
             node.speed_test_support = speed_tests::supported(&conn, &node.id)?;
             node.connections_support = connections::supported(&conn, &node.id)?;
+            node.egress_proxy_support = egress_proxies::supported(&conn, &node.id)?;
         }
         Ok(nodes)
     }

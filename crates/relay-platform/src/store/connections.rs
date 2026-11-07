@@ -320,6 +320,7 @@ mod tests {
             live_connections: true,
             live_connection_requests: vec![],
             block_cursor: None,
+            egress_proxy: false,
         };
         let mut old = reply();
         answer(&live, "n", false, None, &mut old);

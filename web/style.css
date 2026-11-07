@@ -564,6 +564,8 @@ dialog::backdrop { background: rgba(4, 6, 10, .5); -webkit-backdrop-filter: blur
 .dialog-head h2 { font-size: 16px; }
 #dialog-body { padding: 4px 22px 22px; }
 .dialog-actions { position: sticky; bottom: 0; z-index: 2; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin: 22px -22px -22px; padding: 14px 22px; border-top: 1px solid var(--line); background: var(--surface); }
+/* A dialog's error line follows the action bar; clear the bar's negative bottom margin so the bar does not cover it. */
+.dialog-actions + .error:not(:empty) { margin-top: 31px; }
 /* The Diagnostics speed test form sits in the page, not a dialog: no sticky bar. */
 .speed-test-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 10px; margin-top: 14px; }
 

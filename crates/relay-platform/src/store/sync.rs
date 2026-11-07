@@ -289,6 +289,7 @@ fn apply_sync(
         None
     };
     super::rate_limits::observe(tx, node, request.stats.rate_limits.as_ref())?;
+    super::egress_proxies::observe(tx, node, request.stats.egress_proxy.as_ref())?;
     let user_rates = super::user_rates::shares(
         tx,
         &mut rates.lock().unwrap(),
@@ -320,6 +321,7 @@ fn apply_sync(
             // Filled in after the commit, from memory.
             live_connection_requests: vec![],
             block_cursor: None,
+            egress_proxy: true,
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

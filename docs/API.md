@@ -838,3 +838,28 @@ Anyone who may read the node's configuration may read both: system administrator
 | 429 | Eight rules of the node are already waiting for a snapshot |
 
 **Agents and old agents.** Every sync response carries `live_connections: true` (omitted when false). An agent of this release then adds `EngineStats.live_connections: {snapshots?:[{rule_id, taken_at_ms, tcp, udp, sessions?, refused?}], blocks?:{stream, entries:[{id, seq, rule_id, protocol, source, reason, detail?, first_ms, last_ms, count}]}}` to its stats; the controller takes it out before keeping the stats and records `connections_node:<node id>` the first time. Only such agents receive `SyncResponse.live_connection_requests` (rule ids, omitted when empty; the agent answers them in its next sync, at once) and `SyncResponse.block_cursor: {stream, seq}` (the last record the controller holds; the agent sends the records changed after it, at most 200 per sync; a record that changes is sent again with a higher `seq` and replaces the controller's copy, so nothing is counted twice; an unknown `stream` asks for everything the agent still keeps). `GET /agent/watch` returns early with `connections_requested: true` once when the panel asks for a node's sessions. Reports are bounded: at most 4 snapshots, 200 sessions each, addresses of at most 300 bytes, 200 records per sync and details of at most 120 characters; a larger report makes the sync 400. Agents of 0.147.0 and earlier ignore the new fields, never report support and receive nothing; an agent of this release talking to a 0.147.0 controller (which sends no `live_connections`) reports nothing, because that controller's `EngineStats` rejects unknown fields.
+
+## Egress proxies
+
+A rule whose clients choose the destination (an `inbound_socks5`, `inbound_http_connect`, `inbound_http2_connect` or `inbound_shadowsocks` rule) can reach those destinations through an upstream SOCKS5 proxy instead of directly; see [EGRESS_PROXY.md](EGRESS_PROXY.md). The field is left out while unset, so existing configurations, backups and API calls are unchanged.
+
+| Field | Meaning |
+| --- | --- |
+| `Rule.egress_proxy?` | `{kind: "socks5", servers: [..], username?, password?}`, unknown fields refused. Accepted by `PUT /nodes/{id}/config`, `/configurations/preview\|publish`, rollback, templates, shared rules and chains like any rule field |
+| `egress_proxy.servers` | 1..=8 `host:port`, `IPv4:port` or `[IPv6]:port`, tried in order; a server that failed in the last 10 seconds is tried after the others; no duplicates (case-insensitive) |
+| `egress_proxy.username`, `egress_proxy.password` | RFC 1929 credentials of the upstream, 1..=255 bytes each without control characters, both or neither; shared by every server and separate from the inbound's credentials. Stored and returned with the rule like a Shadowsocks password; never in audit details, errors, logs or agent reports |
+| `Node.egress_proxy_support` | `GET /nodes`: the node's agent reported that it supports egress proxies (metadata `egress_proxy_node:<node id>`) |
+| `SyncResponse.egress_proxy` | `true` from controllers of this release (omitted when false) |
+| `EngineStats.egress_proxy?` | `{}`, sent by agents of this release only to a controller that sent `SyncResponse.egress_proxy` |
+
+The rule's destination ACL and the inbound's `allow_private_destinations` apply to the client's destination before the upstream is used. A name goes to the upstream unresolved (SOCKS5 address type 3) only when the inbound allows private destinations and the ACL can decide by name and port alone; otherwise the node resolves it, filters the addresses and sends the permitted IP addresses. `outbound_bind` applies to the connection to the upstream; the session's `remote` in `/nodes/{id}/rules/{rule}/connections` is the upstream address. Upstream connection, authentication and SOCKS5 reply failures count as failed destination connections. TCP only: no UDP is sent around the upstream.
+
+| Status | When | `error` |
+| --- | --- | --- |
+| 400 | `egress_proxy` on a rule without a SOCKS5, HTTP CONNECT, HTTP/2 CONNECT or Shadowsocks inbound | `an egress proxy applies only to rules whose clients choose the destination: a SOCKS5, HTTP CONNECT, HTTP/2 CONNECT or Shadowsocks inbound` |
+| 400 | The rule's `protocol` is not `tcp`, or its Shadowsocks inbound has `udp_over_tcp` | `an egress proxy carries TCP only; set the rule's protocol to TCP (UDP is never sent around the egress proxy)`, or `an egress proxy carries TCP only; turn off Shadowsocks UDP over TCP` |
+| 400 | Invalid servers or credentials | The validation message, e.g. `an egress proxy needs 1..8 servers`, `the egress proxy username and password must be set together`; never the password |
+| 400 | A publish sets `egress_proxy` on a cross-panel share's rule | `rule <name> belongs to share <share>; a share's rules cannot have an egress proxy` |
+| 409 | A publish (any route: single, batch, rollback, template, shared rule, chain) gives `egress_proxy` to a server whose agent has not reported support | `the agent on server <name> is too old for egress proxies; upgrade it first`, or for a server that never connected `server <name> has not connected to the panel yet; egress proxies need its agent to report in first` |
+
+**Agents and old agents.** Agents of 0.148.0 and earlier ignore `SyncResponse.egress_proxy`, never report support and would reject a rule with the field, so the controller refuses it with the 409 above; configurations without the field reach them unchanged. An agent of this release talking to a 0.148.0 controller (which sends no `egress_proxy`) reports nothing, because that controller's `EngineStats` rejects unknown fields. The panel shows these reasons in its language.

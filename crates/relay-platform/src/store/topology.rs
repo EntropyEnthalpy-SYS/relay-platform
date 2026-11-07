@@ -124,6 +124,7 @@ pub(super) fn prepare(
         reverse_tunnels::merge(conn, &config.node_id, &mut config.rules)?;
         config.validate().map_err(bad_input)?;
         rate_limits::require(conn, &config)?;
+        egress_proxies::require(conn, &config)?;
         if config
             .rules
             .iter()

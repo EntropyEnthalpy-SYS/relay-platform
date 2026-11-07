@@ -68,7 +68,7 @@ async function api(path, options = {}) {
   const requestToken = state.token;
   const response = await fetch(`/api/v1${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}), ...options.headers }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = { error: text || `HTTP ${response.status}` }; }
-  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(rateLimitReason(result.error) || speedTestReason(result.error) || result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
+  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(rateLimitReason(result.error) || speedTestReason(result.error) || egressProxyReason(result.error) || result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
 }
 setupLanguageSwitcher(() => {
   if (!state.actor) { document.title = translate('Relay · 独立转发平台'); return; }
@@ -275,6 +275,22 @@ function rateLimitReason(message) {
   const user = /^user (.+) has separate upload\/download speed limits: (.+)$/.exec(String(message ?? ''));
   if (user) { const reason = server(user[2]); return reason && msg`用户 ${user[1]} 设有分别的上传/下载总限速：${reason}`; }
   return server(String(message ?? ''));
+}
+// The controller's English refusals of an egress proxy, in the panel's language; others stay as they are.
+function egressProxyReason(message) {
+  const text = String(message ?? '');
+  let m = /^the agent on server (.+) is too old for egress proxies; upgrade it first$/.exec(text);
+  if (m) return msg`服务器 ${m[1]} 的 Agent 版本过旧，不支持出口代理；请先升级 Agent`;
+  m = /^server (.+) has not connected to the panel yet; egress proxies need its agent to report in first$/.exec(text);
+  if (m) return msg`服务器 ${m[1]} 尚未连接面板；它的 Agent 回报后才能使用出口代理`;
+  m = /^rule (.+) belongs to share (.+); a share's rules cannot have an egress proxy$/.exec(text);
+  if (m) return msg`规则 ${m[1]} 属于共享 ${m[2]}，共享的规则不能设置出口代理`;
+  const known = {
+    "an egress proxy carries TCP only; set the rule's protocol to TCP (UDP is never sent around the egress proxy)": '出口代理只转发 TCP：请把传输协议设为 TCP',
+    'an egress proxy carries TCP only; turn off Shadowsocks UDP over TCP': '出口代理只转发 TCP：请关闭 Shadowsocks 的 UDP over TCP',
+    'an egress proxy applies only to rules whose clients choose the destination: a SOCKS5, HTTP CONNECT, HTTP/2 CONNECT or Shadowsocks inbound': '只有 SOCKS5、HTTP CONNECT、HTTP/2 CONNECT 或 Shadowsocks 代理服务能设置出口代理',
+  };
+  return Object.hasOwn(known, text) ? translate(known[text]) : null;
 }
 function websocketEditor(id, spec, inbound, defaultHost = () => '') {
   const box = el('details'); box.open = !!spec; box.append(el('summary', inbound ? translate('入口 WebSocket / WSS 隧道') : translate('出口 WebSocket / WSS 隧道')));
@@ -1445,7 +1461,7 @@ async function renderRules() {
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); actions.append(button(translate('连接…'), () => openRuleConnections(config.node_id, rule), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); if (canSpeedTestRule(rule)) actions.append(button(translate('路径测速…'), () => openPathSpeedTest(config.node_id, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), limitCell(rule, state.nodes.find(n => n.id === nodeId)), rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); actions.append(button(translate('连接…'), () => openRuleConnections(config.node_id, rule), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); if (canSpeedTestRule(rule)) actions.append(button(translate('路径测速…'), () => openPathSpeedTest(config.node_id, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), egressCell(rule, rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · '))), limitCell(rule, state.nodes.find(n => n.id === nodeId)), rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p, sharedRulesPanel(sharedRules, state.nodes));
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -1652,6 +1668,14 @@ function ruleNameCell(rule, membership) {
   if (rule.reverse_tunnel) cell.append(badge(translate('反向隧道公网端'), 'blue'));
   return cell;
 }
+// A proxy rule's cell in the rules table, with the upstream it reaches destinations through.
+function egressCell(rule, cell) {
+  const proxy = rule.egress_proxy;
+  if (!proxy) return cell;
+  const first = proxy.servers[0], count = proxy.servers.length;
+  cell.append(badge(count > 1 ? msg`出口代理 · ${first} 等 ${count} 个` : msg`出口代理 · ${first}`, 'blue'));
+  return cell;
+}
 function sharedTarget(rule) {
   if (!rule) return '—';
   if (rule.inbound_shadowsocks) return translate('Shadowsocks 代理服务');
@@ -1784,6 +1808,9 @@ async function editRule(existing, seed = {}) {
   const http2Connect = http2ConnectEditor(r.inbound_http2_connect); form.append(http2Connect.box);
   const gateway = gatewayEditor(r.protocol_gateway, protocolControl, listenControl); form.append(gateway.box);
   const services = { ss: shadowsocks, socks5, http: httpConnect, h2: http2Connect, gateway };
+  // Shown only for a service whose clients choose the destination.
+  const egress = egressProxyEditor(r.egress_proxy, () => state.nodes.find(n => n.id === runOn.value)); form.append(egress.box);
+  const dynamicDestination = () => shadowsocks.enabled() || socks5.enabled() || httpConnect.enabled() || http2Connect.enabled();
   const mptcp = mptcpEditor(r.mptcp); form.append(mptcp.box);
   const routed = el('div'); form.append(routed);
   const routedOptions = el('details'); routedOptions.append(el('summary', translate('高级路由：健康检查与多路径')));
@@ -1809,6 +1836,7 @@ async function editRule(existing, seed = {}) {
     mptcp.gateway(gateway.enabled());
     if (proxyInput) sectionVisible(proxyInput, !gateway.enabled());
     for (const [kind, editor] of Object.entries(services)) { sectionVisible(editor.box, purpose.value === kind); if (purpose.value === kind) editor.box.open = true; }
+    sectionVisible(egress.box, dynamicDestination()); egress.show();
     describePlacement();
   }
   const routing = el('details'); routing.append(el('summary', translate('出口绑定与 DNS 缓存'))); const routeFields = el('div', undefined, 'form-grid');
@@ -1835,10 +1863,12 @@ async function editRule(existing, seed = {}) {
     // Restore controls before the editor sets its own field requirements.
     for (const editor of Object.values(services)) sectionVisible(editor.box, true);
     for (const [kind, editor] of Object.entries(services)) editor.setEnabled(purpose.value === kind);
-    if (['ss', 'socks5', 'gateway'].includes(purpose.value)) protocolControl.value = 'both';
+    if (['ss', 'socks5', 'gateway'].includes(purpose.value)) protocolControl.value = egress.enabled() && purpose.value !== 'gateway' ? 'tcp' : 'both';
     if (['http', 'h2'].includes(purpose.value)) protocolControl.value = 'tcp';
     showRouted();
   });
+  // The upstream carries TCP only: turning it on switches the rule to TCP and Shadowsocks UDP over TCP off.
+  egress.onchange(() => { if (egress.enabled()) { protocolControl.value = 'tcp'; const uot = form.querySelector?.('[name=ss_uot]'); if (uot) uot.value = 'no'; } showRouted(); });
   proxyInput = el('details'); proxyInput.append(el('summary', translate('接收可信上游传递的原始地址（PROXY protocol）')));
   const proxyMode = select(proxyInput, 'proxy_input_version', translate('入口 PROXY 报头'), [['off', translate('关闭')], ['v1', translate('要求 v1 · 仅 TCP')], ['v2', translate('要求 v2 · TCP / UDP')], ['any', translate('要求 v1 或 v2 · 仅 TCP')]], r.inbound_proxy?.version || 'off');
   const proxyOptions = el('div', undefined, 'form-grid');
@@ -1870,6 +1900,12 @@ async function editRule(existing, seed = {}) {
     else if (http) rule.inbound_http_connect = http;
     else if (h2) rule.inbound_http2_connect = h2;
     if (wire) { rule.protocol_gateway = wire; rule.targets = []; rule.listen = gatewayBridge(r, baseConfig.rules, wire.listen); }
+    const egressProxy = server || socks || http || h2 ? egress.read() : null;
+    if (egressProxy) {
+      if (rule.protocol !== 'tcp') throw egress.fail(translate('出口代理只转发 TCP：请把传输协议设为 TCP'));
+      if (server?.udp_over_tcp) throw egress.fail(translate('出口代理只转发 TCP：请关闭 Shadowsocks 的 UDP over TCP'));
+      rule.egress_proxy = egressProxy;
+    }
     if (!server && !socks && !http && !h2 && !wire) { rule.health_check = readHealth(); Object.assign(rule, multipath.read(readTargets.multipathPaths())); }
     const kernelMultipath = mptcp.read(rule.protocol, !!wire); if (kernelMultipath) rule.mptcp = kernelMultipath;
     rule.advertise = wire ? null : String(data.get('advertise') ?? '').trim() || null;
@@ -1933,6 +1969,101 @@ async function editRule(existing, seed = {}) {
     else await previewTopology(topology, { updates: [{ node_id: baseConfig.node_id, expected_revision: baseConfig.revision, rules: rulesFor(rule) }] }, placement.textContent,
       () => modal(translate('添加节点规则或代理服务'), form), [{ node_id: baseConfig.node_id, rule_id: rule.id }]);
   }); modal(existing ? translate('编辑节点规则') : translate('添加节点规则或代理服务'), form);
+}
+// An egress proxy: the node reaches the destinations that a proxy rule's clients ask for through an upstream
+// SOCKS5 proxy instead of directly. Up to MAX_EGRESS_SERVERS addresses share one username and password and are
+// tried in order. `socks5://[user:pass@]host:port` links (percent-encoded) fill the fields.
+const MAX_EGRESS_SERVERS = 8;
+function egressServerValid(text) {
+  const match = /^(?:\[([0-9A-Fa-f:.]+)\]|([^\s:[\]/@]+)):(\d{1,5})$/.exec(text);
+  if (!match || !(Number(match[3]) >= 1 && Number(match[3]) <= 65535)) return false;
+  if (match[1] !== undefined) return match[1].split(':').length >= 3;
+  const host = match[2].replace(/\.$/, '');
+  if (/^[\d.]+$/.test(host)) return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) && host.split('.').every(part => Number(part) <= 255) && host !== '0.0.0.0';
+  return host.length <= 253 && host.split('.').every(label => /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(label));
+}
+function parseEgressLink(text) {
+  const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^?#]*)(?:\?[^#]*)?(?:#.*)?$/.exec(String(text).trim());
+  if (!match) throw new Error(translate('无法识别的链接；请粘贴 socks5:// 开头的链接'));
+  const scheme = match[1].toLowerCase();
+  if (!['socks5', 'socks5h'].includes(scheme)) throw new Error(msg`暂不支持 ${scheme}:// 出口代理；目前只支持 SOCKS5（socks5://）`);
+  const body = match[2].replace(/\/$/, ''), at = body.lastIndexOf('@'), server = body.slice(at + 1), userinfo = at < 0 ? '' : body.slice(0, at);
+  if (!egressServerValid(server)) throw new Error(translate('无法识别链接中的服务器地址和端口'));
+  // Split before decoding: an encoded ':' belongs to the username.
+  const decode = part => { try { return decodeURIComponent(part); } catch { throw new Error(translate('链接中的用户名或密码编码无效')); } };
+  const split = userinfo.indexOf(':');
+  const [username, password] = !userinfo ? ['', ''] : split < 0 ? [decode(userinfo), ''] : [decode(userinfo.slice(0, split)), decode(userinfo.slice(split + 1))];
+  return { server, username, password };
+}
+// `{kind, servers, username?, password?}` as the controller takes it, or null when off.
+function egressProxyConfig(mode, serverText, username, password) {
+  if (mode === 'off') return null;
+  const servers = String(serverText).split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if (!servers.length) throw new Error(translate('请至少填写一个上游代理地址'));
+  if (servers.length > MAX_EGRESS_SERVERS) throw new Error(msg`上游代理地址最多 ${MAX_EGRESS_SERVERS} 个`);
+  const invalid = servers.findIndex(line => !egressServerValid(line));
+  if (invalid >= 0) throw new Error(msg`第 ${invalid + 1} 行上游代理地址无效：请写成 host:port，IPv6 地址加方括号，如 [2001:db8::1]:1080`);
+  const seen = new Set();
+  for (const line of servers) { const key = line.toLowerCase(); if (seen.has(key)) throw new Error(msg`上游代理地址 ${line} 重复`); seen.add(key); }
+  const user = String(username).trim(), pass = String(password);
+  if (!!user !== !!pass) throw new Error(translate('上游代理的用户名和密码必须同时填写或同时留空'));
+  const bytes = value => new TextEncoder().encode(value).length;
+  for (const [value, label] of [[user, translate('上游代理用户名')], [pass, translate('上游代理密码')]]) {
+    if (value && (bytes(value) > 255 || /[\u0000-\u001f\u007f-\u009f]/.test(value))) throw new Error(msg`${label}须为 1 到 255 字节，不含控制字符`);
+  }
+  return { kind: 'socks5', servers, ...(user ? { username: user, password: pass } : {}) };
+}
+function egressProxyEditor(spec, nodeOf) {
+  const box = el('details'); box.open = !!spec; box.append(el('summary', translate('出口代理（经上游代理连接目的地）')));
+  // The address list spans the row; the username and password sit side by side below it.
+  const head = el('div', undefined, 'form-grid'), list = el('div'), fields = el('div', undefined, 'form-grid');
+  const mode = select(head, 'egress_mode', translate('出口代理'), [['off', translate('关闭 · 本节点直接连接目的地')], ['socks5', translate('SOCKS5 · 经上游代理连接目的地')]], spec ? 'socks5' : 'off');
+  const servers = textarea(list, 'egress_servers', translate('上游代理地址（host:port，每行一个，最多 8 个，按顺序尝试）'), (spec?.servers || []).join('\n'));
+  const username = field(fields, 'egress_user', translate('上游用户名（留空不认证）'), spec?.username || '', 'text', false); username.maxLength = 255; username.autocomplete = 'off';
+  const password = field(fields, 'egress_password', translate('上游密码（与用户名同时填写）'), spec?.password || '', 'password', false); password.maxLength = 255; password.autocomplete = 'new-password';
+  const paste = el('div', undefined, 'upstream-paste');
+  const link = field(paste, 'egress_link', translate('导入 socks5:// 链接（填入地址、用户名和密码）'), '', 'text', false); link.autocomplete = 'off';
+  const problem = el('p', '', 'error'); problem.setAttribute('role', 'alert');
+  const fail = message => { problem.textContent = message; return new Error(message); };
+  paste.append(button(translate('导入链接'), () => {
+    problem.textContent = '';
+    if (!link.value.trim()) return;
+    let parsed;
+    try { parsed = parseEgressLink(link.value); } catch (error) { fail(error.message); return; }
+    const lines = servers.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (!lines.some(line => line.toLowerCase() === parsed.server.toLowerCase())) {
+      if (lines.length >= MAX_EGRESS_SERVERS) { fail(msg`上游代理地址最多 ${MAX_EGRESS_SERVERS} 个`); return; }
+      lines.push(parsed.server);
+    }
+    servers.value = lines.join('\n');
+    // Every address shares one set of credentials; a link with credentials sets them.
+    if (parsed.username || parsed.password) { username.value = parsed.username; password.value = parsed.password; }
+    link.value = '';
+    if (mode.value === 'off') { mode.value = 'socks5'; changed(); } else show();
+  }));
+  const support = el('p', '', 'workflow-callout warning');
+  const note = el('p', translate('客户端 → 本节点 → 上游 SOCKS5 代理 → 目的地。目的地仍由客户端指定，并先按本规则的目的地 ACL 检查。上游地址按顺序尝试，连不上就换下一个；全部地址共用这里的用户名和密码，与入口凭据无关。只转发 TCP：规则须使用 TCP，UDP、Shadowsocks UDP over TCP 和 SOCKS5 BIND 都会被拒绝。不允许内网目的地（默认）时，域名先由本节点解析，只把检查过的 IP 发给上游；允许内网目的地且 ACL 中没有 IP 条目时，域名原样交给上游解析。'), 'fine');
+  const parts = el('div'); parts.append(list, fields, paste, problem, support, note); box.append(head, parts);
+  let handlers = [];
+  function show() {
+    const on = mode.value !== 'off';
+    parts.classList.toggle('hidden', !on);
+    parts.querySelectorAll('input, select, textarea').forEach(input => { input.disabled = !on; });
+    const node = nodeOf();
+    support.textContent = node && !node.egress_proxy_support ? msg`服务器 ${node.name || node.id} 的 Agent 尚未报告支持出口代理，发布会被拒绝；请先升级 Agent。` : '';
+    support.classList.toggle('hidden', !on || !support.textContent);
+  }
+  function changed() { problem.textContent = ''; show(); handlers.forEach(handler => handler()); }
+  mode.addEventListener('change', changed); show();
+  return {
+    box, show, fail,
+    enabled: () => mode.value !== 'off',
+    onchange: handler => { handlers.push(handler); },
+    read() {
+      problem.textContent = '';
+      try { return egressProxyConfig(mode.value, servers.value, username.value, password.value); } catch (error) { throw fail(error.message); }
+    },
+  };
 }
 const shadowsocksMethods = localize([['2022-blake3-aes-256-gcm', '2022-blake3-aes-256-gcm（推荐 · 防重放）'], ['2022-blake3-aes-128-gcm', '2022-blake3-aes-128-gcm（防重放）'], ['2022-blake3-chacha20-poly1305', '2022-blake3-chacha20-poly1305（无 AES 加速的设备）'], ['aes-256-gcm', 'aes-256-gcm（旧客户端兼容）'], ['aes-128-gcm', 'aes-128-gcm（旧客户端兼容）'], ['chacha20-ietf-poly1305', 'chacha20-ietf-poly1305（旧客户端兼容）']]);
 function shadowsocksKey(method) {
@@ -3459,7 +3590,8 @@ async function openRuleConnections(nodeId, rule) {
     const total = view.totals.tcp + view.totals.udp, notes = [msg`TCP 连接 ${view.totals.tcp} · UDP 会话 ${view.totals.udp}`];
     if (view.truncated) notes.push(msg`显示最新的 ${view.sessions.length} 个，共 ${total} 个`);
     if (query) notes.push(msg`筛选后 ${shown.length} 个`);
-    const rows = shown.map(s => { const main = s.destination || s.target || '—'; return [el('span', s.client, 'mono'), connectionProtocols[s.protocol] || s.protocol, namedCell(main, [s.destination ? s.target : '', s.remote].filter(part => part && part !== main).join(' → ')), connectionHop(s.via), namedCell(timestamp(s.started_ms), durationText(Math.max(0, Math.round((taken - s.started_ms) / 1000)))), bytes(s.upload_bytes), bytes(s.download_bytes)]; });
+    // A rule with an egress proxy connects to the proxy: it is the next hop.
+    const rows = shown.map(s => { const main = s.destination || s.target || '—', egress = rule.egress_proxy && s.remote; return [el('span', s.client, 'mono'), connectionProtocols[s.protocol] || s.protocol, namedCell(main, [s.destination ? s.target : '', egress ? '' : s.remote].filter(part => part && part !== main).join(' → ')), egress ? namedCell(translate('出口代理'), s.remote) : connectionHop(s.via), namedCell(timestamp(s.started_ms), durationText(Math.max(0, Math.round((taken - s.started_ms) / 1000)))), bytes(s.upload_bytes), bytes(s.download_bytes)]; });
     sessionsBox.replaceChildren(el('p', notes.join(' · '), 'fine'), rows.length ? table([translate('客户端'), translate('协议'), translate('目标 / 真实目的地'), translate('下一跳'), translate('开始 / 时长'), translate('上传'), translate('下载')], rows) : el('p', translate('没有符合条件的连接。'), 'fine'));
   }
   function draw() {

@@ -373,6 +373,9 @@ async fn run_agent(
     // that takes them; sessions only of the rules it asked for.
     let mut connections_reporting = false;
     let mut connection_requests: Vec<String> = vec![];
+    // Support for egress proxies is reported only to a controller that
+    // takes the report, as older ones reject the unknown field.
+    let mut egress_reporting = false;
     let mut block_cursor = crate::connections::Cursor::default();
     let mut active = false;
     let mut apply_error = None;
@@ -555,6 +558,7 @@ async fn run_agent(
                     stats.speed_test = speed_reporting.then(|| speed_tests.report());
                     stats.live_connections = connections_reporting
                         .then(|| engine.connection_report(&answered, &block_cursor));
+                    stats.egress_proxy = egress_reporting.then(Default::default);
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -608,6 +612,7 @@ async fn run_agent(
                             });
                             // An older controller sends none of these.
                             connections_reporting = synced.live_connections;
+                            egress_reporting = synced.egress_proxy;
                             block_cursor = synced.block_cursor.unwrap_or_default();
                             if connections_reporting {
                                 connection_requests = synced.live_connection_requests;

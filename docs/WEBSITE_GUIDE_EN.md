@@ -452,6 +452,24 @@ Protocol options in this release:
 
 Client exports never contain Reality private keys, local TLS keys or the agent's internal bridge credentials.
 
+#### Egress proxy
+
+Normally the server that runs a proxy service connects to each destination itself. With an **egress proxy**, it reaches destinations through another SOCKS5 proxy instead: client → your proxy service → upstream SOCKS5 proxy → destination. The client still chooses the destination; the upstream only makes the connection for it. Use it when the destination should see the upstream's address rather than your server's.
+
+- **Where:** in the rule editor of a SOCKS5, HTTP CONNECT, HTTP/2 CONNECT or Shadowsocks service, open **Egress proxy (reach destinations through an upstream proxy)** and choose **SOCKS5**. Other rules do not have this section.
+- **Upstream proxy addresses:** one `host:port` per line, up to 8. IPv6 addresses go in brackets, such as `[2001:db8::1]:1080`. They are tried in order: when one cannot be reached, the next is used, and one that just failed is tried last for 10 seconds.
+- **Upstream username and password:** leave both empty if the upstream needs no login. All addresses share them. They are not the login your own users type for your proxy service.
+- **Import link:** paste a link such as `socks5://user:pass@proxy.example.com:1080` and choose **Import link**. The address is added to the list, and the username and password are filled in.
+- **Rules still apply first:** your destination allow and deny lists, and the setting that refuses private addresses, check the real destination before anything goes to the upstream.
+- **Domain names:** while the service refuses private destinations (the default), your server looks the name up itself, checks the addresses and sends only those to the upstream, so your server's DNS sees the names. If the service allows private destinations and your destination lists have no IP entries, names go to the upstream unresolved.
+- **TCP only:** UDP is never sent around the upstream. Turning on the egress proxy switches the rule to TCP and turns off Shadowsocks UDP over TCP; SOCKS5 UDP and BIND requests are refused.
+- **What stays the same:** traffic counting, quotas, budgets and speed limits work exactly as without an egress proxy. A failed upstream connection, a wrong password or an error reply counts as a failed connection, and the reason names the upstream but never the password.
+- **Seeing it:** the rules table shows an **Egress proxy · address** badge, and **Connections…** lists the upstream as each session's next hop.
+- **Older agents:** the server running the service needs the agent of this release. Until it has reported in, the panel refuses to publish and says why, for example “The agent on server Tokyo is too old for egress proxies; upgrade it first”, and the editor warns about it. Rules without an egress proxy keep working with every agent.
+- **Not yet supported:** Hysteria2, TUIC and Juicity upstreams, and choosing another rule as the upstream. Rules in a cross-panel share cannot have an egress proxy.
+
+See [Egress proxy](EGRESS_PROXY.md) (Chinese) for the details.
+
 ### Client subscriptions
 
 **Client subscriptions** turns a user's Shadowsocks and managed-protocol rules into one link that a client app imports and refreshes. The link contains server addresses, ports and keys, never panel or node credentials. Other rules, such as plain port forwarding, are listed as skipped with a reason.

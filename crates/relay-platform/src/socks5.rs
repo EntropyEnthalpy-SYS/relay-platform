@@ -56,6 +56,9 @@ impl Server {
     pub fn permits(&self, ip: IpAddr) -> bool {
         self.config.allow_private_destinations || crate::shadowsocks::public(ip)
     }
+    pub fn allows_private(&self) -> bool {
+        self.config.allow_private_destinations
+    }
     /// Performs the greeting, optional authentication and CONNECT/BIND/
     /// UDP ASSOCIATE request. On malformed/unsupported input this method sends
     /// a failure reply where the protocol still permits one.

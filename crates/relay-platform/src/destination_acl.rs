@@ -156,6 +156,25 @@ impl DestinationPolicy {
         self.permits(&address.ip().to_string(), [address.ip()])
             && self.ports.permits(address.port())
     }
+    /// Whether `host:port` is permitted by its name alone, for a name sent
+    /// on unresolved: `Some(false)` when a name or port entry denies it,
+    /// `Some(true)` when a name entry or an empty allow list permits it and
+    /// no address entry could deny one of its addresses, and `None` when
+    /// only its addresses can tell.
+    pub fn decide_name(&self, host: &str, port: u16) -> Option<bool> {
+        let host = normalize_host(host);
+        if !self.ports.permits(port) || self.deny.iter().any(|p| p.matches_host(&host)) {
+            return Some(false);
+        }
+        if self
+            .deny
+            .iter()
+            .any(|p| matches!(p, Pattern::Ip(_) | Pattern::Cidr(_)))
+        {
+            return None;
+        }
+        (self.allow.is_empty() || self.allow.iter().any(|p| p.matches_host(&host))).then_some(true)
+    }
 }
 impl Pattern {
     fn matches_host(&self, host: &str) -> bool {
@@ -256,6 +275,35 @@ mod tests {
         assert!(!policy.permits("other.test", ["10.9.1.1".parse().unwrap()]));
         assert!(!policy.permits("other.test", ["203.0.113.8".parse().unwrap()]));
         assert!(policy.permits("other.test", ["203.0.113.7".parse().unwrap()]));
+    }
+
+    #[test]
+    fn names_are_decided_without_addresses_only_when_no_address_entry_could_matter() {
+        let names = DestinationPolicy::parse_with_ports(
+            &["*.example.com".into()],
+            &["secret.example.com".into()],
+            &[],
+            &["25".into()],
+        )
+        .unwrap();
+        assert_eq!(names.decide_name("API.Example.com.", 443), Some(true));
+        assert_eq!(names.decide_name("secret.example.com", 443), Some(false));
+        assert_eq!(names.decide_name("api.example.com", 25), Some(false));
+        // Outside the name entries only an address entry could allow it.
+        assert_eq!(names.decide_name("other.test", 443), None);
+        assert_eq!(
+            DestinationPolicy::default().decide_name("other.test", 443),
+            Some(true)
+        );
+        // An address entry in the deny list may match any name's address.
+        let addresses = DestinationPolicy::parse(&[], &["10.0.0.0/8".into()]).unwrap();
+        assert_eq!(addresses.decide_name("api.example.com", 443), None);
+        assert_eq!(
+            DestinationPolicy::parse(&["10.0.0.0/8".into()], &[])
+                .unwrap()
+                .decide_name("api.example.com", 443),
+            None
+        );
     }
 
     #[test]

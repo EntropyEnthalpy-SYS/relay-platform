@@ -368,6 +368,12 @@ pub struct Rule {
     /// Managed HTTP/2 CONNECT, with Basic and/or hashed Bearer credentials.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inbound_http2_connect: Option<crate::http2_connect::ServerConfig>,
+    /// The upstream proxy that a SOCKS5, HTTP CONNECT, HTTP/2 CONNECT or
+    /// Shadowsocks rule reaches its clients' destinations through. Only
+    /// agents that report the capability get such rules; older agents
+    /// reject the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_proxy: Option<crate::egress::Config>,
     pub targets: Vec<Target>,
     #[serde(default)]
     pub balance: Balance,
@@ -525,6 +531,7 @@ impl Rule {
             );
         }
         crate::shadowsocks::validate_rule(self)?;
+        crate::egress::validate_rule(self)?;
         if let Some(config) = &self.inbound_socks5 {
             crate::socks5::validate(config)?;
             ensure!(
@@ -1137,6 +1144,11 @@ pub struct EngineStats {
     /// and block records. The controller takes it out before keeping stats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_connections: Option<crate::connections::Report>,
+    /// Sent only after the controller sent [`SyncResponse::egress_proxy`];
+    /// that it is sent tells the controller this agent reaches rules'
+    /// destinations through their egress proxies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_proxy: Option<crate::egress::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1458,6 +1470,10 @@ pub struct SyncResponse {
     /// reported support.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_cursor: Option<crate::connections::Cursor>,
+    /// The controller takes [`EngineStats::egress_proxy`]; false from
+    /// controllers older than egress proxies.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub egress_proxy: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

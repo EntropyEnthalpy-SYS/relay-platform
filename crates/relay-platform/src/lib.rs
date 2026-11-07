@@ -11,6 +11,7 @@ mod datagram;
 pub mod destination_acl;
 pub mod dns;
 pub mod dns_authoritative;
+pub mod egress;
 pub mod email;
 pub mod engine;
 pub mod federation;

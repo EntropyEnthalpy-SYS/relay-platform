@@ -152,6 +152,15 @@ pub(super) fn merge(
                     ),
                 );
             }
+            if rule.egress_proxy.is_some() {
+                return reject(
+                    400,
+                    format!(
+                        "rule {} belongs to share {}; a share's rules cannot have an egress proxy",
+                        rule.name, grant.name
+                    ),
+                );
+            }
         }
     }
     rules.retain(|r| {
