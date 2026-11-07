@@ -1132,6 +1132,11 @@ pub struct EngineStats {
     /// that it is sent tells the controller this agent runs speed tests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speed_test: Option<crate::speed_test::Report>,
+    /// Sent only after the controller sent [`SyncResponse::live_connections`];
+    /// that it is sent tells the controller this agent keeps live sessions
+    /// and block records. The controller takes it out before keeping stats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_connections: Option<crate::connections::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1439,6 +1444,20 @@ pub struct SyncResponse {
     /// reported support, and omitted when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub speed_test_tasks: Vec<crate::speed_test::Task>,
+    /// The controller takes [`EngineStats::live_connections`]; false from
+    /// controllers older than live connections and block records.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_connections: bool,
+    /// Rules whose open sessions the controller asks for; the agent answers
+    /// with its next report. Sent only to agents that reported support, and
+    /// omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live_connection_requests: Vec<String>,
+    /// The last block record the controller holds from this node; the agent
+    /// sends the records changed after it. Sent only to agents that
+    /// reported support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_cursor: Option<crate::connections::Cursor>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

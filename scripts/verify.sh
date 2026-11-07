@@ -29,6 +29,7 @@ for RELAY_TEST_LANGUAGE in zh-CN en; do
     node scripts/test_web_traffic_cycles.cjs web/app.js
     node scripts/test_web_rate_limits.cjs web/app.js
     node scripts/test_web_speed_tests.cjs web/app.js
+    node scripts/test_web_connections.cjs web/app.js
     node scripts/test_web_smtp.cjs web/app.js
     node scripts/test_web_views.cjs web/index.html web/app.js
 done

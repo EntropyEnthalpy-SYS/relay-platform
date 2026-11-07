@@ -11,6 +11,7 @@ pub(super) async fn relay(
     meter: Meter,
     stats: Arc<Counters>,
     inlet: ListenerKey,
+    live: &Live,
 ) -> Result<()> {
     let activity = Arc::new(StdMutex::new(Instant::now()));
     let relay = async {
@@ -30,6 +31,7 @@ pub(super) async fn relay(
         let mut routes = HashMap::<SocketAddr, LoopGuard>::new();
         let mut names = HashMap::<String, (Instant, SocketAddr)>::new();
         let mut buffer = vec![0; wire::MAX_DATAGRAM + 1];
+        let mut last_destination = None::<shadowsocks::Destination>;
         loop {
             // A reply must not cancel a partly read TCP frame. Reuse this
             // future until it completes, even across many UDP replies.
@@ -57,9 +59,13 @@ pub(super) async fn relay(
                             stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed); continue;
                         }
                         rule.throttle(size, false).await;
-                        ensure!(meter.admit(&rule.spec, false, size, true).await? == Some(size), "UDP-over-TCP quota exhausted");
+                        if meter.admit(&rule.spec, false, size, true).await? != Some(size) {
+                            stats.meter_refused(&rule, live.protocol(), live.client().ip());
+                            bail!("UDP-over-TCP quota exhausted");
+                        }
                         wire::write_packet(&mut writer, connected.is_some(), source, &buffer[..size]).await?;
                         stats.forwarded_download_bytes.fetch_add(size as u64, Ordering::Relaxed);
+                        live.add_download(size as u64);
                         *activity.lock().unwrap() = Instant::now();
                     }
                 }
@@ -68,12 +74,17 @@ pub(super) async fn relay(
                 writer.shutdown().await?;
                 return Ok(());
             };
+            if last_destination.as_ref() != Some(&message.destination) {
+                live.set_destination(&message.destination.to_string());
+                last_destination = Some(message.destination.clone());
+            }
             let address = match datagram_address(&rule, server, &message.destination, &mut names)
                 .await
             {
                 Ok(address) => address,
                 Err(error) => {
                     stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                    stats.destination_refused(&rule, live, &error);
                     tracing::debug!(rule_id=%rule.spec.id,%error,"UDP-over-TCP destination rejected");
                     continue;
                 }
@@ -105,10 +116,10 @@ pub(super) async fn relay(
             }
             let size = message.payload.len();
             rule.throttle(size, true).await;
-            ensure!(
-                meter.admit(&rule.spec, true, size, true).await? == Some(size),
-                "UDP-over-TCP quota exhausted"
-            );
+            if meter.admit(&rule.spec, true, size, true).await? != Some(size) {
+                stats.meter_refused(&rule, live.protocol(), live.client().ip());
+                bail!("UDP-over-TCP quota exhausted");
+            }
             match slot
                 .as_ref()
                 .unwrap()
@@ -119,6 +130,7 @@ pub(super) async fn relay(
                     stats
                         .forwarded_upload_bytes
                         .fetch_add(sent as u64, Ordering::Relaxed);
+                    live.add_upload(sent as u64);
                 }
                 _ => {
                     stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);

@@ -1438,13 +1438,14 @@ async function renderRules() {
   nodeStatus.append(applicationBadge(state.nodes.find(n => n.id === nodeId)), badge(msg`期望修订 v${config.revision}`), badge(nodeLimit ? msg`节点总限速 ${nodeLimit}` : translate('节点不限速'), nodeLimit ? 'orange' : ''));
   if (nodeBurst) nodeStatus.append(badge(nodeBurst, 'orange'));
   nodeTools.append(button(translate('版本历史'), history)); if (canWrite()) nodeTools.append(button(translate('节点总限速'), () => editNodeRate(config)));
+  nodeTools.append(button(translate('拦截记录'), () => openNodeBlocks(state.nodes.find(n => n.id === nodeId), config)));
   toolbar.append(nodeTools, nodeStatus);
   const protocols = { tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' }, balances = { weighted_round_robin: translate('加权轮询'), source_hash: translate('来源 IP 哈希'), least_connections: translate('最少连接'), lowest_latency: translate('最低延迟'), random: translate('随机') };
   const p = panel(msg`${state.nodes.find(n => n.id === nodeId).name} 上运行的规则`, translate('一台服务器上的监听端口和服务。多跳转发会在经过的每台服务器上各有一条规则；完整路线见「全部转发」。'));
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); if (canSpeedTestRule(rule)) actions.append(button(translate('路径测速…'), () => openPathSpeedTest(config.node_id, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), limitCell(rule, state.nodes.find(n => n.id === nodeId)), rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); actions.append(button(translate('连接…'), () => openRuleConnections(config.node_id, rule), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); if (canSpeedTestRule(rule)) actions.append(button(translate('路径测速…'), () => openPathSpeedTest(config.node_id, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), limitCell(rule, state.nodes.find(n => n.id === nodeId)), rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p, sharedRulesPanel(sharedRules, state.nodes));
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -3421,6 +3422,97 @@ async function renderDiagnostics() {
   about.append(items, el('p', translate('报告包含服务器地址和日志内容，只分享给你信任的人。'), 'diagnostics-note'));
   if (state.view === 'diagnostics') $('#content').replaceChildren(head, speedTestPanel(nodes, speedTests), about);
 }
+// Connections: a rule's open sessions, taken by its agent when the panel asks, the rule's counters since
+// the agent started and its block records; and a server's block records. Client addresses are personal
+// data; only users who may read the server's configuration see them.
+const blockReasons = localize({ source_not_allowed: '来源不在允许列表', source_denied: '来源在拒绝列表', proxy_untrusted: 'PROXY 头的发送方不受信任', expired: '规则已到期', connection_limit: '达到连接数上限', udp_session_limit: '达到 UDP 会话上限', http2_stream_limit: '达到 HTTP/2 并发隧道上限', quota: '配额已用完', budget: '共享额度拒绝或未及时授予', inactive: '规则未在这台服务器生效', no_target: '没有可用目标（全部暂停、不可用或已满）', destination_denied: '目的地址不在允许范围', auth_failed: '代理认证失败', handshake_failed: '代理或网关握手失败' });
+const connectionProtocols = localize({ tcp: 'TCP', tls: 'TLS', websocket: 'WebSocket', wss: 'WebSocket + TLS', socks5: 'SOCKS5', socks5_udp: 'SOCKS5 UDP', http_connect: 'HTTP CONNECT', http2_connect: 'HTTP/2 CONNECT', shadowsocks: 'Shadowsocks', shadowsocks_uot: 'Shadowsocks UDP over TCP', shadowsocks_udp: 'Shadowsocks UDP', multipath: '多路径聚合', gateway: '协议网关', udp: 'UDP' });
+const connectionStates = localize({ pending: '正在等待服务器回报当前连接…', no_answer: '服务器 30 秒内没有回报当前连接，它可能正忙或刚断开；请稍后点“刷新”重试。', unsupported: '这台服务器的 Agent 版本过旧，不记录当前连接和拦截记录；请先升级 Agent。下方的累计统计仍然有效。', offline: '服务器离线，无法获取当前连接。' });
+function connectionsReason(message) { return /^too many connection snapshots are waiting for this server/.test(String(message ?? '')) ? translate('这台服务器有太多连接快照在等待回报；请几秒后再试') : ''; }
+function connectionHop(via) { if (!via) return '—'; const node = state.nodes?.find(n => n.id === via.node_id); return namedCell(node?.name || via.node_id, via.rule_id); }
+function blockTable(blocks, ruleNames) {
+  return table([translate('最近一次'), translate('来源'), ...(ruleNames ? [translate('规则')] : []), translate('协议'), translate('原因 / 详情'), translate('次数')], blocks.map(b => [
+    namedCell(timestamp(b.last_ms), b.count > 1 && b.first_ms !== b.last_ms ? msg`首次 ${timestamp(b.first_ms)}` : ''), el('span', b.source, 'mono'),
+    ...(ruleNames ? [ruleNames.get(b.rule_id) || b.rule_id] : []), connectionProtocols[b.protocol] || b.protocol, namedCell(blockReasons[b.reason] || b.reason, b.detail || ''), String(b.count)]));
+}
+function connectionCounters(view) {
+  const box = el('div'), { inbound, targets, refused } = view.counters, connected = targets.reduce((sum, t) => sum + t.counts.connected, 0);
+  const failed = c => [['timeout', '超时'], ['refused', '被拒绝'], ['dns', 'DNS'], ['closed', '对端断开'], ['other', '其他']].filter(([key]) => c[key]).map(([key, text]) => `${translate(text)} ${c[key]}`).join(' · ') || '0';
+  const average = c => { const us = c.connect_us / c.connected; return !c.connected ? '—' : us < 1000 ? `${Math.round(us)} µs` : `${(us / 1000).toFixed(1)} ms`; };
+  const rows = targets.map(t => [namedCell(msg`目标 ${t.target_index + 1}`, t.target_address), connectionHop(t.via), String(t.counts.attempts), String(t.counts.connected), connected ? `${Math.round(100 * t.counts.connected / connected)}%` : '—', failed(t.counts), average(t.counts)]);
+  if (inbound) rows.unshift([namedCell(translate('已接受的连接'), translate('入站建立，含 PROXY 头、TLS 和 WebSocket 握手')), '—', String(inbound.attempts), String(inbound.connected), '—', failed(inbound), average(inbound)]);
+  box.append(rows.length ? table([translate('环节'), translate('下一跳'), translate('尝试'), translate('成功'), translate('成功占比'), translate('失败原因'), translate('平均建立耗时')], rows) : el('p', translate('Agent 启动以来这条规则还没有建立过连接。'), 'fine'));
+  const total = refused.reduce((sum, r) => sum + r.count, 0);
+  if (view.state !== 'unsupported') box.append(el('p', view.taken_at_ms ? (total ? msg`拒绝 ${total} 次：${refused.map(r => `${blockReasons[r.reason] || r.reason} ${r.count}`).join(' · ')}` : translate('Agent 启动以来没有拒绝过这条规则的连接。')) : translate('按原因统计的拒绝次数在服务器回报当前连接后显示。'), 'fine'));
+  return box;
+}
+async function openRuleConnections(nodeId, rule) {
+  const base = `/nodes/${encodeURIComponent(nodeId)}`, box = el('div', undefined, 'connections-dialog'), tools = el('div', undefined, 'toolbar'), search = el('input');
+  const status = el('p', '', 'fine'), error = el('p', undefined, 'error'), sessionsBox = el('div'), countersBox = el('div'), blocksBox = el('div');
+  search.type = 'search'; search.placeholder = translate('按客户端、协议、目标或下一跳筛选'); search.setAttribute('aria-label', translate('筛选连接')); error.setAttribute('role', 'alert');
+  let view = null, blocks = null;
+  function drawSessions() {
+    if (!view) return;
+    if (!view.taken_at_ms) { sessionsBox.replaceChildren(el('p', '—', 'fine')); return; }
+    const query = search.value.trim().toLowerCase(), taken = view.taken_at_ms;
+    const shown = view.sessions.filter(s => !query || [s.client, s.protocol, connectionProtocols[s.protocol], s.target, s.remote, s.destination, s.via?.node_id, s.via?.rule_id].filter(Boolean).join(' ').toLowerCase().includes(query));
+    const total = view.totals.tcp + view.totals.udp, notes = [msg`TCP 连接 ${view.totals.tcp} · UDP 会话 ${view.totals.udp}`];
+    if (view.truncated) notes.push(msg`显示最新的 ${view.sessions.length} 个，共 ${total} 个`);
+    if (query) notes.push(msg`筛选后 ${shown.length} 个`);
+    const rows = shown.map(s => { const main = s.destination || s.target || '—'; return [el('span', s.client, 'mono'), connectionProtocols[s.protocol] || s.protocol, namedCell(main, [s.destination ? s.target : '', s.remote].filter(part => part && part !== main).join(' → ')), connectionHop(s.via), namedCell(timestamp(s.started_ms), durationText(Math.max(0, Math.round((taken - s.started_ms) / 1000)))), bytes(s.upload_bytes), bytes(s.download_bytes)]; });
+    sessionsBox.replaceChildren(el('p', notes.join(' · '), 'fine'), rows.length ? table([translate('客户端'), translate('协议'), translate('目标 / 真实目的地'), translate('下一跳'), translate('开始 / 时长'), translate('上传'), translate('下载')], rows) : el('p', translate('没有符合条件的连接。'), 'fine'));
+  }
+  function draw() {
+    if (!view) return;
+    status.textContent = view.state === 'ready' ? msg`服务器于 ${timestamp(view.taken_at_ms)} 回报` : view.state === 'pending' && view.taken_at_ms ? msg`下面是 ${timestamp(view.taken_at_ms)} 的数据，正在刷新…` : [connectionStates[view.state] || view.state, view.taken_at_ms ? msg`下面是 ${timestamp(view.taken_at_ms)} 的数据。` : ''].filter(Boolean).join(' ');
+    status.className = ['ready', 'pending'].includes(view.state) ? 'fine' : 'workflow-callout';
+    drawSessions(); countersBox.replaceChildren(connectionCounters(view));
+    blocksBox.replaceChildren(!blocks?.supported ? el('p', translate('这台服务器的 Agent 升级后才有拦截记录。'), 'fine') : blocks.blocks.length ? blockTable(blocks.blocks) : el('p', translate('没有拦截记录。'), 'fine'));
+  }
+  async function load() {
+    try {
+      [view, blocks] = await Promise.all([api(`${base}/rules/${encodeURIComponent(rule.id)}/connections`), api(`${base}/blocks?rule_id=${encodeURIComponent(rule.id)}&limit=200`)]);
+      error.textContent = '';
+    } catch (e) { error.textContent = connectionsReason(e.detail?.error) || e.message; return false; } finally { draw(); }
+    return true;
+  }
+  // While the dialog is open: every second until the agent answers, then every 3 seconds; an error,
+  // an old agent, an offline server or no answer stops it until Refresh.
+  let following = false;
+  async function follow() {
+    if (following) return load();
+    following = true;
+    try {
+      while (box.isConnected) {
+        const wait = await load() && { pending: 1000, ready: 3000 }[view.state];
+        if (!wait) return;
+        await new Promise(resolve => setTimeout(resolve, wait));
+      }
+    } finally { following = false; }
+  }
+  search.addEventListener('input', drawSessions);
+  tools.append(search, button(translate('刷新'), follow));
+  box.append(tools, status, error, el('h3', translate('当前连接')), sessionsBox, el('h3', translate('累计统计（Agent 启动以来）')), countersBox, el('h3', translate('拦截记录')), blocksBox, el('p', translate('客户端地址属于个人数据，只有能查看这台服务器配置的用户看得到。当前连接按需向服务器获取，不保存；拦截记录只保存在面板内存中，面板重启后清空。'), 'fine'));
+  modal(msg`连接 · ${rule.name}`, box);
+  await follow();
+}
+async function openNodeBlocks(node, config) {
+  const box = el('div', undefined, 'connections-dialog'), tools = el('div', undefined, 'toolbar'), filter = el('select'), list = el('div'), error = el('p', undefined, 'error'), names = new Map(config.rules.map(r => [r.id, r.name]));
+  filter.setAttribute('aria-label', translate('按规则筛选')); error.setAttribute('role', 'alert');
+  for (const [id, text] of [['', translate('全部规则')], ...config.rules.map(r => [r.id, r.name])]) { const option = el('option', text); option.value = id; filter.append(option); }
+  async function load() {
+    try {
+      const view = await api(`/nodes/${encodeURIComponent(node.id)}/blocks?limit=1000${filter.value ? `&rule_id=${encodeURIComponent(filter.value)}` : ''}`);
+      error.textContent = '';
+      list.replaceChildren(!view.supported ? el('p', translate('这台服务器的 Agent 版本过旧，不记录拦截记录；请先升级 Agent。'), 'workflow-callout') : view.blocks.length ? blockTable(view.blocks, names) : el('p', translate('没有拦截记录。'), 'fine'));
+    } catch (e) { error.textContent = e.message; }
+  }
+  filter.addEventListener('change', load);
+  tools.append(filter, button(translate('刷新'), load));
+  box.append(el('p', translate('被拒绝的连接和 UDP 会话：来源不在允许列表、达到连接数上限、配额用完、代理目的地址不允许等。同一规则、来源 IP 和原因在 60 秒内合并为一条并计数。面板保存每台服务器最近 1000 条，只在内存中，重启后清空。'), 'fine'), tools, error, list);
+  modal(msg`拦截记录 · ${node.name}`, box);
+  await load();
+}
 // Speed tests: administrators measure a server against Cloudflare's speed service or against another
 // server; the path test measures each segment of a rule's path. Test traffic never passes through a
 // rule, so no speed limit, meter, quota or shared budget applies to it.
@@ -4385,6 +4477,7 @@ async function renderTopology() {
     const path = shadowsocksPath(snapshot, root);
     if (path) tools.append(button(translate('客户端链接'), () => shareShadowsocks(path.exit, path.entry, path.hops.map(hop => names.get(hop.node_id)).join(' → ')), 'table-action'));
     if (canSpeedTestRule(rule)) tools.append(button(translate('路径测速…'), () => openPathSpeedTest(root.node_id, rule), 'table-action'));
+    if (rule) tools.append(button(translate('连接…'), () => openRuleConnections(root.node_id, rule), 'table-action'));
     if (canWrite()) tools.append(button(rule?.enabled ? translate('停用') : translate('启用'), () => changeTopologyComponent(snapshot, key, !rule?.enabled), 'table-action'));
     if (canWrite() && !root.rule_id.startsWith('fed-')) tools.append(button(translate('删除'), () => deleteForwarding(snapshot, root), 'table-action danger'));
     head.append(title, tools); card.append(head, routeChips(model, health, byId, conns));

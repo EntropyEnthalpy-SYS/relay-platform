@@ -1,4 +1,5 @@
 use crate::{
+    connections::{self, Live, Reason},
     datagram, destination_acl,
     health::{self, HealthSet, Observation},
     http_connect, http2_connect,
@@ -70,6 +71,10 @@ struct Counters {
     /// Connection outcomes by rule, target index (`None` for the inbound
     /// side) and configured target address.
     hops: StdMutex<HopCounters>,
+    /// Open sessions of every rule, for the controller's snapshots.
+    sessions: Arc<connections::Registry>,
+    /// Refused connections, UDP sessions and datagrams.
+    blocks: connections::Blocks,
 }
 type HopCounters = HashMap<(String, Option<usize>, String), ConnectionCounts>;
 /// Why a connection could not be set up, as counted per hop.
@@ -130,6 +135,43 @@ impl Counters {
             Err(SetupFailure::Other) => counts.other += 1,
         }
     }
+    /// Records why the meter admitted nothing for a session of `rule`.
+    fn meter_refused(&self, rule: &RuntimeRule, protocol: &'static str, source: std::net::IpAddr) {
+        let spec = &rule.spec;
+        let reason = if spec.expires_at_ms.is_some_and(|expiry| expiry <= now_ms()) {
+            Reason::Expired
+        } else if !spec.budget_ids.is_empty() {
+            Reason::Budget
+        } else if spec.quota_bytes.is_some() {
+            Reason::Quota
+        } else {
+            Reason::Inactive
+        };
+        let quota = spec.quota_bytes.unwrap_or_default();
+        self.blocks
+            .record(&rule.key, protocol, source, reason, || match reason {
+                Reason::Expired => "the rule expired".into(),
+                Reason::Budget => "shared budget refused or not granted in time".into(),
+                Reason::Quota => format!("quota of {quota} bytes used up"),
+                _ => "the meter admits nothing: the rule is not active here".into(),
+            });
+    }
+    /// Records a proxy client's destination that the rule refused, when
+    /// `error` is such a refusal.
+    fn destination_refused(&self, rule: &RuntimeRule, session: &Live, error: &anyhow::Error) {
+        if let Some(denied) = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<DestinationDenied>())
+        {
+            self.blocks.record(
+                &rule.key,
+                session.protocol(),
+                session.client().ip(),
+                Reason::DestinationDenied,
+                || denied.0.clone(),
+            );
+        }
+    }
     fn snapshot(&self) -> EngineStats {
         EngineStats {
             protocol_gateway: None,
@@ -141,6 +183,7 @@ impl Counters {
             reverse_tunnel: None,
             rate_limits: None,
             speed_test: None,
+            live_connections: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),
@@ -173,6 +216,29 @@ impl Counters {
                 .collect(),
         }
     }
+}
+
+/// A proxy client's destination outside the rule's destination rules, or
+/// not a public address.
+#[derive(Debug)]
+struct DestinationDenied(String);
+impl std::fmt::Display for DestinationDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for DestinationDenied {}
+/// A proxy handshake that failed: authentication or anything else. The
+/// protocol modules' messages name no credentials and no payload.
+fn handshake_refusal(error: &anyhow::Error) -> (Reason, String) {
+    let text = format!("{error:#}");
+    let reason = if text.contains("authentication failed") || text.contains("failed authentication")
+    {
+        Reason::AuthFailed
+    } else {
+        Reason::HandshakeFailed
+    };
+    (reason, text)
 }
 
 struct MeterMessage {
@@ -943,6 +1009,10 @@ struct RuntimeRule {
     /// advertised one, because an advertised address can also be reached
     /// directly and topology metadata alone proves no metered upstream.
     user_limit: Option<Arc<UserLimit>>,
+    /// The rule id its sessions and block records share.
+    key: Arc<str>,
+    /// How TCP and UDP clients reach the rule, as sessions name it.
+    kinds: [&'static str; 2],
 }
 /// Orders same-priority targets by probe latency, unmeasured ones last. The
 /// current choice is kept until another target is faster by more than 10%
@@ -1024,6 +1094,11 @@ impl RuntimeRule {
             preferred: AtomicUsize::new(usize::MAX),
             user: user_key(&spec.tenant_id, &spec.owner_id),
             user_limit: resources.user_limit,
+            key: Arc::from(spec.id.as_str()),
+            kinds: [
+                connections::protocol(&spec, false),
+                connections::protocol(&spec, true),
+            ],
             spec,
             resolver,
             routes,
@@ -1218,6 +1293,63 @@ impl RuntimeRule {
         } else {
             self.accepts(peer)
         }
+    }
+    /// Records why `source` was refused: by [`Self::accepts_transport`]
+    /// when `transport`, else by [`Self::accepts`].
+    fn refuse(&self, stats: &Counters, udp: bool, source: SocketAddr, transport: bool) {
+        let ip = canonical_ip(source.ip());
+        let spec = &self.spec;
+        let gateway = spec.protocol_gateway.is_some();
+        let denied = (!gateway)
+            .then(|| spec.deny_sources.iter().find(|n| n.contains(&ip)).copied())
+            .flatten();
+        let reason = if spec.expires_at_ms.is_some_and(|expiry| expiry <= now_ms()) {
+            Reason::Expired
+        } else if transport
+            && spec
+                .inbound_proxy
+                .as_ref()
+                .is_some_and(|proxy| !proxy.trusts(ip))
+        {
+            Reason::ProxyUntrusted
+        } else if denied.is_some() {
+            Reason::SourceDenied
+        } else {
+            Reason::SourceNotAllowed
+        };
+        stats
+            .blocks
+            .record(&self.key, self.kinds[udp as usize], ip, reason, || {
+                match (reason, denied) {
+                    (Reason::Expired, _) => "the rule expired".into(),
+                    (Reason::ProxyUntrusted, _) => "PROXY header sender is not trusted".into(),
+                    (Reason::SourceDenied, Some(network)) => {
+                        format!("matches deny-list network {network}")
+                    }
+                    _ if gateway => "the gateway's local bridge takes loopback clients only".into(),
+                    _ => "not in the allow list".into(),
+                }
+            });
+    }
+    /// Records that no target takes new sessions.
+    fn no_target(&self, stats: &Counters, session: &Live) {
+        let paused = {
+            let now = now_ms();
+            self.spec.targets.iter().all(|t| t.paused_at(now))
+        };
+        stats.blocks.record(
+            &self.key,
+            session.protocol(),
+            session.client().ip(),
+            Reason::NoTarget,
+            || {
+                if paused {
+                    "all targets paused".into()
+                } else {
+                    "no target takes new sessions: paused, unhealthy or full".into()
+                }
+            },
+        );
     }
 }
 
@@ -1684,6 +1816,35 @@ impl Engine {
             });
         }
         RateLimitReport { bursts }
+    }
+    /// Open sessions of the `rules` a controller asked for and the block
+    /// records changed after `cursor`. The agent sends it only to
+    /// controllers that take it.
+    pub fn connection_report(
+        &self,
+        rules: &[String],
+        cursor: &connections::Cursor,
+    ) -> connections::Report {
+        let taken_at_ms = now_ms();
+        connections::Report {
+            snapshots: rules
+                .iter()
+                .filter(|rule| identifier(rule))
+                .take(connections::MAX_SNAPSHOTS)
+                .map(|rule| {
+                    let (tcp, udp, sessions) = self.stats.sessions.snapshot(rule);
+                    connections::Snapshot {
+                        rule_id: rule.clone(),
+                        taken_at_ms,
+                        tcp,
+                        udp,
+                        sessions,
+                        refused: self.stats.blocks.refused(rule),
+                    }
+                })
+                .collect(),
+            blocks: self.stats.blocks.after(cursor),
+        }
     }
     pub fn stats(&self) -> EngineStats {
         let mut stats = self.stats.snapshot();
@@ -2304,6 +2465,7 @@ async fn tcp_listener(
         let rule = updates.borrow().clone();
         if !rule.accepts_transport(peer) {
             stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+            rule.refuse(&stats, false, peer, true);
             continue;
         }
         let Some(guard) = CountGuard::acquire(
@@ -2313,9 +2475,19 @@ async fn tcp_listener(
             true,
         ) else {
             stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+            let limit = rule.spec.max_connections;
+            stats.blocks.record(
+                &rule.key,
+                rule.kinds[0],
+                peer.ip(),
+                Reason::ConnectionLimit,
+                || format!("limit {limit} connections"),
+            );
             continue;
         };
         stats.accepted_tcp.fetch_add(1, Ordering::Relaxed);
+        // Listed until the task ends, however it ends.
+        let session = stats.sessions.track(&rule.key, rule.kinds[0], false, peer);
         let meter = meter.clone();
         let stats = stats.clone();
         let session_tasks = tasks.clone();
@@ -2323,7 +2495,7 @@ async fn tcp_listener(
             // A session that fails while this is unset counts as an inbound
             // setup failure; cancelled sessions count as neither.
             let settled = AtomicBool::new(false);
-            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,inlet,rule.clone(),meter,stats.clone(),guard,session_tasks,&settled)=>result};
+            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,inlet,rule.clone(),meter,stats.clone(),guard,session_tasks,&settled,&session)=>result};
             if let Err(error)=outcome {
                 if !settled.load(Ordering::Relaxed) {
                     stats.record_hop(&rule.spec.id, None, Err(SetupFailure::of(&error)));
@@ -2643,11 +2815,11 @@ async fn try_target(
     inlet: ListenerKey,
     stats: &Counters,
     deadline: Instant,
-) -> Result<(BoxStream, LoopGuard), (SetupFailure, String)> {
+) -> Result<(BoxStream, LoopGuard, Option<SocketAddr>), (SetupFailure, String)> {
     if let (Some(tunnel), Some(server)) = (&rule.spec.reverse_tunnel, &rule.reverse) {
         let idle = Duration::from_secs(rule.spec.idle_timeout_secs);
         return match timeout_at(deadline, server.open_stream(tunnel, idle)).await {
-            Ok(Ok(stream)) => Ok((Box::new(stream), LoopGuard::none())),
+            Ok(Ok(stream)) => Ok((Box::new(stream), LoopGuard::none(), None)),
             Ok(Err(error)) => Err((SetupFailure::Other, error.to_string())),
             Err(_) => Err((
                 SetupFailure::Timeout,
@@ -2684,10 +2856,11 @@ async fn try_target(
                 "pre-warmed destination denied by rule policy".into(),
             ));
         } else {
+            let remote = dialed.address;
             match timeout_at(deadline, activate_target(rule, index, dialed, Some(info))).await {
-                Ok(Ok(dialed)) => {
+                Ok(Ok((stream, route))) => {
                     stats.prewarmed_connections.fetch_add(1, Ordering::Relaxed);
-                    return Ok(dialed);
+                    return Ok((stream, route, Some(remote)));
                 }
                 Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string())),
                 Err(_) => {
@@ -2706,7 +2879,7 @@ async fn try_target(
         )
         .await
         {
-            Ok(Ok(dialed)) => return Ok(dialed),
+            Ok(Ok((stream, route))) => return Ok((stream, route, Some(address))),
             Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string())),
             Err(_) => {
                 return Err((SetupFailure::Timeout, "target connection timed out".into()));
@@ -2725,9 +2898,13 @@ async fn connect_tcp(
     info: ConnectionInfo,
     inlet: ListenerKey,
     stats: &Counters,
+    session: &Live,
 ) -> Result<(BoxStream, TargetGuard, LoopGuard)> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     let order = rule.order(info.source, inlet);
+    if order.is_empty() {
+        rule.no_target(stats, session);
+    }
     let mut pending = order.iter().copied().enumerate();
     let mut running = FuturesUnordered::new();
     let mut in_flight = vec![];
@@ -2771,7 +2948,8 @@ async fn connect_tcp(
                 let outcome = result.as_ref().map(|_| started.elapsed()).map_err(|(kind, _)| *kind);
                 stats.record_hop(&rule.spec.id, Some((index, address)), outcome);
                 match result {
-                    Ok((stream, route)) => {
+                    Ok((stream, route, remote)) => {
+                        session.set_target(index, &rule.spec.targets[index], remote);
                         // Without health probes, a target that lost the race
                         // gets no other verdict, so it waits like a failure.
                         if rule.health.is_none() {
@@ -2799,10 +2977,11 @@ async fn resolve_destination(rule: &RuntimeRule, endpoint: &str) -> Result<Vec<S
     let addresses: Vec<_> = rule
         .destination
         .filter_sockets(destination_acl::host_from_endpoint(endpoint), addresses);
-    ensure!(
-        !addresses.is_empty(),
-        "destination denied by rule policy: {endpoint}"
-    );
+    if addresses.is_empty() {
+        return Err(
+            DestinationDenied(format!("destination denied by rule policy: {endpoint}")).into(),
+        );
+    }
     Ok(addresses)
 }
 
@@ -2812,13 +2991,16 @@ async fn connect_destination(
     server: &shadowsocks::Server,
     destination: &shadowsocks::Destination,
     inlet: ListenerKey,
+    session: &Live,
 ) -> Result<BoxStream> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     timeout_at(deadline, async {
         let mut last = None;
         for address in resolve_destination(rule, &destination.to_string()).await? {
             if !server.permits(address.ip()) {
-                last = Some(anyhow::anyhow!("{destination} is not a public address"));
+                last = Some(
+                    DestinationDenied(format!("{destination} is not a public address")).into(),
+                );
                 continue;
             }
             let route = rule.routes.reserve(inlet, address)?;
@@ -2837,6 +3019,7 @@ async fn connect_destination(
                         &rule.spec.id,
                         "outbound",
                     )?;
+                    session.set_remote(address);
                     return Ok(transport::hold(Box::new(stream), (route, mptcp)));
                 }
                 Err(error) => last = Some(error),
@@ -2853,13 +3036,16 @@ async fn connect_http_connect_destination(
     allow_private: bool,
     destination: &shadowsocks::Destination,
     inlet: ListenerKey,
+    session: &Live,
 ) -> Result<BoxStream> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     timeout_at(deadline, async {
         let mut last = None;
         for address in resolve_destination(rule, &destination.to_string()).await? {
             if !allow_private && !shadowsocks::public(address.ip()) {
-                last = Some(anyhow::anyhow!("{destination} is not a public address"));
+                last = Some(
+                    DestinationDenied(format!("{destination} is not a public address")).into(),
+                );
                 continue;
             }
             let route = rule.routes.reserve(inlet, address)?;
@@ -2879,6 +3065,7 @@ async fn connect_http_connect_destination(
                         &rule.spec.id,
                         "outbound",
                     )?;
+                    session.set_remote(address);
                     return Ok(transport::hold(Box::new(stream), (route, mptcp)));
                 }
                 Err(error) => last = Some(error),
@@ -2897,10 +3084,12 @@ async fn socks5_udp_association(
     inlet: ListenerKey,
     stats: Arc<Counters>,
     meter: Meter,
+    session: Arc<Live>,
 ) {
     let Some(server) = &rule.socks5 else {
         return;
     };
+    let mut last_endpoint = String::new();
     let inlet = ListenerKey {
         tcp: false,
         ..inlet
@@ -2941,16 +3130,22 @@ async fn socks5_udp_association(
                     }
                 };
                 let endpoint = datagram.destination.to_string();
+                if endpoint != last_endpoint {
+                    session.set_destination(&endpoint);
+                    last_endpoint.clone_from(&endpoint);
+                }
                 let addresses = match resolve_destination(&rule, &endpoint).await {
                     Ok(addresses) => addresses,
                     Err(error) => {
                         stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                        stats.destination_refused(&rule, &session, &error);
                         tracing::debug!(%error, rule = %rule.spec.id, "SOCKS5 UDP destination rejected");
                         continue;
                     }
                 };
                 let Some(address) = addresses.into_iter().find(|address| server.permits(address.ip())) else {
                     stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                    stats.destination_refused(&rule, &session, &DestinationDenied(format!("{endpoint} is not a public address")).into());
                     continue;
                 };
                 let family_slot = if address.is_ipv4() { &mut ipv4 } else { &mut ipv6 };
@@ -2968,6 +3163,7 @@ async fn socks5_udp_association(
                                 meter.clone(),
                                 stats.clone(),
                                 allowed.clone(),
+                                session.clone(),
                             ));
                         }
                         Err(error) => {
@@ -3016,12 +3212,16 @@ async fn socks5_udp_association(
                     Some(granted) if granted == datagram.payload.len() => {}
                     _ => {
                         stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                        if !cancel.is_cancelled() {
+                            stats.meter_refused(&rule, session.protocol(), session.client().ip());
+                        }
                         continue;
                     }
                 }
                 match outbound.send_to(&datagram.payload, address).await {
                     Ok(sent) => {
                         stats.forwarded_upload_bytes.fetch_add(sent as u64, Ordering::Relaxed);
+                        session.add_upload(sent as u64);
                     }
                     Err(error) => {
                         stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
@@ -3051,6 +3251,7 @@ async fn socks5_udp_replies(
     meter: Meter,
     stats: Arc<Counters>,
     allowed: Arc<StdMutex<std::collections::HashSet<SocketAddr>>>,
+    session: Arc<Live>,
 ) {
     let mut buffer = vec![0u8; 65_535];
     loop {
@@ -3080,10 +3281,14 @@ async fn socks5_udp_replies(
                         Some(granted) if granted == size => {}
                         _ => {
                             stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                            if !cancel.is_cancelled() {
+                                stats.meter_refused(&rule, session.protocol(), session.client().ip());
+                            }
                             continue;
                         }
                     }
                     stats.forwarded_download_bytes.fetch_add(size as u64, Ordering::Relaxed);
+                    session.add_download(size as u64);
                     let packet = socks5::encode_udp_datagram(
                         &shadowsocks::Destination::Ip(source),
                         &buffer[..size],
@@ -3106,13 +3311,16 @@ async fn connect_socks5_destination(
     server: &socks5::Server,
     destination: &shadowsocks::Destination,
     inlet: ListenerKey,
+    session: &Live,
 ) -> Result<BoxStream> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     timeout_at(deadline, async {
         let mut last = None;
         for address in resolve_destination(rule, &destination.to_string()).await? {
             if !server.permits(address.ip()) {
-                last = Some(anyhow::anyhow!("{destination} is not a public address"));
+                last = Some(
+                    DestinationDenied(format!("{destination} is not a public address")).into(),
+                );
                 continue;
             }
             let route = rule.routes.reserve(inlet, address)?;
@@ -3131,6 +3339,7 @@ async fn connect_socks5_destination(
                         &rule.spec.id,
                         "outbound",
                     )?;
+                    session.set_remote(address);
                     return Ok(transport::hold(Box::new(stream), (route, mptcp)));
                 }
                 Err(error) => last = Some(error),
@@ -3177,6 +3386,7 @@ async fn connect_multipath(
     inlet: ListenerKey,
     stats: Arc<multipath::Counters>,
     tasks: TaskTracker,
+    session: &Live,
 ) -> Result<BoxStream> {
     let spec = rule.spec.outbound_multipath.as_ref().unwrap();
     let permit = rule
@@ -3201,6 +3411,7 @@ async fn connect_multipath(
                 Ok(Err(_)) | Err(_) => continue,
             }
         };
+        session.set_target(first.slot, &rule.spec.targets[first.slot], None);
         // CREATE is attempted once. An ambiguous result must not open another backend.
         let (session, first) = timeout_at(path_deadline, multipath::Client::create(first, spec))
             .await
@@ -3251,6 +3462,7 @@ async fn tcp_session(
     guard: CountGuard,
     tasks: TaskTracker,
     settled: &AtomicBool,
+    session: &Arc<Live>,
 ) -> Result<()> {
     let mut began = Instant::now();
     client.set_nodelay(true)?;
@@ -3308,8 +3520,12 @@ async fn tcp_session(
             settled.store(false, Ordering::Relaxed);
         }
     }
+    if info.source != peer {
+        session.set_client(info.source);
+    }
     if !rule.accepts(info.source) {
         stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+        rule.refuse(&stats, false, info.source, false);
         return Ok(());
     }
     let client = if let Some(spec) = &rule.spec.inbound_websocket {
@@ -3334,14 +3550,17 @@ async fn tcp_session(
         let dial_stats = stats.clone();
         let relay_rule = rule.clone();
         let relay_stats = stats.clone();
+        let (dial_session, relay_session) = (session.clone(), session.clone());
         let session = http2_connect::Session {
             config: Arc::new(config.clone()),
             dial: Arc::new(move |destination| {
                 let rule = dial_rule.clone();
                 let stats = dial_stats.clone();
+                let session = dial_session.clone();
                 Box::pin(async move {
                     use hyper::StatusCode;
                     if !rule.accepts(info.source) {
+                        rule.refuse(&stats, false, info.source, false);
                         return Err(StatusCode::FORBIDDEN);
                     }
                     let permit = Http2Guard::acquire(
@@ -3351,19 +3570,30 @@ async fn tcp_session(
                     )
                     .ok_or_else(|| {
                         stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                        let limit = config.max_concurrent_streams;
+                        stats.blocks.record(
+                            &rule.key,
+                            rule.kinds[0],
+                            info.source.ip(),
+                            Reason::Http2StreamLimit,
+                            || format!("limit {limit} streams"),
+                        );
                         StatusCode::TOO_MANY_REQUESTS
                     })?;
+                    session.set_destination(&destination.to_string());
                     match connect_http_connect_destination(
                         &rule,
                         config.allow_private_destinations,
                         &destination,
                         inlet,
+                        &session,
                     )
                     .await
                     {
                         Ok(stream) => Ok(transport::hold(stream, permit)),
                         Err(error) => {
                             stats.failed_connections.fetch_add(1, Ordering::Relaxed);
+                            stats.destination_refused(&rule, &session, &error);
                             tracing::debug!(%error, "managed HTTP/2 destination rejected");
                             Err(StatusCode::BAD_GATEWAY)
                         }
@@ -3374,7 +3604,10 @@ async fn tcp_session(
                 let rule = relay_rule.clone();
                 let stats = relay_stats.clone();
                 let meter = meter.clone();
-                Box::pin(async move { relay_tcp(client, target, rule, meter, stats).await })
+                let session = relay_session.clone();
+                Box::pin(
+                    async move { relay_tcp(client, target, rule, meter, stats, &session).await },
+                )
             }),
             cancel: rule.cancel.clone(),
             tasks,
@@ -3411,10 +3644,19 @@ async fn tcp_session(
             Ok(destination) => destination,
             Err(error) => {
                 stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                let (reason, detail) = handshake_refusal(&error);
+                stats.blocks.record(
+                    &rule.key,
+                    session.protocol(),
+                    info.source.ip(),
+                    reason,
+                    || detail,
+                );
                 tracing::debug!(%error, rule = %rule.spec.id, "HTTP CONNECT request rejected");
                 return Ok(());
             }
         };
+        session.set_destination(&destination.to_string());
         let target = match connect_http_connect_destination(
             &rule,
             rule.spec
@@ -3424,6 +3666,7 @@ async fn tcp_session(
                 .allow_private_destinations,
             &destination,
             inlet,
+            session,
         )
         .await
         {
@@ -3432,6 +3675,7 @@ async fn tcp_session(
                 target
             }
             Err(error) => {
+                stats.destination_refused(&rule, session, &error);
                 let _ = http_connect::reply(&mut client, 502, "Bad Gateway").await;
                 return Err(error);
             }
@@ -3442,6 +3686,14 @@ async fn tcp_session(
             Ok(request) => request,
             Err(error) => {
                 stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                let (reason, detail) = handshake_refusal(&error);
+                stats.blocks.record(
+                    &rule.key,
+                    session.protocol(),
+                    info.source.ip(),
+                    reason,
+                    || detail,
+                );
                 tracing::debug!(%error, rule = %rule.spec.id, "SOCKS5 request rejected");
                 return Ok(());
             }
@@ -3476,6 +3728,7 @@ async fn tcp_session(
                         }
                     };
                     if bind_peer_allowed(&rule, server, &requested, bound_peer) {
+                        session.set_remote(bound_peer);
                         break (inbound, bound_peer);
                     }
                     tracing::debug!(peer = %bound_peer, "SOCKS5 BIND peer rejected by policy");
@@ -3513,6 +3766,7 @@ async fn tcp_session(
                     };
                 let relay = socket.local_addr()?;
                 socks5::udp_bind_reply(&mut client, relay).await?;
+                session.set_protocol("socks5_udp");
                 let cancel = CancellationToken::new();
                 let relay_task = tasks.spawn(socks5_udp_association(
                     rule.clone(),
@@ -3521,6 +3775,7 @@ async fn tcp_session(
                     inlet,
                     stats.clone(),
                     meter.clone(),
+                    session.clone(),
                 ));
                 let mut control = client;
                 let mut discard = [0u8; 512];
@@ -3541,12 +3796,15 @@ async fn tcp_session(
         };
         let target = match (destination, bound) {
             (Some(destination), None) => {
-                match connect_socks5_destination(&rule, server, &destination, inlet).await {
+                session.set_destination(&destination.to_string());
+                match connect_socks5_destination(&rule, server, &destination, inlet, session).await
+                {
                     Ok(target) => {
                         socks5::reply(&mut client, 0).await?;
                         target
                     }
                     Err(error) => {
+                        stats.destination_refused(&rule, session, &error);
                         let _ = socks5::reply(&mut client, 5).await;
                         return Err(error);
                     }
@@ -3557,10 +3815,18 @@ async fn tcp_session(
         };
         (client, target)
     } else if let Some(server) = &rule.shadowsocks {
-        let (destination, session) = match server.accept(client, handshake_deadline).await {
+        let (destination, ss_session) = match server.accept(client, handshake_deadline).await {
             Ok(accepted) => accepted,
             Err(error) => {
                 stats.rejected_connections.fetch_add(1, Ordering::Relaxed);
+                let (reason, detail) = handshake_refusal(&error);
+                stats.blocks.record(
+                    &rule.key,
+                    session.protocol(),
+                    info.source.ip(),
+                    reason,
+                    || detail,
+                );
                 tracing::debug!(%error, rule = %rule.spec.id, "Shadowsocks request rejected");
                 return Ok(());
             }
@@ -3573,18 +3839,28 @@ async fn tcp_session(
                     .is_some_and(|s| s.udp_over_tcp),
                 "Shadowsocks UDP-over-TCP is disabled"
             );
-            return uot::relay(session, version, rule, meter, stats, inlet).await;
+            session.set_protocol("shadowsocks_uot");
+            return uot::relay(ss_session, version, rule, meter, stats, inlet, session).await;
         }
-        let target = connect_destination(&rule, server, &destination, inlet).await?;
-        (Box::new(session) as BoxStream, target)
+        session.set_destination(&destination.to_string());
+        let target = match connect_destination(&rule, server, &destination, inlet, session).await {
+            Ok(target) => target,
+            Err(error) => {
+                stats.destination_refused(&rule, session, &error);
+                return Err(error);
+            }
+        };
+        (Box::new(ss_session) as BoxStream, target)
     } else if rule.spec.outbound_multipath.is_some() {
-        let target = connect_multipath(&rule, info, inlet, stats.multipath.clone(), tasks).await?;
+        let target =
+            connect_multipath(&rule, info, inlet, stats.multipath.clone(), tasks, session).await?;
         (client, target)
     } else {
-        let (target, target_guard, route_guard) = connect_tcp(&rule, info, inlet, &stats).await?;
+        let (target, target_guard, route_guard) =
+            connect_tcp(&rule, info, inlet, &stats, session).await?;
         (client, transport::hold(target, (target_guard, route_guard)))
     };
-    relay_tcp(client, target, rule, meter, stats).await
+    relay_tcp(client, target, rule, meter, stats, session).await
 }
 async fn relay_tcp(
     client: BoxStream,
@@ -3592,14 +3868,15 @@ async fn relay_tcp(
     rule: Arc<RuntimeRule>,
     meter: Meter,
     stats: Arc<Counters>,
+    session: &Live,
 ) -> Result<()> {
     let activity = Arc::new(StdMutex::new(Instant::now()));
     let (cr, cw) = tokio::io::split(client);
     let (tr, tw) = tokio::io::split(target);
     let forward = async {
         tokio::try_join!(
-            copy_direction(cr, tw, &rule, &meter, &stats, &activity, true),
-            copy_direction(tr, cw, &rule, &meter, &stats, &activity, false)
+            copy_direction(cr, tw, &rule, &meter, &stats, &activity, true, session),
+            copy_direction(tr, cw, &rule, &meter, &stats, &activity, false, session)
         )?;
         Ok(())
     };
@@ -3621,6 +3898,7 @@ async fn watch_deadline(rule: &Rule, activity: Arc<StdMutex<Instant>>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     mut reader: R,
     mut writer: W,
@@ -3629,6 +3907,7 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     stats: &Counters,
     activity: &StdMutex<Instant>,
     upload: bool,
+    session: &Live,
 ) -> Result<()> {
     let mut buffer = vec![0u8; MIN_STREAM_BUFFER];
     loop {
@@ -3647,6 +3926,7 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 .await?
                 .unwrap_or(0);
             if allowed == 0 {
+                stats.meter_refused(rule, session.protocol(), session.client().ip());
                 bail!("quota exhausted, budget unavailable or rule inactive");
             }
             let end = offset + allowed;
@@ -3662,10 +3942,12 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                     stats
                         .forwarded_upload_bytes
                         .fetch_add(n as u64, Ordering::Relaxed);
+                    session.add_upload(n as u64);
                 } else {
                     stats
                         .forwarded_download_bytes
                         .fetch_add(n as u64, Ordering::Relaxed);
+                    session.add_download(n as u64);
                 }
                 *activity.lock().unwrap() = Instant::now();
             }
@@ -3840,7 +4122,7 @@ async fn udp_listener(
                     }
                 };
                 let runtime=updates.borrow().clone();
-                if !runtime.accepts_transport(peer){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
+                if !runtime.accepts_transport(peer){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);runtime.refuse(&stats,true,peer,true);continue;}
                 let original=ConnectionInfo{source:peer,destination:local};
                 let (info,header_size)=if let Some(policy)=&runtime.spec.inbound_proxy {
                     match proxy::decode_v2(&buffer[..size],false,policy.max_header_bytes,original) {
@@ -3848,12 +4130,17 @@ async fn udp_listener(
                         Err(error)=>{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"UDP PROXY rejected");continue;}
                     }
                 } else {(original,0)};
-                if !runtime.accepts(info.source){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
+                if !runtime.accepts(info.source){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);runtime.refuse(&stats,true,info.source,false);continue;}
                 let key=UdpSessionKey{peer,local,info};
                 if let Some(server)=&runtime.shadowsocks {
                     let datagram=match server.open_datagram(&mut buffer[header_size..size],shadowsocks::unix_now()) {
                         Ok(datagram)=>datagram,
-                        Err(error)=>{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"Shadowsocks datagram rejected");continue;}
+                        Err(error)=>{
+                            stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);
+                            let (reason,detail)=handshake_refusal(&error);
+                            stats.blocks.record(&runtime.key,runtime.kinds[1],info.source.ip(),reason,||detail);
+                            tracing::debug!(rule_id=%runtime.spec.id,%error,"Shadowsocks datagram rejected");continue;
+                        }
                     };
                     let id=datagram.session.map_or(AssociationKey::Peer(key),AssociationKey::Session);
                     let message=ClientDatagram{from:key,destination:datagram.destination,payload:datagram.payload.to_vec()};
@@ -3872,16 +4159,22 @@ async fn udp_listener(
                     let guard=if fresh {CountGuard::acquire(runtime.shared.udp.clone(),runtime.spec.udp_max_sessions as usize,stats.clone(),false)} else {None};
                     let Some(guard)=guard else{
                         if let AssociationKey::Session(session)=id {ended_windows.keep(session,window);}
-                        stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;
+                        stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);
+                        if fresh {
+                            let limit=runtime.spec.udp_max_sessions;
+                            stats.blocks.record(&runtime.key,runtime.kinds[1],info.source.ip(),Reason::UdpSessionLimit,||format!("limit {limit} UDP sessions"));
+                        }
+                        continue;
                     };
                     let (sender,receiver)=backlog();
                     sender.push(message.payload.len(),message);generation=generation.wrapping_add(1);let generation_id=generation;
                     associations.insert(id,Association{generation:generation_id,sender,window});
                     let replies=server.replies(datagram.session);
                     let socket=listener.clone();let meter=meter.clone();let stats=stats.clone();let ended=ended_tx.clone();let listener_stop=stop.clone();
+                    let session=stats.sessions.track(&runtime.key,runtime.kinds[1],true,info.source);
                     tasks.spawn(async move {
                         let _guard=guard;
-                        let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=shadowsocks_association(socket,receiver,replies,runtime.clone(),meter,stats.clone())=>result};
+                        let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=shadowsocks_association(socket,receiver,replies,runtime.clone(),meter,stats.clone(),&session)=>result};
                         if let Err(error)=outcome{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"Shadowsocks association ended");}
                         let _=ended.send((id,generation_id));
                     });
@@ -3892,14 +4185,20 @@ async fn udp_listener(
                     if !session.sender.push(size-header_size,buffer[header_size..size].to_vec()){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);}
                     continue;
                 }
-                let Some(guard)=CountGuard::acquire(runtime.shared.udp.clone(),runtime.spec.udp_max_sessions as usize,stats.clone(),false) else{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;};
+                let Some(guard)=CountGuard::acquire(runtime.shared.udp.clone(),runtime.spec.udp_max_sessions as usize,stats.clone(),false) else{
+                    stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);
+                    let limit=runtime.spec.udp_max_sessions;
+                    stats.blocks.record(&runtime.key,runtime.kinds[1],info.source.ip(),Reason::UdpSessionLimit,||format!("limit {limit} UDP sessions"));
+                    continue;
+                };
                 let (sender,receiver)=backlog();
                 sender.push(size-header_size,buffer[header_size..size].to_vec());generation=generation.wrapping_add(1);let id=generation;
                 sessions.insert(key,UdpEntry{generation:id,sender});
                 let socket=listener.clone();let meter=meter.clone();let stats=stats.clone();let finished=finished_tx.clone();let listener_stop=stop.clone();
+                let session=stats.sessions.track(&runtime.key,runtime.kinds[1],true,info.source);
                 tasks.spawn(async move {
                     let _guard=guard;
-                    let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=udp_session(socket,key,receiver,runtime.clone(),meter,stats.clone())=>result};
+                    let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=udp_session(socket,key,receiver,runtime.clone(),meter,stats.clone(),&session)=>result};
                     if let Err(error)=outcome{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"UDP session ended");}
                     let _=finished.send((key,id));
                 });
@@ -3951,6 +4250,8 @@ async fn udp_target(
     rule: &RuntimeRule,
     info: ConnectionInfo,
     inlet: ListenerKey,
+    stats: &Counters,
+    session: &Live,
 ) -> Result<UdpTarget> {
     let deadline = Instant::now() + Duration::from_millis(rule.spec.connect_timeout_ms);
     if let (Some(tunnel), Some(server)) = (&rule.spec.reverse_tunnel, &rule.reverse) {
@@ -3960,6 +4261,7 @@ async fn udp_target(
         let datagrams = timeout_at(deadline, server.open_datagrams(tunnel))
             .await
             .context("reverse tunnel connection timed out")??;
+        session.set_target(0, &rule.spec.targets[0], None);
         return Ok(UdpTarget {
             index: 0,
             health: None,
@@ -3971,7 +4273,11 @@ async fn udp_target(
         });
     }
     let mut last = None;
-    for index in rule.order(info.source, inlet) {
+    let order = rule.order(info.source, inlet);
+    if order.is_empty() {
+        rule.no_target(stats, session);
+    }
+    for index in order {
         let Some(guard) = rule.target_guard(index) else {
             continue;
         };
@@ -4001,6 +4307,7 @@ async fn udp_target(
             .await
             {
                 Ok(Ok((socket, route, header))) => {
+                    session.set_target(index, &rule.spec.targets[index], Some(address));
                     return Ok(UdpTarget {
                         index,
                         health: rule
@@ -4032,12 +4339,13 @@ async fn udp_session(
     rule: Arc<RuntimeRule>,
     meter: Meter,
     stats: Arc<Counters>,
+    session: &Live,
 ) -> Result<()> {
     let inlet = ListenerKey {
         address: listener.local_addr()?,
         tcp: false,
     };
-    let target = udp_target(&rule, key.info, inlet).await?;
+    let target = udp_target(&rule, key.info, inlet, &stats, session).await?;
     // The system reports a closed port on the target (ICMP port unreachable)
     // as a refused send or receive. New sessions then try other targets
     // first instead of waiting for health probes to notice.
@@ -4066,18 +4374,20 @@ async fn udp_session(
                 if payload.len()+target.header.len()>target.wire_limit {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
                 rule.throttle(payload.len(), true).await;
                 let allowed=meter.admit(&rule.spec,true,payload.len(),true).await?;
-                if allowed!=Some(payload.len()){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);return Ok(());}
+                if allowed!=Some(payload.len()){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);stats.meter_refused(&rule,rule.kinds[1],key.info.source.ip());return Ok(());}
                 let wire=if target.header.is_empty() {payload} else {let mut wire=target.header.clone();wire.extend_from_slice(&payload);wire};
                 let sent=target.socket.send(&wire).await.map_err(refused)?;
                 ensure!(sent==wire.len(),"partial UDP send");
                 stats.forwarded_upload_bytes.fetch_add((sent-target.header.len()) as u64,Ordering::Relaxed);
+                session.add_upload((sent-target.header.len()) as u64);
             },
             reply=target.socket.recv(&mut buffer)=>{
                 let size=reply.map_err(refused)?;rule.throttle(size, false).await;
                 let allowed=meter.admit(&rule.spec,false,size,true).await?;
-                if allowed!=Some(size) {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);return Ok(());}
+                if allowed!=Some(size) {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);stats.meter_refused(&rule,rule.kinds[1],key.info.source.ip());return Ok(());}
                 let sent=datagram::send(&listener,&buffer[..size],key.peer,key.local,inlet.address.ip().is_unspecified()).await?;
                 stats.forwarded_download_bytes.fetch_add(sent as u64,Ordering::Relaxed);
+                session.add_download(sent as u64);
             }
         }
     }
@@ -4093,8 +4403,10 @@ async fn shadowsocks_association(
     rule: Arc<RuntimeRule>,
     meter: Meter,
     stats: Arc<Counters>,
+    session: &Live,
 ) -> Result<()> {
     let server = rule.shadowsocks.as_ref().expect("Shadowsocks rule");
+    let mut last_destination = None::<shadowsocks::Destination>;
     let inlet = ListenerKey {
         address: listener.local_addr()?,
         tcp: false,
@@ -4122,10 +4434,15 @@ async fn shadowsocks_association(
             _=sleep_until(deadline)=>return Ok(()),
             message=incoming.recv(&stats)=>{
                 let Some(message)=message else{return Ok(());};
+                if client.is_none_or(|c| c.info.source != message.from.info.source) {session.set_client(message.from.info.source);}
                 client=Some(message.from);
+                if last_destination.as_ref()!=Some(&message.destination) {
+                    session.set_destination(&message.destination.to_string());
+                    last_destination=Some(message.destination.clone());
+                }
                 let address=match datagram_address(&rule,server,&message.destination,&mut names).await {
                     Ok(address)=>address,
-                    Err(error)=>{dropped();tracing::debug!(rule_id=%rule.spec.id,%error,"Shadowsocks datagram not sent");continue;}
+                    Err(error)=>{dropped();stats.destination_refused(&rule,session,&error);tracing::debug!(rule_id=%rule.spec.id,%error,"Shadowsocks datagram not sent");continue;}
                 };
                 if !routes.contains_key(&address) {
                     match rule.routes.reserve(inlet,address) {
@@ -4143,9 +4460,9 @@ async fn shadowsocks_association(
                 let size=message.payload.len();
                 rule.throttle(size, true).await;
                 let allowed=meter.admit(&rule.spec,true,size,true).await?;
-                if allowed!=Some(size){dropped();return Ok(());}
+                if allowed!=Some(size){dropped();stats.meter_refused(&rule,rule.kinds[1],session.client().ip());return Ok(());}
                 match slot.as_ref().unwrap().send_to(&message.payload,address).await {
-                    Ok(_)=>{stats.forwarded_upload_bytes.fetch_add(size as u64,Ordering::Relaxed);}
+                    Ok(_)=>{stats.forwarded_upload_bytes.fetch_add(size as u64,Ordering::Relaxed);session.add_upload(size as u64);}
                     Err(error)=>{dropped();tracing::debug!(rule_id=%rule.spec.id,%error,"Shadowsocks datagram not sent");}
                 }
             },
@@ -4167,12 +4484,13 @@ async fn shadowsocks_association(
                 if !server.permits(source.ip()){dropped();continue;}
                 rule.throttle(size, false).await;
                 let allowed=meter.admit(&rule.spec,false,size,true).await?;
-                if allowed!=Some(size){dropped();return Ok(());}
+                if allowed!=Some(size){dropped();stats.meter_refused(&rule,rule.kinds[1],session.client().ip());return Ok(());}
                 let client=client.expect("an association starts with a client datagram");
                 sealed.clear();
                 server.seal_reply(&mut replies,source,&buffer[..size],&mut sealed);
                 datagram::send(&listener,&sealed,client.peer,client.local,inlet.address.ip().is_unspecified()).await?;
                 stats.forwarded_download_bytes.fetch_add(size as u64,Ordering::Relaxed);
+                session.add_download(size as u64);
             }
         }
     }
@@ -4203,7 +4521,9 @@ async fn datagram_address(
                         .into_iter()
                         .filter(|address| server.permits(address.ip()))
                         .min_by_key(|address| !address.is_ipv4())
-                        .with_context(|| format!("{destination} has no public address"))?;
+                        .ok_or_else(|| {
+                            DestinationDenied(format!("{destination} has no public address"))
+                        })?;
                     if names.len() >= MAX_NAMES {
                         names.clear();
                     }
@@ -4213,18 +4533,19 @@ async fn datagram_address(
             }
         }
     };
-    ensure!(
-        address.port() != 0 && server.permits(address.ip()),
-        "{destination} is not a public address"
-    );
+    if address.port() == 0 || !server.permits(address.ip()) {
+        return Err(DestinationDenied(format!("{destination} is not a public address")).into());
+    }
     let endpoint = destination.to_string();
-    ensure!(
-        !rule
-            .destination
-            .filter_sockets(destination_acl::host_from_endpoint(&endpoint), [address])
-            .is_empty(),
-        "destination denied by rule policy: {destination}"
-    );
+    if rule
+        .destination
+        .filter_sockets(destination_acl::host_from_endpoint(&endpoint), [address])
+        .is_empty()
+    {
+        return Err(
+            DestinationDenied(format!("destination denied by rule policy: {destination}")).into(),
+        );
+    }
     Ok(address)
 }
 

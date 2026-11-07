@@ -348,6 +348,11 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/nodes/{node}/rules/{rule}/share",
             get(share_gateway_rule),
         )
+        .route(
+            "/api/v1/nodes/{node}/rules/{rule}/connections",
+            get(rule_connections),
+        )
+        .route("/api/v1/nodes/{node}/blocks", get(node_blocks))
         .route("/api/v1/nodes/{node}/drain", post(drain))
         .route("/api/v1/topology", get(topology))
         .route("/api/v1/telemetry", get(telemetry))
@@ -2064,7 +2069,7 @@ async fn watch_config(
     loop {
         let published = state.store.config_published();
         let credential = token.clone();
-        let (revision, wireguard_changed, tunnels_changed, speed_tests_changed) =
+        let (revision, wireguard_changed, tunnels_changed, speed_tests_changed, connections_asked) =
             database(state.store.clone(), move |db| db.node_watch(&credential)).await?;
         let mut reply = serde_json::json!({ "desired_revision": revision });
         if wireguard_changed {
@@ -2076,8 +2081,16 @@ async fn watch_config(
         if speed_tests_changed {
             reply["speed_tests_changed"] = true.into();
         }
+        if connections_asked {
+            reply["connections_requested"] = true.into();
+        }
         let reply = Json(reply);
-        if revision > query.after || wireguard_changed || tunnels_changed || speed_tests_changed {
+        if revision > query.after
+            || wireguard_changed
+            || tunnels_changed
+            || speed_tests_changed
+            || connections_asked
+        {
             return Ok(reply);
         }
         tokio::select! {
@@ -2866,6 +2879,44 @@ struct ShareQuery {
     port: Option<u16>,
     #[serde(default)]
     name: Option<String>,
+}
+/// A rule's open sessions, asked of its agent on demand, and its counters.
+async fn rule_connections(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((node, rule)): Path<(String, String)>,
+) -> ApiResult<crate::connections::RuleView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.rule_connections(&actor, &node, &rule)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlocksQuery {
+    rule_id: Option<String>,
+    limit: Option<usize>,
+}
+/// A node's latest block records, newest change first.
+async fn node_blocks(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Query(query): Query<BlocksQuery>,
+) -> ApiResult<crate::connections::BlocksView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.node_blocks(
+                &actor,
+                &node,
+                query.rule_id.as_deref(),
+                query.limit.unwrap_or(200),
+            )
+        })
+        .await?,
+    ))
 }
 /// A protocol gateway rule's share link and its QR code. The link holds the
 /// same client material as the rule's subscription export: whoever may read

@@ -369,6 +369,11 @@ async fn run_agent(
     let mut speed_tests = speed_test::SpeedTests::new(speed_service);
     let speed_test_ended = speed_tests.finished();
     let mut speed_reporting = false;
+    // Open sessions and block records are reported only to a controller
+    // that takes them; sessions only of the rules it asked for.
+    let mut connections_reporting = false;
+    let mut connection_requests: Vec<String> = vec![];
+    let mut block_cursor = crate::connections::Cursor::default();
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
@@ -399,7 +404,8 @@ async fn run_agent(
                     body["desired_revision"].as_u64().unwrap_or(0),
                     body["wireguard_changed"] == true
                         || body["reverse_tunnels_changed"] == true
-                        || body["speed_tests_changed"] == true,
+                        || body["speed_tests_changed"] == true
+                        || body["connections_requested"] == true,
                 ))
             };
             match watched.await {
@@ -408,7 +414,8 @@ async fn run_agent(
                     published.notify_one();
                 }
                 // NAT traversal moved a path, a reverse tunnel or a speed
-                // test changed: sync now so both sides switch together.
+                // test changed: sync now so both sides switch together. The
+                // panel asked for live connections: sync to hear which.
                 Ok((_, true)) => published.notify_one(),
                 Ok(_) => {}
                 Err(error) => {
@@ -523,6 +530,10 @@ async fn run_agent(
             .await??;
             let requested_budget = !budget.requests.is_empty();
             let mut granted_budget = false;
+            // Answered with this report; a reply asking for other rules is
+            // answered at once, the same ones again only at the next poll.
+            let answered = std::mem::take(&mut connection_requests);
+            let mut answer_due = false;
             let request = SyncRequest {
                 lease: lease.proof.clone(),
                 budget: Some(budget),
@@ -542,6 +553,8 @@ async fn run_agent(
                     stats.reverse_tunnel = tunnel_reporting.then(|| tunnels.report());
                     stats.rate_limits = rate_reporting.then(|| engine.rate_limit_report());
                     stats.speed_test = speed_reporting.then(|| speed_tests.report());
+                    stats.live_connections = connections_reporting
+                        .then(|| engine.connection_report(&answered, &block_cursor));
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -593,6 +606,14 @@ async fn run_agent(
                             } else {
                                 &[]
                             });
+                            // An older controller sends none of these.
+                            connections_reporting = synced.live_connections;
+                            block_cursor = synced.block_cursor.unwrap_or_default();
+                            if connections_reporting {
+                                connection_requests = synced.live_connection_requests;
+                                answer_due =
+                                    connection_requests.iter().any(|r| !answered.contains(r));
+                            }
                             if let Err(error) = tunnels
                                 .reconcile(&store, &synced.reverse_tunnels.unwrap_or_default())
                             {
@@ -785,7 +806,7 @@ async fn run_agent(
             } else {
                 2
             });
-            if std::mem::take(&mut receipt_due) {
+            if std::mem::take(&mut receipt_due) || answer_due {
                 continue;
             }
             tokio::select! {

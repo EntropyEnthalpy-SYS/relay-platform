@@ -775,6 +775,20 @@ Relay can measure how fast a server's line is, and how fast each leg of a forwar
 
 See [Speed tests](SPEED_TESTS.md) (Chinese) for the details.
 
+#### Connections and blocked connections
+
+When a user says “it doesn't connect” or a port looks busy, you can see who is connected to a rule right now and what the server refused, without SSH.
+
+- **Connections…** is in the actions of a rule under **Forwarding rules → By server** and of a path under **All forwarding**. The dialog asks the server for the rule's open connections and shows, newest first, each **client** address (the real one when the rule takes PROXY headers), the **protocol**, the **target** and the address actually connected (for SOCKS5, HTTP CONNECT, Shadowsocks and protocol gateways, the **real destination** the client asked for), the **next hop** when the target is another server's rule, when it **started** and for how long, and live **upload** and **download**. Type in the filter box to narrow the list; it refreshes every few seconds while the dialog is open, and **Refresh** asks again. At most 200 connections are listed; above that the dialog says, for example, “200 of 350 shown”.
+- Below the list, **Counters (since the agent started)** show the accepted connections and how many completed their inbound setup (PROXY header, TLS or WebSocket handshake), and for each target the attempts, successes, its share of successes (the next-hop distribution), failures by cause and the average setup time, followed by refusals by reason. They start over when the agent restarts; the hourly history is on **All forwarding** as before.
+- **Blocked connections** lists what was refused and why: source not in the allow list, source in the deny list (with the matching network), connection or UDP session limit reached, HTTP/2 stream limit reached, quota used up, shared budget refused, rule expired, all targets paused, proxy destination not allowed, and proxy authentication or handshake failed. Each entry shows the last time, the source IP, the reason with a short detail and a count: refusals of the same rule, source and reason within 60 seconds are merged. The dialog shows the rule's entries; **Blocked connections** in the server toolbar of **By server** shows the whole server's, with a rule filter.
+- **Who can see it:** everyone who can see the server's rules, including read-only accounts, and API tokens with `read`. Client addresses are personal data: blur them before you share a screenshot.
+- **What is kept:** current connections are fetched when you look and never stored. The panel keeps the latest 1000 blocked connections per server in memory only; they are gone after the panel restarts. Each server keeps its own latest 1000.
+- **Older agents:** the server needs the agent of this release; otherwise the dialog says “This server's agent is too old to keep current connections and blocked connections; upgrade the agent first”, and still shows the counters. An offline server, or one that does not answer within 30 seconds, is reported as such. Older agents keep forwarding as before.
+- **Not included:** samples of probe or scanner traffic, closing connections from the panel, and firewall rule sets. Refusals by a protocol gateway's own public side are not visible, and its connections show the local bridge address as the client.
+
+See [Connections and blocked connections](CONNECTIONS.md) (Chinese) for the details.
+
 ### Upgrades and rollback
 
 Build and sign the new version with the same key, copy it to each server, then upgrade the **panel first**:

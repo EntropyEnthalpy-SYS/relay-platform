@@ -5,6 +5,7 @@ pub mod api;
 pub mod budget;
 pub mod chain;
 pub mod commerce;
+pub mod connections;
 pub mod credential;
 mod datagram;
 pub mod destination_acl;

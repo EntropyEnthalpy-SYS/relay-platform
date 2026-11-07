@@ -20,6 +20,7 @@ mod announcements;
 mod budgets;
 mod chains;
 mod commerce;
+mod connections;
 mod credentials;
 mod diagnostics;
 mod dns;
@@ -105,6 +106,8 @@ pub struct Store(
     Arc<Mutex<std::collections::HashSet<String>>>,
     /// Speed tests' watch wakes and live progress.
     Arc<Mutex<speed_tests::Live>>,
+    /// Live-connection requests, answers and block records.
+    Arc<Mutex<connections::Live>>,
 );
 #[derive(Default)]
 struct BudgetSignals {
@@ -179,6 +182,9 @@ pub struct Node {
     /// The agent reported that it runs speed tests.
     #[serde(default)]
     pub speed_test_support: bool,
+    /// The agent reported that it keeps live connections and block records.
+    #[serde(default)]
+    pub connections_support: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -330,6 +336,7 @@ impl Store {
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
             Arc::new(Mutex::new(leases::LeaseClocks::default())),
+            Arc::default(),
             Arc::default(),
             Arc::default(),
             Arc::default(),
@@ -612,6 +619,7 @@ impl Store {
                 stats: EngineStats::default(),
                 rate_limit_support: false,
                 speed_test_support: false,
+                connections_support: false,
             },
             token,
         ))
@@ -686,6 +694,7 @@ impl Store {
         }
         leases::deleted(&mut self.3.lock().unwrap(), node);
         self.4.forget(node);
+        self.forget_connections(node);
         Ok(())
     }
     pub fn enroll(&self, node: &str, token: &str, credential: &str) -> Result<()> {
@@ -780,6 +789,7 @@ impl Store {
                 stats: serde_json::from_str(&stats).unwrap_or_default(),
                 rate_limit_support: false,
                 speed_test_support: false,
+                connections_support: false,
             })
         })?;
         let mut nodes: Vec<Node> = rows.collect::<rusqlite::Result<_>>()?;
@@ -792,6 +802,7 @@ impl Store {
             node.lifecycle = node.profile.settings.lifecycle(now);
             node.rate_limit_support = rate_limits::supported(&conn, &node.id)?;
             node.speed_test_support = speed_tests::supported(&conn, &node.id)?;
+            node.connections_support = connections::supported(&conn, &node.id)?;
         }
         Ok(nodes)
     }
@@ -1058,9 +1069,9 @@ impl Store {
         self.2.config.notified()
     }
     /// The node's desired revision, and whether its WireGuard interfaces,
-    /// its reverse tunnels or its speed tests changed since its last sync
-    /// (answered yes once).
-    pub fn node_watch(&self, credential: &str) -> Result<(u64, bool, bool, bool)> {
+    /// its reverse tunnels or its speed tests changed, or the panel asked
+    /// for live connections, since its last sync (answered yes once).
+    pub fn node_watch(&self, credential: &str) -> Result<(u64, bool, bool, bool, bool)> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let node = leases::authenticated(&tx, credential)?;
@@ -1074,6 +1085,7 @@ impl Store {
             self.8.lock().unwrap().take_wake(&node),
             reverse_tunnels::take_wake(&self.10, &node),
             speed_tests::take_wake(&self.11, &node),
+            connections::take_wake(&self.12, &node),
         ))
     }
     /// A NAT traversal step changed some node's interfaces: its watch returns
