@@ -339,6 +339,9 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     // Reported only to a controller that sent tunnels, as older ones reject
     // the unknown field.
     let mut tunnel_reporting = false;
+    // Burst credit, and with it support for upload, download and burst
+    // limits, is reported only to a controller that asked for it.
+    let mut rate_reporting = false;
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
@@ -508,6 +511,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     stats.authoritative_dns = dns_reporting.then(|| dns.report());
                     stats.wireguard = overlay_report.clone();
                     stats.reverse_tunnel = tunnel_reporting.then(|| tunnels.report());
+                    stats.rate_limits = rate_reporting.then(|| engine.rate_limit_report());
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -551,6 +555,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                             };
                             // An older controller sends none: no tunnels.
                             tunnel_reporting = synced.reverse_tunnels.is_some();
+                            rate_reporting = synced.rate_limits;
                             if let Err(error) = tunnels
                                 .reconcile(&store, &synced.reverse_tunnels.unwrap_or_default())
                             {
@@ -639,14 +644,24 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                             let restored: Vec<UserShare> = engine
                                 .user_shares()
                                 .into_iter()
-                                .map(|share| {
-                                    let rate =
-                                        share.rate_bytes_per_sec.min(share.fallback_bytes_per_sec);
-                                    UserShare {
-                                        rate_bytes_per_sec: rate,
-                                        fallback_bytes_per_sec: rate,
-                                        ..share
+                                .map(|mut share| {
+                                    for direction in [
+                                        RateDirection::Combined,
+                                        RateDirection::Upload,
+                                        RateDirection::Download,
+                                    ] {
+                                        let part = share.part(direction).map(|part| {
+                                            let rate = part
+                                                .rate_bytes_per_sec
+                                                .min(part.fallback_bytes_per_sec);
+                                            SharePart {
+                                                rate_bytes_per_sec: rate,
+                                                fallback_bytes_per_sec: rate,
+                                            }
+                                        });
+                                        share.set_part(direction, part);
                                     }
+                                    share
                                 })
                                 .collect();
                             let shares = serde_json::to_string(&restored)?;

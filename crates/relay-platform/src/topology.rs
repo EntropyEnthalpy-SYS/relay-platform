@@ -18,6 +18,14 @@ pub struct ConfigUpdate {
         skip_serializing_if = "Option::is_none"
     )]
     pub rate_bytes_per_sec: Option<Option<u64>>,
+    /// Node-wide upload, download and burst limits: omit to keep them,
+    /// `null` clears them.
+    #[serde(
+        default,
+        deserialize_with = "explicit",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rate_limits: Option<Option<RateLimits>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

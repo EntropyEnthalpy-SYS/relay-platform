@@ -36,7 +36,9 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+mod rate;
 mod uot;
+use rate::{Limiter, Limits, Pace};
 
 const BUFFER_SIZE: usize = 64 * 1024;
 /// TCP copy buffers start here and double, up to BUFFER_SIZE, whenever a read
@@ -137,6 +139,7 @@ impl Counters {
             authoritative_dns: None,
             wireguard: None,
             reverse_tunnel: None,
+            rate_limits: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),
@@ -654,152 +657,23 @@ impl Meter {
     }
 }
 
-struct Bucket {
-    rate: Option<u64>,
-    tokens: f64,
-    updated: Instant,
-    /// Sends of at least `SMALL_SEND` bytes wait here: one queue per user in
-    /// arrival order, and the users take turns.
-    line: VecDeque<(u64, VecDeque<u64>)>,
-    next_ticket: u64,
-}
-impl Bucket {
-    fn refill(&mut self, rate: u64) {
-        let now = Instant::now();
-        self.tokens = (self.tokens + now.duration_since(self.updated).as_secs_f64() * rate as f64)
-            .min(rate.max(BUFFER_SIZE as u64) as f64);
-        self.updated = now;
-    }
-}
-/// Smaller sends (interactive traffic, a new connection's first reads) skip
-/// the line, so bulk transfers cannot delay them.
-const SMALL_SEND: usize = MIN_STREAM_BUFFER;
-/// Token bucket over combined upload + download application bytes. Bulk sends
-/// take turns: users in rotation, each user's sends in arrival order, and a
-/// session reading again rejoins at the back. Users share the rate evenly
-/// however many connections each opens, and so do one user's connections,
-/// instead of racing for each refill.
-struct Limiter {
-    bucket: StdMutex<Bucket>,
-    turn: tokio::sync::Notify,
-}
-/// Leaves the line when a send is admitted or abandoned (session cancelled).
-struct Ticket<'a> {
-    limiter: &'a Limiter,
-    user: u64,
-    id: u64,
-}
-impl Drop for Ticket<'_> {
-    fn drop(&mut self) {
-        let mut b = self.limiter.bucket.lock().unwrap();
-        let first = b.line.front().and_then(|(_, q)| q.front()) == Some(&self.id);
-        let Some(at) = b.line.iter().position(|(user, _)| *user == self.user) else {
-            return;
-        };
-        b.line[at].1.retain(|&t| t != self.id);
-        // The user who just sent goes to the back of the rotation.
-        let (user, queue) = b.line.remove(at).unwrap();
-        if !queue.is_empty() {
-            if first {
-                b.line.push_back((user, queue));
-            } else {
-                b.line.insert(at, (user, queue));
-            }
-        }
-        drop(b);
-        if first {
-            self.limiter.turn.notify_waiters();
-        }
-    }
-}
-impl Limiter {
-    fn new(rate: Option<u64>) -> Self {
-        Self {
-            bucket: StdMutex::new(Bucket {
-                rate,
-                tokens: rate.unwrap_or(0).max(BUFFER_SIZE as u64) as f64,
-                updated: Instant::now(),
-                line: VecDeque::new(),
-                next_ticket: 0,
-            }),
-            turn: tokio::sync::Notify::new(),
-        }
-    }
-    fn set_rate(&self, rate: Option<u64>) {
-        let mut b = self.bucket.lock().unwrap();
-        if b.rate != rate {
-            b.rate = rate;
-            b.tokens = b
-                .tokens
-                .min(rate.unwrap_or(0).max(BUFFER_SIZE as u64) as f64);
-            b.updated = Instant::now();
-        }
-        drop(b);
-        // Waiters re-check: a removed rate admits everyone at once.
-        self.turn.notify_waiters();
-    }
-    async fn throttle(&self, bytes: usize, user: u64) {
-        let mut ticket = None;
-        loop {
-            // Registered before checking, so a turn handed over in between is not missed.
-            let turn = self.turn.notified();
-            let wait = {
-                let mut b = self.bucket.lock().unwrap();
-                let Some(rate) = b.rate else {
-                    return;
-                };
-                if bytes >= SMALL_SEND && ticket.is_none() {
-                    let id = b.next_ticket;
-                    b.next_ticket += 1;
-                    match b.line.iter_mut().find(|(u, _)| *u == user) {
-                        Some((_, queue)) => queue.push_back(id),
-                        None => b.line.push_back((user, VecDeque::from([id]))),
-                    }
-                    ticket = Some(Ticket {
-                        limiter: self,
-                        user,
-                        id,
-                    });
-                }
-                b.refill(rate);
-                let head = b.line.front().and_then(|(_, q)| q.front());
-                let my_turn = ticket.as_ref().is_none_or(|t| head == Some(&t.id));
-                if !my_turn {
-                    None
-                } else if b.tokens >= bytes as f64 {
-                    b.tokens -= bytes as f64;
-                    return;
-                } else {
-                    Some(Duration::from_secs_f64(
-                        ((bytes as f64 - b.tokens) / rate as f64).clamp(0.001, 1.0),
-                    ))
-                }
-            };
-            match wait {
-                Some(wait) => sleep(wait).await,
-                None => turn.await,
-            }
-        }
-    }
-}
-/// One user's share of a cross-node limit, used by all of the user's rules
-/// on this node. Sends are counted only while a share is held.
-struct UserLimit {
-    tenant_id: String,
-    owner_id: String,
+/// One of a user's shares (combined, upload or download) on this node.
+/// Sends are counted only while the share is held.
+struct UserLane {
     rate: Limiter,
     limited: AtomicBool,
     bytes: AtomicU64,
     waited_us: AtomicU64,
-    share: StdMutex<Option<HeldShare>>,
 }
-#[derive(Clone, Copy)]
-struct HeldShare {
-    rate: u64,
-    fallback: u64,
-    until: Instant,
-}
-impl UserLimit {
+impl UserLane {
+    fn new() -> Self {
+        Self {
+            rate: Limiter::new(None),
+            limited: AtomicBool::new(false),
+            bytes: AtomicU64::new(0),
+            waited_us: AtomicU64::new(0),
+        }
+    }
     async fn throttle(&self, bytes: usize, user: u64) {
         if !self.limited.load(Ordering::Relaxed) {
             return;
@@ -813,10 +687,64 @@ impl UserLimit {
             self.waited_us.fetch_add(waited, Ordering::Relaxed);
         }
     }
+    fn report(&self, part: SharePart) -> RateLane {
+        RateLane {
+            bytes: self.bytes.load(Ordering::Relaxed),
+            waited_ms: self.waited_us.load(Ordering::Relaxed) / 1000,
+            enforced_bytes_per_sec: Some(part.rate_bytes_per_sec),
+        }
+    }
+}
+/// One user's shares of their cross-node limits, used by all of the
+/// user's rules on this node: combined, upload and download.
+struct UserLimit {
+    tenant_id: String,
+    owner_id: String,
+    lanes: [UserLane; 3],
+    share: StdMutex<Option<HeldShare>>,
+}
+const USER_LANES: [RateDirection; 3] = [
+    RateDirection::Combined,
+    RateDirection::Upload,
+    RateDirection::Download,
+];
+#[derive(Clone, Copy)]
+struct HeldShare {
+    /// Combined, upload and download.
+    parts: [Option<SharePart>; 3],
+    until: Instant,
+}
+impl HeldShare {
+    fn of(share: &UserShare, until: Instant) -> Option<Self> {
+        let parts = USER_LANES.map(|direction| {
+            share.part(direction).map(|part| SharePart {
+                rate_bytes_per_sec: part.rate_bytes_per_sec.max(1),
+                fallback_bytes_per_sec: part.fallback_bytes_per_sec.max(1),
+            })
+        });
+        parts
+            .iter()
+            .any(Option::is_some)
+            .then_some(Self { parts, until })
+    }
+}
+impl UserLimit {
+    async fn throttle(&self, bytes: usize, user: u64, upload: bool) {
+        self.lanes[0].throttle(bytes, user).await;
+        self.lanes[if upload { 1 } else { 2 }]
+            .throttle(bytes, user)
+            .await;
+    }
     fn hold(&self, share: Option<HeldShare>) {
         *self.share.lock().unwrap() = share;
-        self.limited.store(share.is_some(), Ordering::Relaxed);
-        self.rate.set_rate(share.map(|s| s.rate));
+        for (index, lane) in self.lanes.iter().enumerate() {
+            let part = share.and_then(|s| s.parts[index]);
+            lane.limited.store(part.is_some(), Ordering::Relaxed);
+            lane.rate.set(part.map(|p| Pace {
+                sustained: p.rate_bytes_per_sec,
+                burst: None,
+            }));
+        }
     }
 }
 fn user_key(tenant_id: &str, owner_id: &str) -> u64 {
@@ -835,10 +763,7 @@ impl UserLimits {
                 Arc::new(UserLimit {
                     tenant_id: tenant_id.into(),
                     owner_id: owner_id.into(),
-                    rate: Limiter::new(None),
-                    limited: AtomicBool::new(false),
-                    bytes: AtomicU64::new(0),
-                    waited_us: AtomicU64::new(0),
+                    lanes: [UserLane::new(), UserLane::new(), UserLane::new()],
                     share: StdMutex::new(None),
                 })
             })
@@ -857,17 +782,20 @@ struct SharedRule {
     http2_streams: Arc<AtomicUsize>,
     tcp: Arc<AtomicUsize>,
     udp: Arc<AtomicUsize>,
-    rate: Limiter,
+    rate: Limits,
     target_counts: StdMutex<HashMap<String, Weak<AtomicUsize>>>,
 }
 impl SharedRule {
-    fn new(rate: Option<u64>) -> Self {
+    fn new(rule: &Rule) -> Self {
         Self {
             target_counts: StdMutex::new(HashMap::new()),
             tcp: Arc::new(AtomicUsize::new(0)),
             http2_streams: Arc::new(AtomicUsize::new(0)),
             udp: Arc::new(AtomicUsize::new(0)),
-            rate: Limiter::new(rate),
+            rate: Limits::new(Pace::lanes(
+                rule.rate_bytes_per_sec,
+                rule.rate_limits.as_ref(),
+            )),
         }
     }
     fn target_counters(&self, targets: &[Target]) -> Vec<Arc<AtomicUsize>> {
@@ -978,7 +906,7 @@ struct RuleResources {
     reverse: Arc<crate::reverse_mux::managed::Server>,
     gateway_auth: Option<socks5::ServerConfig>,
     mptcp: Arc<crate::mptcp::Tracker>,
-    node_rate: Arc<Limiter>,
+    node_rate: Arc<Limits>,
     user_limit: Option<Arc<UserLimit>>,
     salts: Option<shadowsocks::SaltCache>,
 }
@@ -1000,7 +928,7 @@ struct RuntimeRule {
     routes: Arc<Routes>,
     tls: PreparedTls,
     shared: Arc<SharedRule>,
-    node_rate: Arc<Limiter>,
+    node_rate: Arc<Limits>,
     cancel: CancellationToken,
     cursor: AtomicU64,
     target_active: Vec<Arc<AtomicUsize>>,
@@ -1049,7 +977,7 @@ impl RuntimeRule {
         routes: Arc<Routes>,
         resources: RuleResources,
     ) -> Self {
-        let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(spec.rate_bytes_per_sec)));
+        let shared = shared.unwrap_or_else(|| Arc::new(SharedRule::new(&spec)));
         let target_active = shared.target_counters(&spec.targets);
         Self {
             reverse: spec
@@ -1107,13 +1035,15 @@ impl RuntimeRule {
             target_active,
         }
     }
-    /// Waits for the rule's, the user's and the node's byte rate.
-    async fn throttle(&self, bytes: usize) {
-        self.shared.rate.throttle(bytes, self.user).await;
+    /// Waits for the rule's, the user's and the node's limits: each one's
+    /// combined limit, then the one for this direction. `upload` is a send
+    /// from this hop's client toward the target.
+    async fn throttle(&self, bytes: usize, upload: bool) {
+        self.shared.rate.throttle(bytes, self.user, upload).await;
         if let Some(limit) = &self.user_limit {
-            limit.throttle(bytes, self.user).await;
+            limit.throttle(bytes, self.user, upload).await;
         }
-        self.node_rate.throttle(bytes, self.user).await;
+        self.node_rate.throttle(bytes, self.user, upload).await;
     }
     /// Moves a target behind the others for new sessions without waiting for
     /// health probes; it stays eligible, so a lone target is still tried.
@@ -1562,8 +1492,10 @@ pub struct Engine {
     stats: Arc<Counters>,
     tasks: TaskTracker,
     routes: Arc<Routes>,
-    node_rate: Arc<Limiter>,
+    node_rate: Arc<Limits>,
     user_limits: UserLimits,
+    /// Rules whose limits have a burst, for the burst credit report.
+    bursts: StdMutex<Vec<(String, Arc<SharedRule>)>>,
     reverse: Arc<crate::reverse_mux::managed::Server>,
 }
 impl Drop for Engine {
@@ -1613,8 +1545,9 @@ impl Engine {
             stats: Arc::new(Counters::default()),
             tasks: TaskTracker::new(),
             routes: Arc::new(Routes::default()),
-            node_rate: Arc::new(Limiter::new(None)),
+            node_rate: Arc::new(Limits::new([None; 3])),
             user_limits: UserLimits::default(),
+            bursts: StdMutex::new(vec![]),
             reverse: Arc::default(),
         }
     }
@@ -1659,14 +1592,13 @@ impl Engine {
     fn hold_user_shares(&self, shares: &[UserShare], until: Instant) {
         let mut kept = std::collections::HashSet::new();
         for share in shares {
+            let Some(held) = HeldShare::of(share, until) else {
+                continue;
+            };
             kept.insert(user_key(&share.tenant_id, &share.owner_id));
             self.user_limits
                 .get(&share.tenant_id, &share.owner_id)
-                .hold(Some(HeldShare {
-                    rate: share.rate_bytes_per_sec.max(1),
-                    fallback: share.fallback_bytes_per_sec.max(1),
-                    until,
-                }));
+                .hold(Some(held));
         }
         let mut limits = self.user_limits.0.lock().unwrap();
         for (key, limit) in limits.iter() {
@@ -1683,11 +1615,17 @@ impl Engine {
         let held = self.user_limits.held();
         let now = Instant::now();
         for (limit, share) in &held {
-            if share.until <= now && share.rate > share.fallback {
-                limit.hold(Some(HeldShare {
-                    rate: share.fallback,
-                    ..*share
-                }));
+            if share.until > now {
+                continue;
+            }
+            let parts = share.parts.map(|part| {
+                part.map(|p| SharePart {
+                    rate_bytes_per_sec: p.rate_bytes_per_sec.min(p.fallback_bytes_per_sec),
+                    ..p
+                })
+            });
+            if parts != share.parts {
+                limit.hold(Some(HeldShare { parts, ..*share }));
             }
         }
         !held.is_empty()
@@ -1698,11 +1636,16 @@ impl Engine {
             .user_limits
             .held()
             .into_iter()
-            .map(|(limit, share)| UserShare {
-                tenant_id: limit.tenant_id.clone(),
-                owner_id: limit.owner_id.clone(),
-                rate_bytes_per_sec: share.rate,
-                fallback_bytes_per_sec: share.fallback,
+            .map(|(limit, share)| {
+                let mut out = UserShare {
+                    tenant_id: limit.tenant_id.clone(),
+                    owner_id: limit.owner_id.clone(),
+                    ..Default::default()
+                };
+                for (direction, part) in USER_LANES.into_iter().zip(share.parts) {
+                    out.set_part(direction, part);
+                }
+                out
             })
             .collect();
         shares.sort_by(|a, b| (&a.tenant_id, &a.owner_id).cmp(&(&b.tenant_id, &b.owner_id)));
@@ -1713,6 +1656,33 @@ impl Engine {
     pub fn restore_user_shares(&self, shares: &[UserShare]) {
         self.hold_user_shares(shares, Instant::now());
         self.expire_user_shares();
+    }
+    /// Burst credit of every rule and node limit with a burst. The agent
+    /// sends it only to controllers that take it.
+    pub fn rate_limit_report(&self) -> RateLimitReport {
+        let mut bursts = vec![];
+        let node = self
+            .node_rate
+            .bursts()
+            .into_iter()
+            .map(|b| (String::new(), b));
+        let rules: Vec<_> = self.bursts.lock().unwrap().clone();
+        let rules = rules.into_iter().flat_map(|(id, shared)| {
+            shared
+                .rate
+                .bursts()
+                .into_iter()
+                .map(move |b| (id.clone(), b))
+        });
+        for (rule_id, (direction, credit_bytes, capacity_bytes)) in node.chain(rules) {
+            bursts.push(BurstReport {
+                rule_id,
+                direction,
+                credit_bytes,
+                capacity_bytes,
+            });
+        }
+        RateLimitReport { bursts }
     }
     pub fn stats(&self) -> EngineStats {
         let mut stats = self.stats.snapshot();
@@ -1727,9 +1697,11 @@ impl Engine {
             .map(|(limit, share)| UserRateReport {
                 tenant_id: limit.tenant_id.clone(),
                 owner_id: limit.owner_id.clone(),
-                bytes: limit.bytes.load(Ordering::Relaxed),
-                waited_ms: limit.waited_us.load(Ordering::Relaxed) / 1000,
-                enforced_bytes_per_sec: Some(share.rate),
+                bytes: limit.lanes[0].bytes.load(Ordering::Relaxed),
+                waited_ms: limit.lanes[0].waited_us.load(Ordering::Relaxed) / 1000,
+                enforced_bytes_per_sec: share.parts[0].map(|p| p.rate_bytes_per_sec),
+                upload: share.parts[1].map(|p| limit.lanes[1].report(p)),
+                download: share.parts[2].map(|p| limit.lanes[2].report(p)),
             })
             .collect();
         stats.meter = Some(self.meter.stats());
@@ -2034,12 +2006,21 @@ impl Engine {
                 _ => {}
             }
         }
-        self.node_rate.set_rate(config.rate_bytes_per_sec);
+        self.node_rate.set(Pace::lanes(
+            config.rate_bytes_per_sec,
+            config.rate_limits.as_ref(),
+        ));
+        let mut bursts = vec![];
         for runtime in rules.values() {
-            runtime
-                .shared
-                .rate
-                .set_rate(runtime.spec.rate_bytes_per_sec);
+            runtime.shared.rate.set(Pace::lanes(
+                runtime.spec.rate_bytes_per_sec,
+                runtime.spec.rate_limits.as_ref(),
+            ));
+            if runtime.spec.rate_limits.is_some_and(|l| {
+                l.burst.is_some() || l.upload_burst.is_some() || l.download_burst.is_some()
+            }) {
+                bursts.push((runtime.spec.id.clone(), runtime.shared.clone()));
+            }
             if let Some(health) = &runtime.health
                 && !inner
                     .rules
@@ -2093,6 +2074,8 @@ impl Engine {
             .collect();
         health_runtimes.sort_by(|a, b| a.spec.id.cmp(&b.spec.id));
         *self.health_runtimes.lock().unwrap() = health_runtimes;
+        bursts.sort_by(|a, b| a.0.cmp(&b.0));
+        *self.bursts.lock().unwrap() = bursts;
         // Counters of removed rules or changed targets would only grow the report.
         self.stats
             .hops
@@ -2215,6 +2198,7 @@ impl Engine {
         self.tasks.wait().await;
         self.reverse.shutdown();
         self.health_runtimes.lock().unwrap().clear();
+        self.bursts.lock().unwrap().clear();
         self.meter.barrier().await?;
         Ok(())
     }
@@ -2289,6 +2273,7 @@ fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
         || old.expires_at_ms != new.expires_at_ms
         || old.quota_bytes != new.quota_bytes
         || old.rate_bytes_per_sec != new.rate_bytes_per_sec
+        || old.rate_limits != new.rate_limits
         || old.idle_timeout_secs != new.idle_timeout_secs
 }
 
@@ -3016,7 +3001,7 @@ async fn socks5_udp_association(
                 let throttled = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => false,
-                    _ = rule.throttle(datagram.payload.len()) => true,
+                    _ = rule.throttle(datagram.payload.len(), true) => true,
                 };
                 if !throttled {
                     break;
@@ -3080,7 +3065,7 @@ async fn socks5_udp_replies(
                     let throttled = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => false,
-                        _ = rule.throttle(size) => true,
+                        _ = rule.throttle(size, false) => true,
                     };
                     if !throttled {
                         break;
@@ -3653,7 +3638,7 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         let filled = read == buffer.len();
         *activity.lock().unwrap() = Instant::now();
-        rule.throttle(read).await;
+        rule.throttle(read, upload).await;
         let mut offset = 0;
         while offset < read {
             let allowed = meter
@@ -4078,7 +4063,7 @@ async fn udp_session(
             message=incoming.recv(&stats)=>{
                 let Some(payload)=message else{return Ok(());};
                 if payload.len()+target.header.len()>target.wire_limit {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
-                rule.throttle(payload.len()).await;
+                rule.throttle(payload.len(), true).await;
                 let allowed=meter.admit(&rule.spec,true,payload.len(),true).await?;
                 if allowed!=Some(payload.len()){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);return Ok(());}
                 let wire=if target.header.is_empty() {payload} else {let mut wire=target.header.clone();wire.extend_from_slice(&payload);wire};
@@ -4087,7 +4072,7 @@ async fn udp_session(
                 stats.forwarded_upload_bytes.fetch_add((sent-target.header.len()) as u64,Ordering::Relaxed);
             },
             reply=target.socket.recv(&mut buffer)=>{
-                let size=reply.map_err(refused)?;rule.throttle(size).await;
+                let size=reply.map_err(refused)?;rule.throttle(size, false).await;
                 let allowed=meter.admit(&rule.spec,false,size,true).await?;
                 if allowed!=Some(size) {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);return Ok(());}
                 let sent=datagram::send(&listener,&buffer[..size],key.peer,key.local,inlet.address.ip().is_unspecified()).await?;
@@ -4155,7 +4140,7 @@ async fn shadowsocks_association(
                     }
                 }
                 let size=message.payload.len();
-                rule.throttle(size).await;
+                rule.throttle(size, true).await;
                 let allowed=meter.admit(&rule.spec,true,size,true).await?;
                 if allowed!=Some(size){dropped();return Ok(());}
                 match slot.as_ref().unwrap().send_to(&message.payload,address).await {
@@ -4179,7 +4164,7 @@ async fn shadowsocks_association(
                 };
                 let source=canonical_address(source);
                 if !server.permits(source.ip()){dropped();continue;}
-                rule.throttle(size).await;
+                rule.throttle(size, false).await;
                 let allowed=meter.admit(&rule.spec,false,size,true).await?;
                 if allowed!=Some(size){dropped();return Ok(());}
                 let client=client.expect("an association starts with a client datagram");

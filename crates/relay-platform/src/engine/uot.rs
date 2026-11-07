@@ -56,7 +56,7 @@ pub(super) async fn relay(
                         if size > wire::MAX_DATAGRAM || !routes.contains_key(&source) {
                             stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed); continue;
                         }
-                        rule.throttle(size).await;
+                        rule.throttle(size, false).await;
                         ensure!(meter.admit(&rule.spec, false, size, true).await? == Some(size), "UDP-over-TCP quota exhausted");
                         wire::write_packet(&mut writer, connected.is_some(), source, &buffer[..size]).await?;
                         stats.forwarded_download_bytes.fetch_add(size as u64, Ordering::Relaxed);
@@ -104,7 +104,7 @@ pub(super) async fn relay(
                 )?);
             }
             let size = message.payload.len();
-            rule.throttle(size).await;
+            rule.throttle(size, true).await;
             ensure!(
                 meter.admit(&rule.spec, true, size, true).await? == Some(size),
                 "UDP-over-TCP quota exhausted"

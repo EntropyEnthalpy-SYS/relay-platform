@@ -1,6 +1,6 @@
 # Relay documentation
 
-Relay is a self-hosted platform for people who run forwarding and relay servers. A web panel keeps your servers, forwarding rules, users and usage records. A small agent on each server opens the ports and carries the traffic, and your customers' apps connect to those servers directly. This page explains what Relay is, how to install it, how to use each feature in the panel, how to handle common deployments, and where to look when something goes wrong. It describes Relay 0.142.0. Relay is still a development release. Read [Current limits](#current-limits) before you depend on it.
+Relay is a self-hosted platform for people who run forwarding and relay servers. A web panel keeps your servers, forwarding rules, users and usage records. A small agent on each server opens the ports and carries the traffic, and your customers' apps connect to those servers directly. This page explains what Relay is, how to install it, how to use each feature in the panel, how to handle common deployments, and where to look when something goes wrong. It describes Relay 0.147.0. Relay is still a development release. Read [Current limits](#current-limits) before you depend on it.
 
 ## Contents
 
@@ -312,7 +312,7 @@ You choose the policy when you create a server, and it cannot change afterwards.
 
 #### Speed limit and maintenance
 
-- **Node rate limit** (on **Forwarding rules → By server**) caps all of the server's rules together, upload and download combined, in Mbit/s. It applies to the next read or write without dropping connections, and never slows the agent's own connection to the panel.
+- **Node rate limit** (on **Forwarding rules → By server**) caps all of the server's rules together, upload and download combined, in Mbit/s. It can also limit upload and download separately and allow a burst; see [Separate upload and download limits and burst](#separate-upload-and-download-limits-and-burst). It applies to the next read or write without dropping connections, and never slows the agent's own connection to the panel.
 - **Maintenance drain** (in the server's details) tells every upstream server that forwards to this one to send new connections to its other targets, while existing connections run to completion. When active sessions reach zero you can restart or upgrade the server, then click **End maintenance**. Clients that connect to this server directly are not moved; switch them another way, for example with DNS.
 
 #### Identity, replacement and deletion
@@ -485,10 +485,10 @@ Relay counts the application data it accepts, upload and download together. Prot
 | Limit | Where | Applies to |
 | --- | --- | --- |
 | Rule quota and expiry | Rule editor | One rule. Blank quota is unlimited; `0` blocks traffic. |
-| Rule rate | Rule editor | All connections of one rule, in bytes per second (12500000 bytes/s is 100 Mbit/s). |
+| Rule rate | Rule editor | All connections of one rule, in bytes per second (12500000 bytes/s is 100 Mbit/s). Combined, upload, download, and an optional burst. |
 | Connection and session limits | Rule editor | Concurrent TCP connections and UDP sessions of one rule. |
-| **Node rate limit** | **Forwarding rules → By server** | All rules on one server, in Mbit/s. |
-| **Total rate limit** | **Users & permissions** | One user across every server, in Mbit/s. Every hop of a multi-hop path applies it, so a path can run slower than the limit. |
+| **Node rate limit** | **Forwarding rules → By server** | All rules on one server, in Mbit/s. Combined, upload, download, and an optional burst. |
+| **Total rate limit** | **Users & permissions** | One user across every server, in Mbit/s. Combined, upload or download; no burst. Every hop of a multi-hop path applies it, so a path can run slower than the limit. |
 | Shared budget | **Shared budgets** | Total bytes for a user, a tenant or a server, across every server. |
 
 When several limits apply, the strictest wins. Under a busy speed limit, bandwidth is shared fairly first between users and then between each user's connections, so one user opening many connections does not crowd out others. Small reads such as interactive traffic are not queued behind large transfers.
@@ -496,6 +496,20 @@ When several limits apply, the strictest wins. Under a busy speed limit, bandwid
 **Shared budgets** spread one byte total across several servers. The panel hands each server reservations, and each server deducts traffic locally before forwarding it, so the total holds even under load. To add a budget, first disable the affected rules and wait for the servers to confirm, then create the budget and enable the rules again; the panel attaches the budget automatically. On a multi-hop path every hop counts against a budget that covers it, so a byte crossing three servers of the same user counts three times. See [Shared budgets](BUDGETS.md).
 
 With the optional **Plan entitlements** feature, a paid plan order becomes the buyer's traffic budget: renewals add traffic and extend the expiry, and refunds remove that order's traffic and days. See [Wallet, plans, orders](#wallet-plans-orders-discount-codes-and-gift-codes).
+
+#### Separate upload and download limits and burst
+
+Each speed limit (a rule's **Combined rate**, a server's **Node rate limit** and a user's **Total rate limit**) has a **Limit mode**: **Combined upload and download** (as before), **Separate upload and download**, or **Combined and separate** (a combined limit plus upload and download limits). Fill in only the limits you want; a blank one is unlimited, and every limit you set applies at once.
+
+- **Upload** is what this hop's client sends toward the target; **download** is what comes back from the target. UDP works the same way. On a multi-hop path each server counts relative to its own client, so your users' outgoing traffic is upload on every hop. For a proxy service (Shadowsocks, SOCKS5 and the others), what the client sends to its destination is upload.
+- **Where:** the rule editor (bytes/s), **Node rate limit** on **Forwarding rules → By server** (Mbit/s), **Total rate limit** on **Users & permissions** (Mbit/s), **Access & limits** of a reverse tunnel (bytes/s), and **Total bandwidth** of a cross-panel share (Mbit/s, upload and download without burst). Shared rules and rule templates keep the limits of the rule they copy.
+- **Burst (optional)** is available for rules and servers. Open it under the limits and enter a **burst rate** and a **burst time / seconds** for the combined, upload or download limit; the burst rate must be above that limit, and the burst time is 1 to 86400 seconds. The burst credit is (burst rate − limit) × burst time and starts full. While credit is left, traffic can run up to the burst rate; sending above the limit spends credit, sending below the limit earns the difference back, and with no credit left the limit applies. For example, with a burst of 100 Mbit/s, a limit of 30 Mbit/s and a burst time of 5 minutes, a full burst runs at 100 Mbit/s for 5 minutes and then at 30 Mbit/s. The burst comes back while the link runs below 30 Mbit/s; from idle, a full burst is back after about 11.7 minutes.
+- **Total rate limit** has no burst. Its upload and download totals are each split between the servers that carry the user's rules, like the combined total, and the dialog lists **Upload shares** and **Download shares** per server. The servers' shares never add up to more than the total.
+- **Seeing them:** the rules table's **Quota / rate limit** column and the server's **Node rate limit** badge list every limit, for example `Upload 10 Mbit/s · Download 50 Mbit/s (burst 80 Mbit/s · 300 s)`. When an agent reports it, **Download burst credit 50%** (or **Combined** or **Upload**) shows how much burst is left; below 100% the burst is in use or still coming back.
+- **Older agents:** separate and burst limits need the agent of this release on every server involved. Until a server's agent has reported in, the panel refuses to publish them there and says why, for example “The agent on server Tokyo is too old for separate upload/download or burst speed limits; upgrade it first”, and the **Node rate limit** dialog warns about it. A combined limit still works with every agent. While a user has an upload or download total, their enabled rules can only be published on servers with the new agent.
+- Metering, quotas and shared budgets do not change: traffic is still counted in both directions and against the same quotas.
+
+See [Speed limits](RATE_LIMITS.md) (Chinese) for the details.
 
 #### Plan traffic cycles and automatic top-up
 

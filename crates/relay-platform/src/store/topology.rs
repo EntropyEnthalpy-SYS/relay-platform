@@ -114,10 +114,16 @@ pub(super) fn prepare(
             revision: update.expected_revision + 1,
             rules: update.rules,
             rate_bytes_per_sec: update.rate_bytes_per_sec.unwrap_or(old.rate_bytes_per_sec),
+            rate_limits: RateLimits::normalized(update.rate_limits.unwrap_or(old.rate_limits)),
         };
+        // An empty set is no limit, and is left out for older agents.
+        for rule in &mut config.rules {
+            rule.rate_limits = RateLimits::normalized(rule.rate_limits);
+        }
         federation::merge(conn, &config.node_id, &tenant, &mut config.rules)?;
         reverse_tunnels::merge(conn, &config.node_id, &mut config.rules)?;
         config.validate().map_err(bad_input)?;
+        rate_limits::require(conn, &config)?;
         if config
             .rules
             .iter()
@@ -273,6 +279,7 @@ impl Store {
                         expected_revision: config.revision,
                         rules,
                         rate_bytes_per_sec: None,
+                        rate_limits: None,
                     });
                 }
             }
@@ -328,6 +335,19 @@ impl Store {
         rules: Vec<Rule>,
         rate_bytes_per_sec: Option<Option<u64>>,
     ) -> Result<NodeConfig> {
+        self.set_config_with_limits(actor, node, expected, rules, rate_bytes_per_sec, None)
+    }
+    /// Like [`Self::set_config_with_rate`], with the node's upload, download
+    /// and burst limits: `None` keeps them, `Some(None)` clears them.
+    pub fn set_config_with_limits(
+        &self,
+        actor: &Actor,
+        node: &str,
+        expected: u64,
+        rules: Vec<Rule>,
+        rate_bytes_per_sec: Option<Option<u64>>,
+        rate_limits: Option<Option<RateLimits>>,
+    ) -> Result<NodeConfig> {
         Ok(self
             .publish_configs(
                 actor,
@@ -337,6 +357,7 @@ impl Store {
                         expected_revision: expected,
                         rules,
                         rate_bytes_per_sec,
+                        rate_limits,
                     }],
                 },
             )?

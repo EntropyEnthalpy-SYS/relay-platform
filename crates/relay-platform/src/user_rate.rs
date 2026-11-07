@@ -3,8 +3,9 @@
 //! a node that cannot reach the controller drops to its fallback, an equal
 //! split. A share only grows into room the other nodes do not hold, so the
 //! shares in force never add up to more than the total once every node has
-//! synced, even while they move toward the busy nodes.
-use crate::model::UserRateReport;
+//! synced, even while they move toward the busy nodes. A user's combined,
+//! upload and download limits are each split by an allocator of their own.
+use crate::model::RateLane;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -65,14 +66,15 @@ impl Default for Allocator {
 }
 impl Allocator {
     /// Returns `(share, fallback)` for `node`, one of `nodes`, which carry
-    /// the rules of `owner`, whose combined limit is `total` bytes/second.
+    /// the rules of `owner`, whose limit is `total` bytes/second; `report`
+    /// is the node's counters for this limit.
     pub fn share(
         &mut self,
         owner: &str,
         total: u64,
         nodes: &[String],
         node: &str,
-        report: Option<&UserRateReport>,
+        report: Option<&RateLane>,
         now: Instant,
     ) -> (u64, u64) {
         let count = nodes.len().max(1) as u64;
@@ -227,10 +229,8 @@ mod tests {
     fn nodes() -> Vec<String> {
         vec!["a".into(), "b".into()]
     }
-    fn report(bytes: u64, waited_ms: u64, enforced: u64) -> UserRateReport {
-        UserRateReport {
-            tenant_id: "t".into(),
-            owner_id: "u".into(),
+    fn report(bytes: u64, waited_ms: u64, enforced: u64) -> RateLane {
+        RateLane {
             bytes,
             waited_ms,
             enforced_bytes_per_sec: Some(enforced),

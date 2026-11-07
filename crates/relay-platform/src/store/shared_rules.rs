@@ -212,6 +212,7 @@ fn plan(
                 .cloned()
                 .collect(),
             rate_bytes_per_sec: None,
+            rate_limits: None,
         });
     }
     let order = existing
@@ -294,6 +295,7 @@ fn plan(
             expected_revision: config.revision,
             rules,
             rate_bytes_per_sec: None,
+            rate_limits: None,
         });
     }
     Ok(result)
@@ -729,6 +731,7 @@ impl Store {
                     })
                     .collect(),
                 rate_bytes_per_sec: None,
+                rate_limits: None,
             });
         }
         let published = !updates.is_empty();
@@ -772,6 +775,7 @@ impl Store {
                             .cloned()
                             .collect(),
                         rate_bytes_per_sec: None,
+                        rate_limits: None,
                     }
                 })
                 .collect();

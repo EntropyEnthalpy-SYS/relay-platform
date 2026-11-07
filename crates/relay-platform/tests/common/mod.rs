@@ -81,6 +81,7 @@ pub fn rule(target: SocketAddr, protocol: Protocol) -> Rule {
         quota_bytes: None,
         expires_at_ms: None,
         rate_bytes_per_sec: None,
+        rate_limits: None,
         meter_epoch: "epoch-one".into(),
         allow_sources: vec![],
         allow_destinations: vec![],
@@ -98,6 +99,7 @@ pub fn config(rule: Rule) -> NodeConfig {
         revision: 1,
         rules: vec![rule],
         rate_bytes_per_sec: None,
+        rate_limits: None,
     }
 }
 pub struct Echo {

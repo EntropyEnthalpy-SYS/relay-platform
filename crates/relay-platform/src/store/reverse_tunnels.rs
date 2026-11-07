@@ -292,6 +292,7 @@ fn publish_public(
                 expected_revision: current.revision,
                 rules,
                 rate_bytes_per_sec: None,
+                rate_limits: None,
             }],
         },
     )?;

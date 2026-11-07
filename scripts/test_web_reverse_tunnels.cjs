@@ -12,6 +12,7 @@ const between = (start, end) => {
 };
 const line = pattern => { const found = source.match(pattern); assert.ok(found, `${pattern} not found`); return found[0] + '\n'; };
 const code = line(/^function bytes\(.*$/m) + line(/^const listenPort = .*$/m)
+  + between('// Speed limits: the combined', 'function websocketEditor(')
   + between('// Reverse tunnels (NAT traversal).', '// Endpoint groups and saved chains.');
 
 class Element {

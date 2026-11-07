@@ -50,7 +50,7 @@ async function expiredResponse(replaced, path = '/nodes') {
     assert.equal(options.headers.Authorization, 'Bearer original-session');
     return new Promise(resolve => { finish = resolve; });
   } };
-  vm.createContext(context); vm.runInContext(`${definition('api')}\nthis.run = api;`, context);
+  vm.createContext(context); vm.runInContext(`${definition('rateLimitReason')}\n${definition('api')}\nthis.run = api;`, context);
   const result = context.run(path);
   if (replaced) state.token = 'new-session';
   finish({ ok: false, status: 401, text: async () => '{"error":"expired"}' });

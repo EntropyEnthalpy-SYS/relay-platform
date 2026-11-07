@@ -68,7 +68,7 @@ async function api(path, options = {}) {
   const requestToken = state.token;
   const response = await fetch(`/api/v1${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}), ...options.headers }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = { error: text || `HTTP ${response.status}` }; }
-  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
+  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(rateLimitReason(result.error) || result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
 }
 setupLanguageSwitcher(() => {
   if (!state.actor) { document.title = translate('Relay · 独立转发平台'); return; }
@@ -165,6 +165,116 @@ function sectionVisible(part, visible) {
     if (!visible) { input.dataset.sectionDisabled ??= String(input.disabled); input.disabled = true; }
     else if (input.dataset.sectionDisabled !== undefined) { input.disabled = input.dataset.sectionDisabled === 'true'; delete input.dataset.sectionDisabled; }
   });
+}
+// Speed limits: the combined (upload + download) limit, upload-only and download-only limits, or any mix,
+// all applying at once. Upload is what a hop's client sends toward its target, download what comes back.
+// Rule and server limits can also burst: above the limit up to the burst rate while burst credit lasts.
+const rateModes = localize([['combined', '上下行合计'], ['separate', '分别限制上传和下载'], ['both', '合计并分别限制上传和下载']]);
+const rateLanes = localize({ combined: '合计', upload: '上传', download: '下载' });
+function rateParts(rate, limits) {
+  return { combined: [rate ?? null, limits?.burst || null], upload: [limits?.upload_bytes_per_sec ?? null, limits?.upload_burst || null], download: [limits?.download_bytes_per_sec ?? null, limits?.download_burst || null] };
+}
+// Each limit that is set, in `unit` (mbit or bytes/s). A combined limit alone reads as before.
+function rateLines(rate, limits, unit = mbit) {
+  const parts = rateParts(rate, limits);
+  if (parts.upload[0] == null && parts.download[0] == null && !parts.combined[1]) return rate ? [unit(rate)] : [];
+  return Object.entries(parts).filter(([, [value]]) => value != null).map(([lane, [value, burst]]) => {
+    const text = msg`${rateLanes[lane]} ${unit(value)}`;
+    return burst ? msg`${text}（突发 ${unit(burst.bytes_per_sec)} · ${burst.secs} 秒）` : text;
+  });
+}
+// The same on one line; empty when nothing is set.
+function rateText(rate, limits, unit = mbit) { return rateLines(rate, limits, unit).join(' · '); }
+// Burst credit the agent reported for a rule (`ruleId`) or the server itself (''), as text; empty when none.
+function burstState(node, ruleId) {
+  const bursts = (node?.stats?.rate_limits?.bursts || []).filter(b => (b.rule_id || '') === ruleId);
+  return bursts.map(b => msg`${rateLanes[b.direction] || b.direction}突发额度 ${b.capacity_bytes ? Math.floor(b.credit_bytes * 100 / b.capacity_bytes) : 100}%`).join(' · ');
+}
+// Combined, upload and download inputs with a mode, and optionally a burst for each. `unit`: 'bytes'
+// (bytes/s, as the rule editor) or 'mbit' (Mbit/s, as server and user limits); `min`/`max` bound each
+// limit in bytes/s and `rangeError` explains them; `combined` names and labels the combined input.
+function rateLimitEditor({ rate, limits, unit = 'bytes', burst = false, combined, min = 1, max = 1e12, rangeError }) {
+  const box = el('div', undefined, 'rate-limit-editor'), grid = el('div', undefined, 'form-grid'), parts = rateParts(rate, limits);
+  const mbits = unit === 'mbit', shown = value => value == null ? '' : mbits ? +(value * 8 / 1e6).toFixed(3) : value;
+  const labels = mbits ? { upload: translate('上传 / Mbit/s（留空不限速）'), download: translate('下载 / Mbit/s（留空不限速）') } : { upload: translate('上传速率 / bytes/s（留空不限）'), download: translate('下载速率 / bytes/s（留空不限）') };
+  const names = { combined: combined.name, upload: 'rate_upload', download: 'rate_download' };
+  const initial = parts.upload[0] != null || parts.download[0] != null ? (parts.combined[0] != null ? 'both' : 'separate') : 'combined';
+  const mode = select(grid, 'rate_mode', translate('限速方式'), rateModes, initial);
+  const inputs = {};
+  for (const lane of ['combined', 'upload', 'download']) {
+    const input = field(grid, names[lane], lane === 'combined' ? combined.label : labels[lane], shown(parts[lane][0]), 'number', false);
+    input.min = mbits ? +(min * 8 / 1e6).toFixed(3) : min; input.step = mbits ? 'any' : '1'; inputs[lane] = input;
+  }
+  box.append(grid, el('p', translate('上传指本跳客户端发往目标的流量，下载指目标返回客户端的流量。设置的各项限速同时生效。'), 'fine'));
+  const bursts = {};
+  if (burst) {
+    const details = el('details', undefined, 'rate-burst'), burstGrid = el('div', undefined, 'form-grid');
+    details.append(el('summary', translate('突发限速（可选）')));
+    for (const lane of ['combined', 'upload', 'download']) {
+      const speed = field(burstGrid, `burst_${lane}_rate`, msg`${rateLanes[lane]}突发速率 / ${mbits ? 'Mbit/s' : 'bytes/s'}`, shown(parts[lane][1]?.bytes_per_sec), 'number', false);
+      speed.min = inputs[lane].min; speed.step = inputs[lane].step;
+      const secs = field(burstGrid, `burst_${lane}_secs`, msg`${rateLanes[lane]}突发时长 / 秒`, parts[lane][1]?.secs ?? '', 'number', false); secs.min = 1; secs.max = 86400; secs.step = '1';
+      bursts[lane] = [speed, secs];
+    }
+    details.append(burstGrid, el('p', translate('突发让速率在一段时间内高于限速：高于限速的部分消耗突发额度，低于限速时按差值恢复，额度为（突发速率 − 限速）× 突发时长，用完后回到限速。例如突发 100 Mbit/s、限速 30 Mbit/s、突发时长 300 秒：满额时以 100 Mbit/s 运行 5 分钟，之后为 30 Mbit/s；空闲约 11.7 分钟后恢复满额。'), 'fine'));
+    details.open = Object.values(parts).some(([, value]) => value);
+    box.append(details);
+  }
+  function show() {
+    for (const lane of ['combined', 'upload', 'download']) {
+      const visible = lane === 'combined' ? mode.value !== 'separate' : mode.value !== 'combined';
+      for (const input of [inputs[lane], ...(bursts[lane] || [])]) { input.parentElement?.classList.toggle('hidden', !visible); input.disabled = !visible; }
+    }
+  }
+  mode.addEventListener('change', show); show();
+  // Bytes/second of one input, or null when it is hidden or empty.
+  function value(data, name) {
+    const raw = String(data.get(name) ?? '').trim();
+    if (!raw) return null;
+    const n = Number(raw);
+    if (!mbits) { if (!(Number.isInteger(n) && n >= 1)) throw new Error(translate('速率必须是正整数 bytes/s，留空不限。')); return n; }
+    const bytesPerSec = Math.round(n * 1e6 / 8);
+    if (!(bytesPerSec >= min && bytesPerSec <= max)) throw new Error(rangeError);
+    return bytesPerSec;
+  }
+  return {
+    box, mode,
+    // `{rate_bytes_per_sec, rate_limits}` as the controller takes them; `rate_limits` is null when empty.
+    read(data) {
+      const read = { combined: value(data, names.combined), upload: value(data, names.upload), download: value(data, names.download) }, burstOf = {};
+      for (const lane of Object.keys(bursts)) {
+        const speedText = String(data.get(`burst_${lane}_rate`) ?? '').trim(), secsText = String(data.get(`burst_${lane}_secs`) ?? '').trim();
+        if (!speedText && !secsText) continue;
+        if (!speedText || !secsText) throw new Error(translate('突发速率和突发时长要同时填写，或都留空'));
+        if (read[lane] == null) throw new Error(translate('设置突发前，请先填写对应的限速'));
+        const secs = Number(secsText), speed = value(data, `burst_${lane}_rate`);
+        if (!(Number.isInteger(secs) && secs >= 1 && secs <= 86400)) throw new Error(translate('突发时长必须是 1 到 86400 之间的整数秒'));
+        if (!(speed > read[lane])) throw new Error(translate('突发速率必须高于对应的限速'));
+        burstOf[lane] = { bytes_per_sec: speed, secs };
+      }
+      const out = {};
+      if (read.upload != null) out.upload_bytes_per_sec = read.upload;
+      if (read.download != null) out.download_bytes_per_sec = read.download;
+      if (burstOf.combined) out.burst = burstOf.combined;
+      if (burstOf.upload) out.upload_burst = burstOf.upload;
+      if (burstOf.download) out.download_burst = burstOf.download;
+      return { rate_bytes_per_sec: read.combined, rate_limits: Object.keys(out).length ? out : null };
+    },
+  };
+}
+// The controller refuses limits a server's agent cannot enforce and names the server (and user) in
+// English; known reasons are shown in the panel's language, others as they are.
+function rateLimitReason(message) {
+  const server = text => {
+    let m = /^the agent on server (.+) is too old for separate upload\/download or burst speed limits; upgrade it first$/.exec(text);
+    if (m) return msg`服务器 ${m[1]} 的 Agent 版本过旧，不支持分别限制上传/下载或突发限速；请先升级 Agent`;
+    m = /^server (.+) has not connected to the panel yet; separate upload\/download or burst speed limits need its agent to report in first$/.exec(text);
+    if (m) return msg`服务器 ${m[1]} 尚未连接面板；它的 Agent 回报后才能设置分别的上传/下载限速或突发限速`;
+    return null;
+  };
+  const user = /^user (.+) has separate upload\/download speed limits: (.+)$/.exec(String(message ?? ''));
+  if (user) { const reason = server(user[2]); return reason && msg`用户 ${user[1]} 设有分别的上传/下载总限速：${reason}`; }
+  return server(String(message ?? ''));
 }
 function websocketEditor(id, spec, inbound, defaultHost = () => '') {
   const box = el('details'); box.open = !!spec; box.append(el('summary', inbound ? translate('入口 WebSocket / WSS 隧道') : translate('出口 WebSocket / WSS 隧道')));
@@ -1324,7 +1434,9 @@ async function renderRules() {
   const toolbar = el('div', undefined, 'toolbar node-toolbar'), selector = el('select'); selector.setAttribute('aria-label', translate('选择节点')); state.nodes.forEach(n => { const option = el('option', n.name); option.value = n.id; selector.append(option); }); selector.value = state.selectedNode; selector.onchange = async () => { state.selectedNode = selector.value; await refresh(); }; const nodeLabel = el('label', translate('运行节点 / VPS')); nodeLabel.append(selector); toolbar.append(nodeLabel);
   const nodeId = state.selectedNode; const config = await api(`/nodes/${nodeId}/config`); if (state.view !== 'rules' || state.actor !== actor || state.selectedNode !== nodeId) return; state.config = config;
   const nodeStatus = el('div', undefined, 'node-toolbar-status'), nodeTools = el('div', undefined, 'node-toolbar-actions');
-  nodeStatus.append(applicationBadge(state.nodes.find(n => n.id === nodeId)), badge(msg`期望修订 v${config.revision}`), badge(config.rate_bytes_per_sec ? msg`节点总限速 ${mbit(config.rate_bytes_per_sec)}` : translate('节点不限速'), config.rate_bytes_per_sec ? 'orange' : ''));
+  const nodeLimit = rateText(config.rate_bytes_per_sec, config.rate_limits, mbit), nodeBurst = burstState(state.nodes.find(n => n.id === nodeId), '');
+  nodeStatus.append(applicationBadge(state.nodes.find(n => n.id === nodeId)), badge(msg`期望修订 v${config.revision}`), badge(nodeLimit ? msg`节点总限速 ${nodeLimit}` : translate('节点不限速'), nodeLimit ? 'orange' : ''));
+  if (nodeBurst) nodeStatus.append(badge(nodeBurst, 'orange'));
   nodeTools.append(button(translate('版本历史'), history)); if (canWrite()) nodeTools.append(button(translate('节点总限速'), () => editNodeRate(config)));
   toolbar.append(nodeTools, nodeStatus);
   const protocols = { tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' }, balances = { weighted_round_robin: translate('加权轮询'), source_hash: translate('来源 IP 哈希'), least_connections: translate('最少连接'), lowest_latency: translate('最低延迟'), random: translate('随机') };
@@ -1332,7 +1444,7 @@ async function renderRules() {
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${rule.rate_bytes_per_sec === null ? translate('不限速') : bytes(rule.rate_bytes_per_sec) + '/s'}`, rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), limitCell(rule, state.nodes.find(n => n.id === nodeId)), rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p, sharedRulesPanel(sharedRules, state.nodes));
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -1348,9 +1460,23 @@ function forwardingTabs(view, count) {
   return bar;
 }
 function mbit(rate) { return `${+(rate * 8 / 1e6).toFixed(2)} Mbit/s`; }
+// Quota and speed limits of a rule, with its burst credit when the agent reports it.
+function limitCell(rule, node) {
+  const lines = rateLines(rule.rate_bytes_per_sec, rule.rate_limits, rate => bytes(rate) + '/s'), credit = burstState(node, rule.id);
+  const text = `${rule.quota_bytes === null ? translate('不限量') : bytes(rule.quota_bytes)} / ${lines[0] || translate('不限速')}`;
+  if (lines.length < 2 && !credit) return text;
+  // One limit per line, so several do not run under the actions column.
+  const cell = el('div');
+  cell.append(el('strong', text), ...lines.slice(1).map(line => el('div', line)));
+  if (credit) cell.append(el('div', credit, 'subline mono'));
+  return cell;
+}
 function editNodeRate(baseConfig) {
-  const form = el('form'), grid = el('div', undefined, 'form-grid'); const input = field(grid, 'mbit', translate('本节点所有规则上下行合计 / Mbit/s（留空不限速）'), baseConfig.rate_bytes_per_sec ? +(baseConfig.rate_bytes_per_sec * 8 / 1e6).toFixed(3) : '', 'number', false); input.min = 0.008; input.step = 'any'; form.append(grid, el('p', translate('与规则自身的限速同时生效，取较严者。立即作用于已有连接，不会断开会话；健康探测不计入。'), 'muted'));
-  submit(form, translate('发布限速'), async data => { const raw = String(data.get('mbit')).trim(); const rate = raw === '' ? null : Math.round(Number(raw) * 1e6 / 8); if (rate !== null && !(rate >= 1 && rate <= 1e12)) throw new Error(translate('请输入 0.008 到 8,000,000 之间的 Mbit/s')); await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision: baseConfig.revision, rules: baseConfig.rules, rate_bytes_per_sec: rate } }); $('#dialog').close(); notify(rate ? msg`已发布节点总限速 ${mbit(rate)}。` : translate('已取消节点总限速。')); await renderRules(); });
+  const form = el('form'), node = state.nodes.find(n => n.id === baseConfig.node_id);
+  const speed = rateLimitEditor({ rate: baseConfig.rate_bytes_per_sec, limits: baseConfig.rate_limits, unit: 'mbit', burst: true, combined: { name: 'mbit', label: translate('本节点所有规则上下行合计 / Mbit/s（留空不限速）') }, min: 1, max: 1e12, rangeError: translate('请输入 0.008 到 8,000,000 之间的 Mbit/s') });
+  form.append(speed.box, el('p', translate('与规则自身的限速同时生效，取较严者。立即作用于已有连接，不会断开会话；健康探测不计入。'), 'muted'));
+  if (node && !node.rate_limit_support) form.append(el('p', translate('这台服务器的 Agent 尚未报告支持分别限制上传/下载或突发限速；只有上下行合计可以发布，其他方式会被拒绝。请先升级 Agent。'), 'fine'));
+  submit(form, translate('发布限速'), async data => { const { rate_bytes_per_sec: rate, rate_limits } = speed.read(data); await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision: baseConfig.revision, rules: baseConfig.rules, rate_bytes_per_sec: rate, rate_limits } }); $('#dialog').close(); const text = rateText(rate, rate_limits, mbit); notify(text ? msg`已发布节点总限速 ${text}。` : translate('已取消节点总限速。')); await renderRules(); });
   modal(translate('节点总限速'), form);
 }
 async function saveRules(rules, baseConfig) { const expected_revision = baseConfig.revision; await api(`/nodes/${baseConfig.node_id}/config`, { method: 'PUT', body: { expected_revision, rules } }); $('#dialog').close(); notify(translate('配置已发布。请在节点总览确认实际应用修订号。')); await renderRules(); }
@@ -1722,7 +1848,8 @@ async function editRule(existing, seed = {}) {
   function showProxyInput() { const enabled = proxyMode.value !== 'off'; proxyOptions.classList.toggle('hidden', !enabled); proxyOptions.querySelectorAll('input, select, textarea').forEach(input => { input.disabled = !enabled; }); } proxyMode.addEventListener('change', showProxyInput); showProxyInput();
   proxyInput.append(proxyOptions, el('p', translate('启用后必须携带正确报头；直接客户端将被拒绝。来源 ACL 和来源哈希按报头中的客户端地址执行。PROXY 和 CRC32C 不提供身份认证；可信网段应只包含你的代理。UDP 每包都须携带 v2，回复为普通业务数据。'), 'fine')); form.append(proxyInput);
   showRouted();
-  const limits = el('div', undefined, 'form-grid'); field(limits, 'quota_bytes', translate('合并配额 / bytes（留空不限，0 禁止流量）'), r.quota_bytes, 'number', false).min = 0; field(limits, 'rate_bytes_per_sec', translate('合并速率 / bytes/s（留空不限）'), r.rate_bytes_per_sec, 'number', false).min = 1; form.append(limits);
+  const limits = el('div', undefined, 'form-grid'); field(limits, 'quota_bytes', translate('合并配额 / bytes（留空不限，0 禁止流量）'), r.quota_bytes, 'number', false).min = 0; form.append(limits);
+  const speed = rateLimitEditor({ rate: r.rate_bytes_per_sec, limits: r.rate_limits, unit: 'bytes', burst: true, combined: { name: 'rate_bytes_per_sec', label: translate('合并速率 / bytes/s（留空不限）') } }); form.append(speed.box);
   if(existing){const label=el('label',undefined,'inline-check'),fresh=el('input');fresh.type='checkbox';fresh.name='new_meter_period';label.append(fresh,document.createTextNode(translate('明确开始新计量周期：旧账保留，重新发放本规则额度；共享预算不重置')));form.append(label);}
   const details = el('details'); details.append(el('summary', translate('高级：超时、会话上限、到期和来源网段'))); const advanced = el('div', undefined, 'form-grid');
   for (const [name, label, fallback, min, max] of [['connect_timeout_ms', translate('连接超时 / ms'), 5000, 100, 60000], ['idle_timeout_secs', translate('空闲回收 / 秒'), 120, 1, 86400], ['max_connections', translate('TCP 最大连接'), 4096, 1, 1000000], ['udp_max_sessions', translate('UDP 最大会话'), 1024, 1, 100000]]) { const input = field(advanced, name, label, r[name] ?? fallback, 'number'); input.min = min; input.max = max; }
@@ -1757,9 +1884,10 @@ async function editRule(existing, seed = {}) {
     if (rule.protocol !== 'tcp' && (websocket || rule.targets.some(target => target.websocket))) throw new Error(translate('WebSocket / WSS 流隧道只支持 TCP，请调整规则协议'));
     if (!wire && data.get('proxy_input_version') !== 'off') rule.inbound_proxy = { version: data.get('proxy_input_version'), trusted_sources: lines('proxy_trusted_sources'), placement: data.get('proxy_input_placement'), max_header_bytes: number(data, 'proxy_header_limit'), accept_prewarmed: data.get('proxy_accept_prewarmed') === 'yes' };
     for (const key of ['quota_bytes', 'rate_bytes_per_sec', 'expires_at_ms', 'connect_timeout_ms', 'idle_timeout_secs', 'max_connections', 'udp_max_sessions']) rule[key] = number(data, key);
+    const { rate_limits } = speed.read(data); if (rate_limits) rule.rate_limits = rate_limits;
     return rule;
   }
-  const options = el('details'); options.append(el('summary', translate('配额、端口范围与高级选项')), extraGrid, mptcp.box, routing, transport, inboundWs.box, proxyInput, limits, details);
+  const options = el('details'); options.append(el('summary', translate('配额、端口范围与高级选项')), extraGrid, mptcp.box, routing, transport, inboundWs.box, proxyInput, limits, speed.box, details);
   form.append(options);
   const pathView = forwardingPathView(); if (!asTemplate && !shared) form.append(el('h3', translate('3. 检查并预览发布'), 'setup-step'), pathView.box);
   function redrawPath() {
@@ -3007,12 +3135,13 @@ async function renderUsage() {
   p.append(table([translate('规则 / 周期'), translate('节点'), translate('上行'), translate('下行'), translate('序号'), translate('最近上报')], records.map(r => [namedCell(r.rule_id, r.meter_epoch), names.has(r.node_id) ? namedCell(names.get(r.node_id), r.node_id.slice(0, 8)) : r.node_id, bytes(r.upload_bytes), bytes(r.download_bytes), r.sequence, timestamp(r.reported_at_ms)])));
   if (state.view === 'usage') { $('#page-tools').replaceChildren(...toolbar.childNodes); $('#content').replaceChildren(p); }
 }
-async function renderUsers() { const actor = state.actor; const users = await api('/users'); if (state.view !== 'users' || !actor || state.actor !== actor) return; const p = panel(translate('用户与会话'), translate('权限由服务端校验；撤销、停用、改密或删除后，该用户已有的 Web 会话和 API 令牌立即失效。'), canWrite() ? button(translate('＋ 添加用户'), newUser, 'primary') : null); p.append(table([translate('账号'), translate('角色'), translate('租户'), translate('状态'), translate('两步验证'), translate('跨节点总限速'), translate('操作')], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.disabled ? badge(translate('已停用'), 'red') : badge(translate('启用'), 'green'), u.mfa_enabled ? badge(translate('已启用'), 'green') : badge(translate('未启用')), u.rate_bytes_per_sec ? badge(mbit(u.rate_bytes_per_sec), 'orange') : badge(translate('不限速')), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
+async function renderUsers() { const actor = state.actor; const users = await api('/users'); if (state.view !== 'users' || !actor || state.actor !== actor) return; const p = panel(translate('用户与会话'), translate('权限由服务端校验；撤销、停用、改密或删除后，该用户已有的 Web 会话和 API 令牌立即失效。'), canWrite() ? button(translate('＋ 添加用户'), newUser, 'primary') : null); p.append(table([translate('账号'), translate('角色'), translate('租户'), translate('状态'), translate('两步验证'), translate('跨节点总限速'), translate('操作')], users.map(u => [namedCell(u.username, u.id), roleNames[u.role], u.tenant_id, u.disabled ? badge(translate('已停用'), 'red') : badge(translate('启用'), 'green'), u.mfa_enabled ? badge(translate('已启用'), 'green') : badge(translate('未启用')), userRateText(u) ? badge(userRateText(u), 'orange') : badge(translate('不限速')), userActions(u)]))); if (state.view === 'users') $('#content').replaceChildren(p); }
+function userRateText(u) { return rateText(u.rate_bytes_per_sec, { upload_bytes_per_sec: u.upload_bytes_per_sec, download_bytes_per_sec: u.download_bytes_per_sec }, mbit); }
 function userActions(u) {
   if (!canWrite() && u.id !== state.actor.id) return '—';
   const actions = el('div');
   actions.append(button(translate('撤销全部会话'), async () => { await api(`/users/${u.id}/revoke-sessions`, { method: 'POST' }); if (u.id === state.actor.id) loggedOut(); else notify(translate('该用户现有会话和 API 令牌已撤销。')); }, 'table-action'));
-  if (state.actor.role === 'system_admin' || u.rate_bytes_per_sec) actions.append(button(translate('总限速'), () => editUserRate(u), 'table-action'));
+  if (state.actor.role === 'system_admin' || userRateText(u)) actions.append(button(translate('总限速'), () => editUserRate(u), 'table-action'));
   if (canWrite() && u.id !== state.actor.id) {
     actions.append(button(translate('改密'), () => adminPassword(u), 'table-action'));
     actions.append(button(u.disabled ? translate('启用') : translate('停用'), () => toggleUserDisabled(u), 'table-action'));
@@ -3059,13 +3188,17 @@ async function editUserRate(u) {
   const [view, nodes] = await Promise.all([api(`/users/${u.id}/rate`), api('/nodes').catch(() => [])]);
   const names = Object.fromEntries(nodes.map(n => [n.id, n.name]));
   const form = el('form');
+  let speed = null;
   if (state.actor.role === 'system_admin') {
-    const grid = el('div', undefined, 'form-grid'); const input = field(grid, 'mbit', translate('该用户所有节点入口规则的上下行合计 / Mbit/s（留空不限速）'), view.rate_bytes_per_sec ? +(view.rate_bytes_per_sec * 8 / 1e6).toFixed(3) : '', 'number', false); input.min = 0.009; input.step = 'any';
-    form.append(grid, el('p', translate('控制器按各节点的实际用量动态分配份额，忙的节点多分；节点与控制器失联 15 秒后退回平均份额。与规则、节点限速同时生效，取较严者。只计入口规则；已停用或到期的节点不占份额，长期离线的节点请停用。'), 'muted'));
+    speed = rateLimitEditor({ rate: view.rate_bytes_per_sec, limits: { upload_bytes_per_sec: view.upload_bytes_per_sec, download_bytes_per_sec: view.download_bytes_per_sec }, unit: 'mbit', combined: { name: 'mbit', label: translate('该用户所有节点入口规则的上下行合计 / Mbit/s（留空不限速）') }, min: 1024, max: 2 ** 40, rangeError: translate('请输入 0.009 到 8,796,093 之间的 Mbit/s') });
+    form.append(speed.box, el('p', translate('控制器按各节点的实际用量动态分配份额，忙的节点多分；节点与控制器失联 15 秒后退回平均份额。与规则、节点限速同时生效，取较严者。只计入口规则；已停用或到期的节点不占份额，长期离线的节点请停用。'), 'muted'));
+    form.append(el('p', translate('上传和下载总限速也各自按节点分配份额，各节点份额之和不超过总限速；需要这些节点的 Agent 支持分别限速。用户总限速不支持突发。'), 'fine'));
   }
-  if (view.nodes.length) form.append(table([translate('节点'), translate('当前份额'), translate('实测'), translate('状态')], view.nodes.map(n => [namedCell(names[n.node_id] || n.node_id, n.node_id), mbit(n.share_bytes_per_sec), n.measured_bytes_per_sec == null ? '—' : mbit(n.measured_bytes_per_sec), n.seen_ms_ago == null ? badge(translate('未连接，预留平均份额'), 'red') : n.seen_ms_ago > 20000 ? badge(translate('失联，按平均份额'), 'red') : n.saturated ? badge(translate('已用满'), 'orange') : badge(translate('有余量'), 'green')])));
-  else if (view.rate_bytes_per_sec) form.append(el('p', translate('各节点下次同步后显示份额。'), 'muted'));
-  if (state.actor.role === 'system_admin') submit(form, translate('保存总限速'), async data => { const raw = String(data.get('mbit')).trim(); const rate = raw === '' ? null : Math.round(Number(raw) * 1e6 / 8); if (rate !== null && !(rate >= 1024 && rate <= 2 ** 40)) throw new Error(translate('请输入 0.009 到 8,796,093 之间的 Mbit/s')); await api(`/users/${u.id}/rate`, { method: 'PUT', body: { rate_bytes_per_sec: rate } }); $('#dialog').close(); notify(rate ? msg`${u.username} 的跨节点总限速为 ${mbit(rate)}。` : msg`已取消 ${u.username} 的跨节点总限速。`); await renderUsers(); });
+  const shares = list => table([translate('节点'), translate('当前份额'), translate('实测'), translate('状态')], list.map(n => [namedCell(names[n.node_id] || n.node_id, n.node_id), mbit(n.share_bytes_per_sec), n.measured_bytes_per_sec == null ? '—' : mbit(n.measured_bytes_per_sec), n.seen_ms_ago == null ? badge(translate('未连接，预留平均份额'), 'red') : n.seen_ms_ago > 20000 ? badge(translate('失联，按平均份额'), 'red') : n.saturated ? badge(translate('已用满'), 'orange') : badge(translate('有余量'), 'green')]));
+  const lanes = [[view.nodes || [], translate('上下行合计份额')], [view.upload_nodes || [], translate('上传份额')], [view.download_nodes || [], translate('下载份额')]].filter(([list]) => list.length);
+  for (const [list, title] of lanes) { if (view.upload_nodes?.length || view.download_nodes?.length) form.append(el('h4', title)); form.append(shares(list)); }
+  if (!lanes.length && userRateText(view)) form.append(el('p', translate('各节点下次同步后显示份额。'), 'muted'));
+  if (speed) submit(form, translate('保存总限速'), async data => { const { rate_bytes_per_sec: rate, rate_limits } = speed.read(data); await api(`/users/${u.id}/rate`, { method: 'PUT', body: { rate_bytes_per_sec: rate, upload_bytes_per_sec: rate_limits?.upload_bytes_per_sec ?? null, download_bytes_per_sec: rate_limits?.download_bytes_per_sec ?? null } }); $('#dialog').close(); const text = rateText(rate, rate_limits, mbit); notify(text ? msg`${u.username} 的跨节点总限速为 ${text}。` : msg`已取消 ${u.username} 的跨节点总限速。`); await renderUsers(); });
   modal(msg`${u.username} 的跨节点总限速`, form);
 }
 async function renderAccount() {
@@ -3549,7 +3682,7 @@ const fedStateColors = { active: 'green', paused: 'orange', revoked: '' };
 const fedKinds = localize({ forward: '端口转发', shadowsocks: 'Shadowsocks' });
 const fedProtocols = localize({ tcp: 'TCP', udp: 'UDP', both: 'TCP + UDP' });
 function fedLimits(s) {
-  const parts = [s.kinds.map(k => fedKinds[k] || k).join(' / '), msg`规则 ${s.rules.length}/${s.max_rules}`, s.rate_bytes_per_sec ? msg`带宽 ${mbit(s.rate_bytes_per_sec)}` : translate('不限速'), s.quota_bytes ? msg`流量 ${bytes(s.quota_bytes)}` : translate('不限流量'), s.expires_at_ms ? msg`到期 ${timestamp(s.expires_at_ms)}` : translate('长期有效')];
+  const parts = [s.kinds.map(k => fedKinds[k] || k).join(' / '), msg`规则 ${s.rules.length}/${s.max_rules}`, userRateText(s) ? msg`带宽 ${userRateText(s)}` : translate('不限速'), s.quota_bytes ? msg`流量 ${bytes(s.quota_bytes)}` : translate('不限流量'), s.expires_at_ms ? msg`到期 ${timestamp(s.expires_at_ms)}` : translate('长期有效')];
   if (s.allow_sources?.length) parts.push(msg`来源 ${s.allow_sources.join(', ')}`);
   return parts.join(' · ');
 }
@@ -3616,11 +3749,12 @@ async function federationGrantForm(view) {
   const start = field(grid, 'port_start', translate('起始端口'), g?.port_start ?? 20000, 'number'); start.min = 1; start.max = 65535;
   const end = field(grid, 'port_end', translate('结束端口'), g?.port_end ?? 20009, 'number'); end.min = 1; end.max = 65535;
   const max = field(grid, 'max_rules', translate('对方最多可建的规则数'), g?.max_rules ?? 5, 'number'); max.min = 1; max.max = 32;
-  const rate = field(grid, 'mbit', translate('总带宽 / Mbit/s（留空不限速）'), g?.rate_bytes_per_sec ? +(g.rate_bytes_per_sec * 8 / 1e6).toFixed(3) : '', 'number', false); rate.min = 0.009; rate.step = 'any';
   const quota = field(grid, 'gib', translate('总流量 / GiB（留空不限；建好后只能修改，不能取消或新加）'), g?.quota_bytes ? +(g.quota_bytes / 2 ** 30).toFixed(3) : '', 'number', false); quota.min = 0.001; quota.step = 'any';
   if (g && !g.quota_bytes) { quota.disabled = true; quota.title = translate('这个共享建立时没有流量限制'); }
   field(grid, 'expires', translate('到期时间（本地，留空长期有效）'), g?.expires_at_ms ? announcementDateTime(g.expires_at_ms) : '', 'datetime-local', false);
   form.append(grid);
+  const speed = rateLimitEditor({ rate: g?.rate_bytes_per_sec, limits: { upload_bytes_per_sec: g?.upload_bytes_per_sec, download_bytes_per_sec: g?.download_bytes_per_sec }, unit: 'mbit', combined: { name: 'mbit', label: translate('总带宽 / Mbit/s（留空不限速）') }, min: 1024, max: 2 ** 40, rangeError: translate('请输入 0.009 到 8,796,093 之间的 Mbit/s') });
+  form.append(speed.box);
   const kinds = el('fieldset', undefined, 'target-editor'); kinds.append(el('legend', translate('允许对方建的规则类型')));
   for (const [value, label] of Object.entries(fedKinds)) { const item = el('label', label, 'inline-check'), input = el('input'); input.type = 'checkbox'; input.name = 'kinds'; input.value = value; input.checked = g ? g.kinds.includes(value) : value === 'shadowsocks'; item.prepend(input); kinds.append(item); }
   form.append(kinds);
@@ -3634,8 +3768,8 @@ async function federationGrantForm(view) {
   form.append(el('p', translate('对方的规则都由本面板按这些限制生成。端口范围不能和节点上已有的规则或其他共享重叠；修改后节点会自动更新。'), 'fine'));
   submit(form, g ? translate('保存共享') : translate('新建共享'), async data => {
     const lines = key => String(data.get(key) || '').split('\n').map(s => s.trim()).filter(Boolean);
-    const mbitText = String(data.get('mbit') || '').trim(), gibText = String(data.get('gib') || '').trim(), expires = String(data.get('expires') || '').trim();
-    const body = { name: String(data.get('name')).trim(), public_host: String(data.get('public_host')).trim(), listen_ip: String(data.get('listen_ip') || '').trim() || null, port_start: number(data, 'port_start'), port_end: number(data, 'port_end'), max_rules: number(data, 'max_rules'), kinds: data.getAll('kinds'), rate_bytes_per_sec: mbitText ? Math.round(Number(mbitText) * 1e6 / 8) : null, quota_bytes: gibText ? Math.round(Number(gibText) * 2 ** 30) : g?.quota_bytes ?? null, expires_at_ms: expires ? new Date(expires).getTime() : null, allow_sources: lines('allow_sources'), allow_destinations: lines('allow_destinations'), deny_destinations: lines('deny_destinations'), allow_private_destinations: data.get('allow_private_destinations') === 'on' };
+    const gibText = String(data.get('gib') || '').trim(), expires = String(data.get('expires') || '').trim(), { rate_bytes_per_sec, rate_limits } = speed.read(data);
+    const body = { name: String(data.get('name')).trim(), public_host: String(data.get('public_host')).trim(), listen_ip: String(data.get('listen_ip') || '').trim() || null, port_start: number(data, 'port_start'), port_end: number(data, 'port_end'), max_rules: number(data, 'max_rules'), kinds: data.getAll('kinds'), rate_bytes_per_sec, upload_bytes_per_sec: rate_limits?.upload_bytes_per_sec ?? null, download_bytes_per_sec: rate_limits?.download_bytes_per_sec ?? null, quota_bytes: gibText ? Math.round(Number(gibText) * 2 ** 30) : g?.quota_bytes ?? null, expires_at_ms: expires ? new Date(expires).getTime() : null, allow_sources: lines('allow_sources'), allow_destinations: lines('allow_destinations'), deny_destinations: lines('deny_destinations'), allow_private_destinations: data.get('allow_private_destinations') === 'on' };
     if (g) await api(`/federation/grants/${g.id}`, { method: 'PUT', body });
     else await api('/federation/grants', { method: 'POST', body: { ...body, node_id: node.value } });
     $('#dialog').close(); notify(translate('共享已保存。')); await renderFederation();
@@ -4362,14 +4496,14 @@ async function limitReverseTunnel(view) {
   const form = el('form'), grid = el('div', undefined, 'form-grid');
   textarea(grid, 'allow_sources', translate('允许来源 CIDR（留空允许所有未拒绝来源，每行一个）'), (rule.allow_sources || []).join('\n'));
   textarea(grid, 'deny_sources', translate('拒绝来源 CIDR（优先于允许列表，每行一个）'), (rule.deny_sources || []).join('\n'));
-  field(grid, 'rate_bytes_per_sec', translate('合并速率 / bytes/s（留空不限）'), rule.rate_bytes_per_sec ?? '', 'number', false).min = 1;
   const most = field(grid, 'max_connections', translate('TCP 最大连接'), rule.max_connections ?? 4096, 'number'); most.min = 1; most.max = 1000000;
-  form.append(grid, el('p', translate('这些限制作用于公网端口上的用户连接，与普通规则相同；流量计入公网服务器的流量账本。'), 'fine'));
+  const speed = rateLimitEditor({ rate: rule.rate_bytes_per_sec, limits: rule.rate_limits, unit: 'bytes', burst: true, combined: { name: 'rate_bytes_per_sec', label: translate('合并速率 / bytes/s（留空不限）') } });
+  form.append(grid, speed.box, el('p', translate('这些限制作用于公网端口上的用户连接，与普通规则相同；流量计入公网服务器的流量账本。'), 'fine'));
   submit(form, translate('保存'), async data => {
-    const lines = key => String(data.get(key) || '').split('\n').map(s => s.trim()).filter(Boolean), rate = String(data.get('rate_bytes_per_sec') || '').trim(), most = Number(data.get('max_connections'));
-    if (rate && !(Number.isInteger(Number(rate)) && Number(rate) >= 1)) throw new Error(translate('速率必须是正整数 bytes/s，留空不限。'));
+    const lines = key => String(data.get(key) || '').split('\n').map(s => s.trim()).filter(Boolean), { rate_bytes_per_sec, rate_limits } = speed.read(data), most = Number(data.get('max_connections'));
     if (!(Number.isInteger(most) && most >= 1 && most <= 1000000)) throw new Error(translate('TCP 最大连接必须在 1 到 1000000 之间。'));
-    const changed = { ...rule, allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources'), rate_bytes_per_sec: rate ? Number(rate) : null, max_connections: most };
+    const changed = { ...rule, allow_sources: lines('allow_sources'), deny_sources: lines('deny_sources'), rate_bytes_per_sec, max_connections: most };
+    if (rate_limits) changed.rate_limits = rate_limits; else delete changed.rate_limits;
     await api(path, { method: 'PUT', body: { expected_revision: config.revision, rules: config.rules.map(r => r.id === rule.id ? changed : r) } });
     $('#dialog').close(); notify(translate('访问与限速已发布到公网服务器。')); await refresh();
   });

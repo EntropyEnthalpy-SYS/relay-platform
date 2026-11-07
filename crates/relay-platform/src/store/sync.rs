@@ -147,6 +147,11 @@ fn apply_sync(
             .reverse_tunnel
             .as_ref()
             .is_some_and(|r| !r.within_limits())
+        || request
+            .stats
+            .rate_limits
+            .as_ref()
+            .is_some_and(|r| !r.within_limits())
     {
         return reject(400, "sync payload exceeds limits");
     }
@@ -262,11 +267,13 @@ fn apply_sync(
     } else {
         None
     };
+    super::rate_limits::observe(tx, node, request.stats.rate_limits.as_ref())?;
     let user_rates = super::user_rates::shares(
         tx,
         &mut rates.lock().unwrap(),
         node,
         &request.stats.user_rates,
+        super::rate_limits::supported(tx, node)?,
     )?;
     let mut traversal = traversal.lock().unwrap();
     super::wireguard::observe(tx, node, request.stats.wireguard.as_ref(), &mut traversal)?;
@@ -285,6 +292,7 @@ fn apply_sync(
             authoritative_dns: None,
             wireguard: Some(super::wireguard::desired(tx, node, &traversal)?),
             reverse_tunnels: Some(super::reverse_tunnels::desired(tx, node)?),
+            rate_limits: true,
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

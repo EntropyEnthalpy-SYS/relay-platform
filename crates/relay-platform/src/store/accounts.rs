@@ -135,6 +135,9 @@ pub struct UserSummary {
     pub mfa_enabled: bool,
     /// Combined bytes/second across every node, if limited.
     pub rate_bytes_per_sec: Option<u64>,
+    /// Upload and download bytes/second across every node, if limited.
+    pub upload_bytes_per_sec: Option<u64>,
+    pub download_bytes_per_sec: Option<u64>,
 }
 
 impl Store {
@@ -239,7 +242,7 @@ impl Store {
     }
     pub fn users(&self, actor: &Actor) -> Result<Vec<UserSummary>> {
         let conn = self.0.lock().unwrap();
-        let mut q = conn.prepare("SELECT u.id,u.tenant_id,u.username,u.role,u.disabled,COALESCE(json_extract(m.value,'$.enabled'),0),CAST(r.value AS INTEGER) FROM users u LEFT JOIN metadata m ON m.key='user_mfa:'||u.id LEFT JOIN metadata r ON r.key='user_rate:'||u.id WHERE (?1='system_admin' OR u.tenant_id=?2) ORDER BY u.username")?;
+        let mut q = conn.prepare("SELECT u.id,u.tenant_id,u.username,u.role,u.disabled,COALESCE(json_extract(m.value,'$.enabled'),0),CAST(r.value AS INTEGER),CAST(up.value AS INTEGER),CAST(down.value AS INTEGER) FROM users u LEFT JOIN metadata m ON m.key='user_mfa:'||u.id LEFT JOIN metadata r ON r.key='user_rate:'||u.id LEFT JOIN metadata up ON up.key='user_rate_upload:'||u.id LEFT JOIN metadata down ON down.key='user_rate_download:'||u.id WHERE (?1='system_admin' OR u.tenant_id=?2) ORDER BY u.username")?;
         Ok(
             q.query_map(params![actor.role.as_str(), actor.tenant_id], |r| {
                 Ok(UserSummary {
@@ -247,6 +250,8 @@ impl Store {
                     disabled: r.get(4)?,
                     mfa_enabled: r.get(5)?,
                     rate_bytes_per_sec: r.get(6)?,
+                    upload_bytes_per_sec: r.get(7)?,
+                    download_bytes_per_sec: r.get(8)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?,
@@ -486,10 +491,12 @@ impl Store {
         }
         accounts::end_credentials(&tx, &target.id)?;
         tx.execute(
-            "DELETE FROM metadata WHERE key IN (?1,?2)",
+            "DELETE FROM metadata WHERE key IN (?1,?2,?3,?4)",
             params![
                 format!("user_mfa:{}", target.id),
-                format!("user_rate:{}", target.id)
+                format!("user_rate:{}", target.id),
+                format!("user_rate_upload:{}", target.id),
+                format!("user_rate_download:{}", target.id)
             ],
         )?;
         tx.execute("DELETE FROM users WHERE id=?1", [&target.id])?;

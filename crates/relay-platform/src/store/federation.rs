@@ -130,6 +130,30 @@ pub(super) fn merge(
             ),
         );
     }
+    // A share's rules are rendered again below. Their upload and download
+    // limits come from the share; a publish asking for others is refused
+    // rather than silently replaced.
+    for rule in rules.iter().filter(|r| r.id.starts_with(fed::RULE_PREFIX)) {
+        if let Some(grant) = grants
+            .iter()
+            .find(|g| g.user_id == rule.owner_id && g.state != State::Revoked)
+        {
+            let wanted = RateLimits::normalized(Some(RateLimits {
+                upload_bytes_per_sec: grant.upload_bytes_per_sec,
+                download_bytes_per_sec: grant.download_bytes_per_sec,
+                ..Default::default()
+            }));
+            if RateLimits::normalized(rule.rate_limits) != wanted {
+                return reject(
+                    400,
+                    format!(
+                        "rule {} belongs to share {}; change its speed limits on the share",
+                        rule.name, grant.name
+                    ),
+                );
+            }
+        }
+    }
     rules.retain(|r| {
         !(r.id.starts_with(fed::RULE_PREFIX) && accounts.contains(r.owner_id.as_str()))
     });
@@ -170,7 +194,15 @@ fn republish(tx: &Transaction<'_>, clocks: &mut leases::LeaseClocks, node: &str)
         [node],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let current: NodeConfig = serde_json::from_str(&json)?;
+    let mut current: NodeConfig = serde_json::from_str(&json)?;
+    // The shares' rules are rendered again from the shares as they are now.
+    let accounts: HashSet<String> = all::<Grant>(tx, "grant")?
+        .into_iter()
+        .map(|g| g.user_id)
+        .collect();
+    current
+        .rules
+        .retain(|r| !(r.id.starts_with(fed::RULE_PREFIX) && accounts.contains(&r.owner_id)));
     let actor = Actor {
         id: "federation".into(),
         tenant_id: tenant,
@@ -183,6 +215,7 @@ fn republish(tx: &Transaction<'_>, clocks: &mut leases::LeaseClocks, node: &str)
             expected_revision: current.revision,
             rules: current.rules,
             rate_bytes_per_sec: None,
+            rate_limits: None,
         }],
     };
     Ok(topology::publish_in(tx, clocks, &actor, batch)?.configs[0].revision)
@@ -237,6 +270,8 @@ fn shared(conn: &Connection, grant: &Grant, panel: &str) -> Result<Shared> {
         max_rules: grant.max_rules,
         kinds: grant.kinds.clone(),
         rate_bytes_per_sec: grant.rate_bytes_per_sec,
+        upload_bytes_per_sec: grant.upload_bytes_per_sec,
+        download_bytes_per_sec: grant.download_bytes_per_sec,
         quota_bytes: grant.quota_bytes,
         quota_used_bytes: quota_used(conn, grant)?,
         expires_at_ms: grant.expires_at_ms,
@@ -340,6 +375,23 @@ fn set_rate(tx: &Transaction<'_>, user: &str, rate: Option<u64>) -> Result<()> {
         None => tx.execute("DELETE FROM metadata WHERE key=?1", [key])?,
     };
     Ok(())
+}
+/// The share account's limits across the share's rules. Upload and
+/// download limits need the share's server to enforce them (409).
+fn set_rates(tx: &Transaction<'_>, node: &str, user: &str, input: &GrantInput) -> Result<()> {
+    if (input.upload_bytes_per_sec.is_some() || input.download_bytes_per_sec.is_some())
+        && let Some(reason) = rate_limits::unsupported(tx, node)?
+    {
+        return reject(409, reason);
+    }
+    set_rate(tx, user, input.rate_bytes_per_sec)?;
+    user_rates::write_limit(tx, RateDirection::Upload, user, input.upload_bytes_per_sec)?;
+    user_rates::write_limit(
+        tx,
+        RateDirection::Download,
+        user,
+        input.download_bytes_per_sec,
+    )
 }
 fn matches(stored: &str, secret: &str) -> bool {
     !stored.is_empty() && bool::from(stored.as_bytes().ct_eq(token_hash(secret).as_bytes()))
@@ -449,7 +501,7 @@ impl Store {
             "INSERT INTO users(id,tenant_id,username,password_hash,role,disabled) VALUES(?1,?2,?3,?4,'viewer',1)",
             params![user, tenant, format!("share-{}", &id[..8]), hash],
         )?;
-        set_rate(&tx, &user, input.rate_bytes_per_sec)?;
+        set_rates(&tx, &node, &user, &input)?;
         let budget_id = match input.quota_bytes {
             Some(quota) => Some(
                 budgets::insert_budget(
@@ -480,6 +532,8 @@ impl Store {
             max_rules: input.max_rules,
             kinds: input.kinds.clone(),
             rate_bytes_per_sec: input.rate_bytes_per_sec,
+            upload_bytes_per_sec: input.upload_bytes_per_sec,
+            download_bytes_per_sec: input.download_bytes_per_sec,
             quota_bytes: input.quota_bytes,
             expires_at_ms: input.expires_at_ms,
             allow_sources: fed::sources(&input),
@@ -575,7 +629,7 @@ impl Store {
                 );
             }
         }
-        set_rate(&tx, &grant.user_id, input.rate_bytes_per_sec)?;
+        set_rates(&tx, &grant.node_id, &grant.user_id, &input)?;
         grant.name = input.name.trim().into();
         grant.public_host = public_host;
         grant.listen_ip = ip;
@@ -584,6 +638,8 @@ impl Store {
         grant.max_rules = input.max_rules;
         grant.kinds = input.kinds.clone();
         grant.rate_bytes_per_sec = input.rate_bytes_per_sec;
+        grant.upload_bytes_per_sec = input.upload_bytes_per_sec;
+        grant.download_bytes_per_sec = input.download_bytes_per_sec;
         grant.quota_bytes = input.quota_bytes;
         grant.expires_at_ms = input.expires_at_ms;
         grant.allow_sources = fed::sources(&input);

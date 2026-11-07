@@ -68,6 +68,7 @@ fn batch(node: &str, revision: u64, rules: Vec<Rule>) -> ConfigBatch {
             expected_revision: revision,
             rules,
             rate_bytes_per_sec: None,
+            rate_limits: None,
         }],
     }
 }

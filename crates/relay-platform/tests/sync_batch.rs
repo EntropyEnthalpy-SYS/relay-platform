@@ -338,6 +338,7 @@ fn only_revoked_unreferenced_nodes_are_deleted_and_the_deletion_replays() {
                         expected_revision: 0,
                         rules: vec![r.clone()],
                         rate_bytes_per_sec: None,
+                        rate_limits: None,
                     })
                     .collect(),
             },

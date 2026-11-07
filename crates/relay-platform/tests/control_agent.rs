@@ -2706,6 +2706,7 @@ fn topology_batch(configs: &[NodeConfig]) -> relay_platform::topology::ConfigBat
                 expected_revision: c.revision,
                 rules: c.rules.clone(),
                 rate_bytes_per_sec: None,
+                rate_limits: None,
             })
             .collect(),
     }
@@ -2840,6 +2841,7 @@ async fn three_agent_topology(secure: bool) {
             revision: 0,
             rules: vec![r],
             rate_bytes_per_sec: None,
+            rate_limits: None,
         });
     }
     topology_link(&mut configs, &[0, 1, 2], echo.address, secure);

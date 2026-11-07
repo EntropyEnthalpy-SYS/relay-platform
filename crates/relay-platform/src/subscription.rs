@@ -1005,6 +1005,7 @@ mod tests {
             quota_bytes: None,
             expires_at_ms: None,
             rate_bytes_per_sec: None,
+            rate_limits: None,
             meter_epoch: "epoch".into(),
             allow_sources: vec![],
             allow_destinations: vec![],

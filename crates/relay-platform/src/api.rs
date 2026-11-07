@@ -989,6 +989,9 @@ struct Publish {
     rules: Vec<Rule>,
     #[serde(default, deserialize_with = "crate::model::explicit")]
     rate_bytes_per_sec: Option<Option<u64>>,
+    /// Omitted keeps the node's upload, download and burst limits.
+    #[serde(default, deserialize_with = "crate::model::explicit")]
+    rate_limits: Option<Option<RateLimits>>,
 }
 async fn publish(
     State(state): State<AppState>,
@@ -998,12 +1001,13 @@ async fn publish(
 ) -> ApiResult<NodeConfig> {
     Ok(Json(
         database(state.store, move |db| {
-            db.set_config_with_rate(
+            db.set_config_with_limits(
                 &actor,
                 &node,
                 input.expected_revision,
                 input.rules,
                 input.rate_bytes_per_sec,
+                input.rate_limits,
             )
         })
         .await?,
@@ -1420,12 +1424,13 @@ async fn rollback(
     Ok(Json(
         database(state.store, move |db| {
             let previous = db.config(&actor, &node, Some(input.revision))?;
-            db.set_config_with_rate(
+            db.set_config_with_limits(
                 &actor,
                 &node,
                 input.expected_revision,
                 previous.rules,
                 Some(previous.rate_bytes_per_sec),
+                Some(previous.rate_limits),
             )
         })
         .await?,
@@ -1603,6 +1608,11 @@ async fn disable_second_factor(
 #[serde(deny_unknown_fields)]
 struct UserRate {
     rate_bytes_per_sec: Option<u64>,
+    /// Omitted keeps the user's upload limit; `null` clears it.
+    #[serde(default, deserialize_with = "crate::model::explicit")]
+    upload_bytes_per_sec: Option<Option<u64>>,
+    #[serde(default, deserialize_with = "crate::model::explicit")]
+    download_bytes_per_sec: Option<Option<u64>>,
 }
 async fn set_user_rate(
     State(state): State<AppState>,
@@ -1612,7 +1622,15 @@ async fn set_user_rate(
 ) -> ApiResult<crate::store::UserRateView> {
     Ok(Json(
         database(state.store, move |db| {
-            db.set_user_rate(&actor, &user, input.rate_bytes_per_sec)?;
+            db.set_user_rates(
+                &actor,
+                &user,
+                crate::store::UserRateChange {
+                    rate_bytes_per_sec: input.rate_bytes_per_sec,
+                    upload_bytes_per_sec: input.upload_bytes_per_sec,
+                    download_bytes_per_sec: input.download_bytes_per_sec,
+                },
+            )?;
             db.user_rate(&actor, &user)
         })
         .await?,

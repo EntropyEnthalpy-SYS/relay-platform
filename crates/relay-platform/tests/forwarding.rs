@@ -763,8 +763,9 @@ async fn a_user_share_drops_to_its_fallback_when_the_lease_runs_out() {
     let share = UserShare {
         tenant_id: "default".into(),
         owner_id: "admin".into(),
-        rate_bytes_per_sec: 1 << 20,
-        fallback_bytes_per_sec: 64 << 10,
+        rate_bytes_per_sec: Some(1 << 20),
+        fallback_bytes_per_sec: Some(64 << 10),
+        ..Default::default()
     };
     let enforced = |engine: &Engine| {
         let stats = engine.stats();
@@ -797,7 +798,7 @@ async fn a_user_share_drops_to_its_fallback_when_the_lease_runs_out() {
     let address = hop.listen;
     engine.apply(config(hop)).await.unwrap();
     let tight = UserShare {
-        rate_bytes_per_sec: 64 << 10,
+        rate_bytes_per_sec: Some(64 << 10),
         ..share
     };
     engine.set_user_shares(&[tight], Instant::now());

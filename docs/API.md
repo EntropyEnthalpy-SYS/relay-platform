@@ -14,7 +14,7 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | PUT | `/nodes/{id}/profile` | `{expected_revision,name,settings}`；更新完整资料，独立于转发修订 |
 | POST | `/nodes/profiles` | `{updates:[{node_id,update}]}`；原子保存 1..100 个节点资料，逐节点返回修订 |
 | GET | `/nodes/{id}/config` | 当前期望配置，包含修订号和规则 |
-| PUT | `/nodes/{id}/config` | `{expected_revision,rules,rate_bytes_per_sec?}`；并发冲突返回 409，成功生成下一版本。省略 `rate_bytes_per_sec` 保留节点总限速，`null` 取消 |
+| PUT | `/nodes/{id}/config` | `{expected_revision,rules,rate_bytes_per_sec?,rate_limits?}`；并发冲突返回 409，成功生成下一版本。省略 `rate_bytes_per_sec` 保留节点总限速，`null` 取消；`rate_limits`（上传 / 下载 / 突发限速）同样省略保留、`null` 取消，见[分别限制上传 / 下载与突发限速](#upload-download-and-burst-speed-limits) |
 | GET | `/nodes/{id}/credential` | 可见节点的身份阶段/版本、轮换/撤销/替换回执与受保护配额周期；不返回秘密或哈希 |
 | POST | `/nodes/{id}/credential/rotate` | `{expected_revision}` 请求 Agent 自行生成并轮换凭据；权限与版本检查 |
 | POST | `/nodes/{id}/credential/revoke` | `{operation_id,expected_revision,reason}`；退役身份、保留旧窗口与未知预留 |
@@ -26,11 +26,11 @@ API 尚处开发阶段；以 `model.rs`、`lease.rs` 等公开模型的严格字
 | POST | `/nodes/{id}/drain` | `{draining}`；把所有 `via` 指向该节点的上游目标设为（或取消）维护排空，在一个批次中发布有变化的上游节点；没有上游指向它时返回 409，已是目标状态时返回空结果 |
 | GET | `/topology` | 当前可见节点、配置、声明边、根规则及应用状态 |
 | POST | `/configurations/allocate-endpoints` | `{hops:[{node_id,listen?,advertise?}]}`；只读分配建议端点，返回 `endpoints,configs`；需写权限及 `nodes:write` token scope |
-| POST | `/configurations/preview` | `{updates:[{node_id,expected_revision,rules}]}`；只读校验并返回候选配置及完整差异，需要写权限 |
+| POST | `/configurations/preview` | `{updates:[{node_id,expected_revision,rules,rate_bytes_per_sec?,rate_limits?}]}`；只读校验并返回候选配置及完整差异，需要写权限；两个限速字段与单节点发布相同 |
 | POST | `/configurations/publish` | 同预览请求；1..64 个节点的期望配置在同一事务中提交 |
 | GET / POST | `/users` | 列出用户；`{username,password,role,tenant_id?}` 创建用户 |
 | POST | `/users/{id}/revoke-sessions` | 撤销该用户全部现有 Web 会话 |
-| GET / PUT | `/users/{id}/rate` | 跨节点用户总限速。PUT `{rate_bytes_per_sec}`（1024..=2^40，`null` 取消）仅系统管理员；GET 按租户可见，返回总速率和各节点当前份额、实测速率、是否用满、距上次同步毫秒数 |
+| GET / PUT | `/users/{id}/rate` | 跨节点用户总限速。PUT `{rate_bytes_per_sec, upload_bytes_per_sec?, download_bytes_per_sec?}`（每项 1024..=2^40）仅系统管理员：`rate_bytes_per_sec` 省略或 `null` 取消合计限速（与以前相同），上传 / 下载省略保留、`null` 取消；新增上传或下载限速而承载该用户启用规则的服务器有 Agent 不支持时 409。GET 按租户可见，返回 `{user_id, rate_bytes_per_sec, nodes, upload_bytes_per_sec, upload_nodes, download_bytes_per_sec, download_nodes}`：各方向的总速率和各节点当前份额、实测速率、是否用满、距上次同步毫秒数。`GET /users` 的每个用户同样带 `upload_bytes_per_sec`、`download_bytes_per_sec` |
 | POST | `/tenants` | `{name}`；仅系统管理员 |
 | GET | `/usage` | 最近 2,000 条已上报的规则/周期累计记录，不是全库聚合接口 |
 | GET / POST | `/budgets` | 返回 `{allocation_paused,budgets}`；创建 `{scope,scope_id,name,limit_bytes,quantum_bytes}` |
@@ -665,7 +665,7 @@ Administration routes need a system administrator session (API tokens are refuse
 | Method | Path | Body / result |
 | --- | --- | --- |
 | GET | `/federation` | `{enabled, panel_id, grants:[share + {node_name, statement, quota_used_bytes?, applied, ack_mismatch}], remotes:[received share]}`; secrets and secret hashes are never included |
-| POST | `/federation/grants` | `{name, node_id, public_host, listen_ip?, port_start, port_end, max_rules, kinds:["forward"\|"shadowsocks"], rate_bytes_per_sec?, quota_bytes?, expires_at_ms?, allow_sources, allow_destinations?, deny_destinations?, allow_private_destinations?}`; 409 when the ports overlap another rule or share on the node |
+| POST | `/federation/grants` | `{name, node_id, public_host, listen_ip?, port_start, port_end, max_rules, kinds:["forward"\|"shadowsocks"], rate_bytes_per_sec?, upload_bytes_per_sec?, download_bytes_per_sec?, quota_bytes?, expires_at_ms?, allow_sources, allow_destinations?, deny_destinations?, allow_private_destinations?}`; 409 when the ports overlap another rule or share on the node, or with `upload_bytes_per_sec` / `download_bytes_per_sec` (each 1024..=2^40, like `rate_bytes_per_sec`) when the node's agent does not support separate limits |
 | PUT / DELETE | `/federation/grants/{id}` | Same body (`node_id` cannot change; `quota_bytes` can change but not be added or removed); DELETE only after revoke |
 | POST | `/federation/grants/{id}/invite` | `{owner_url}` (this panel's origin) → `{code, expires_at_ms}`, shown once; 409 once redeemed |
 | POST | `/federation/grants/{id}/pause`, `/resume`, `/revoke` | The share; each republishes the node when the share has rules |
@@ -679,7 +679,7 @@ Public routes the receiving panel calls on the owner (`Authorization: Bearer <64
 | Method | Path | Body / result |
 | --- | --- | --- |
 | POST | `/federation/peer/redeem` | `{invite_id, invite_secret, panel_id}` → `{secret, shared}`; 401 for an unknown, wrong or expired invite, 409 once used |
-| GET | `/federation/peer/grant` | `shared`: `{grant_id, owner_panel_id, name, public_host, port_start, port_end, max_rules, kinds, rate_bytes_per_sec?, quota_bytes?, quota_used_bytes?, expires_at_ms?, allow_sources, state, revision, rules:[{id, name, kind, protocol, port, targets?, password?}], applied, statement:{as_of_ms, upload_bytes, download_bytes}}` |
+| GET | `/federation/peer/grant` | `shared`: `{grant_id, owner_panel_id, name, public_host, port_start, port_end, max_rules, kinds, rate_bytes_per_sec?, upload_bytes_per_sec?, download_bytes_per_sec?, quota_bytes?, quota_used_bytes?, expires_at_ms?, allow_sources, state, revision, rules:[{id, name, kind, protocol, port, targets?, password?}], applied, statement:{as_of_ms, upload_bytes, download_bytes}}` |
 | PUT | `/federation/peer/grant/rules` | `{expected_revision, rules}` → `shared`; 403 when a request is wider than the share, 400 when malformed, 409 when paused, expired or the revision is stale |
 | POST | `/federation/peer/grant/ack` | `statement` the receiver saw → `{ok:true}` |
 
@@ -726,7 +726,7 @@ Each layer's `balance` is how the previous hop chooses among that layer's server
 
 ## Reverse tunnels
 
-A public server accepts users on a public port; a private server behind NAT keeps one outbound TLS tunnel connection to it and connects each user to its target (`host:port` as the private server sees it). See [REVERSE_TUNNELS.md](REVERSE_TUNNELS.md). Records live in metadata (`reverse_tunnel:<id>`; the per-tunnel token in `reverse_tunnel_token:<id>`, never returned), so the schema is unchanged. The public end is an ordinary rule `rt-…` on the public server with `reverse_tunnel: <id>`, metered and limited like any rule; publishing may change only its limits (`allow_sources`, `deny_sources`, `rate_bytes_per_sec`, `max_connections`, `udp_max_sessions`, `quota_bytes`, `expires_at_ms`, `idle_timeout_secs`, `connect_timeout_ms`, `budget_ids`), other changes to it are 400, and any other rule on a port a tunnel holds is 409. Reads need a session or a token with `read`; writes need a writable role, write permission on both servers and, for tokens, `nodes:write`. Both servers must be different and in one tenant; other tenants get 404. Audit actions are `reverse_tunnel.create|update|delete`, without the token.
+A public server accepts users on a public port; a private server behind NAT keeps one outbound TLS tunnel connection to it and connects each user to its target (`host:port` as the private server sees it). See [REVERSE_TUNNELS.md](REVERSE_TUNNELS.md). Records live in metadata (`reverse_tunnel:<id>`; the per-tunnel token in `reverse_tunnel_token:<id>`, never returned), so the schema is unchanged. The public end is an ordinary rule `rt-…` on the public server with `reverse_tunnel: <id>`, metered and limited like any rule; publishing may change only its limits (`allow_sources`, `deny_sources`, `rate_bytes_per_sec`, `rate_limits`, `max_connections`, `udp_max_sessions`, `quota_bytes`, `expires_at_ms`, `idle_timeout_secs`, `connect_timeout_ms`, `budget_ids`), other changes to it are 400, and any other rule on a port a tunnel holds is 409. Reads need a session or a token with `read`; writes need a writable role, write permission on both servers and, for tokens, `nodes:write`. Both servers must be different and in one tenant; other tenants get 404. Audit actions are `reverse_tunnel.create|update|delete`, without the token.
 
 | Method | Path | Body / result |
 | --- | --- | --- |
@@ -738,3 +738,33 @@ A public server accepts users on a public port; a private server behind NAT keep
 Errors: 400 invalid input (name 1–120 bytes, the same server twice, servers of two tenants, port 0 or equal public and tunnel ports, a target that is not `host:port`, a multicast listen IP, unknown fields or a body that does not parse), 403 permission, 404 unknown or invisible, 409 a taken port (a rule, its port range or gateway port, a cross-panel share, another tunnel's public port, or another tunnel using the public port as its tunnel port) or a paused or expired server. Creating a tunnel never waits for the agents: until both have reported the capability and the public server its key fingerprint, the tunnel is `waiting` with the reason, and nothing is sent to either agent. Deleting a server is not blocked; its tunnels show it as missing (`public_missing` / `private_missing`).
 
 Agents receive `SyncResponse.reverse_tunnels` and return `EngineStats.reverse_tunnel` (only to a controller that sent the field) as described in [REVERSE_TUNNELS.md](REVERSE_TUNNELS.md#同步协议). `GET /agent/watch` also returns early with `reverse_tunnels_changed: true` once after a node's tunnels changed; newer agents sync at once, older agents ignore the field.
+
+## Upload, download and burst speed limits
+
+Separate upload and download limits at the rule, server and user-total levels, and burst limits at the rule and server levels; see [RATE_LIMITS.md](RATE_LIMITS.md). Upload is what a hop's client sends toward its target, download what comes back (the same for UDP). Every limit that is set applies at once, and `rate_bytes_per_sec` keeps its meaning (upload and download combined). New fields are left out while unset, so existing configurations, backups and API calls are unchanged.
+
+**`rate_limits`** on a rule (`Rule.rate_limits`) and on a node configuration (`NodeConfig.rate_limits`, `PUT /nodes/{id}/config`, `/configurations/preview|publish` updates):
+
+| Field | Meaning |
+| --- | --- |
+| `upload_bytes_per_sec?` | Upload limit, 1..=10^12 bytes/second |
+| `download_bytes_per_sec?` | Download limit, 1..=10^12 bytes/second |
+| `burst?` | `{bytes_per_sec, secs}`: burst of the combined `rate_bytes_per_sec` |
+| `upload_burst?`, `download_burst?` | Burst of the upload or download limit |
+
+A burst needs its limit S, a burst rate B with S < B ≤ 10^12 bytes/second and a burst time W of 1..=86400 seconds; otherwise 400. Its credit holds (B − S) × W bytes and starts full; sending above S spends it at (rate − S), sending below S earns it back at (S − rate) up to that capacity, and without credit the limit is S. An empty object is the same as none and is left out. On a publish, an omitted node `rate_limits` keeps the node's limits and `null` clears them; rules carry theirs in the rule. Rollback restores both.
+
+**User totals:** `PUT /users/{id}/rate` takes `upload_bytes_per_sec` and `download_bytes_per_sec` (1024..=2^40; omitted keeps, `null` clears) next to `rate_bytes_per_sec`; each total is split between the user's servers like the combined one, so the shares in force per direction never add up to more than its total once every server has synced. There is no user-level burst. `GET /users/{id}/rate` returns `upload_nodes` and `download_nodes` next to `nodes`.
+
+**Cross-panel shares:** `upload_bytes_per_sec` and `download_bytes_per_sec` on a share work like its `rate_bytes_per_sec`: they limit each of the share's rules and the share's account across them, and the receiving panel sees them in `shared`. A receiving panel's publish that changes a shared rule's limits is 400, as for its other fields.
+
+**Agents and old agents.** Every sync response carries `rate_limits: true`; an agent of this release then returns `EngineStats.rate_limits: {bursts?:[{rule_id?, direction: combined|upload|download, credit_bytes, capacity_bytes}]}` (`rule_id` left out for the node's own limits), and the controller records `rate_limit_node:<node id>` the first time. `GET /nodes` shows it as `rate_limit_support` and the burst credit in `stats.rate_limits`. User shares (`SyncResponse.user_rates[]`) keep their format for a combined total and add `upload` / `download` (`{rate_bytes_per_sec, fallback_bytes_per_sec}`) only for a node that reported support; agent reports (`EngineStats.user_rates[]`) add `upload` / `download` (`{bytes, waited_ms, enforced_bytes_per_sec}`) only for those shares. Older agents ignore the unknown sync field, never report support, and reject a configuration or share with the new fields, so the controller refuses instead:
+
+| Status | When | `error` |
+| --- | --- | --- |
+| 409 | A publish (any route: single, batch, rollback, template, shared rule, chain, reverse tunnel, cross-panel share) gives a server whose agent has not reported support a rule or node `rate_limits` | `the agent on server <name> is too old for separate upload/download or burst speed limits; upgrade it first`, or for a server that never connected `server <name> has not connected to the panel yet; separate upload/download or burst speed limits need its agent to report in first` |
+| 409 | A publish gives such a server an enabled rule of a user with an upload or download total | `user <username> has separate upload/download speed limits: <one of the reasons above>` |
+| 409 | `PUT /users/{id}/rate` adds an upload or download total while a server carrying the user's enabled rules lacks support; a share with upload or download bandwidth on such a server | One of the server reasons above |
+| 400 | Invalid limits or bursts | The validation message |
+
+The panel shows these reasons in its language. Metering, quotas, shared budgets and the usage ledger are unchanged.

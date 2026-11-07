@@ -24,6 +24,7 @@ fn batch(configs: &[NodeConfig]) -> ConfigBatch {
                 expected_revision: c.revision,
                 rules: c.rules.clone(),
                 rate_bytes_per_sec: None,
+                rate_limits: None,
             })
             .collect(),
     }
@@ -56,6 +57,7 @@ impl Fixture {
                 revision: 0,
                 rules: vec![r],
                 rate_bytes_per_sec: None,
+                rate_limits: None,
             });
             tokens.push(token);
         }
@@ -728,6 +730,7 @@ fn tenant_read_isolation_and_write_permissions_include_batch_and_topology() {
             expected_revision: 0,
             rules: vec![other],
             rate_bytes_per_sec: None,
+            rate_limits: None,
         }],
     };
     assert_eq!(rejection(f.store.publish_configs(&f.admin, input)), 400);

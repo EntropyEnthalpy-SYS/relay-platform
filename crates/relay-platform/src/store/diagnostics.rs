@@ -315,7 +315,7 @@ pub fn findings(
 /// A rule without its secrets: plain settings, target addresses and the
 /// names of the features it uses.
 fn rule_summary(rule: &Rule, names: &HashMap<String, String>) -> Value {
-    const PLAIN: [&str; 14] = [
+    const PLAIN: [&str; 15] = [
         "id",
         "name",
         "enabled",
@@ -330,6 +330,7 @@ fn rule_summary(rule: &Rule, names: &HashMap<String, String>) -> Value {
         "udp_max_sessions",
         "quota_bytes",
         "rate_bytes_per_sec",
+        "rate_limits",
     ];
     const OMIT: [&str; 6] = [
         "tenant_id",

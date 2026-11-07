@@ -387,6 +387,9 @@ pub struct Rule {
     pub expires_at_ms: Option<i64>,
     /// Combined application bytes/second, shared by every session in this rule.
     pub rate_bytes_per_sec: Option<u64>,
+    /// Upload, download and burst limits next to `rate_bytes_per_sec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimits>,
     /// A new explicit billing period gets a new identifier. Never inferred from wall time.
     pub meter_epoch: String,
     #[serde(default)]
@@ -786,9 +789,12 @@ impl Rule {
         );
         ensure!(
             self.rate_bytes_per_sec
-                .is_none_or(|q| (1..=1_000_000_000_000).contains(&q)),
+                .is_none_or(|q| (1..=MAX_RATE).contains(&q)),
             "invalid byte rate"
         );
+        if let Some(limits) = &self.rate_limits {
+            limits.validate(self.rate_bytes_per_sec)?;
+        }
         ensure!(
             self.allow_sources.len() <= 256 && self.deny_sources.len() <= 256,
             "too many source networks"
@@ -864,6 +870,124 @@ pub struct NodeConfig {
     /// Omitted when unset so agents older than this field accept the config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_bytes_per_sec: Option<u64>,
+    /// Upload, download and burst limits across every rule on this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimits>,
+}
+
+/// Largest byte rate any speed limit takes.
+pub const MAX_RATE: u64 = 1_000_000_000_000;
+/// Longest burst time.
+pub const MAX_BURST_SECS: u32 = 86_400;
+
+/// A faster rate B that a speed limit with sustained rate S allows for a
+/// while. Burst credit holds (B − S) × W bytes and starts full: sending
+/// above S spends it at (rate − S), sending below S earns it back at
+/// (S − rate) up to that capacity, and without credit the limit is S.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Burst {
+    /// B, above the sustained rate.
+    pub bytes_per_sec: u64,
+    /// W: how long a full credit lasts at B.
+    pub secs: u32,
+}
+impl Burst {
+    /// (B − S) × W bytes for sustained rate `sustained`.
+    pub fn capacity(&self, sustained: u64) -> u64 {
+        self.bytes_per_sec
+            .saturating_sub(sustained)
+            .saturating_mul(u64::from(self.secs))
+    }
+}
+
+/// Which bytes a speed limit counts. Upload is what a hop's client sends
+/// toward its target, download what comes back from the target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateDirection {
+    Combined,
+    Upload,
+    Download,
+}
+
+/// Speed limits next to a combined `rate_bytes_per_sec`: upload-only and
+/// download-only limits, and a burst on any limit that is set. Every limit
+/// that is set applies at once. The controller leaves the object out when
+/// it is empty and sends it only to agents that report support, because
+/// older agents reject unknown fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_bytes_per_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_bytes_per_sec: Option<u64>,
+    /// Burst of the combined `rate_bytes_per_sec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<Burst>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_burst: Option<Burst>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_burst: Option<Burst>,
+}
+impl RateLimits {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+    /// `None` for an empty set, so it is left out of the configuration.
+    pub fn normalized(limits: Option<Self>) -> Option<Self> {
+        limits.filter(|l| !l.is_empty())
+    }
+    /// The three limits with `combined` as the combined rate: sustained
+    /// rate and burst, by direction.
+    pub fn lanes(
+        limits: Option<&Self>,
+        combined: Option<u64>,
+    ) -> [(RateDirection, Option<u64>, Option<Burst>); 3] {
+        let l = limits.copied().unwrap_or_default();
+        [
+            (RateDirection::Combined, combined, l.burst),
+            (
+                RateDirection::Upload,
+                l.upload_bytes_per_sec,
+                l.upload_burst,
+            ),
+            (
+                RateDirection::Download,
+                l.download_bytes_per_sec,
+                l.download_burst,
+            ),
+        ]
+    }
+    /// Checks the limits next to the combined rate they extend.
+    pub fn validate(&self, combined: Option<u64>) -> Result<()> {
+        for (direction, sustained, burst) in Self::lanes(Some(self), combined) {
+            let name = match direction {
+                RateDirection::Combined => "combined",
+                RateDirection::Upload => "upload",
+                RateDirection::Download => "download",
+            };
+            ensure!(
+                sustained.is_none_or(|r| (1..=MAX_RATE).contains(&r)),
+                "invalid {name} byte rate"
+            );
+            if let Some(burst) = burst {
+                let Some(sustained) = sustained else {
+                    bail!("a {name} burst needs a {name} speed limit");
+                };
+                ensure!(
+                    burst.bytes_per_sec > sustained && burst.bytes_per_sec <= MAX_RATE,
+                    "the {name} burst rate must be above its speed limit and at most {MAX_RATE} bytes/second"
+                );
+                ensure!(
+                    (1..=MAX_BURST_SECS).contains(&burst.secs),
+                    "burst time must be 1..{MAX_BURST_SECS} seconds"
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// For publish requests: a missing field is `None` (keep), `null` is
@@ -887,9 +1011,14 @@ impl NodeConfig {
         ensure!(self.rules.len() <= MAX_RULES, "too many rules");
         ensure!(
             self.rate_bytes_per_sec
-                .is_none_or(|q| (1..=1_000_000_000_000).contains(&q)),
+                .is_none_or(|q| (1..=MAX_RATE).contains(&q)),
             "invalid node byte rate"
         );
+        if let Some(limits) = &self.rate_limits {
+            limits
+                .validate(self.rate_bytes_per_sec)
+                .map_err(|error| anyhow::anyhow!("node speed limit: {error}"))?;
+        }
         let multipath_payload: u64 = self
             .rules
             .iter()
@@ -994,6 +1123,11 @@ pub struct EngineStats {
     /// Sent only after the controller sent [`SyncResponse::reverse_tunnels`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse_tunnel: Option<crate::reverse_tunnel::Report>,
+    /// Sent only after the controller sent [`SyncResponse::rate_limits`];
+    /// that it is sent tells the controller this agent enforces
+    /// [`RateLimits`] and directional user shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimitReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1107,28 +1241,119 @@ impl ConnectionCounts {
         *self = Self::from_fields(std::array::from_fn(|i| a[i].saturating_add(b[i])));
     }
 }
+/// Burst credit of the rule and node limits with a burst.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bursts: Vec<BurstReport>,
+}
+impl RateLimitReport {
+    /// A node has at most `MAX_RULES` rules and itself, with three limits each.
+    pub fn within_limits(&self) -> bool {
+        self.bursts.len() <= (MAX_RULES + 1) * 3
+            && self.bursts.iter().all(|b| b.rule_id.len() <= 80)
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct BurstReport {
+    /// The rule; empty for the node's own limits.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule_id: String,
+    pub direction: RateDirection,
+    /// Credit left now; below `capacity_bytes` while a burst is in use or
+    /// has not been earned back.
+    pub credit_bytes: u64,
+    pub capacity_bytes: u64,
+}
 /// An agent's counters for one user under a cross-node speed limit.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct UserRateReport {
     pub tenant_id: String,
     pub owner_id: String,
-    /// Application bytes of this user's rules since the agent started.
+    /// Application bytes of this user's rules since the agent started,
+    /// counted while a combined share is held.
     pub bytes: u64,
-    /// Time sends waited for this user's share since the agent started.
+    /// Time sends waited for this user's combined share since the agent started.
     pub waited_ms: u64,
-    /// The bytes/second in force now.
+    /// The combined bytes/second in force now.
+    pub enforced_bytes_per_sec: Option<u64>,
+    /// The upload share's counters, while one is held. Only controllers
+    /// that send directional shares get them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<RateLane>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<RateLane>,
+}
+impl UserRateReport {
+    pub fn lane(&self, direction: RateDirection) -> Option<RateLane> {
+        match direction {
+            RateDirection::Combined => Some(RateLane {
+                bytes: self.bytes,
+                waited_ms: self.waited_ms,
+                enforced_bytes_per_sec: self.enforced_bytes_per_sec,
+            }),
+            RateDirection::Upload => self.upload,
+            RateDirection::Download => self.download,
+        }
+    }
+}
+/// One share's counters in a [`UserRateReport`].
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLane {
+    pub bytes: u64,
+    pub waited_ms: u64,
     pub enforced_bytes_per_sec: Option<u64>,
 }
 /// This node's part of a user's total speed limit, kept for
 /// [`crate::user_rate::LEASE`]; afterwards at most `fallback_bytes_per_sec`.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+/// The combined part is left out only for a user with upload or download
+/// limits alone, which the controller sends only to agents that report
+/// support; so are `upload` and `download`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct UserShare {
     pub tenant_id: String,
     pub owner_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_bytes_per_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_bytes_per_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<SharePart>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download: Option<SharePart>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SharePart {
     pub rate_bytes_per_sec: u64,
     pub fallback_bytes_per_sec: u64,
+}
+impl UserShare {
+    pub fn part(&self, direction: RateDirection) -> Option<SharePart> {
+        match direction {
+            RateDirection::Combined => self.rate_bytes_per_sec.map(|rate| SharePart {
+                rate_bytes_per_sec: rate,
+                fallback_bytes_per_sec: self.fallback_bytes_per_sec.unwrap_or(rate),
+            }),
+            RateDirection::Upload => self.upload,
+            RateDirection::Download => self.download,
+        }
+    }
+    pub fn set_part(&mut self, direction: RateDirection, part: Option<SharePart>) {
+        match direction {
+            RateDirection::Combined => {
+                self.rate_bytes_per_sec = part.map(|p| p.rate_bytes_per_sec);
+                self.fallback_bytes_per_sec = part.map(|p| p.fallback_bytes_per_sec);
+            }
+            RateDirection::Upload => self.upload = part,
+            RateDirection::Download => self.download = part,
+        }
+    }
 }
 fn is_zero_u64(value: &u64) -> bool {
     *value == 0
@@ -1198,6 +1423,10 @@ pub struct SyncResponse {
     /// `None` from older controllers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverse_tunnels: Option<crate::reverse_tunnel::Desired>,
+    /// The controller takes [`EngineStats::rate_limits`]; false from
+    /// controllers older than upload, download and burst limits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rate_limits: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

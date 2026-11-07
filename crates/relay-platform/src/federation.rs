@@ -9,7 +9,7 @@
 //! with a rate, a budget, an expiry and source and destination lists. The
 //! receiver pulls and the owner never calls it, so a receiving panel can sit
 //! behind NAT.
-use crate::model::{Protocol, Rule, identifier, validate_target};
+use crate::model::{Protocol, RateLimits, Rule, identifier, validate_target};
 use anyhow::{Context, Result, anyhow, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ipnet::IpNet;
@@ -71,6 +71,12 @@ pub struct Grant {
     pub kinds: Vec<Kind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_bytes_per_sec: Option<u64>,
+    /// Upload and download limits of every rule of the share, and of the
+    /// share's account across them, like `rate_bytes_per_sec`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_bytes_per_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_bytes_per_sec: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,6 +167,10 @@ pub struct GrantInput {
     #[serde(default)]
     pub rate_bytes_per_sec: Option<u64>,
     #[serde(default)]
+    pub upload_bytes_per_sec: Option<u64>,
+    #[serde(default)]
+    pub download_bytes_per_sec: Option<u64>,
+    #[serde(default)]
     pub quota_bytes: Option<u64>,
     #[serde(default)]
     pub expires_at_ms: Option<i64>,
@@ -217,6 +227,10 @@ pub struct Shared {
     pub kinds: Vec<Kind>,
     #[serde(default)]
     pub rate_bytes_per_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_bytes_per_sec: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_bytes_per_sec: Option<u64>,
     #[serde(default)]
     pub quota_bytes: Option<u64>,
     #[serde(default)]
@@ -400,6 +414,11 @@ pub fn render(grant: &Grant, rule: &SharedRule, tenant: &str) -> Rule {
         "enabled": grant.state == State::Active,
         "expires_at_ms": grant.expires_at_ms,
         "rate_bytes_per_sec": grant.rate_bytes_per_sec,
+        "rate_limits": RateLimits::normalized(Some(RateLimits {
+            upload_bytes_per_sec: grant.upload_bytes_per_sec,
+            download_bytes_per_sec: grant.download_bytes_per_sec,
+            ..Default::default()
+        })),
         "meter_epoch": format!("fed-{}", grant.id),
         "allow_sources": grant.allow_sources,
         "allow_destinations": grant.allow_destinations,
@@ -565,12 +584,18 @@ pub fn check_input(input: &GrantInput) -> Result<()> {
         &input.allow_destinations,
         &input.deny_destinations,
     )?;
-    ensure!(
-        input.rate_bytes_per_sec.is_none_or(|r| {
-            (crate::store::MIN_USER_RATE..=crate::store::MAX_USER_RATE).contains(&r)
-        }),
-        "the bandwidth must be at least 1 KiB/s"
-    );
+    for rate in [
+        input.rate_bytes_per_sec,
+        input.upload_bytes_per_sec,
+        input.download_bytes_per_sec,
+    ] {
+        ensure!(
+            rate.is_none_or(|r| {
+                (crate::store::MIN_USER_RATE..=crate::store::MAX_USER_RATE).contains(&r)
+            }),
+            "the bandwidth must be at least 1 KiB/s"
+        );
+    }
     ensure!(
         input.quota_bytes.is_none_or(|q| q >= 1 << 20),
         "the traffic limit must be at least 1 MiB"
@@ -769,6 +794,8 @@ mod tests {
             max_rules: 2,
             kinds: vec![Kind::Shadowsocks],
             rate_bytes_per_sec: Some(1 << 20),
+            upload_bytes_per_sec: None,
+            download_bytes_per_sec: None,
             quota_bytes: None,
             expires_at_ms: Some(1_900_000_000_000),
             allow_sources: vec!["198.51.100.0/24".parse().unwrap()],

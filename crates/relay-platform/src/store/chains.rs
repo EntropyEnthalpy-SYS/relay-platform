@@ -532,6 +532,7 @@ fn build(conn: &Connection, actor: &Actor, chain: &Chain, input: &BuildInput) ->
             expected_revision: config.revision,
             rules,
             rate_bytes_per_sec: None,
+            rate_limits: None,
         });
         hops.push(PlannedHop {
             layer,

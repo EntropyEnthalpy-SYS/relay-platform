@@ -30,6 +30,7 @@ mod federation;
 mod health;
 mod leases;
 mod node_profiles;
+mod rate_limits;
 mod recovery;
 mod reservations;
 mod reverse_tunnels;
@@ -49,7 +50,7 @@ pub use alert_config::{AlertBudget, AlertDnsRecord, AlertNode};
 pub use dns::{DnsRecordPatch, NewDnsRecord};
 pub use features::{FEATURES, FeatureState};
 pub use reservations::MeterFlush;
-pub use user_rates::{MAX_USER_RATE, MIN_USER_RATE, UserRateView};
+pub use user_rates::{MAX_USER_RATE, MIN_USER_RATE, UserRateChange, UserRateView};
 
 fn acknowledge_usage(tx: &Transaction<'_>, acks: &[UsageAck]) -> Result<()> {
     ensure!(acks.len() <= 1024, "too many usage acknowledgements");
@@ -169,6 +170,9 @@ pub struct Node {
     pub apply_error: Option<String>,
     pub enrolled: bool,
     pub stats: EngineStats,
+    /// The agent reported that it enforces upload, download and burst limits.
+    #[serde(default)]
+    pub rate_limit_support: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -560,6 +564,7 @@ impl Store {
             revision: 0,
             rules: vec![],
             rate_bytes_per_sec: None,
+            rate_limits: None,
         };
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
@@ -598,6 +603,7 @@ impl Store {
                 apply_error: None,
                 enrolled: false,
                 stats: EngineStats::default(),
+                rate_limit_support: false,
             },
             token,
         ))
@@ -609,7 +615,7 @@ impl Store {
     /// with a line on it, an endpoint group with it as a member and a chain
     /// use with a hop on it show it as missing.
     pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
-        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
+        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1,'rate_limit_node:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         require_node(&tx, actor, node, true)?;
@@ -764,6 +770,7 @@ impl Store {
                 apply_error: r.get(6)?,
                 enrolled: r.get(7)?,
                 stats: serde_json::from_str(&stats).unwrap_or_default(),
+                rate_limit_support: false,
             })
         })?;
         let mut nodes: Vec<Node> = rows.collect::<rusqlite::Result<_>>()?;
@@ -774,6 +781,7 @@ impl Store {
             node.lease = leases::status(&conn, &mut clocks, &node.id)?;
             node.profile = node_profiles::read(&conn, &node.id)?;
             node.lifecycle = node.profile.settings.lifecycle(now);
+            node.rate_limit_support = rate_limits::supported(&conn, &node.id)?;
         }
         Ok(nodes)
     }
