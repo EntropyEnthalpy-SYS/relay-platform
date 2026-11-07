@@ -2113,7 +2113,7 @@ function shareGateway(rule, nodeId) {
   body.append(grid, link, problem, qr, el('p', translate('用客户端扫描二维码或粘贴链接导入。链接包含客户端 UUID / 密码，不含 Reality 私钥；持有者即可使用本节点，请只发给使用者本人。证书模式须让客户端信任签发 CA。AnyTLS 没有通用链接格式，请使用订阅。'), 'fine'), actions);
   modal(msg`分享 ${rule.name}`, body);
 }
-const subscriptionFormats = localize({ sing_box: 'sing-box JSON（SS 与受管协议）', v2ray: 'V2Ray / Base64（ss:// 列表）', clash: 'mihomo / Clash Meta（YAML）', surge: 'Surge（完整配置 · 自动更新）', shadowrocket: 'Shadowrocket（ss:// 列表）' });
+const subscriptionFormats = localize({ sing_box: 'sing-box JSON（SS 与受管协议）', v2ray: 'V2Ray / Base64（分享链接列表）', clash: 'mihomo / Clash Meta（YAML）', surge: 'Surge（完整配置 · 自动更新）', shadowrocket: 'Shadowrocket（分享链接列表）' });
 const dnsModes = localize({ observe: '观察（只读，不写服务商）', apply: '应用（创建/更新/删除托管记录）' });
 const dnsRecordTypes = ['A', 'AAAA', 'CNAME'];
 const announcementSeverities = localize({ info: '信息', warning: '警告', critical: '严重' });

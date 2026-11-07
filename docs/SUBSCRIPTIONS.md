@@ -15,16 +15,38 @@
 
 ## 支持的格式
 
-只包含**启用中的 Shadowsocks 入站**规则（`inbound_shadowsocks` 非空）。普通 TCP/TLS/WS/WSS 规则不是客户端代理协议，会在预览的 `skipped` 列表中写明原因，而不是静默消失。
+包含**启用中的 Shadowsocks 入站**规则（`inbound_shadowsocks` 非空）和**受管协议入口**规则（`protocol_gateway` 非空，见下方「受管协议入口」）。普通 TCP/TLS/WS/WSS 规则不是客户端代理协议，会在预览的 `skipped` 列表中写明原因，而不是静默消失；某个格式无法表达的协议入口同样列入 `skipped` 并写明原因。
 
 | 格式 | 输出 | 说明 |
 | --- | --- | --- |
-| `v2ray` | 标准 Base64，解码后每行一个 `ss://` URI | 适合 v2rayN、Shadowrocket、sing-box 等支持 SIP002 的客户端 |
+| `v2ray` | 标准 Base64，解码后每行一个 `ss://` URI 或协议入口的分享链接 | 以 v2rayN 为准；其他读取分享链接列表的客户端支持的协议可能更少 |
 | `clash` | Clash / mihomo YAML：`proxies`、`proxy-groups`、`rules` | 使用 `type: ss`、`cipher`、`password`、`udp`；组名固定为 `Relay` |
 | `surge` | 完整的 Surge 托管配置：`[General]`、`[Proxy]`、`[Proxy Group]`、`[Rule]`，见下方「Surge 完整配置」 | 逗号或换行密码、IPv6 地址会单独处理；Surge 手册列出 2022 方式中的 `2022-blake3-aes-128-gcm` 与 `2022-blake3-aes-256-gcm` |
-| `shadowrocket` | 每行一个 `ss://` URI | 可直接导入 Shadowrocket |
+| `shadowrocket` | 每行一个 `ss://` URI 或协议入口的分享链接 | 可直接导入 Shadowrocket |
 
 2022 方式 URI 使用 `method:password` 的 URL 编码；旧版 AEAD 使用 `base64url(method:password)`，与面板现有分享链接一致。URI 片段使用节点名和规则名生成显示名。
+
+### 受管协议入口
+
+协议入口（VLESS/Reality、VMess、Trojan、TUIC、Hysteria2、AnyTLS，见 [PROTOCOL_GATEWAYS.md](PROTOCOL_GATEWAYS.md)）按各客户端官方文档能导入的写法输出；客户端不支持的组合列入 `skipped`，不会生成客户端用不了的条目。连接地址的选取与 Shadowsocks 相同：模板 `host` 优先，否则使用入口的具体监听 IP；通配监听且没有 `host` 的入口跳过。
+
+| 协议 | `sing_box`、`clash` | `surge` | `v2ray`、`shadowrocket` |
+| --- | --- | --- | --- |
+| VLESS（TLS 或 Reality，可选 Vision） | 输出 | 跳过：Surge 不支持 VLESS | `vless://` |
+| VMess | 输出 | `vmess`，带 `vmess-aead=true`、`tls=true` | `vmess://`（v2rayN JSON） |
+| Trojan | 输出 | `trojan` | `trojan://` |
+| TUIC v5 | 输出 | `tuic-v5`，`uuid` 与 `password` | `tuic://` |
+| Hysteria2 | 输出 | `hysteria2`，混淆写为 `salamander-password` | `hysteria2://` |
+| AnyTLS | 输出 | `anytls` | 跳过：Relay 没有 AnyTLS 分享链接 |
+
+- `sing_box` 和 `clash` 的输出不变。
+- **Surge**：各行按 [Surge 手册](https://manual.nssurge.com/policy/proxy.html) 书写。证书校验保持开启，不写 `skip-cert-verify`。证书的服务器名与连接地址不同时写 `sni=`，相同时省略（Surge 默认用连接地址作 SNI）。版本要求：Hysteria2 需 iOS 5.8.0 / Mac 5.4.0 及以上，TUIC v5 需 iOS 5.5.1 / Mac 5.1.1 及以上，AnyTLS 与 Hysteria2 Salamander 混淆需 iOS 5.17.0 / Mac 6.4.3 及以上；更旧的 Surge 无法使用这些条目。
+- Surge 对这些协议总是转发 UDP，没有逐条关闭的开关（见手册 [UDP Relay](https://manual.nssurge.com/policies/udp.html)），因此这些行不写 `udp-relay`，模板关闭 UDP 或规则只允许 TCP（AnyTLS 总是如此）都无法在 Surge 中表达。规则只允许 TCP 时，节点的协议引擎拒绝 UDP：经这些条目的 UDP 会失败，不会绕过规则。
+- Surge 的配置行无法容纳密码（含 Hysteria2 混淆密码）中的逗号、双引号或首尾空格，这类入口在 Surge 格式中跳过。
+- TUIC 的拥塞控制和 0-RTT 在 Surge 中没有对应参数：客户端使用自己的默认值，仍可连接。
+- **V2Ray 与 Shadowrocket**：每个入口一行，内容与面板「分享链接」相同（格式见 [PROTOCOL_GATEWAYS.md](PROTOCOL_GATEWAYS.md#share-links-and-qr-codes)），显示名为订阅条目名。分享链接同样无法表达证书需要信任私有 CA、规则只允许 TCP 或 TUIC 使用 0-RTT。
+- v2rayN 能导入以上每种分享链接（[源码](https://github.com/2dust/v2rayN/blob/master/v2rayN/ServiceLib/Global.cs)）：VLESS、VMess、Trojan、Hysteria2 由 Xray 或 sing-box 内核运行，TUIC 固定使用 sing-box 内核。v2rayN 7.14.0 起也能读取 `anytls://`，但 Relay 的分享链接尚未提供 AnyTLS，因此这两个格式跳过 AnyTLS。
+- Shadowrocket 没有公开的官方手册。与官方群组同步的[使用手册](https://lowertop.github.io/Shadowrocket/)列出的协议类型包括 VLESS、VMess、Trojan、Hysteria2、TUIC 和 AnyTLS；这些分享链接尚未在真实 Shadowrocket 中导入验证。
 
 ### Surge 完整配置
 
@@ -161,8 +183,8 @@ Subscription-Userinfo: download=5368709120; total=107374182400; expire=179876160
 
 ## 限制与后续
 
-- 真实 Clash/mihomo、Surge、Shadowrocket、v2rayN 客户端互通矩阵尚未执行；测试覆盖生成结构、YAML 解析、URI/Base64 解码、HTTP 端点、权限、轮换、限频和跳过原因。
-- 只有 Shadowsocks 入站；VLESS/REALITY、Hysteria2、TUIC、AnyTLS、SOCKS5 等协议待实现后再接入。
+- 真实 Clash/mihomo、Surge、Shadowrocket、v2rayN 客户端互通矩阵尚未执行；测试覆盖生成结构、YAML 解析、URI/Base64 解码、HTTP 端点、权限、轮换、限频和跳过原因。协议入口的 Surge 行和分享链接按客户端文档核对，但尚未在真实 Surge、Shadowrocket、v2rayN 中导入验证。
+- 只有 Shadowsocks 入站和受管协议入口进入订阅；SOCKS5、HTTP CONNECT 和 HTTP/2 CONNECT 入站在预览中跳过。
 - 模板版本化、按订阅统计流量、订阅专用限速档位、实时节点地址变更通知、公开端点持久化限频和反向代理审计尚未完成。
 - 订阅记录写入 metadata，schema 保持 v5；0.20.0 二进制会忽略这些键，回退后订阅端点消失但数据仍在。新版本不应在未评估该回退影响时降级。
 - `allow_sources`、`previous_token_hash` 和 `previous_token_expires_at_ms` 是带默认值的可选记录字段：已有订阅照常读取，不使用这些功能的记录序列化不变。回退到不认识这些字段的版本时，它们被忽略：**来源限制不再生效**，宽限期内的旧令牌立即失效。回退前先为限制来源的订阅轮换或删除链接。

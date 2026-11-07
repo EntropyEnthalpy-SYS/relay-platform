@@ -354,6 +354,9 @@ pub struct Entry {
     outbound: Option<serde_json::Value>,
     #[serde(skip)]
     upstream: Option<Upstream>,
+    /// A managed gateway, rendered as a Surge line or a share link.
+    #[serde(skip)]
+    gateway: Option<crate::gateway::Config>,
 }
 /// Client configs share one namespace for proxies and groups.
 fn free_name(base: &str, taken: &[&str]) -> String {
@@ -448,7 +451,12 @@ fn client_name(template: &Template, node: &str, rule: &str, port: u16, multiple:
 fn surge_name(name: &str) -> String {
     name.replace([',', '\n', '\r'], " ").trim().to_owned()
 }
-fn uri(entry: &Entry) -> String {
+fn uri(entry: &Entry) -> Result<String> {
+    if let Some(gateway) = &entry.gateway {
+        return gateway
+            .share_link(&entry.host, entry.port, &entry.name)?
+            .context("render() skips gateways without a share link");
+    }
     let userinfo = if entry.method.starts_with("2022-") {
         format!("{}:{}", percent(&entry.method), percent(&entry.password))
     } else {
@@ -459,11 +467,11 @@ fn uri(entry: &Entry) -> String {
     } else {
         entry.host.clone()
     };
-    format!(
+    Ok(format!(
         "ss://{userinfo}@{host}:{}#{}",
         entry.port,
         percent(&entry.name)
-    )
+    ))
 }
 fn unique_names(entries: &mut [Entry]) {
     let mut counts = std::collections::HashMap::<String, usize>::new();
@@ -550,7 +558,7 @@ fn clash(entries: &[Entry]) -> Result<String> {
     );
     Ok(serde_yaml::to_string(&Value::Mapping(root))?)
 }
-fn surge(entries: &[Entry]) -> String {
+fn surge(entries: &[Entry]) -> Result<String> {
     let mut names = Vec::with_capacity(entries.len());
     let mut counts = std::collections::HashMap::<String, usize>::new();
     for entry in entries {
@@ -582,6 +590,10 @@ fn surge(entries: &[Entry]) -> String {
          proxy-test-url = http://www.gstatic.com/generate_204\n[Proxy]\n",
     );
     for (entry, name) in entries.iter().zip(&names) {
+        if let Some(gateway) = &entry.gateway {
+            out.push_str(&format!("{name} = {}\n", gateway.surge_proxy(&entry.host)?));
+            continue;
+        }
         let host = if entry.host.contains(':') && !entry.host.starts_with('[') {
             format!("[{}]", entry.host)
         } else {
@@ -630,7 +642,7 @@ fn surge(entries: &[Entry]) -> String {
          DOMAIN-SUFFIX,cn,{china}\nGEOIP,CN,{china}\nFINAL,{main},dns-failed\n",
         main = groups.main
     ));
-    out
+    Ok(out)
 }
 
 /// Renders a stable snapshot of the candidate rules. Disabled rules and
@@ -669,12 +681,6 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 rule_name: rule.name.clone(),
                 reason: reason.into(),
             };
-            if !matches!(format, Format::SingBox | Format::Clash) {
-                skipped.push(skip(
-                    "managed protocol gateways require sing_box or Clash/mihomo subscription format",
-                ));
-                continue;
-            }
             let host = if let Some(host) = &template.host {
                 normalize_host(host)?
             } else if !gateway.listen.ip().is_unspecified() {
@@ -685,39 +691,54 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 ));
                 continue;
             };
-            let name = client_name(
-                template,
-                &candidate.node_name,
-                &rule.name,
-                gateway.listen.port(),
-                false,
-            );
+            let port = gateway.listen.port();
+            let name = client_name(template, &candidate.node_name, &rule.name, port, false);
             let udp = template.udp && rule.protocol.udp();
-            let mut outbound = if format == Format::Clash {
-                gateway.mihomo_proxy(&host, &name, udp)?
-            } else {
-                gateway.client_outbound(&host, &name)?
+            let outbound = match format {
+                Format::Clash => Some(gateway.mihomo_proxy(&host, &name, udp)?),
+                Format::SingBox => {
+                    let mut outbound = gateway.client_outbound(&host, &name)?;
+                    if !udp
+                        && !matches!(
+                            gateway.protocol,
+                            crate::gateway::WireProtocol::AnyTls { .. }
+                        )
+                    {
+                        outbound["network"] = "tcp".into();
+                    }
+                    Some(outbound)
+                }
+                // Surge has no VLESS and cannot quote every password.
+                Format::Surge => {
+                    if let Err(error) = gateway.surge_proxy(&host) {
+                        skipped.push(skip(&format!("{error:#}")));
+                        continue;
+                    }
+                    None
+                }
+                Format::V2ray | Format::Shadowrocket => {
+                    if gateway.share_link(&host, port, &name)?.is_none() {
+                        skipped.push(skip(&format!(
+                            "{} has no share link; use sing_box, Clash/mihomo or Surge",
+                            gateway.protocol.kind()
+                        )));
+                        continue;
+                    }
+                    None
+                }
             };
-            if format == Format::SingBox
-                && !udp
-                && !matches!(
-                    gateway.protocol,
-                    crate::gateway::WireProtocol::AnyTls { .. }
-                )
-            {
-                outbound["network"] = "tcp".into();
-            }
             entries.push(Entry {
                 name,
                 host,
-                port: gateway.listen.port(),
+                port,
                 method: gateway.protocol.kind().into(),
                 password: String::new(),
                 udp,
                 udp_over_tcp: false,
-                outbound: Some(outbound),
+                outbound,
                 chained: false,
                 upstream: None,
+                gateway: Some(gateway.clone()),
             });
             continue;
         }
@@ -815,6 +836,7 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
                 outbound: None,
                 chained: false,
                 upstream: None,
+                gateway: None,
             });
         }
     }
@@ -860,6 +882,7 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
             udp_over_tcp: false,
             outbound: None,
             upstream: Some(upstream.clone()),
+            gateway: None,
         });
     }
     unique_names(&mut entries);
@@ -912,12 +935,16 @@ pub fn render(format: Format, template: &Template, candidates: &[Candidate]) -> 
             }
         }
         Format::Clash => clash(&entries)?,
-        Format::Surge => surge(&entries),
+        Format::Surge => surge(&entries)?,
         Format::V2ray => {
-            let lines: Vec<String> = entries.iter().map(uri).collect();
+            let lines = entries.iter().map(uri).collect::<Result<Vec<_>>>()?;
             general_purpose::STANDARD.encode(lines.join("\n"))
         }
-        Format::Shadowrocket => entries.iter().map(uri).collect::<Vec<_>>().join("\n"),
+        Format::Shadowrocket => entries
+            .iter()
+            .map(uri)
+            .collect::<Result<Vec<_>>>()?
+            .join("\n"),
     };
     Ok(Rendered {
         content,
@@ -1326,6 +1353,208 @@ mod tests {
                 .iter()
                 .all(|s| s.reason.contains("no relay node entry"))
         );
+    }
+
+    #[test]
+    fn gateways_reach_surge_v2ray_and_shadowrocket_where_the_client_supports_them() {
+        const UUID: &str = "bf000d23-0752-40b4-affe-68f7707a9661";
+        let tls = serde_json::json!({"type":"certificate","identity":"server","server_name":"relay.example"});
+        let gateway = |name: &str,
+                       port: u16,
+                       protocol: serde_json::Value,
+                       security: &serde_json::Value| {
+            let mut rule = rule();
+            rule.id = format!("gw-{port}");
+            rule.name = name.into();
+            rule.listen = format!("127.0.0.1:{}", 20_000 + port).parse().unwrap();
+            rule.advertise = None;
+            rule.inbound_shadowsocks = None;
+            rule.protocol_gateway = Some(
+                serde_json::from_value(serde_json::json!({"listen":format!("0.0.0.0:{port}"),"protocol":protocol,"security":security}))
+                    .unwrap(),
+            );
+            Candidate {
+                node_name: "edge".into(),
+                node_tags: vec![],
+                rule,
+            }
+        };
+        let reality = serde_json::json!({"type":"reality","server_name":"www.example.com","handshake":"www.example.com:443",
+            "private_key":general_purpose::URL_SAFE_NO_PAD.encode([7u8; 32]),"short_id":"0123"});
+        let candidates = vec![
+            gateway(
+                "VLESS",
+                8443,
+                serde_json::json!({"type":"vless","uuid":UUID,"vision":true}),
+                &reality,
+            ),
+            gateway(
+                "VMess",
+                443,
+                serde_json::json!({"type":"vmess","uuid":UUID}),
+                &tls,
+            ),
+            gateway(
+                "Trojan",
+                444,
+                serde_json::json!({"type":"trojan","password":"trojan-password-1234"}),
+                &tls,
+            ),
+            // Same name on the same node: links carry the renamed entry.
+            gateway(
+                "Trojan",
+                445,
+                serde_json::json!({"type":"trojan","password":"comma,password-12345"}),
+                &tls,
+            ),
+            // No certificate server name: clients send the host they dial.
+            gateway(
+                "TUIC",
+                446,
+                serde_json::json!({"type":"tuic","uuid":UUID,"password":"tuic-password-12345","congestion_control":"cubic"}),
+                &serde_json::json!({"type":"certificate","identity":"server"}),
+            ),
+            gateway(
+                "Hysteria2",
+                447,
+                serde_json::json!({"type":"hysteria2","password":"hy2-password-123456",
+                "obfs":{"type":"salamander","password":"obfs-password-12345"}}),
+                &tls,
+            ),
+            gateway(
+                "AnyTLS",
+                448,
+                serde_json::json!({"type":"any_tls","password":"anytls-password-1234"}),
+                &tls,
+            ),
+        ];
+        let template = Template {
+            host: Some("edge.example".into()),
+            ..Default::default()
+        };
+        let reasons = |rendered: &Rendered| -> Vec<(String, String)> {
+            rendered
+                .skipped
+                .iter()
+                .map(|s| (s.rule_id.clone(), s.reason.clone()))
+                .collect()
+        };
+
+        // Lines as the Surge manual writes them (manual.nssurge.com/policies).
+        let surge = render(Format::Surge, &template, &candidates).unwrap();
+        for line in [
+            format!("\nedge · VMess = vmess, edge.example, 443, username={UUID}, vmess-aead=true, tls=true, sni=relay.example\n"),
+            "\nedge · Trojan = trojan, edge.example, 444, password=trojan-password-1234, sni=relay.example\n".into(),
+            format!("\nedge · TUIC = tuic-v5, edge.example, 446, uuid={UUID}, password=tuic-password-12345\n"),
+            "\nedge · Hysteria2 = hysteria2, edge.example, 447, password=hy2-password-123456, salamander-password=obfs-password-12345, sni=relay.example\n".into(),
+            "\nedge · AnyTLS = anytls, edge.example, 448, password=anytls-password-1234, sni=relay.example\n".into(),
+            "\nRelay = select, Auto, Fallback, edge · VMess, edge · Trojan, edge · TUIC, edge · Hysteria2, edge · AnyTLS\n".into(),
+        ] {
+            assert!(surge.content.contains(&line), "{line}\n{}", surge.content);
+        }
+        assert!(
+            !surge.content.contains("udp-relay"),
+            "Surge relays UDP over these by itself"
+        );
+        let skipped = reasons(&surge);
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        assert_eq!(skipped[0].0, "gw-8443");
+        assert!(skipped[0].1.contains("Surge does not support VLESS"));
+        assert_eq!(skipped[1].0, "gw-445");
+        assert!(skipped[1].1.contains("Surge cannot represent a comma"));
+        let surge6 = render(
+            Format::Surge,
+            &Template {
+                host: Some("[2001:db8::1]".into()),
+                ..Default::default()
+            },
+            &candidates,
+        )
+        .unwrap();
+        assert!(surge6.content.contains(
+            "\nedge · Trojan = trojan, [2001:db8::1], 444, password=trojan-password-1234, sni=relay.example\n"
+        ));
+        assert!(surge6.content.contains(&format!(
+            "\nedge · TUIC = tuic-v5, [2001:db8::1], 446, uuid={UUID}, password=tuic-password-12345\n"
+        )));
+
+        let v2ray = render(Format::V2ray, &template, &candidates).unwrap();
+        let decoded = String::from_utf8(
+            general_purpose::STANDARD
+                .decode(v2ray.content.as_bytes())
+                .unwrap(),
+        )
+        .unwrap();
+        let lines: Vec<&str> = decoded.lines().collect();
+        assert_eq!(lines.len(), 6, "{decoded}");
+        assert!(lines[0].starts_with(&format!("vless://{UUID}@edge.example:8443?")));
+        assert!(
+            lines[0].contains("&security=reality&") && lines[0].ends_with("#edge%20%C2%B7%20VLESS")
+        );
+        let vmess: serde_json::Value = serde_json::from_slice(
+            &general_purpose::STANDARD
+                .decode(lines[1].strip_prefix("vmess://").unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (&vmess["ps"], &vmess["add"], &vmess["port"]),
+            (
+                &"edge · VMess".into(),
+                &"edge.example".into(),
+                &"443".into()
+            )
+        );
+        assert_eq!(
+            lines[2],
+            "trojan://trojan-password-1234@edge.example:444?security=tls&sni=relay.example&type=tcp#edge%20%C2%B7%20Trojan"
+        );
+        assert_eq!(
+            lines[3],
+            "trojan://comma%2Cpassword-12345@edge.example:445?security=tls&sni=relay.example&type=tcp#edge%20%C2%B7%20Trojan%20%232"
+        );
+        assert_eq!(
+            lines[4],
+            format!(
+                "tuic://{UUID}:tuic-password-12345@edge.example:446?sni=edge.example&alpn=h3&congestion_control=cubic#edge%20%C2%B7%20TUIC"
+            )
+        );
+        assert_eq!(
+            lines[5],
+            "hysteria2://hy2-password-123456@edge.example:447/?sni=relay.example&obfs=salamander&obfs-password=obfs-password-12345#edge%20%C2%B7%20Hysteria2"
+        );
+        assert_eq!(
+            reasons(&v2ray),
+            [(
+                "gw-448".to_owned(),
+                "anytls has no share link; use sing_box, Clash/mihomo or Surge".to_owned()
+            )]
+        );
+        let shadowrocket = render(Format::Shadowrocket, &template, &candidates).unwrap();
+        assert_eq!(shadowrocket.content, decoded);
+        assert_eq!(reasons(&shadowrocket), reasons(&v2ray));
+
+        // sing-box and Clash/mihomo still carry every gateway.
+        for format in [Format::SingBox, Format::Clash] {
+            let rendered = render(format, &template, &candidates).unwrap();
+            assert_eq!((rendered.entries.len(), rendered.skipped.len()), (7, 0));
+        }
+
+        // Gateway entries are relay entries, so Surge chains upstreams through them.
+        let chained = render(
+            Format::Surge,
+            &Template {
+                upstreams: upstreams(),
+                ..template.clone()
+            },
+            &candidates,
+        )
+        .unwrap();
+        assert!(chained.content.contains(
+            "\nRelay entry = select, edge · VMess, edge · Trojan, edge · TUIC, edge · Hysteria2, edge · AnyTLS\n"
+        ));
+        assert!(chained.content.contains(", underlying-proxy=Relay entry\n"));
+        assert_eq!(chained.skipped.len(), 2);
     }
 
     #[test]

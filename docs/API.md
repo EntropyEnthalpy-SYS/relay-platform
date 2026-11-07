@@ -379,7 +379,7 @@ Shadowsocks：TCP 重放盐缓存按（方式、密钥）在进程内共享。�
 | DELETE | `/subscriptions/{id}` | 删除记录与索引 |
 | GET | `/sub/{token}` | 公开端点，无登录；60 次/分钟/令牌；`Cache-Control: no-store` |
 
-`format` 为 `v2ray`、`clash`、`surge`、`shadowrocket`。`template` 为 `{name_prefix,host,node_tags,udp}`，创建时保存为快照；`host` 覆盖连接地址，`node_tags` 过滤节点，通配监听且无 `advertise`/`host` 的规则会被跳过。端口段展开为多个条目。`surge` 返回完整的 Surge 托管配置，公开链接第一行为指向自身的 `#!MANAGED-CONFIG`。只支持 Shadowsocks 入站；其他协议在预览的 `skipped` 中给出原因。可选的 `template.upstreams` 为用户自己的 SOCKS5/Shadowsocks 代理（最多 8 个），在 `sing_box`、`clash`、`surge` 中经中转条目组成代理链，预览条目带 `chained: true`；其他格式列入 `skipped`。见 [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)。
+`format` 为 `v2ray`、`clash`、`surge`、`shadowrocket`。`template` 为 `{name_prefix,host,node_tags,udp}`，创建时保存为快照；`host` 覆盖连接地址，`node_tags` 过滤节点，通配监听且无 `advertise`/`host` 的规则会被跳过。端口段展开为多个条目。`surge` 返回完整的 Surge 托管配置，公开链接第一行为指向自身的 `#!MANAGED-CONFIG`。包含 Shadowsocks 入站和受管协议入口；其他规则，以及某格式无法表达的协议入口（`surge` 跳过 VLESS/Reality，`v2ray`、`shadowrocket` 跳过 AnyTLS），在预览的 `skipped` 中给出原因。可选的 `template.upstreams` 为用户自己的 SOCKS5/Shadowsocks 代理（最多 8 个），在 `sing_box`、`clash`、`surge` 中经中转条目组成代理链，预览条目带 `chained: true`；其他格式列入 `skipped`。见 [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)。
 
 权限：读取列表/预览需要 `read`，创建/轮换/删除需要 `users:write`，并同时受账号角色与租户边界限制；只读用户不能写入。系统管理员可见全部，租户管理员可见本租户普通用户，普通用户只管理自己。令牌只保存 SHA-256 哈希；记录和索引写入 metadata，应用 schema 仍为 v5、恢复日志格式 4 不变。0.20.0 二进制忽略这些键，回退会丢失订阅服务但不会删除数据。详见 [SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)。
 
@@ -591,7 +591,7 @@ Rules accept optional `protocol_gateway`: `{listen, protocol, security, allow_pr
 
 Gateway rules use the existing configuration/template APIs and rule policy fields. `EngineStats.protocol_gateway` reports `gateways`, `running`, `restarts`, `last_error`, `engine_version`, and local `process_id`. Engine binaries are selected only by node-local `RELAY_PROTOCOL_ENGINE` or deployment settings. The API cannot upload a binary or supply arbitrary engine configuration.
 
-Subscriptions add format `sing_box`. Both `sing_box` and `clash` (mihomo/Clash Meta) render managed gateways; legacy formats explicitly report unsupported rules in preview. Set template `host` for wildcard public listeners. See [PROTOCOL_GATEWAYS.md](PROTOCOL_GATEWAYS.md) for source/license provenance, supported payloads and lifecycle limits.
+Subscriptions add format `sing_box`. Both `sing_box` and `clash` (mihomo/Clash Meta) render every managed gateway. `surge` renders VMess, Trojan, TUIC v5, Hysteria2 and AnyTLS, and `v2ray`/`shadowrocket` render the rule share links (VLESS/Reality, VMess, Trojan, Hysteria2, TUIC); the remaining combinations are reported in the preview's `skipped`. Set template `host` for wildcard public listeners. See [PROTOCOL_GATEWAYS.md](PROTOCOL_GATEWAYS.md) for source/license provenance, supported payloads and lifecycle limits.
 
 ## 0.119.0 Shadowsocks UDP-over-TCP
 

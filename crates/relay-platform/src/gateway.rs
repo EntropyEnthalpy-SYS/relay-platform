@@ -625,6 +625,65 @@ impl Config {
             percent(name)
         )))
     }
+
+    /// A Surge `[Proxy]` declaration, the part after `Name = `, as the Surge
+    /// manual writes it (manual.nssurge.com/policies). Surge has no VLESS, so
+    /// no Reality, and its comma-separated lines cannot carry a comma, a
+    /// double quote or surrounding spaces in a value: both are errors whose
+    /// message a subscription shows as the skip reason.
+    /// Surge relays UDP over all of these protocols by itself, so a TCP-only
+    /// rule cannot be marked here; the engine rejects the UDP instead.
+    pub fn surge_proxy(&self, host: &str) -> Result<String> {
+        let outbound = self.client_outbound(host, "")?;
+        let host = outbound["server"].as_str().expect("normalized host");
+        let address = if host.contains(':') {
+            format!("[{host}], {}", self.listen.port())
+        } else {
+            format!("{host}, {}", self.listen.port())
+        };
+        let value = |value: &str| -> Result<String> {
+            ensure!(
+                !value.contains([',', '"']) && value.trim() == value,
+                "Surge cannot represent a comma, a double quote or surrounding spaces in a {} password",
+                self.protocol.kind()
+            );
+            Ok(value.to_owned())
+        };
+        let mut line = match &self.protocol {
+            WireProtocol::Vless { .. } => bail!(
+                "Surge does not support VLESS or Reality; use sing_box, Clash/mihomo, V2Ray or Shadowrocket"
+            ),
+            // Relay's VMess users have alterId 0, which needs the AEAD handshake.
+            WireProtocol::Vmess { uuid } => {
+                format!("vmess, {address}, username={uuid}, vmess-aead=true, tls=true")
+            }
+            WireProtocol::Trojan { password } => {
+                format!("trojan, {address}, password={}", value(password)?)
+            }
+            WireProtocol::Tuic { uuid, password, .. } => {
+                format!(
+                    "tuic-v5, {address}, uuid={uuid}, password={}",
+                    value(password)?
+                )
+            }
+            WireProtocol::Hysteria2 { password, obfs, .. } => {
+                let mut line = format!("hysteria2, {address}, password={}", value(password)?);
+                if let Some(Obfuscation::Salamander { password }) = obfs {
+                    line.push_str(&format!(", salamander-password={}", value(password)?));
+                }
+                line
+            }
+            WireProtocol::AnyTls { password } => {
+                format!("anytls, {address}, password={}", value(password)?)
+            }
+        };
+        // Surge sends the proxy host name as SNI unless told otherwise.
+        let sni = outbound["tls"]["server_name"].as_str().unwrap_or(host);
+        if sni != host {
+            line.push_str(&format!(", sni={sni}"));
+        }
+        Ok(line)
+    }
 }
 
 #[derive(Clone, Default, Debug, Serialize, Deserialize)]

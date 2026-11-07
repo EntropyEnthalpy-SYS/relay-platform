@@ -448,6 +448,7 @@ Protocol options in this release:
 - Reality rules accept several short IDs and a limit on how far a client's clock may drift.
 - VLESS (including Reality), VMess, Trojan, Hysteria2 and TUIC rules have a **Share link** with a QR code for importing into client apps. AnyTLS has no widely used link format, so use a subscription for it. Server-side secrets such as the Reality private key never appear in a link.
 - The sing-box and Clash/mihomo subscriptions carry the matching client settings (obfuscation, congestion control, short ID).
+- Surge subscriptions carry VMess, Trojan, TUIC, Hysteria2 and AnyTLS rules (Surge has no VLESS), and V2Ray and Shadowrocket subscriptions carry each rule's share link (not AnyTLS). Other combinations are listed as skipped with the reason.
 
 Client exports never contain Reality private keys, local TLS keys or the agent's internal bridge credentials.
 
