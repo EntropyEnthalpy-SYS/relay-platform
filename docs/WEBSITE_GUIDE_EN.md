@@ -760,6 +760,19 @@ ss -lntp
 ss -lnup
 ```
 
+#### Speed tests
+
+Relay can measure how fast a server's line is, and how fast each leg of a forwarding path is, without SSH or extra tools. The test is built into the agent with fixed limits: the panel cannot make an agent run a program or fetch an address of its choosing.
+
+- **Server speed test** (system administrators): **Diagnostics → Speed test**. Choose a **Mode**: **Server ↔ Cloudflare** measures one server against Cloudflare's public speed service (speed.cloudflare.com only); **Server ↔ server** measures the line between a **Testing server (connects)** and a **Peer server (listens temporarily and accepts the connection)**. Then choose the **Direction** (upload, download or both), a duration of 5 to 60 seconds per direction or a data amount of 1 to 1000 MB, and 1 to 8 **Parallel TCP streams**, and click **Start speed test**. Progress shows while it runs; **Cancel speed test** stops both servers at once.
+- **Upload** is from the testing server (on a path, towards the last hop, the way your users upload); **download** is towards it. The first 2 seconds of each direction are warm-up and are left out. Each result shows the **average** and the **1-second peak** in bits per second, the bytes and seconds measured, and any streams that failed. **Last 50 speed tests** keeps the history.
+- **Path speed test…** is in the actions of a rule under **Forwarding rules → By server** and of a path under **All forwarding**. It measures each segment of the rule's path in turn (entry server → next hop → … → last hop) with the server-to-server test, connecting to the same address the hop's target uses, so the test follows the real route between those servers. It names the **slowest segment** and, when the last hop has a fixed target, shows the TCP connect time from the last hop to that target (no data is sent). System administrators and users who can edit every server of the path may run it; read-only accounts and API tokens without `nodes:write` cannot, and other users run at most one speed test a minute.
+- **Not counted, not limited:** test traffic does not pass through any rule. Rule and server speed limits do not apply, and nothing counts towards the traffic ledger, quotas, shared budgets or plans. The path dialog lists the limits configured along the path next to the results so you can compare; a result above a limit is the line's capacity, not what your users get through the rule.
+- **Ports and firewalls:** in server-to-server and path tests the receiving server opens a temporary TCP port from its forwarding port range (or a **Test port on the peer** you choose), accepts only connections that carry the test's random token, and closes it when the test ends. Allow that range in its firewall or security group. Both servers need a forwarding host under their forwarding settings; behind NAT, the public port mapping must match the router. Cloudflare tests need outbound HTTPS. Cloudflare limits how much one address can download in a short time, so on a fast server it may stop serving partway through: the result then covers only the part before that and says so, and a test refused from the start asks you to try again in a few minutes.
+- **Limits and older agents:** each server takes part in one test at a time. Not available for proxy services, protocol gateways, the public end of a reverse tunnel or rules shared from another panel; the dialog says why. Every server involved needs the agent of this release; otherwise the panel says, for example, “The agent on server Tokyo is too old for speed tests; upgrade it first”. Older agents keep working as before.
+
+See [Speed tests](SPEED_TESTS.md) (Chinese) for the details.
+
 ### Upgrades and rollback
 
 Build and sign the new version with the same key, copy it to each server, then upgrade the **panel first**:

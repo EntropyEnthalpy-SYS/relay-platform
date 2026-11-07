@@ -3,7 +3,7 @@ import { t as translate, msg, localize, searchAliases } from '/assets/i18n.js';
 export const pageInfo = localize({
   overview: ['总览', 'NETWORK OVERVIEW', '节点在哪里、是否在线、流量走向哪里，一页看清。', 'observability', 'dashboard monitor globe map 总览 监控 地球 地图'],
   nodes: ['转发配置', 'STEP 1 · SERVERS', '第一步：接入服务器。管理每台服务器的位置、身份、默认地址与运行许可。', 'quickstart', 'server agent location 服务器 注册 位置'],
-  topology: ['转发配置', 'STEP 2 · FORWARDING', '第二步：建立转发。每条转发从客户端出发，经过一台或多台服务器到达目标。', 'rules', 'chain route path forward reverse tunnel nat 链路 路径 转发 多跳 反向隧道 内网穿透'],
+  topology: ['转发配置', 'STEP 2 · FORWARDING', '第二步：建立转发。每条转发从客户端出发，经过一台或多台服务器到达目标。', 'rules', 'chain route path forward reverse tunnel nat speed test 链路 路径 转发 多跳 反向隧道 内网穿透 路径测速 测速'],
   rules: ['转发配置', 'STEP 2 · FORWARDING', '同一份转发配置，按服务器列出它上面运行的监听端口和服务。', 'rules', 'proxy gateway vless reality tuic hysteria2 socks http2 代理 网关 节点规则'],
   wireguard: ['转发配置', 'WIREGUARD NETWORKS', '把节点和设备连进同一个私有网络。没有公网地址的节点经中继节点互通，设备扫码加入。', 'rules', 'wireguard vpn mesh overlay nat relay device 组网 隧道 设备 中继'],
   federation: ['转发配置', 'CROSS-PANEL SHARING', '把节点上的一段端口共享给另一个面板，或接收其他面板共享的端口。对方用邀请码接入，限制由共享方决定。', 'rules', 'federation share invite peer panel 共享 邀请码 跨面板 对方'],
@@ -12,7 +12,7 @@ export const pageInfo = localize({
   usage: ['监控与用量', 'TRAFFIC LEDGER', '按规则与周期查看已上报的流量，核对用量记录。', 'resources', 'traffic bandwidth 计量 流量'],
   budgets: ['监控与用量', 'SHARED BUDGETS', '在多个节点之间分配额度，追踪消费与尚未归还的预留。', 'resources', 'quota limit 配额 预算 限速'],
   logs: ['监控与用量', 'LIVE LOGS', '在面板里查看控制器和每台服务器的最新日志，不用登录服务器。', 'observability', 'log journal tail error 日志 实时 错误'],
-  diagnostics: ['监控与用量', 'DIAGNOSTICS', '自动检查节点、配置、各段连接、资源和日志，列出问题并导出诊断报告。', 'observability', 'diagnose report troubleshoot export support 诊断 排障 报告 导出'],
+  diagnostics: ['监控与用量', 'DIAGNOSTICS', '自动检查节点、配置、各段连接、资源和日志，列出问题并导出诊断报告。', 'observability', 'diagnose report troubleshoot export support speed test bandwidth throughput cloudflare 诊断 排障 报告 导出 测速 速度 带宽 全球测速'],
   alerts: ['监控与用量', 'ALERTS & NOTIFICATIONS', '为需要关注的运行事件设置通知通道。', 'observability', 'smtp email telegram 邮件 告警'],
   subscriptions: ['客户与服务', 'CLIENT SUBSCRIPTIONS', '将兼容规则交付给客户端，管理订阅的预览、有效期与撤销。', 'clients', 'clash mihomo sing-box subscription 客户端'],
   dns: ['客户与服务', 'MANAGED DNS', '管理服务商与解析记录，先观察变更，再按需要应用。', 'operations', 'cloudflare 域名 解析'],
@@ -52,6 +52,7 @@ export const guideArticles = localize([
     ['看真实连接', '转发规则页每段箭头显示最近 1 小时真实 TCP 连接的成功率：第一段是入口的入站建立，之后是各服务器拨号到下一跳。展开路径可查看 24 小时或 7 天的逐段记录并导出 CSV；总览可把趋势切换为 24 小时或 7 天。'],
     ['定位配置问题', '检查节点的期望 / 已应用修订与应用错误，再查看运行诊断。控制在线、配置应用成功、目标可用是三个不同信号。'],
     ['查看日志与诊断', '系统管理员可在「实时日志」查看控制器和每台服务器的最新日志，约 5 秒更新一次，不用登录服务器；「诊断报告」自动列出离线节点、被拒绝的配置、成功率低的连接段、资源紧张和近期错误，并可下载报告交给技术支持或 AI 助手分析。报告不包含密码、密钥和令牌。'],
+    ['测速', '系统管理员可在「诊断报告」的“测速”中测服务器到 Cloudflare 的速度，或两台服务器之间的速度；能修改路径上每台服务器的用户可在转发规则的操作里点“路径测速…”，逐段测这条转发经过的服务器。测速流量不经过规则：不受限速，也不计入流量账本、配额和共享额度。'],
     ['设置通知', '有管理权限的账号可配置通知通道与严重级别。SMTP 支持 TLS / STARTTLS；保存后使用测试通知验证目标收件端。'],
   ], note: '面板在部分运行页面每 5 秒刷新。输入筛选条件、打开对话框或切到后台时会暂停自动刷新，避免打断操作。' },
   { id: 'resources', title: '流量、额度与限速', subtitle: '理解消费、预留与可分配额度之间的关系。', icon: 'gauge', read: '3 分钟', target: 'budgets', steps: [

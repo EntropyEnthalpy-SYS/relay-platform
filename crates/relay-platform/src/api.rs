@@ -247,6 +247,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
         || path.starts_with("endpoint-groups")
         || path.starts_with("chains")
         || path.starts_with("reverse-tunnels")
+        || path.starts_with("speed-tests")
     {
         Scope::NodesWrite
     } else if path.starts_with("budgets") {
@@ -392,6 +393,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/reverse-tunnels/{id}",
             axum::routing::put(update_reverse_tunnel).delete(delete_reverse_tunnel),
+        )
+        .route(
+            "/api/v1/speed-tests",
+            get(speed_tests).post(start_speed_test),
+        )
+        .route(
+            "/api/v1/speed-tests/path",
+            get(speed_test_path).post(start_path_speed_test),
+        )
+        .route(
+            "/api/v1/speed-tests/{id}",
+            get(speed_test).delete(cancel_speed_test),
         )
         .route("/api/v1/users", get(users).post(create_user))
         .route(
@@ -1295,6 +1308,85 @@ async fn delete_reverse_tunnel(
     database(state.store, move |db| db.delete_reverse_tunnel(&actor, &id)).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
+async fn speed_tests(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::speed_test::JobView>> {
+    Ok(Json(
+        database(state.store, move |db| db.speed_tests(&actor)).await?,
+    ))
+}
+async fn speed_test(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::speed_test::JobView> {
+    Ok(Json(
+        database(state.store, move |db| db.speed_test(&actor, &id)).await?,
+    ))
+}
+/// A body that does not parse is invalid input (400), like the other
+/// checks of a test's parameters.
+fn speed_test_input<T: serde::de::DeserializeOwned>(body: serde_json::Value) -> anyhow::Result<T> {
+    serde_json::from_value(body).map_err(|error| {
+        Rejection {
+            status: 400,
+            message: format!("invalid speed test: {error}"),
+        }
+        .into()
+    })
+}
+async fn start_speed_test(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::speed_test::JobView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.start_speed_test(&actor, speed_test_input(body)?)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PathQuery {
+    node_id: String,
+    rule_id: String,
+}
+async fn speed_test_path(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Query(query): Query<PathQuery>,
+) -> ApiResult<crate::speed_test::PathPlan> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.speed_test_path(&actor, &query.node_id, &query.rule_id)
+        })
+        .await?,
+    ))
+}
+async fn start_path_speed_test(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::speed_test::JobView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.start_path_speed_test(&actor, speed_test_input(body)?)
+        })
+        .await?,
+    ))
+}
+async fn cancel_speed_test(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::speed_test::JobView> {
+    Ok(Json(
+        database(state.store, move |db| db.cancel_speed_test(&actor, &id)).await?,
+    ))
+}
 async fn endpoint_groups(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -1972,7 +2064,7 @@ async fn watch_config(
     loop {
         let published = state.store.config_published();
         let credential = token.clone();
-        let (revision, wireguard_changed, tunnels_changed) =
+        let (revision, wireguard_changed, tunnels_changed, speed_tests_changed) =
             database(state.store.clone(), move |db| db.node_watch(&credential)).await?;
         let mut reply = serde_json::json!({ "desired_revision": revision });
         if wireguard_changed {
@@ -1981,8 +2073,11 @@ async fn watch_config(
         if tunnels_changed {
             reply["reverse_tunnels_changed"] = true.into();
         }
+        if speed_tests_changed {
+            reply["speed_tests_changed"] = true.into();
+        }
         let reply = Json(reply);
-        if revision > query.after || wireguard_changed || tunnels_changed {
+        if revision > query.after || wireguard_changed || tunnels_changed || speed_tests_changed {
             return Ok(reply);
         }
         tokio::select! {

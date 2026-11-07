@@ -107,7 +107,7 @@ fn readiness(conn: &Connection, tunnel: &ReverseTunnel) -> Result<Readiness> {
     })
 }
 
-fn forwarding(conn: &Connection, node: &str) -> Result<Option<ForwardingDefaults>> {
+pub(super) fn forwarding(conn: &Connection, node: &str) -> Result<Option<ForwardingDefaults>> {
     Ok(node_profiles::read(conn, node)?.settings.forwarding)
 }
 /// The listen IP of the public port when the tunnel names none, and of the
@@ -117,7 +117,7 @@ fn default_ip(conn: &Connection, node: &str) -> Result<IpAddr> {
 }
 /// `host:port` others use for `port` of `node`: the forwarding host, with
 /// the public NAT mapping when the port lies in the forwarding range.
-fn reachable(
+pub(super) fn reachable(
     defaults: Option<&ForwardingDefaults>,
     ip: Option<IpAddr>,
     port: u16,
@@ -134,7 +134,7 @@ fn reachable(
         .map(|ip| SocketAddr::new(ip, port).to_string())
 }
 
-fn current_config(conn: &Connection, node: &str) -> Result<Option<NodeConfig>> {
+pub(super) fn current_config(conn: &Connection, node: &str) -> Result<Option<NodeConfig>> {
     let json: Option<String> = conn
         .query_row(
             "SELECT c.config_json FROM config_history c JOIN nodes n ON n.id=c.node_id AND n.desired_revision=c.revision WHERE n.id=?1",

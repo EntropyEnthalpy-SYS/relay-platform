@@ -19,8 +19,9 @@ impl Store {
             request.budget.as_ref().map(|b| b.run_id.as_str()),
         )?;
         let report = Report::of(&mut request);
-        let (mut response, stored_seen, tunnels_changed) =
-            apply_sync(&tx, node, request, &self.6, &self.8, &self.3, &self.10)?;
+        let (mut response, stored_seen, tunnels_changed) = apply_sync(
+            &tx, node, request, &self.6, &self.8, &self.3, &self.10, &self.11,
+        )?;
         tx.commit()?;
         self.wake_wireguard_watches();
         if tunnels_changed {
@@ -66,8 +67,9 @@ impl Store {
                     input.budget.as_ref().map(|b| b.run_id.as_str()),
                 )?;
                 let report = Report::of(&mut input);
-                let (response, stored_seen, changed) =
-                    apply_sync(&tx, &node, input, &self.6, &self.8, &self.3, &self.10)?;
+                let (response, stored_seen, changed) = apply_sync(
+                    &tx, &node, input, &self.6, &self.8, &self.3, &self.10, &self.11,
+                )?;
                 tunnels_changed |= changed;
                 reports.push((node, report, stored_seen, responses.len()));
                 Ok(response)
@@ -125,6 +127,7 @@ impl Report {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_sync(
     tx: &Transaction<'_>,
     node: &str,
@@ -133,6 +136,7 @@ fn apply_sync(
     traversal: &std::sync::Mutex<crate::wireguard::punch::Traversal>,
     clocks: &std::sync::Mutex<leases::LeaseClocks>,
     tunnel_wakes: &std::sync::Mutex<std::collections::HashSet<String>>,
+    speed_tests: &std::sync::Mutex<super::speed_tests::Live>,
 ) -> Result<(SyncResponse, Option<i64>, bool)> {
     if request.usage.len() > 1024
         || request.stats.user_rates.len() > 1024
@@ -150,6 +154,11 @@ fn apply_sync(
         || request
             .stats
             .rate_limits
+            .as_ref()
+            .is_some_and(|r| !r.within_limits())
+        || request
+            .stats
+            .speed_test
             .as_ref()
             .is_some_and(|r| !r.within_limits())
     {
@@ -253,6 +262,9 @@ fn apply_sync(
         node,
         request.stats.reverse_tunnel.as_ref(),
     )?;
+    // A segment that ended moves its test on: wake the next segment's agents.
+    let speed_tests_changed =
+        super::speed_tests::observe(tx, speed_tests, node, request.stats.speed_test.as_ref())?;
     let desired: u64 = tx.query_row(
         "SELECT desired_revision FROM nodes WHERE id=?1",
         [node],
@@ -293,6 +305,8 @@ fn apply_sync(
             wireguard: Some(super::wireguard::desired(tx, node, &traversal)?),
             reverse_tunnels: Some(super::reverse_tunnels::desired(tx, node)?),
             rate_limits: true,
+            speed_test: true,
+            speed_test_tasks: super::speed_tests::desired(tx, node)?,
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,
@@ -303,6 +317,6 @@ fn apply_sync(
             log_cursor: None,
         },
         stored_seen,
-        tunnels_changed,
+        tunnels_changed || speed_tests_changed,
     ))
 }

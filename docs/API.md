@@ -768,3 +768,46 @@ A burst needs its limit S, a burst rate B with S < B ≤ 10^12 bytes/second and 
 | 400 | Invalid limits or bursts | The validation message |
 
 The panel shows these reasons in its language. Metering, quotas, shared budgets and the usage ledger are unchanged.
+
+## Speed tests
+
+Built-in speed tests; see [SPEED_TESTS.md](SPEED_TESTS.md). A **server test** measures one server against Cloudflare's fixed speed endpoints (`https://speed.cloudflare.com/__down?bytes=N` and `POST /__up`; no other URL can be given) or two servers against each other: the receiving (peer) server listens on a temporary test port, and the testing server connects to the peer's forwarding host (through its public-port mapping) with a per-test random token. A **path test** runs the server-to-server test on each segment of a rule's effective path (entry → next hop → … → last hop, following each hop's preferred target and its `via`), dialing the host that hop's target uses, and then times one TCP connect from the last hop to the rule's target. Test traffic never passes through a rule: no speed limit applies, and nothing is metered or counted against quotas, budgets, plans or the usage ledger (`metered` is always `false`). Jobs live in metadata (`speed_test:<id>`; tokens apart in `speed_test_token:<id>`, deleted when the job ends and never returned), so the schema is unchanged; the last 50 ended jobs are kept. Audit actions are `speed_test.start|cancel|finish`, without tokens.
+
+Reads need a session or a token with `read`; starting and cancelling need a token with `nodes:write`. Server tests are for system administrators only. Path tests are for system administrators and users with write permission on every server of the path; other tenants get 404. A non-administrator sees only the path tests of their tenant.
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| GET | `/speed-tests` | `[job]`, running jobs first, then newest first |
+| POST | `/speed-tests` | `{mode: cloudflare\|server, node_id, peer_node_id?, port?, direction: upload\|download\|both, duration_secs?, bytes?, streams?}` → `job`. `node_id` is the testing server (it dials, or talks to Cloudflare); `peer_node_id` the receiving server of a `server` test; `port` its test port (1024–65535), omitted picks the highest free port of the peer's forwarding range |
+| GET | `/speed-tests/path?node_id=&rule_id=` | The plan: `{node_id, rule_id, rule_name, hops:[{node_id, node_name, rule_id, rule_name}], segments:[{from_node_id, from_name, to_node_id, to_name, rule_id, target_address}], target?:{node_id, node_name, rule_id, address}, limits:[limit], reason?, metered:false}`; `reason` says why it cannot start now (the refusals below), or is null |
+| POST | `/speed-tests/path` | `{node_id, rule_id, direction, duration_secs?, bytes?, streams?}` → `job` |
+| GET | `/speed-tests/{id}` | `job` |
+| DELETE | `/speed-tests/{id}` | `job` with `state: cancelled`; the agents at both ends stop at once |
+
+**Parameters:** `direction` `both` runs upload, then download. `duration_secs` is 5–60 seconds per direction, `bytes` 1,000,000–1,000,000,000 bytes per direction (split between the streams, still at most 60 seconds); give one or neither (then 10 seconds). `streams` is 1–8, default 4. About 2 seconds of warm-up per direction are not part of the result. Upload is from the testing server (on a path, from the entry towards the last hop), download towards it. Unknown fields (for example a `url`) and bodies that do not parse are 400 `invalid speed test: …`.
+
+**`job`:** `{id, kind: server|path, mode: cloudflare|server, tenant_id, started_by, started_by_name, params:{direction, duration_secs?, bytes?, streams}, port?, rule?:{node_id, rule_id, name}, node_ids, segments:[segment], target?, limits?:[limit], state: running|finished|failed|cancelled, step, step_started_ms, created_at_ms, finished_at_ms?, error?, progress, slowest_segment, metered:false}`.
+
+- `segment`: `{from_node_id, from_name, to_node_id?, to_name?, rule_id?, listen?, address, state: pending|running|finished|failed|cancelled, results?:[result], rejected_connections?, error?, started_at_ms?, finished_at_ms?}`. `listen` is where the receiving server listened; `address` what the testing server dialed, or `speed.cloudflare.com`. `rejected_connections` counts connections the listener closed for a wrong token or format.
+- `result` (one per direction): `{direction, bytes, measured_ms, average_bps, peak_bps, streams, failed_streams?, errors?, limited?}`. Bits per second; `bytes` and `measured_ms` cover the measured window after the warm-up; `peak_bps` is the most bits in any one second of it. `limited` is true when the speed service refused further requests (HTTP 429) after part of the direction; the result then covers only what came before.
+- `target` (path tests whose last hop has a fixed TCP target): `{node_id, node_name, rule_id, address, state, connect_us?, error?}`; connect only, no data.
+- `limit`: `{kind: rule|server, node_id, node_name, rule_id?, rule_name?, rate_bytes_per_sec, rate_limits?, quota_bytes?}`: the limits configured along the path, shown for comparison only; none of them applied to the test.
+- `progress` (while a segment runs): `{segment, direction, elapsed_ms, bytes, current_bps}`; `slowest_segment` (path tests) is the index of the segment whose slower direction has the lowest average.
+
+A job runs its segments one after another, then the target probe. A step that has no result by its deadline (the task's hard limit plus 30 seconds; 45 seconds for the probe) fails with `no result from server <name> in time` and the job goes on. A job is `finished` when at least one step was measured, otherwise `failed`.
+
+| Status | When | `error` |
+| --- | --- | --- |
+| 400 | Parameters out of range, both `duration_secs` and `bytes`, a test port below 1024, a Cloudflare test with `peer_node_id` or `port`, a server test without a peer or with the same server twice | The validation message |
+| 403 | A server test by a non-administrator; a path test or cancel by a read-only role or without write permission on a server of the path; a token without `nodes:write` | `server speed tests need system administrator access`, `read-only role cannot run speed tests`, `read-only role cannot stop speed tests` |
+| 404 | Unknown or invisible server, rule or job | |
+| 409 | A server of the test is in another running test | `server <name> is already running a speed test` |
+| 409 | A server's agent has not reported speed-test support | `the agent on server <name> is too old for speed tests; upgrade it first`, or `server <name> has not connected to the panel yet; speed tests need its agent to report in first` |
+| 409 | A server has not synced for 90 seconds | `server <name> is offline` |
+| 409 | A server-to-server test or segment where either server has no forwarding host | `server <name> has no forwarding host; set the forwarding address and port range in its settings first` |
+| 409 | No free port, or the requested port is taken by a rule (port range, gateway port), reverse tunnel, shared rule or cross-panel share | `server <name> has no free port in its forwarding port range for a speed test`, `port <port> on server <name> is used by a rule, reverse tunnel or share; choose another port` |
+| 409 | A rule with no path to test | `this rule is a proxy service or protocol gateway with no fixed target; there is no path to test`, `this rule is the public end of a reverse tunnel and reaches its target through the tunnel; test the two servers with a server speed test instead`, `this rule is shared from another panel (cross-panel sharing); its path cannot be tested here`, `this rule runs on one server and has no TCP target whose connect time could be measured`, `the next hop of rule <rule> on server <name> no longer exists`, `the path is too long or loops` |
+| 409 | Cancelling a job that has ended | `this speed test has already ended` |
+| 429 | A non-administrator starting a test within 1 minute of their last one | `wait <n> s before starting another speed test` |
+
+**Agents and old agents.** Every sync response carries `speed_test: true`. An agent of this release then returns `EngineStats.speed_test: {tasks?:[{id, state: running|finished|failed, phase?, elapsed_ms?, bytes?, current_bps?, results?, connect_us?, rejected?, error?}]}` (at most 8 tasks, 2 results each, 4 errors per result; larger reports make the sync 400), and the controller records `speed_test_node:<node id>` the first time; `GET /nodes` shows it as `speed_test_support`. Only such agents receive `SyncResponse.speed_test_tasks` (left out when empty): `[{id, role: listen|dial|cloudflare|connect, params, listen?, address?, token?}]`; an agent stops any task the controller no longer sends. `GET /agent/watch` returns early with `speed_tests_changed: true` once when a node's tasks change, so newer agents sync at once; older agents ignore the field. Agents of 0.147.0 and earlier ignore the new sync fields, never report support and receive nothing; an agent of this release talking to a 0.147.0 controller (which sends no `speed_test`) reports nothing. The panel shows the reasons above in its language.

@@ -1128,6 +1128,10 @@ pub struct EngineStats {
     /// [`RateLimits`] and directional user shares.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimitReport>,
+    /// Sent only after the controller sent [`SyncResponse::speed_test`];
+    /// that it is sent tells the controller this agent runs speed tests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_test: Option<crate::speed_test::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1427,6 +1431,14 @@ pub struct SyncResponse {
     /// controllers older than upload, download and burst limits.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rate_limits: bool,
+    /// The controller takes [`EngineStats::speed_test`]; false from
+    /// controllers older than speed tests.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub speed_test: bool,
+    /// The speed-test tasks this node runs now; sent only to agents that
+    /// reported support, and omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub speed_test_tasks: Vec<crate::speed_test::Task>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

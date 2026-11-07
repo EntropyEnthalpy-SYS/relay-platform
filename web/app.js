@@ -68,7 +68,7 @@ async function api(path, options = {}) {
   const requestToken = state.token;
   const response = await fetch(`/api/v1${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}), ...options.headers }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = { error: text || `HTTP ${response.status}` }; }
-  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(rateLimitReason(result.error) || result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
+  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(rateLimitReason(result.error) || speedTestReason(result.error) || result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
 }
 setupLanguageSwitcher(() => {
   if (!state.actor) { document.title = translate('Relay · 独立转发平台'); return; }
@@ -1444,7 +1444,7 @@ async function renderRules() {
   const applyError = state.nodes.find(n => n.id === nodeId)?.apply_error;
   if (applyError) p.append(el('p', msg`节点应用错误：${applyError}`, 'error workflow-callout'));
   if (!config.rules.length) p.append(empty(translate('这台服务器还没有规则'), translate('新建一条转发：选择它只转发流量，还是在这里提供代理服务。'), canWrite() ? button(translate('＋ 新建转发'), chooseSetup, 'primary') : null));
-  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), limitCell(rule, state.nodes.find(n => n.id === nodeId)), rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
+  else p.append(table([translate('名称'), translate('监听 / 协议'), translate('目标'), translate('配额 / 限速'), translate('状态'), translate('操作')], config.rules.map(rule => { const actions = el('div'), membership = sharedRules.find(view => view.members.some(member => member.node_id === nodeId && member.rule_id === rule.id)); if (rule.inbound_shadowsocks) actions.append(button(translate('分享链接'), () => shareShadowsocks(rule), 'table-action')); if (rule.inbound_socks5) actions.append(button(translate('分享链接'), () => shareSocks5(rule), 'table-action')); if (rule.inbound_http_connect) actions.append(button(translate('分享链接'), () => shareHttpConnect(rule), 'table-action')); if (rule.protocol_gateway && rule.protocol_gateway.protocol.type !== 'any_tls') actions.append(button(translate('分享链接'), () => shareGateway(rule, config.node_id), 'table-action')); if (rule.id.startsWith('fed-')) actions.append(button(translate('在共享页管理'), () => navigate('federation'), 'table-action')); else if (rule.reverse_tunnel) actions.append(button(translate('在反向隧道中管理'), () => navigate('topology'), 'table-action')); else if (canWrite()) { actions.append(button(translate('编辑'), () => editRule(rule), 'table-action'), button(rule.enabled ? translate('停用') : translate('启用'), () => saveRules(config.rules.map(r => r.id === rule.id ? { ...r, enabled: !r.enabled } : r), config), 'table-action')); if (state.actor.role !== 'viewer') actions.append(button(translate('存为模板'), () => saveTemplate(rule), 'table-action')); if (membership) actions.append(button(translate('编辑共同规则'), () => openSharedRule(membership), 'table-action')); else if (!rule.protocol_gateway && !rule.listen_end_port) actions.append(button(translate('扩展到多条线路…'), () => extendRule(config, rule), 'table-action')); if (canSpeedTestRule(rule)) actions.append(button(translate('路径测速…'), () => openPathSpeedTest(config.node_id, rule), 'table-action')); actions.append(button(translate('删除'), async () => { if (rule.advertise || rule.targets.some(t => t.via)) return deleteChainedRule(config.node_id, rule); if (await confirmAction(msg`删除「${rule.name}」会终止其会话，历史账本保留。`)) await saveRules(config.rules.filter(r => r.id !== rule.id), config); }, 'table-action danger')); } return [ruleNameCell(rule, membership), namedCell((rule.protocol_gateway?.listen || rule.listen) + (rule.listen_end_port ? ` → ${rule.listen_end_port}` : ''), protocols[rule.protocol] || rule.protocol), rule.protocol_gateway ? namedCell(rule.protocol_gateway.protocol.type.toUpperCase(), rule.protocol_gateway.security.type === 'reality' ? 'Reality' : 'TLS') : rule.inbound_shadowsocks ? namedCell(translate('Shadowsocks 代理服务'), rule.inbound_shadowsocks.method) : rule.inbound_socks5 ? namedCell(translate('SOCKS5 代理服务'), rule.inbound_socks5.username ? translate('用户名密码认证') : translate('无认证')) : rule.inbound_http_connect ? namedCell(translate('HTTP CONNECT 代理服务'), rule.inbound_http_connect.username ? translate('Basic 认证') : translate('无认证')) : rule.inbound_http2_connect ? namedCell('HTTP/2 CONNECT', msg`并发隧道上限 ${rule.inbound_http2_connect.max_concurrent_streams || 128} · ${rule.inbound_tls ? 'TLS' : 'h2c'}`) : namedCell(rule.targets[0].address, [rule.targets.length > 1 ? msg`${rule.targets.length} 个目标 · ${balances[rule.balance] || rule.balance}` : translate('单一目标'), pausedTargets(rule)].filter(Boolean).join(' · ')), limitCell(rule, state.nodes.find(n => n.id === nodeId)), rule.enabled && rule.targets.length && rule.targets.every(t => targetPaused(t)) ? namedCell(translate('期望启用'), translate('全部目标已暂停 · 拒绝新连接')) : badge(rule.enabled ? translate('期望启用') : translate('期望停用'), rule.enabled ? '' : ''), actions]; })));
   content.replaceChildren(forwardingTabs('rules', config.rules.length), toolbar, p, sharedRulesPanel(sharedRules, state.nodes));
 }
 // Rules by server and complete paths are two views of the same configuration.
@@ -3359,7 +3359,7 @@ function findingDetail(f) {
   }
 }
 async function renderDiagnostics() {
-  const actor = state.actor, report = await api('/diagnostics/report');
+  const actor = state.actor, [report, nodes, speedTests] = await Promise.all([api('/diagnostics/report'), api('/nodes'), api('/speed-tests')]);
   if (state.view !== 'diagnostics' || state.actor !== actor) return;
   const { summary, findings } = report, time = timestamp(report.generated_at_ms);
   const download = button(translate('下载诊断报告'), () => {
@@ -3395,7 +3395,195 @@ async function renderDiagnostics() {
   const items = el('ul', undefined, 'diagnostics-contents');
   for (const line of [translate('上面的问题列表，以及每个节点的回报时间、配置修订、CPU / 内存和目标探测结果'), translate('每条规则的监听地址、目标地址和启用的功能名称；不包含密码、密钥、令牌和证书'), translate('最近 1 小时各段真实连接的成功与失败次数，以及最近 24 小时的事件'), translate('控制器和每台服务器最近 300 行日志')]) items.append(el('li', line));
   about.append(items, el('p', translate('报告包含服务器地址和日志内容，只分享给你信任的人。'), 'diagnostics-note'));
-  if (state.view === 'diagnostics') $('#content').replaceChildren(head, about);
+  if (state.view === 'diagnostics') $('#content').replaceChildren(head, speedTestPanel(nodes, speedTests), about);
+}
+// Speed tests: administrators measure a server against Cloudflare's speed service or against another
+// server; the path test measures each segment of a rule's path. Test traffic never passes through a
+// rule, so no speed limit, meter, quota or shared budget applies to it.
+const speedStates = localize({ running: ['进行中', 'orange'], finished: ['已完成', 'green'], failed: ['失败', 'red'], cancelled: ['已取消', ''], pending: ['等待中', ''] });
+const speedDirections = localize({ upload: '上行', download: '下行', both: '上行和下行' });
+function bitRate(bits) { bits = Number(bits) || 0; return bits >= 1e9 ? `${+(bits / 1e9).toFixed(2)} Gbit/s` : bits >= 1e6 ? `${+(bits / 1e6).toFixed(1)} Mbit/s` : `${+(bits / 1e3).toFixed(1)} kbit/s`; }
+// The controller names servers and reasons in English; known ones are shown in the panel's language.
+function speedTestReason(message) {
+  const text = String(message ?? ''), rules = [
+    [/^the agent on server (.+) is too old for speed tests; upgrade it first$/, m => msg`服务器 ${m[1]} 的 Agent 版本过旧，不支持测速；请先升级 Agent`],
+    [/^server (.+) has not connected to the panel yet; speed tests need its agent to report in first$/, m => msg`服务器 ${m[1]} 尚未连接面板；它的 Agent 回报后才能测速`],
+    [/^server (.+) is offline$/, m => msg`服务器 ${m[1]} 离线，无法测速`],
+    [/^server (.+) is already running a speed test$/, m => msg`服务器 ${m[1]} 正在测速；请等它结束后再试`],
+    [/^server (.+) has no forwarding host; set the forwarding address and port range in its settings first$/, m => msg`服务器 ${m[1]} 没有转发地址；请先在它的转发设置中填写地址和端口范围`],
+    [/^server (.+) has no free port in its forwarding port range for a speed test$/, m => msg`服务器 ${m[1]} 的转发端口范围内没有可用于测速的空闲端口`],
+    [/^port (\d+) on server (.+) is used by a rule, reverse tunnel or share; choose another port$/, m => msg`服务器 ${m[2]} 的端口 ${m[1]} 已被规则、反向隧道或共享占用；请换一个端口`],
+    [/^wait (\d+) s before starting another speed test$/, m => msg`请 ${m[1]} 秒后再开始下一次测速`],
+    [/^this rule is a proxy service or protocol gateway with no fixed target; there is no path to test$/, () => translate('这条规则是代理服务或协议网关，没有固定目标，没有可测的路径')],
+    [/^this rule is the public end of a reverse tunnel and reaches its target through the tunnel; test the two servers with a server speed test instead$/, () => translate('这条规则是反向隧道的公网端，经隧道到达目标；请改用服务器之间的测速来测这两台服务器')],
+    [/^this rule is shared from another panel \(cross-panel sharing\); its path cannot be tested here$/, () => translate('这条规则来自其他面板的共享，不能在这里测速')],
+    [/^this rule runs on one server and has no TCP target whose connect time could be measured$/, () => translate('这条规则只在一台服务器上运行，也没有可测连接耗时的 TCP 目标')],
+    [/^the next hop of rule (.+) on server (.+) no longer exists$/, m => msg`服务器 ${m[2]} 上规则 ${m[1]} 的下一跳已不存在`],
+    [/^the path is too long or loops$/, () => translate('路径过长或形成环路')],
+    [/^this speed test has already ended$/, () => translate('这次测速已经结束')],
+    [/^server speed tests need system administrator access$/, () => translate('服务器测速仅限系统管理员')],
+    [/^read-only role cannot run speed tests$/, () => translate('只读角色不能测速')],
+    [/^no result from server (.+) in time$/, m => msg`服务器 ${m[1]} 没有按时回报结果`],
+    [/^speed\.cloudflare\.com is limiting tests from this server \(HTTP 429\); try again in a few minutes$/, () => translate('speed.cloudflare.com 正在限制这台服务器的测速请求（HTTP 429），请几分钟后再试')],
+  ];
+  for (const [pattern, show] of rules) { const m = pattern.exec(text); if (m) return show(m); }
+  return null;
+}
+// One direction's numbers: average and 1 s peak, then what was measured.
+function speedResultLines(result) {
+  const arrow = result.direction === 'upload' ? '↑' : '↓', lines = [msg`${arrow} ${speedDirections[result.direction]} 平均 ${bitRate(result.average_bps)} · 峰值（1 秒）${bitRate(result.peak_bps)}`, msg`测量 ${bytes(result.bytes)} / ${(result.measured_ms / 1000).toFixed(1)} 秒 · ${result.streams} 个流`];
+  if (result.failed_streams) lines.push(msg`${result.failed_streams} 个流失败：${(result.errors || []).map(error => speedTestReason(error) || error).join('；')}`);
+  if (result.limited) lines.push(translate('测速服务在测试中途限制了请求量，结果只包含限制之前测到的部分。'));
+  return lines;
+}
+function speedSegmentCell(segment, live) {
+  const cell = el('div');
+  for (const result of segment.results || []) { const [head, ...rest] = speedResultLines(result); cell.append(el('strong', head), ...rest.map(line => el('div', line, 'subline'))); }
+  if (live) {
+    const total = live.limit_ms || 1, bar = el('progress'); bar.max = total; bar.value = Math.min(live.elapsed_ms, total);
+    cell.append(el('div', msg`正在测 ${speedDirections[live.direction] || ''} · ${(live.elapsed_ms / 1000).toFixed(0)} 秒 · 当前 ${bitRate(live.current_bps)}`, 'subline speed-live'), bar);
+  }
+  if (segment.error) cell.append(el('div', speedTestReason(segment.error) || segment.error, 'subline wrap error-text'));
+  if (segment.rejected_connections) cell.append(el('div', msg`监听端拒绝了 ${segment.rejected_connections} 个令牌不符的连接`, 'subline'));
+  if (!cell.children.length) cell.append(el('span', '—', 'fine'));
+  return cell;
+}
+function speedSegmentName(segment) { return segment.to_node_id ? `${segment.from_name} → ${segment.to_name}` : `${segment.from_name} → Cloudflare`; }
+function speedParams(job) {
+  const p = job.params, amount = p.bytes ? msg`每个方向 ${bytes(p.bytes)}` : msg`每个方向 ${p.duration_secs} 秒`;
+  return `${speedDirections[p.direction] || p.direction} · ${amount} · ${msg`${p.streams} 个流`}`;
+}
+// Live numbers of the running segment, with the length of one direction for the progress bar.
+function speedLive(job, index) {
+  if (job.state !== 'running' || job.progress?.segment !== index) return null;
+  return { ...job.progress, limit_ms: 2000 + (job.params.duration_secs || 60) * 1000 };
+}
+// Direction, amount and streams; the same fields for server and path tests.
+function speedParamFields(form) {
+  const grid = el('div', undefined, 'form-grid');
+  select(grid, 'direction', translate('方向'), [['both', translate('上行和下行')], ['upload', translate('上行')], ['download', translate('下行')]], 'both');
+  const amount = select(grid, 'amount', translate('测试量'), [['duration', translate('按时长')], ['bytes', translate('按数据量')]], 'duration');
+  const duration = field(grid, 'duration_secs', translate('每个方向时长 / 秒（5–60，另加约 2 秒预热）'), 10, 'number'); duration.min = 5; duration.max = 60;
+  const megabytes = field(grid, 'megabytes', translate('每个方向数据量 / MB（1–1000，最长仍为 60 秒）'), 100, 'number'); megabytes.min = 1; megabytes.max = 1000;
+  const streams = field(grid, 'streams', translate('并行 TCP 流（1–8）'), 4, 'number'); streams.min = 1; streams.max = 8;
+  const toggle = () => { const time = amount.value === 'duration'; duration.parentElement.classList.toggle('hidden', !time); duration.disabled = !time; megabytes.parentElement.classList.toggle('hidden', time); megabytes.disabled = time; };
+  amount.addEventListener('change', toggle); toggle(); form.append(grid);
+  return grid;
+}
+function speedParamBody(data) {
+  const whole = (key, low, high, error) => { const text = String(data.get(key) ?? '').trim(), value = Number(text); if (!/^\d+$/.test(text) || value < low || value > high) throw new Error(error); return value; };
+  const body = { direction: data.get('direction'), streams: whole('streams', 1, 8, translate('并行流数必须是 1 到 8 之间的整数')) };
+  if (data.get('amount') === 'bytes') body.bytes = whole('megabytes', 1, 1000, translate('数据量必须是 1 到 1000 之间的整数 MB')) * 1_000_000;
+  else body.duration_secs = whole('duration_secs', 5, 60, translate('时长必须是 5 到 60 之间的整数秒'));
+  return body;
+}
+function speedNoMeterNote() { return el('p', translate('测速流量不经过任何规则：不受规则和服务器的限速，不计入流量账本、规则配额和共享额度。结果反映服务器之间或到公共测速服务的线路能力，不等于经过规则、限速后的业务速度。'), 'workflow-callout'); }
+// Polls a running test about once a second while `box` is shown.
+async function followSpeedTest(job, box, draw) {
+  draw(job);
+  while (job.state === 'running' && box.isConnected) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    if (!box.isConnected) return;
+    job = await api(`/speed-tests/${encodeURIComponent(job.id)}`); draw(job);
+  }
+}
+async function cancelSpeedTest(job) { const stopped = await api(`/speed-tests/${encodeURIComponent(job.id)}`, { method: 'DELETE' }); notify(translate('已取消测速，两端服务器会立即停止。')); return stopped; }
+function speedHistory(jobs, nodes, onCancel) {
+  if (!jobs.length) return el('p', translate('还没有测速记录。'), 'fine');
+  const name = id => nodes.find(n => n.id === id)?.name || id;
+  return table([translate('开始时间'), translate('测试'), translate('参数'), translate('结果'), translate('状态'), translate('操作')], jobs.map(job => {
+    const what = el('div'), results = el('div'), [label, color] = speedStates[job.state] || [job.state, ''], state = el('div'), tools = el('div');
+    what.append(el('strong', job.kind === 'path' ? msg`路径测速 · ${job.rule?.name || ''}` : job.mode === 'cloudflare' ? translate('服务器 ↔ Cloudflare') : translate('服务器 ↔ 服务器')), el('div', job.kind === 'path' ? job.segments.map(s => s.from_name).concat(job.segments.length ? [job.segments.at(-1).to_name] : job.target ? [job.target.node_name] : []).join(' → ') : job.segments.map(speedSegmentName).join(' · ') || job.node_ids.map(name).join(' · '), 'subline'));
+    job.segments.forEach((segment, index) => { if (job.segments.length > 1) results.append(el('div', `${index + 1}. ${speedSegmentName(segment)}${job.slowest_segment === index ? ` · ${translate('最慢')}` : ''}`, 'subline')); results.append(speedSegmentCell(segment, speedLive(job, index))); });
+    if (job.target) results.append(el('div', job.target.connect_us != null ? msg`末跳到目标 TCP 连接 ${(job.target.connect_us / 1000).toFixed(1)} 毫秒` : job.target.error ? msg`末跳到目标连接失败：${job.target.error}` : translate('末跳到目标的连接耗时：等待中'), 'subline'));
+    state.append(badge(label, color), el('div', msg`由 ${job.started_by_name} 发起`, 'subline'));
+    if (job.state === 'running') tools.append(button(translate('取消'), () => onCancel(job), 'table-action danger'));
+    return [timestamp(job.created_at_ms), what, speedParams(job), results, state, tools];
+  }));
+}
+// The Speed test section of Diagnostics, for system administrators.
+function speedTestPanel(nodes, jobs) {
+  const p = panel(translate('测速'), translate('从一台服务器测到 Cloudflare 的公共测速服务，或测两台服务器之间的速度。约 2 秒预热不计入结果；每台服务器同一时间只进行一项测速。'));
+  p.classList.add('speed-test-panel');
+  const form = el('form', undefined, 'speed-test-form'), grid = el('div', undefined, 'form-grid'), named = list => list.map(n => [n.id, n.speed_test_support ? n.name : msg`${n.name}（Agent 不支持测速）`]);
+  const mode = select(grid, 'mode', translate('测速方式'), [['cloudflare', translate('服务器 ↔ Cloudflare')], ['server', translate('服务器 ↔ 服务器')]], 'cloudflare');
+  const preferred = nodes.find(n => n.speed_test_support && online(n)) || nodes[0];
+  const from = select(grid, 'node_id', translate('测速服务器（发起连接）'), named(nodes), preferred?.id || '');
+  const peer = select(grid, 'peer_node_id', translate('对端服务器（临时监听，接收连接）'), named(nodes), nodes.find(n => n.id !== from.value && n.speed_test_support)?.id || '');
+  const port = field(grid, 'port', translate('对端测试端口（留空：自动选用转发端口范围内的空闲端口）'), '', 'number', false); port.min = 1024; port.max = 65535;
+  form.append(grid); speedParamFields(form);
+  const help = el('p', '', 'fine'), toggle = () => { const pair = mode.value === 'server'; for (const input of [peer, port]) { input.parentElement.classList.toggle('hidden', !pair); input.disabled = !pair; } help.textContent = pair ? translate('上行：测速服务器 → 对端服务器；下行：对端服务器 → 测速服务器。测速服务器连接对端的转发地址（按 NAT 端口映射换算），请在对端的防火墙 / 安全组放行该 TCP 端口。连接须带本次测速的随机令牌，测完或超时后端口关闭。') : translate('上行：服务器 → Cloudflare；下行：Cloudflare → 服务器。只使用 speed.cloudflare.com 的固定测速地址，不能指定其他网址。'); };
+  mode.addEventListener('change', toggle); toggle(); form.append(help, speedNoMeterNote());
+  const actions = el('div', undefined, 'speed-test-actions'), start = el('button', translate('开始测速'), 'primary'); start.type = 'submit'; actions.append(start); form.append(actions);
+  const error = el('p', undefined, 'error'); error.setAttribute('role', 'alert'); form.append(error);
+  const historyBox = el('div', undefined, 'speed-history');
+  const draw = list => { historyBox.replaceChildren(el('h3', translate('最近 50 次测速')), speedHistory(list, nodes, async job => { await cancelSpeedTest(job); await reload(); })); };
+  async function reload() { const list = await api('/speed-tests'); draw(list); return list; }
+  async function poll() { let list = jobs; while (list.some(job => job.state === 'running') && historyBox.isConnected) { await new Promise(resolve => setTimeout(resolve, 1500)); if (!historyBox.isConnected) return; list = await reload(); } }
+  form.onsubmit = async event => {
+    event?.preventDefault?.(); error.textContent = ''; start.disabled = true;
+    try {
+      const data = new FormData(form), body = { mode: data.get('mode'), node_id: data.get('node_id'), ...speedParamBody(data) };
+      if (!body.node_id) throw new Error(translate('请选择测速服务器'));
+      if (body.mode === 'server') {
+        if (!data.get('peer_node_id') || data.get('peer_node_id') === body.node_id) throw new Error(translate('请选择两台不同的服务器'));
+        body.peer_node_id = data.get('peer_node_id');
+        const text = String(data.get('port') ?? '').trim();
+        if (text) { const value = Number(text); if (!/^\d+$/.test(text) || value < 1024 || value > 65535) throw new Error(translate('端口必须是 1024 到 65535 之间的整数，或留空自动选择')); body.port = value; }
+      }
+      const job = await api('/speed-tests', { method: 'POST', body }); notify(translate('测速已开始，结果会显示在下方。'));
+      jobs = [job, ...jobs.filter(j => j.id !== job.id)]; draw(jobs); poll().catch(e => notify(e.message, true));
+    } catch (e) { error.textContent = e.message; } finally { start.disabled = false; }
+  };
+  draw(jobs); poll().catch(e => notify(e.message, true));
+  const body = el('div', undefined, 'panel-body'); body.append(form, historyBox); p.append(body);
+  return p;
+}
+// Path speed test of a rule: each server-to-server segment of its path, then the last hop's TCP connect
+// time to the target, next to the limits that a real connection would meet.
+function speedLimitText(limit) {
+  const rate = rateText(limit.rate_bytes_per_sec, limit.rate_limits, mbit);
+  return [rate || translate('不限速'), limit.kind === 'rule' ? (limit.quota_bytes == null ? translate('不限量') : msg`配额 ${bytes(limit.quota_bytes)}`) : ''].filter(Boolean).join(' · ');
+}
+function canSpeedTestRule(rule) { return canWrite() && rule && rule.targets?.length > 0 && !rule.protocol_gateway && !rule.reverse_tunnel && !String(rule.id).startsWith('fed-'); }
+async function openPathSpeedTest(nodeId, rule) {
+  const plan = await api(`/speed-tests/path?node_id=${encodeURIComponent(nodeId)}&rule_id=${encodeURIComponent(rule.id)}`);
+  const body = el('div', undefined, 'speed-test-dialog'), names = plan.hops.map(h => h.node_name);
+  body.append(el('h3', translate('本次路径')), el('p', [...names, ...(plan.target ? [plan.target.address] : [])].join(' → '), 'mono speed-path'));
+  const segments = el('ol', undefined, 'speed-segments');
+  for (const segment of plan.segments) segments.append(el('li', msg`${segment.from_name} → ${segment.to_name}：测速服务器连接 ${segment.to_name} 时使用与规则目标 ${segment.target_address} 相同的主机，端口为临时测试端口`));
+  if (plan.target) segments.append(el('li', msg`${plan.target.node_name} → 目标 ${plan.target.address}：只测 TCP 连接耗时，不发送数据`));
+  if (!plan.target && plan.segments.length) segments.append(el('li', translate('末跳是代理服务，没有固定目标：不测连接耗时'), 'fine'));
+  body.append(segments, speedNoMeterNote());
+  body.append(el('h3', translate('路径上的限速（本测试不受其限制）')), table([translate('类型'), translate('服务器'), translate('规则'), translate('限速 / 配额')], plan.limits.map(limit => [limit.kind === 'rule' ? translate('规则') : translate('服务器'), limit.node_name, limit.rule_name || '—', speedLimitText(limit)])));
+  const results = el('div', undefined, 'speed-results');
+  if (plan.reason) { body.append(el('p', speedTestReason(plan.reason) || plan.reason, 'error'), results); modal(msg`路径测速 · ${rule.name}`, body); return; }
+  const form = el('form'); speedParamFields(form);
+  form.append(el('p', translate('上行朝最后一跳（与客户端上传同向），下行朝入口服务器。各段依次进行，同一时间每台服务器只进行一项测速；非管理员每分钟最多发起一次。'), 'fine'));
+  const actions = el('div', undefined, 'dialog-actions'), start = el('button', translate('开始测速'), 'primary'), stop = button(translate('取消测速'), async () => { if (current) draw(await cancelSpeedTest(current)); }, 'subtle danger');
+  start.type = 'submit'; stop.classList.add('hidden'); actions.append(stop, start);
+  // Results and errors above the sticky action bar, which stays last.
+  const error = el('p', undefined, 'error'); error.setAttribute('role', 'alert'); form.append(results, error, actions);
+  let current = null;
+  function draw(job) {
+    current = job; const running = job.state === 'running', [label, color] = speedStates[job.state] || [job.state, ''];
+    stop.classList.toggle('hidden', !running); start.disabled = running;
+    const rows = job.segments.map((segment, index) => [`${index + 1}. ${speedSegmentName(segment)}`, badge((speedStates[segment.state] || [segment.state])[0], (speedStates[segment.state] || [])[1] || ''), speedSegmentCell(segment, speedLive(job, index))]);
+    const head = el('div', undefined, 'panel-actions'); head.append(el('h3', translate('测速结果')), badge(label, color));
+    results.replaceChildren(head, table([translate('路段'), translate('状态'), translate('平均 / 峰值（1 秒）')], rows));
+    const slow = job.segments[job.slowest_segment];
+    if (slow && job.segments.length > 1) results.append(el('p', msg`最慢的一段：${speedSegmentName(slow)}（${bitRate(Math.min(...slow.results.filter(r => r.measured_ms > 0).map(r => r.average_bps)))}）`, 'workflow-callout speed-slowest'));
+    if (job.target) results.append(el('p', job.target.connect_us != null ? msg`${job.target.node_name} 到目标 ${job.target.address} 的 TCP 连接耗时 ${(job.target.connect_us / 1000).toFixed(1)} 毫秒` : job.target.error ? msg`${job.target.node_name} 连接目标 ${job.target.address} 失败：${job.target.error}` : msg`${job.target.node_name} 到目标 ${job.target.address} 的连接耗时：等待中`, 'fine'));
+  }
+  form.onsubmit = async event => {
+    event?.preventDefault?.(); error.textContent = '';
+    try {
+      const job = await api('/speed-tests/path', { method: 'POST', body: { node_id: nodeId, rule_id: rule.id, ...speedParamBody(new FormData(form)) } });
+      await followSpeedTest(job, results, draw);
+    } catch (e) { error.textContent = e.message; }
+  };
+  body.append(form);
+  modal(msg`路径测速 · ${rule.name}`, body);
 }
 async function renderAudit() { const actor = state.actor; const rows = await api('/audit'); if (state.view !== 'audit' || !actor || state.actor !== actor) return; const p = panel(translate('操作审计'), translate('记录配置发布、节点注册、身份及会话操作。最近 200 条。')); p.append(table([translate('时间'), translate('操作者'), translate('操作'), translate('对象'), translate('详情')], rows.map(r => [timestamp(r.at_ms), r.actor_id, r.action, r.resource, r.detail]))); if (state.view === 'audit') $('#content').replaceChildren(p); }
 const alertKinds = localize({ smtp: 'Email / SMTP', webhook: 'Webhook', telegram: 'Telegram', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉' });
@@ -4172,6 +4360,7 @@ async function renderTopology() {
     if (canWrite()) tools.append(button(nodeIds.length > 1 ? translate('编辑入口') : translate('编辑'), () => editDiagramRule(root), 'table-action'));
     const path = shadowsocksPath(snapshot, root);
     if (path) tools.append(button(translate('客户端链接'), () => shareShadowsocks(path.exit, path.entry, path.hops.map(hop => names.get(hop.node_id)).join(' → ')), 'table-action'));
+    if (canSpeedTestRule(rule)) tools.append(button(translate('路径测速…'), () => openPathSpeedTest(root.node_id, rule), 'table-action'));
     if (canWrite()) tools.append(button(rule?.enabled ? translate('停用') : translate('启用'), () => changeTopologyComponent(snapshot, key, !rule?.enabled), 'table-action'));
     if (canWrite() && !root.rule_id.startsWith('fed-')) tools.append(button(translate('删除'), () => deleteForwarding(snapshot, root), 'table-action danger'));
     head.append(title, tools); card.append(head, routeChips(model, health, byId, conns));

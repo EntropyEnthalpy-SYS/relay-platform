@@ -13,6 +13,7 @@ mod budget_recovery;
 mod credentials;
 mod lease_client;
 mod reverse_tunnel;
+mod speed_test;
 mod wireguard;
 use credentials::SharedCredential;
 
@@ -208,6 +209,28 @@ async fn bounded_json<T: DeserializeOwned>(mut response: reqwest::Response) -> R
 }
 
 pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -> Result<()> {
+    run_agent(store, options, stop, crate::speed_test::CLOUDFLARE).await
+}
+
+/// [`run`] with another public speed service than Cloudflare's, for tests
+/// that cannot reach the internet. Neither the panel nor a command-line
+/// flag can choose it.
+#[doc(hidden)]
+pub async fn run_with_speed_test_service(
+    store: Store,
+    options: AgentOptions,
+    stop: CancellationToken,
+    service: String,
+) -> Result<()> {
+    run_agent(store, options, stop, &service).await
+}
+
+async fn run_agent(
+    store: Store,
+    options: AgentOptions,
+    stop: CancellationToken,
+    speed_service: &str,
+) -> Result<()> {
     let _instance = store.lock_instance()?;
     store.set_kind("agent")?;
     let base = controller_url(&options.controller)?;
@@ -342,6 +365,10 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
     // Burst credit, and with it support for upload, download and burst
     // limits, is reported only to a controller that asked for it.
     let mut rate_reporting = false;
+    // Speed tests run, and are reported, only for a controller that asked.
+    let mut speed_tests = speed_test::SpeedTests::new(speed_service);
+    let speed_test_ended = speed_tests.finished();
+    let mut speed_reporting = false;
     let mut active = false;
     let mut apply_error = None;
     let mut connection_failed = false;
@@ -370,7 +397,9 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 let body: serde_json::Value = bounded_json(response).await?;
                 Ok::<_, anyhow::Error>((
                     body["desired_revision"].as_u64().unwrap_or(0),
-                    body["wireguard_changed"] == true || body["reverse_tunnels_changed"] == true,
+                    body["wireguard_changed"] == true
+                        || body["reverse_tunnels_changed"] == true
+                        || body["speed_tests_changed"] == true,
                 ))
             };
             match watched.await {
@@ -378,8 +407,8 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     seen = revision;
                     published.notify_one();
                 }
-                // NAT traversal moved a path, or a reverse tunnel changed:
-                // sync now so both sides switch together.
+                // NAT traversal moved a path, a reverse tunnel or a speed
+                // test changed: sync now so both sides switch together.
                 Ok((_, true)) => published.notify_one(),
                 Ok(_) => {}
                 Err(error) => {
@@ -512,6 +541,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                     stats.wireguard = overlay_report.clone();
                     stats.reverse_tunnel = tunnel_reporting.then(|| tunnels.report());
                     stats.rate_limits = rate_reporting.then(|| engine.rate_limit_report());
+                    stats.speed_test = speed_reporting.then(|| speed_tests.report());
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -556,6 +586,13 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                             // An older controller sends none: no tunnels.
                             tunnel_reporting = synced.reverse_tunnels.is_some();
                             rate_reporting = synced.rate_limits;
+                            // An older controller sends neither: no tests.
+                            speed_reporting = synced.speed_test;
+                            speed_tests.reconcile(if synced.speed_test {
+                                &synced.speed_test_tasks
+                            } else {
+                                &[]
+                            });
                             if let Err(error) = tunnels
                                 .reconcile(&store, &synced.reverse_tunnels.unwrap_or_default())
                             {
@@ -725,7 +762,12 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 active = true;
                 tracing::info!("restored last successful local configuration");
             }
-            let poll_interval = user_poll();
+            // A running speed test reports its progress every second.
+            let poll_interval = if speed_tests.active() {
+                user_poll().min(Duration::from_secs(1))
+            } else {
+                user_poll()
+            };
             let interval = if store
                 .agent_config()?
                 .is_some_and(|c| c.rules.iter().any(|r| !r.budget_ids.is_empty()))
@@ -751,6 +793,7 @@ pub async fn run(store: Store, options: AgentOptions, stop: CancellationToken) -
                 _ = stop.cancelled() => break,
                 _ = tokio::time::sleep(interval) => {},
                 _ = published.notified() => {},
+                _ = speed_test_ended.notified() => {},
                 _ = async {store.budget_refill_needed().await;tokio::time::sleep(refill_delay).await;} => {},
             }
         }

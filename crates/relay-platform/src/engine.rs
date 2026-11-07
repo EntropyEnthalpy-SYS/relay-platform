@@ -140,6 +140,7 @@ impl Counters {
             wireguard: None,
             reverse_tunnel: None,
             rate_limits: None,
+            speed_test: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),

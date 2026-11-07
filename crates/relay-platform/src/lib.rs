@@ -37,6 +37,7 @@ pub mod shadowsocks;
 mod shadowsocks_uot;
 pub mod shared_rule;
 pub mod socks5;
+pub mod speed_test;
 pub mod state;
 pub mod store;
 pub mod subscription;
