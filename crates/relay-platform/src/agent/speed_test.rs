@@ -802,7 +802,10 @@ mod tests {
         let upload = &results[0];
         assert_eq!(upload.failed_streams, 0, "{upload:?}");
         // Without the fix the window is about 3 s: 5 s less the 2 s waited.
-        assert!(upload.measured_ms >= 4_500, "{upload:?}");
+        // The listener's clock starts once it has read the stream header, a
+        // little after the dialer's, so a busy machine can trim a few hundred
+        // milliseconds from the 5 s window.
+        assert!(upload.measured_ms >= 4_000, "{upload:?}");
         assert!(upload.bytes > 0 && upload.average_bps > 0, "{upload:?}");
     }
 
