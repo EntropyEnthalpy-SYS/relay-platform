@@ -258,6 +258,7 @@ async fn dns_apply_observe_min_keep_and_provider_isolation_are_real() {
             &endpoint,
             "test-token",
             0,
+            Default::default(),
         )
         .unwrap();
     assert!(provider.token_set);
@@ -445,6 +446,7 @@ async fn dns_health_gate_removes_an_entry_and_restores_it_after_recovery() {
             &endpoint,
             "test-token",
             0,
+            Default::default(),
         )
         .unwrap();
     let zone = store
@@ -754,6 +756,8 @@ async fn dns_list_follows_cloudflare_pagination() {
         endpoint: format!("http://{address}/client/v4"),
         token: "test-token".into(),
         min_ttl: None,
+        zones: vec![],
+        timeout_secs: None,
         created_at_ms: 0,
     };
     let client = dns::Cloudflare::new(reqwest::Client::new(), &provider).unwrap();
@@ -857,6 +861,7 @@ fn fixture(endpoint: &str, min_ttl: u32) -> Fixture {
             endpoint,
             "test-token",
             min_ttl,
+            Default::default(),
         )
         .unwrap();
     Fixture {
@@ -1213,7 +1218,15 @@ async fn dns_provider_minimum_ttl_is_published_without_update_loops() {
     // Removing the minimum publishes the record's own TTL.
     let provider = f
         .store
-        .update_dns_provider(&f.admin, &f.provider, None, None, None, Some(0))
+        .update_dns_provider(
+            &f.admin,
+            &f.provider,
+            None,
+            None,
+            None,
+            Some(0),
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(provider.min_ttl, None);
     let lowered = dns::reconcile(&f.store, &http, &zone.id).await.unwrap();
@@ -1222,7 +1235,15 @@ async fn dns_provider_minimum_ttl_is_published_without_update_loops() {
     assert_eq!(
         rejection(
             f.store
-                .update_dns_provider(&f.admin, &f.provider, None, None, None, Some(86_401))
+                .update_dns_provider(
+                    &f.admin,
+                    &f.provider,
+                    None,
+                    None,
+                    None,
+                    Some(86_401),
+                    Default::default(),
+                )
                 .unwrap_err()
         ),
         400
@@ -1348,4 +1369,1027 @@ async fn dns_provider_test_lists_zones_for_admins_without_leaking_the_token() {
     assert_eq!(too_long.status(), 400);
     stop.cancel();
     mock_stop.cancel();
+}
+
+// ---- DNS webhook provider ----
+
+const WEBHOOK_SECRET: &str = "webhook-secret-for-tests-0123456789abcdef";
+
+/// A local webhook receiver after the public description of the ZFC DNS
+/// webhook protocol v1: it checks the HMAC signature and clock, keeps a
+/// generation watermark per source and the last (generation, seq, body) per
+/// set, and replaces whole value sets. Failures can be injected.
+#[derive(Clone, Default)]
+struct Receiver(Arc<std::sync::Mutex<ReceiverState>>);
+/// (source, zone, name, type) → last accepted (generation, seq, raw body).
+type Versions = std::collections::HashMap<(String, String, String, String), (u64, u64, Vec<u8>)>;
+#[derive(Default)]
+struct ReceiverState {
+    zones: Vec<String>,
+    watermarks: std::collections::HashMap<String, u64>,
+    versions: Versions,
+    /// (zone, name, type) → (ttl, values).
+    sets: std::collections::BTreeMap<(String, String, String), (u64, Vec<String>)>,
+    /// Bodies of accepted requests, in order.
+    accepted: Vec<Value>,
+    deliveries: Vec<String>,
+    /// Every request to the receiver URL, accepted or not.
+    requests: u64,
+    fail: Option<(u16, Value)>,
+    delay_ms: u64,
+}
+impl Receiver {
+    fn state(&self) -> std::sync::MutexGuard<'_, ReceiverState> {
+        self.0.lock().unwrap()
+    }
+    fn set(&self, name: &str, record_type: &str) -> Option<(u64, Vec<String>)> {
+        self.state()
+            .sets
+            .get(&("example.com".into(), name.into(), record_type.into()))
+            .cloned()
+    }
+    fn events(&self) -> Vec<String> {
+        self.state()
+            .accepted
+            .iter()
+            .map(|body| body["event"].as_str().unwrap().to_owned())
+            .collect()
+    }
+    fn requests(&self) -> u64 {
+        self.state().requests
+    }
+}
+fn hmac_hex(secret: &str, timestamp: &str, body: &[u8]) -> String {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let tag = ring::hmac::sign(&key, &[timestamp.as_bytes(), b".", body].concat());
+    let hex: String = tag.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    format!("sha256={hex}")
+}
+/// `1..=i64::MAX` as a decimal string without leading zeros.
+fn decimal(value: &Value) -> Option<u64> {
+    let text = value.as_str()?;
+    if text.is_empty() || text.starts_with('0') || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<u64>()
+        .ok()
+        .filter(|value| *value <= i64::MAX as u64)
+}
+async fn mock_receiver(zones: &[&str]) -> (Receiver, String, CancellationToken) {
+    use axum::{
+        Router,
+        body::Bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::{IntoResponse, Response},
+        routing::post,
+    };
+    let receiver = Receiver::default();
+    receiver.state().zones = zones.iter().map(|zone| zone.to_string()).collect();
+    fn reply(status: u16, body: Value) -> Response {
+        (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response()
+    }
+    async fn receive(State(receiver): State<Receiver>, headers: HeaderMap, raw: Bytes) -> Response {
+        let delay = {
+            let mut state = receiver.state();
+            state.requests += 1;
+            state.delay_ms
+        };
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+        let header = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let timestamp = header("x-zfc-timestamp");
+        let now = relay_platform::model::now_ms() / 1000;
+        if timestamp
+            .parse::<i64>()
+            .is_ok_and(|at| (now - at).abs() > 300)
+            || hmac_hex(WEBHOOK_SECRET, &timestamp, &raw) != header("x-zfc-signature")
+        {
+            return reply(401, json!({"error": "invalid_signature"}));
+        }
+        let Ok(body) = serde_json::from_slice::<Value>(&raw) else {
+            return reply(400, json!({"error": "invalid_json"}));
+        };
+        let event = body["event"].as_str().unwrap_or_default().to_owned();
+        if body["version"] != 1
+            || header("x-zfc-event") != event
+            || header("content-type") != "application/json"
+            || uuid::Uuid::parse_str(&header("x-zfc-delivery")).is_err()
+        {
+            return reply(400, json!({"error": "invalid_request"}));
+        }
+        let mut state = receiver.state();
+        if let Some((status, body)) = state.fail.clone() {
+            return reply(status, body);
+        }
+        let source = body["source"].as_str().unwrap_or_default().to_owned();
+        let allowed = |zone: &Value, state: &ReceiverState| {
+            zone.as_str()
+                .is_some_and(|zone| state.zones.iter().any(|allowed| allowed == zone))
+        };
+        match event.as_str() {
+            "ping" => {
+                let zones = body["zones"].as_array().cloned().unwrap_or_default();
+                if zones.is_empty() || !zones.iter().all(|zone| allowed(zone, &state)) {
+                    return reply(400, json!({"error": "zone_not_allowed"}));
+                }
+            }
+            "generation.start" => {
+                let Some(generation) = decimal(&body["generation"]) else {
+                    return reply(400, json!({"error": "invalid_generation"}));
+                };
+                let watermark = state.watermarks.get(&source).copied().unwrap_or(0);
+                if generation < watermark {
+                    return reply(
+                        409,
+                        json!({"error": "stale_generation", "watermark": watermark.to_string()}),
+                    );
+                }
+                state.watermarks.insert(source.clone(), generation);
+            }
+            "record_set.put" => {
+                let (Some(generation), Some(seq)) =
+                    (decimal(&body["generation"]), decimal(&body["seq"]))
+                else {
+                    return reply(400, json!({"error": "invalid_version"}));
+                };
+                let watermark = state.watermarks.get(&source).copied().unwrap_or(0);
+                if generation != watermark {
+                    return reply(
+                        409,
+                        json!({"error": "stale_generation", "watermark": watermark.to_string()}),
+                    );
+                }
+                if !allowed(&body["zone"], &state) {
+                    return reply(400, json!({"error": "zone_not_allowed"}));
+                }
+                let values: Vec<String> = body["values"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_str().unwrap().to_owned())
+                    .collect();
+                // A complete set, deduplicated and in byte order.
+                if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return reply(400, json!({"error": "values_not_canonical"}));
+                }
+                let text = |field: &str| body[field].as_str().unwrap().to_owned();
+                let key = (source.clone(), text("zone"), text("name"), text("type"));
+                match state.versions.get(&key) {
+                    Some((g, s, previous)) if (*g, *s) == (generation, seq) => {
+                        if *previous != raw.to_vec() {
+                            return reply(409, json!({"error": "version_conflict"}));
+                        }
+                    }
+                    Some((g, s, _)) if (*g, *s) > (generation, seq) => {
+                        return reply(409, json!({"error": "stale_version"}));
+                    }
+                    _ => {
+                        let set = (text("zone"), text("name"), text("type"));
+                        if values.is_empty() {
+                            state.sets.remove(&set);
+                        } else {
+                            state
+                                .sets
+                                .insert(set, (body["ttl"].as_u64().unwrap(), values));
+                        }
+                        state.versions.insert(key, (generation, seq, raw.to_vec()));
+                    }
+                }
+            }
+            _ => return reply(400, json!({"error": "unknown_event"})),
+        }
+        state.accepted.push(body);
+        state.deliveries.push(header("x-zfc-delivery"));
+        StatusCode::NO_CONTENT.into_response()
+    }
+    // A redirect to the real receiver URL: following it would deliver.
+    let redirect = || async {
+        (
+            StatusCode::TEMPORARY_REDIRECT,
+            [(axum::http::header::LOCATION, "/dns")],
+        )
+            .into_response()
+    };
+    let app = Router::new()
+        .route("/dns", post(receive))
+        .route("/moved", post(redirect))
+        .with_state(receiver.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    let shutdown = stop.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    (receiver, format!("http://{address}/dns"), stop)
+}
+fn webhook_store(path: &std::path::Path) -> (Store, relay_platform::store::Actor) {
+    let store = Store::open(path).unwrap();
+    store.set_kind("controller").unwrap();
+    let admin = store.bootstrap(PASSWORD).unwrap();
+    (store, admin)
+}
+fn webhook_provider(store: &Store, admin: &relay_platform::store::Actor, endpoint: &str) -> String {
+    store
+        .create_dns_provider(
+            admin,
+            "receiver",
+            ProviderKind::Webhook,
+            endpoint,
+            WEBHOOK_SECRET,
+            0,
+            dns::WebhookSettings {
+                zones: Some(vec!["example.com".into(), "example.net".into()]),
+                timeout_secs: None,
+            },
+        )
+        .unwrap()
+        .id
+}
+fn record(
+    name: &str,
+    record_type: RecordType,
+    content: &str,
+    ttl: u32,
+) -> relay_platform::store::NewDnsRecord {
+    relay_platform::store::NewDnsRecord {
+        name: name.into(),
+        record_type,
+        content: content.into(),
+        ttl,
+        proxied: false,
+        health: None,
+    }
+}
+fn patch(
+    f: impl FnOnce(&mut relay_platform::store::DnsRecordPatch),
+) -> relay_platform::store::DnsRecordPatch {
+    let mut patch = relay_platform::store::DnsRecordPatch::default();
+    f(&mut patch);
+    patch
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_webhook_sends_signed_complete_sets_and_writes_only_differences() {
+    let (receiver, endpoint, receiver_stop) = mock_receiver(&["example.com", "example.net"]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let (store, admin) = webhook_store(&temp.path().join("controller.db"));
+    let provider = webhook_provider(&store, &admin, &endpoint);
+    let zone = store
+        .create_dns_zone(&admin, &provider, "example.com", ZoneMode::Apply, 0, 0)
+        .unwrap();
+    let low = store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            record("edge.example.com", RecordType::A, "203.0.113.2", 120),
+        )
+        .unwrap();
+    let high = store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            record("Edge.example.com.", RecordType::A, "203.0.113.1", 300),
+        )
+        .unwrap();
+    let v6 = store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            record("edge.example.com", RecordType::Aaaa, "2001:DB8::1", 300),
+        )
+        .unwrap();
+    store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            record(
+                "www.example.com",
+                RecordType::Cname,
+                "Edge.Example.com.",
+                300,
+            ),
+        )
+        .unwrap();
+    let http = reqwest::Client::new();
+    let first = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((first.created, first.errors), (4, 0), "{first:?}");
+    // One generation, then one put per record; one name's values form one
+    // set with the lowest TTL of its values.
+    assert_eq!(
+        receiver.events(),
+        [
+            "generation.start",
+            "record_set.put",
+            "record_set.put",
+            "record_set.put",
+            "record_set.put"
+        ]
+    );
+    {
+        let state = receiver.state();
+        assert_eq!(state.accepted[0]["generation"], "1");
+        assert_eq!(state.accepted[0]["source"], provider.as_str());
+        let seqs: Vec<u64> = state.accepted[1..]
+            .iter()
+            .map(|body| decimal(&body["seq"]).unwrap())
+            .collect();
+        assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
+        let deliveries: std::collections::HashSet<_> = state.deliveries.iter().collect();
+        assert_eq!(
+            deliveries.len(),
+            state.deliveries.len(),
+            "a new delivery ID per request"
+        );
+    }
+    assert_eq!(
+        receiver.set("edge.example.com", "A"),
+        Some((120, vec!["203.0.113.1".into(), "203.0.113.2".into()]))
+    );
+    assert_eq!(
+        receiver.set("edge.example.com", "AAAA"),
+        Some((300, vec!["2001:db8::1".into()]))
+    );
+    assert_eq!(
+        receiver.set("www.example.com", "CNAME"),
+        Some((300, vec!["edge.example.com".into()]))
+    );
+    assert_eq!(
+        store
+            .dns_record(&admin, &low.id)
+            .unwrap()
+            .status
+            .unwrap()
+            .state,
+        dns::RecordState::Published
+    );
+
+    // Nothing changed: no request at all.
+    let requests = receiver.requests();
+    let again = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(
+        (
+            again.unchanged,
+            again.created + again.updated + again.deleted
+        ),
+        (4, 0),
+        "{again:?}"
+    );
+    assert_eq!(receiver.requests(), requests);
+
+    // A changed value replaces the whole set.
+    store
+        .update_dns_record(
+            &admin,
+            &low.id,
+            patch(|p| p.content = Some("203.0.113.3".into())),
+        )
+        .unwrap();
+    let changed = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(changed.updated, 1, "{changed:?}");
+    assert_eq!(
+        receiver.set("edge.example.com", "A"),
+        Some((120, vec!["203.0.113.1".into(), "203.0.113.3".into()]))
+    );
+    // A disabled value leaves the set, and the set's TTL follows the rest.
+    store
+        .update_dns_record(&admin, &low.id, patch(|p| p.enabled = Some(false)))
+        .unwrap();
+    let disabled = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(disabled.deleted, 1, "{disabled:?}");
+    assert_eq!(
+        receiver.set("edge.example.com", "A"),
+        Some((300, vec!["203.0.113.1".into()]))
+    );
+    assert!(
+        store
+            .dns_record(&admin, &low.id)
+            .unwrap()
+            .provider_record_id
+            .is_none()
+    );
+    // A renamed record leaves its old set (now empty: deleted) for the new one.
+    store
+        .update_dns_record(
+            &admin,
+            &v6.id,
+            patch(|p| p.name = Some("api.example.com".into())),
+        )
+        .unwrap();
+    let renamed = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((renamed.updated, renamed.errors), (1, 0), "{renamed:?}");
+    assert_eq!(receiver.set("edge.example.com", "AAAA"), None);
+    assert_eq!(
+        receiver.set("api.example.com", "AAAA"),
+        Some((300, vec!["2001:db8::1".into()]))
+    );
+    // A second CNAME target for one name is refused before sending.
+    store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            record(
+                "www.example.com",
+                RecordType::Cname,
+                "other.example.net",
+                300,
+            ),
+        )
+        .unwrap();
+    let requests = receiver.requests();
+    let cname = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(cname.errors, 1, "{cname:?}");
+    assert!(
+        cname
+            .actions
+            .iter()
+            .any(|action| action.detail.contains("only one target")),
+        "{cname:?}"
+    );
+    assert_eq!(receiver.requests(), requests);
+    let _ = high;
+
+    // Observe mode never contacts the receiver and reports against what it
+    // acknowledged.
+    let observe = store
+        .create_dns_zone(&admin, &provider, "example.net", ZoneMode::Observe, 0, 0)
+        .unwrap();
+    store
+        .create_dns_record(
+            &admin,
+            &observe.id,
+            record("probe.example.net", RecordType::A, "203.0.113.20", 300),
+        )
+        .unwrap();
+    let requests = receiver.requests();
+    let observed = dns::reconcile(&store, &http, &observe.id).await.unwrap();
+    assert_eq!(observed.created, 1, "{observed:?}");
+    assert!(
+        observed
+            .actions
+            .iter()
+            .any(|action| action.action == "would-create")
+    );
+    assert_eq!(receiver.requests(), requests);
+    receiver_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_webhook_generations_survive_restarts_and_follow_the_receiver() {
+    let (receiver, endpoint, receiver_stop) = mock_receiver(&["example.com"]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("controller.db");
+    let (store, admin) = webhook_store(&path);
+    let provider = webhook_provider(&store, &admin, &endpoint);
+    let zone = store
+        .create_dns_zone(&admin, &provider, "example.com", ZoneMode::Apply, 0, 0)
+        .unwrap();
+    let edge = store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            record("edge.example.com", RecordType::A, "203.0.113.1", 300),
+        )
+        .unwrap();
+    let http = reqwest::Client::new();
+    assert_eq!(
+        dns::reconcile(&store, &http, &zone.id)
+            .await
+            .unwrap()
+            .created,
+        1
+    );
+    let last_generation = |receiver: &Receiver| {
+        receiver
+            .state()
+            .accepted
+            .iter()
+            .rev()
+            .find(|body| body["event"] == "generation.start")
+            .map(|body| body["generation"].as_str().unwrap().to_owned())
+    };
+    assert_eq!(last_generation(&receiver).as_deref(), Some("1"));
+
+    // A restarted controller reads what was acknowledged: nothing to send.
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let requests = receiver.requests();
+    let restarted = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(restarted.unchanged, 1, "{restarted:?}");
+    assert_eq!(receiver.requests(), requests);
+    // Its first write starts the next generation.
+    let move_to = |content: &str| patch(|p| p.content = Some(content.into()));
+    store
+        .update_dns_record(&admin, &edge.id, move_to("203.0.113.2"))
+        .unwrap();
+    assert_eq!(
+        dns::reconcile(&store, &http, &zone.id)
+            .await
+            .unwrap()
+            .updated,
+        1
+    );
+    assert_eq!(last_generation(&receiver).as_deref(), Some("2"));
+    assert_eq!(receiver.state().accepted.last().unwrap()["generation"], "2");
+
+    // A receiver ahead of the controller (a restored database): the
+    // controller starts above the receiver's generation.
+    receiver.state().watermarks.insert(provider.clone(), 7);
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    store
+        .update_dns_record(&admin, &edge.id, move_to("203.0.113.3"))
+        .unwrap();
+    let ahead = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((ahead.updated, ahead.errors), (1, 0), "{ahead:?}");
+    assert_eq!(last_generation(&receiver).as_deref(), Some("8"));
+
+    // The receiver moves on mid-session: that write fails and the next
+    // pass starts a newer generation.
+    receiver.state().watermarks.insert(provider.clone(), 20);
+    store
+        .update_dns_record(&admin, &edge.id, move_to("203.0.113.4"))
+        .unwrap();
+    let stale = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(stale.errors, 1, "{stale:?}");
+    let error = store
+        .dns_record(&admin, &edge.id)
+        .unwrap()
+        .last_error
+        .unwrap();
+    assert!(
+        error.contains("409") && error.contains("stale_generation"),
+        "{error}"
+    );
+    let resumed = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((resumed.updated, resumed.errors), (1, 0), "{resumed:?}");
+    assert_eq!(last_generation(&receiver).as_deref(), Some("21"));
+    assert_eq!(
+        receiver.set("edge.example.com", "A"),
+        Some((300, vec!["203.0.113.4".into()]))
+    );
+    assert!(
+        store
+            .dns_record(&admin, &edge.id)
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+    receiver_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_webhook_failures_are_errors_and_never_reveal_the_secret() {
+    let (receiver, endpoint, receiver_stop) = mock_receiver(&["example.com"]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let (store, admin) = webhook_store(&temp.path().join("controller.db"));
+    let provider = webhook_provider(&store, &admin, &endpoint);
+    let zone = store
+        .create_dns_zone(&admin, &provider, "example.com", ZoneMode::Apply, 0, 0)
+        .unwrap();
+    let edge = store
+        .create_dns_record(
+            &admin,
+            &zone.id,
+            record("edge.example.com", RecordType::A, "203.0.113.1", 300),
+        )
+        .unwrap();
+    let http = reqwest::Client::new();
+    let failed_with = |status: u16, body: Value| {
+        receiver.state().fail = Some((status, body));
+    };
+    let error = |store: &Store| {
+        store
+            .dns_record(&admin, &edge.id)
+            .unwrap()
+            .last_error
+            .unwrap_or_default()
+    };
+
+    // The receiver could not apply the change: an error, nothing kept.
+    failed_with(
+        503,
+        json!({"error": "dns_not_applied", "message": "adapter exited 3"}),
+    );
+    let pass = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((pass.created, pass.errors), (0, 1), "{pass:?}");
+    let message = error(&store);
+    assert!(
+        message.contains("HTTP 503") && message.contains("dns_not_applied: adapter exited 3"),
+        "{message}"
+    );
+    assert_eq!(
+        store
+            .dns_record(&admin, &edge.id)
+            .unwrap()
+            .status
+            .unwrap()
+            .state,
+        dns::RecordState::Error
+    );
+    // A 202 is not an applied change.
+    failed_with(202, json!({}));
+    dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert!(
+        error(&store).contains("accepted without applying"),
+        "{}",
+        error(&store)
+    );
+    // A receiver echoing the secret: redacted.
+    failed_with(400, json!({"error": format!("bad key {WEBHOOK_SECRET}")}));
+    dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert!(error(&store).contains("[redacted]"), "{}", error(&store));
+    assert!(!error(&store).contains(WEBHOOK_SECRET));
+
+    // A wrong secret is refused by the receiver's signature check.
+    receiver.state().fail = None;
+    store
+        .update_dns_provider(
+            &admin,
+            &provider,
+            None,
+            None,
+            Some("another-secret-of-at-least-32-bytes!"),
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert!(error(&store).contains("HTTP 401"), "{}", error(&store));
+    store
+        .update_dns_provider(
+            &admin,
+            &provider,
+            None,
+            None,
+            Some(WEBHOOK_SECRET),
+            None,
+            Default::default(),
+        )
+        .unwrap();
+
+    // A slow receiver: the request gives up after the provider timeout.
+    store
+        .update_dns_provider(
+            &admin,
+            &provider,
+            None,
+            None,
+            None,
+            None,
+            dns::WebhookSettings {
+                zones: None,
+                timeout_secs: Some(1),
+            },
+        )
+        .unwrap();
+    receiver.state().delay_ms = 2_500;
+    let started = Instant::now();
+    dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(2_400),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        error(&store).contains("no answer within 1 s"),
+        "{}",
+        error(&store)
+    );
+    receiver.state().delay_ms = 0;
+
+    // A redirect is never followed, even to the receiver itself.
+    let moved = endpoint.replace("/dns", "/moved");
+    store
+        .update_dns_provider(
+            &admin,
+            &provider,
+            None,
+            Some(&moved),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    let requests = receiver.requests();
+    dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert!(
+        error(&store).contains("HTTP 307") && error(&store).contains("redirects are not followed"),
+        "{}",
+        error(&store)
+    );
+    assert_eq!(
+        receiver.requests(),
+        requests,
+        "the redirect must not be followed"
+    );
+
+    // Back to a working receiver: published, and the error clears.
+    store
+        .update_dns_provider(
+            &admin,
+            &provider,
+            None,
+            Some(&endpoint),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    let healed = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((healed.created, healed.errors), (1, 0), "{healed:?}");
+    assert!(
+        store
+            .dns_record(&admin, &edge.id)
+            .unwrap()
+            .last_error
+            .is_none()
+    );
+    assert_eq!(
+        receiver.set("edge.example.com", "A"),
+        Some((300, vec!["203.0.113.1".into()]))
+    );
+    let view = serde_json::to_string(&store.dns_provider(&admin, &provider).unwrap()).unwrap();
+    assert!(!view.contains(WEBHOOK_SECRET), "{view}");
+    receiver_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_webhook_health_removals_keep_the_window_min_keep_and_guard() {
+    let (receiver, endpoint, receiver_stop) = mock_receiver(&["example.com"]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("controller.db");
+    let (store, admin) = webhook_store(&path);
+    store.set_feature(&admin, "dns-health", true).unwrap();
+    let (node, _enrollment) = store.create_node(&admin, "default", "edge").unwrap();
+    let provider = webhook_provider(&store, &admin, &endpoint);
+    let zone = store
+        .create_dns_zone(&admin, &provider, "example.com", ZoneMode::Apply, 3, 1)
+        .unwrap();
+    let rules = ["a", "b", "c", "d"];
+    for (rule, content) in
+        rules
+            .iter()
+            .zip(["203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4"])
+    {
+        let mut input = record("edge.example.com", RecordType::A, content, 300);
+        input.health = Some(HealthGate {
+            node_id: node.id.clone(),
+            rule_id: (*rule).into(),
+        });
+        store.create_dns_record(&admin, &zone.id, input).unwrap();
+    }
+    let health = |failing: &[&str]| {
+        let reports: Vec<(&str, bool)> = rules
+            .iter()
+            .map(|rule| (*rule, !failing.contains(rule)))
+            .collect();
+        write_health(&path, &node.id, &reports);
+    };
+    let values = || {
+        receiver
+            .set("edge.example.com", "A")
+            .map(|(_, values)| values.len())
+            .unwrap_or(0)
+    };
+    let http = reqwest::Client::new();
+    health(&[]);
+    // New gated records wait for a healthy window, then form one set.
+    let waiting = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((waiting.pending, waiting.created), (4, 0), "{waiting:?}");
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    health(&[]);
+    assert_eq!(
+        dns::reconcile(&store, &http, &zone.id)
+            .await
+            .unwrap()
+            .created,
+        4
+    );
+    assert_eq!(values(), 4);
+
+    // Three of four fail at once: the guard holds them; nothing is sent.
+    health(&["a", "b", "c"]);
+    let requests = receiver.requests();
+    dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    health(&["a", "b", "c"]);
+    let guarded = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(guarded.guarded, 3, "{guarded:?}");
+    assert_eq!(receiver.requests(), requests);
+    // Two of four fail after the window: min_keep 3 keeps both.
+    health(&["a", "b"]);
+    let kept = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!((kept.kept, kept.deleted), (2, 0), "{kept:?}");
+    assert_eq!(values(), 4);
+    // With min_keep 2 they leave the set.
+    store
+        .update_dns_zone(&admin, &zone.id, None, None, Some(2), None)
+        .unwrap();
+    let removed = dns::reconcile(&store, &http, &zone.id).await.unwrap();
+    assert_eq!(removed.deleted, 2, "{removed:?}");
+    assert_eq!(
+        receiver.set("edge.example.com", "A"),
+        Some((300, vec!["203.0.113.3".into(), "203.0.113.4".into()]))
+    );
+    receiver_stop.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dns_webhook_provider_api_validates_and_tests_with_a_signed_ping() {
+    let (receiver, endpoint, receiver_stop) = mock_receiver(&["example.com"]).await;
+    let temp = tempfile::tempdir().unwrap();
+    let (store, _admin) = webhook_store(&temp.path().join("controller.db"));
+    let (address, stop) = serve(store).await;
+    let origin = format!("http://{address}");
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let session = login(&client, &origin, "admin").await;
+    let post = |path: &str, body: Value| {
+        client
+            .post(format!("{origin}/api/v1{path}"))
+            .bearer_auth(&session)
+            .json(&body)
+            .send()
+    };
+    let provider = |overrides: Value| {
+        let mut body = json!({"name": "receiver", "kind": "webhook", "endpoint": endpoint,
+            "token": WEBHOOK_SECRET, "zones": ["Example.COM."]});
+        for (key, value) in overrides.as_object().unwrap() {
+            if value.is_null() {
+                body.as_object_mut().unwrap().remove(key);
+            } else {
+                body[key] = value.clone();
+            }
+        }
+        body
+    };
+    for (overrides, status) in [
+        (json!({"token": "short-secret"}), 400),
+        (json!({"endpoint": "http://example.com/dns"}), 400),
+        (
+            json!({"endpoint": "https://user:pass@example.com/dns"}),
+            400,
+        ),
+        (json!({"endpoint": null}), 400),
+        (json!({"zones": null}), 400),
+        (json!({"zones": ["bad zone"]}), 400),
+        (json!({"timeout_secs": 31}), 400),
+        (json!({"timeout_secs": 0}), 400),
+        (json!({"kind": "cloudflare"}), 400),
+    ] {
+        let response = post("/dns/providers", provider(overrides.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            status,
+            "{overrides}: {}",
+            response.text().await.unwrap()
+        );
+    }
+    let created = post("/dns/providers", provider(json!({}))).await.unwrap();
+    assert_eq!(created.status(), 200);
+    let text = created.text().await.unwrap();
+    assert!(!text.contains(WEBHOOK_SECRET), "{text}");
+    let created: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(created["token_set"], true);
+    assert_eq!(created["zones"], json!(["example.com"]));
+    assert_eq!(created["timeout_secs"], 15);
+    let provider_id = created["id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        post("/dns/providers", provider(json!({"name": "again"})))
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+
+    // The test sends a signed ping with the configured zones and a
+    // throwaway source.
+    let tested = post(&format!("/dns/providers/{provider_id}/test"), json!(null))
+        .await
+        .unwrap();
+    assert_eq!(tested.status(), 200);
+    let tested: Value = tested.json().await.unwrap();
+    assert_eq!(
+        tested["zones"],
+        json!([{"id": "example.com", "name": "example.com"}])
+    );
+    {
+        let state = receiver.state();
+        let ping = state.accepted.last().unwrap();
+        assert_eq!(ping["event"], "ping");
+        assert_eq!(ping["zones"], json!(["example.com"]));
+        assert_ne!(ping["source"], provider_id.as_str());
+    }
+    receiver.state().fail = Some((
+        401,
+        json!({"error": format!("signature mismatch for {WEBHOOK_SECRET}")}),
+    ));
+    let failed = post(&format!("/dns/providers/{provider_id}/test"), json!(null))
+        .await
+        .unwrap();
+    assert_eq!(failed.status(), 502);
+    let body = failed.text().await.unwrap();
+    assert!(
+        body.contains("HTTP 401") && !body.contains(WEBHOOK_SECRET),
+        "{body}"
+    );
+    receiver.state().fail = None;
+
+    // Zones come from the provider's list, once each.
+    let zone = |name: &str| {
+        post(
+            "/dns/zones",
+            json!({"provider_id": provider_id, "name": name, "mode": "apply", "min_keep": 0}),
+        )
+    };
+    assert_eq!(zone("example.org").await.unwrap().status(), 400);
+    let created_zone: Value = zone("example.com").await.unwrap().json().await.unwrap();
+    let zone_id = created_zone["id"].as_str().unwrap().to_owned();
+    assert_eq!(zone("EXAMPLE.com.").await.unwrap().status(), 409);
+    // Records stay inside the zone and are never proxied.
+    let records = format!("/dns/zones/{zone_id}/records");
+    assert_eq!(
+        post(&records, json!({"name": "edge.example.com", "type": "A", "content": "203.0.113.30", "proxied": true})).await.unwrap().status(),
+        400
+    );
+    assert_eq!(
+        post(
+            &records,
+            json!({"name": "edge.example.org", "type": "A", "content": "203.0.113.30"})
+        )
+        .await
+        .unwrap()
+        .status(),
+        400
+    );
+    let record: Value = post(
+        &records,
+        json!({"name": "edge.example.com", "type": "A", "content": "203.0.113.30"}),
+    )
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    let record_id = record["id"].as_str().unwrap();
+    let reconciled: Value = post(&format!("/dns/zones/{zone_id}/reconcile"), json!(null))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reconciled["created"], 1, "{reconciled}");
+    assert_eq!(
+        receiver.set("edge.example.com", "A"),
+        Some((300, vec!["203.0.113.30".into()]))
+    );
+    // A published zone cannot be renamed away from its sets.
+    let put = |path: String, body: Value| {
+        client
+            .put(format!("{origin}/api/v1{path}"))
+            .bearer_auth(&session)
+            .json(&body)
+            .send()
+    };
+    let widened = put(
+        format!("/dns/providers/{provider_id}"),
+        json!({"zones": ["example.com", "example.net"]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(widened.status(), 200);
+    let rename = |name: &'static str| put(format!("/dns/zones/{zone_id}"), json!({"name": name}));
+    assert_eq!(rename("example.net").await.unwrap().status(), 409);
+    assert_eq!(
+        rename("example.com.").await.unwrap().status(),
+        200,
+        "the same zone in another spelling"
+    );
+    // Deleting the record empties its set at the receiver.
+    let deleted = client
+        .delete(format!("{origin}/api/v1/dns/records/{record_id}"))
+        .bearer_auth(&session)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), 200);
+    assert_eq!(receiver.set("edge.example.com", "A"), None);
+    let last = receiver.state().accepted.last().cloned().unwrap();
+    assert_eq!(
+        (last["event"].as_str(), last["values"].clone()),
+        (Some("record_set.put"), json!([]))
+    );
+    stop.cancel();
+    receiver_stop.cancel();
 }

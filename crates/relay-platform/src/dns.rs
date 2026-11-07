@@ -9,7 +9,8 @@ use anyhow::{Context, Result, bail, ensure};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex},
     time::Duration,
@@ -19,26 +20,53 @@ use std::{
 pub const MAX_FAILOVER_CONFIRM_SECS: u32 = 1800;
 /// Confirmation window of zones created without an explicit value.
 pub const DEFAULT_FAILOVER_CONFIRM_SECS: u32 = 60;
+/// Webhook request timeout without an explicit `timeout_secs`.
+pub const WEBHOOK_DEFAULT_TIMEOUT_SECS: u32 = 15;
+/// Upper bound of a webhook provider's `timeout_secs`.
+pub const WEBHOOK_MAX_TIMEOUT_SECS: u32 = 30;
+/// Shortest webhook secret, in UTF-8 bytes.
+pub const WEBHOOK_MIN_SECRET_BYTES: usize = 32;
+/// Most zones one webhook provider lists.
+pub const WEBHOOK_MAX_ZONES: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
     Cloudflare,
+    /// A receiver of signed record-set webhooks (ZeroForwarder DNS webhook
+    /// protocol v1, as publicly documented); see [`Webhook`].
+    Webhook,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Provider {
     pub id: String,
     pub name: String,
     pub kind: ProviderKind,
-    /// API base, normally https://api.cloudflare.com/client/v4. Loopback HTTP is
-    /// allowed for local fixtures; other plaintext endpoints are rejected.
+    /// API base, normally https://api.cloudflare.com/client/v4; for a webhook
+    /// the receiver URL, used exactly as given. Loopback HTTP is allowed for
+    /// local fixtures; other plaintext endpoints are rejected.
     pub endpoint: String,
+    /// API token; for a webhook the HMAC secret (at least 32 bytes).
     pub token: String,
     /// Lowest TTL the provider accepts. Records with a lower TTL are published
     /// with this value; TTL 1 (Cloudflare "automatic") is never raised.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_ttl: Option<u32>,
+    /// Webhook: zones the receiver manages, sent in the connection test. A
+    /// webhook provider's zones must be in this list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<String>,
+    /// Webhook: seconds one request may take, 1..=30.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
     pub created_at_ms: i64,
+}
+/// Settings only webhook providers take; `None` keeps the current value, or
+/// the default on creation.
+#[derive(Clone, Debug, Default)]
+pub struct WebhookSettings {
+    pub zones: Option<Vec<String>>,
+    pub timeout_secs: Option<u32>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct ProviderView {
@@ -48,6 +76,10 @@ pub struct ProviderView {
     pub endpoint: String,
     pub token_set: bool,
     pub min_ttl: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u32>,
     pub created_at_ms: i64,
 }
 impl From<&Provider> for ProviderView {
@@ -59,6 +91,8 @@ impl From<&Provider> for ProviderView {
             endpoint: value.endpoint.clone(),
             token_set: !value.token.is_empty(),
             min_ttl: value.min_ttl,
+            zones: value.zones.clone(),
+            timeout_secs: value.timeout_secs,
             created_at_ms: value.created_at_ms,
         }
     }
@@ -268,6 +302,14 @@ fn ttl_matches(remote: u32, published: u32, proxied: bool) -> bool {
 }
 
 pub fn validate_endpoint(raw: &str) -> Result<String> {
+    Ok(endpoint_url(raw)?.as_str().trim_end_matches('/').to_owned())
+}
+/// A webhook URL follows the endpoint rules but is kept as given: the
+/// receiver's path may need its trailing slash.
+pub fn validate_webhook_url(raw: &str) -> Result<String> {
+    Ok(endpoint_url(raw)?.into())
+}
+fn endpoint_url(raw: &str) -> Result<Url> {
     let url = Url::parse(raw).context("DNS provider endpoint must be an absolute URL")?;
     let host = url
         .host_str()
@@ -285,7 +327,37 @@ pub fn validate_endpoint(raw: &str) -> Result<String> {
         url.query().is_none() && url.fragment().is_none(),
         "DNS provider endpoint must not contain a query or fragment"
     );
-    Ok(url.as_str().trim_end_matches('/').to_owned())
+    Ok(url)
+}
+/// A webhook zone is a DNS name (never a provider ID), compared and sent in
+/// lower case without a trailing dot.
+pub fn webhook_zone_name(value: &str) -> Result<String> {
+    let name = value
+        .strip_suffix('.')
+        .unwrap_or(value)
+        .to_ascii_lowercase();
+    ensure!(
+        name.len() <= 253
+            && name.split('.').all(|label| {
+                (1..=63).contains(&label.len())
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            }),
+        "DNS webhook zone must be a DNS name such as example.com: {value}"
+    );
+    Ok(name)
+}
+/// The name a webhook record set is sent under: the record's fully qualified
+/// name in lower case without a trailing dot, the zone itself or inside it.
+pub fn webhook_record_name(zone: &str, name: &str) -> Result<String> {
+    let zone = webhook_zone_name(zone)?;
+    let fqdn = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
+    ensure!(
+        fqdn == zone || fqdn.ends_with(&format!(".{zone}")),
+        "DNS webhook record names must be fully qualified names inside the zone {zone}: {name}"
+    );
+    Ok(fqdn)
 }
 pub fn validate_zone_name(value: &str) -> Result<()> {
     if value.is_empty()
@@ -527,6 +599,502 @@ impl Cloudflare {
     }
 }
 
+/// A receiver's refusal of one webhook request.
+#[derive(Debug)]
+pub struct WebhookRejected {
+    pub status: u16,
+    pub message: String,
+    /// The receiver's generation, sent with a stale-generation 409.
+    pub watermark: Option<u64>,
+}
+impl fmt::Display for WebhookRejected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for WebhookRejected {}
+
+/// `sha256=` and the lower-case hex HMAC-SHA256, keyed with the secret's
+/// UTF-8 bytes, of the timestamp, a dot and the raw body.
+fn webhook_signature(secret: &str, timestamp: &str, body: &[u8]) -> String {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    let mut context = ring::hmac::Context::with_key(&key);
+    context.update(timestamp.as_bytes());
+    context.update(b".");
+    context.update(body);
+    let hex: String = context
+        .sign()
+        .as_ref()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("sha256={hex}")
+}
+/// A value as sent in a set: IP addresses in canonical form, so that equal
+/// addresses deduplicate; CNAME targets in lower case without a trailing dot.
+fn webhook_value(record_type: RecordType, content: &str) -> String {
+    match record_type {
+        RecordType::A => content
+            .parse::<Ipv4Addr>()
+            .map_or_else(|_| content.to_owned(), |ip| ip.to_string()),
+        RecordType::Aaaa => content
+            .parse::<Ipv6Addr>()
+            .map_or_else(|_| content.to_owned(), |ip| ip.to_string()),
+        RecordType::Cname => content
+            .strip_suffix('.')
+            .unwrap_or(content)
+            .to_ascii_lowercase(),
+    }
+}
+
+/// Signed record-set webhook, following the public description of the
+/// ZeroForwarder DNS webhook protocol v1: every request is a JSON `POST` to
+/// one URL with `X-ZFC-Event`, `X-ZFC-Delivery` (new UUID per request),
+/// `X-ZFC-Timestamp` (Unix seconds) and `X-ZFC-Signature`. Only a 2xx other
+/// than 202 counts as applied; redirects are never followed, so the signed
+/// body is never replayed to another URL.
+pub struct Webhook {
+    http: reqwest::Client,
+    url: String,
+    secret: String,
+    /// The provider ID: the stable `source` of generations and sets.
+    source: String,
+    timeout_secs: u32,
+}
+impl Webhook {
+    pub fn new(provider: &Provider) -> Result<Self> {
+        ensure!(
+            provider.kind == ProviderKind::Webhook,
+            "unsupported DNS provider kind"
+        );
+        ensure!(
+            provider.token.len() >= WEBHOOK_MIN_SECRET_BYTES,
+            "DNS webhook secret must be at least {WEBHOOK_MIN_SECRET_BYTES} bytes"
+        );
+        let timeout_secs = provider
+            .timeout_secs
+            .unwrap_or(WEBHOOK_DEFAULT_TIMEOUT_SECS)
+            .clamp(1, WEBHOOK_MAX_TIMEOUT_SECS);
+        // Its own client whatever the caller uses: no redirects, own timeout.
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(timeout_secs.into()))
+            .build()
+            .context("DNS webhook HTTP client")?;
+        Ok(Self {
+            http,
+            url: validate_webhook_url(&provider.endpoint)?,
+            secret: provider.token.clone(),
+            source: provider.id.clone(),
+            timeout_secs,
+        })
+    }
+    async fn send(&self, event: &str, body: &serde_json::Value) -> Result<()> {
+        let body = serde_json::to_vec(body)?;
+        let timestamp = (crate::model::now_ms() / 1000).to_string();
+        let signature = webhook_signature(&self.secret, &timestamp, &body);
+        let response = self
+            .http
+            .post(&self.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header("X-ZFC-Event", event)
+            .header("X-ZFC-Delivery", uuid::Uuid::new_v4().to_string())
+            .header("X-ZFC-Timestamp", &timestamp)
+            .header("X-ZFC-Signature", signature)
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    anyhow::anyhow!(
+                        "DNS webhook {event} got no answer within {} s; the receiver may still apply it",
+                        self.timeout_secs
+                    )
+                } else {
+                    anyhow::Error::new(error).context(format!("DNS webhook {event} failed"))
+                }
+            })?;
+        let status = response.status();
+        if status.is_success() && status != reqwest::StatusCode::ACCEPTED {
+            return Ok(());
+        }
+        let (detail, watermark) = if status == reqwest::StatusCode::ACCEPTED {
+            ("accepted without applying it; a receiver must answer 2xx only after the change is applied".to_owned(), None)
+        } else if status.is_redirection() {
+            (
+                "redirects are not followed; configure the receiver's final URL".to_owned(),
+                None,
+            )
+        } else {
+            receiver_detail(&read_bounded(response, 4096).await)
+        };
+        let message = format!("DNS webhook rejected the {event}: HTTP {status} {detail}")
+            .trim_end()
+            .replace(&self.secret, "[redacted]");
+        Err(WebhookRejected {
+            status: status.as_u16(),
+            message,
+            watermark,
+        }
+        .into())
+    }
+    /// Connection test: a signed `ping` with a throwaway `source`, listing the
+    /// configured zones. It does not prove that the receiver may write DNS.
+    pub async fn ping(&self, zones: &[String]) -> Result<()> {
+        let body = serde_json::json!({
+            "version": 1,
+            "source": uuid::Uuid::new_v4().to_string(),
+            "event": "ping",
+            "zones": zones,
+        });
+        self.send("ping", &body).await
+    }
+}
+/// At most `limit` bytes of a response body; a failed read ends it.
+async fn read_bounded(mut response: reqwest::Response, limit: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    while body.len() < limit {
+        let Ok(Some(chunk)) = response.chunk().await else {
+            break;
+        };
+        body.extend_from_slice(&chunk[..chunk.len().min(limit - body.len())]);
+    }
+    body
+}
+/// The receiver's reason, from the `error`, `code`, `message`, `detail` and
+/// `watermark` fields of a JSON body or else its text, on one line of at most
+/// 300 characters; and the watermark (receiver generation) if it sent one.
+fn receiver_detail(body: &[u8]) -> (String, Option<u64>) {
+    let (text, watermark) = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(fields)) => {
+            let field = |name: &str| match fields.get(name) {
+                Some(serde_json::Value::String(value)) => Some(value.clone()),
+                Some(serde_json::Value::Number(value)) => Some(value.to_string()),
+                _ => None,
+            };
+            let mut parts: Vec<String> = ["error", "code", "message", "detail"]
+                .into_iter()
+                .filter_map(field)
+                .collect();
+            let watermark = field("watermark");
+            if let Some(watermark) = &watermark {
+                parts.push(format!("receiver generation {watermark}"));
+            }
+            (
+                parts.join(": "),
+                watermark.and_then(|value| value.parse().ok()),
+            )
+        }
+        _ => (String::from_utf8_lossy(body).into_owned(), None),
+    };
+    let text = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(300)
+        .collect::<String>();
+    (text.trim().to_owned(), watermark)
+}
+
+/// What a webhook receiver acknowledged for one Relay record.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookEntry {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: RecordType,
+    pub content: String,
+    pub ttl: u32,
+}
+/// A zone's acknowledged entries by record ID.
+pub type WebhookState = BTreeMap<String, WebhookEntry>;
+type SetKey = (RecordType, String);
+
+/// Webhook delivery state of one provider in this process: the generation
+/// the receiver accepted and the last `seq` sent in it.
+#[derive(Default)]
+struct WebhookSession {
+    generation: Option<u64>,
+    seq: u64,
+}
+
+/// A webhook provider bound to one zone for a pass. A webhook cannot be read
+/// back, so the provider's records are what the receiver acknowledged, kept
+/// with the zone. Each record change sends the complete value set of the
+/// record's name and type, with the lowest TTL of its values (RFC 2181 5.2).
+pub struct WebhookZone {
+    hook: Webhook,
+    store: Store,
+    zone_id: String,
+    zone: String,
+    entries: Mutex<WebhookState>,
+}
+impl WebhookZone {
+    pub fn new(store: &Store, provider: &Provider, zone: &Zone) -> Result<Self> {
+        let name = webhook_zone_name(&zone.name)?;
+        ensure!(
+            provider.zones.contains(&name),
+            "zone {name} is not in the DNS webhook provider's zone list"
+        );
+        Ok(Self {
+            hook: Webhook::new(provider)?,
+            store: store.clone(),
+            zone_id: zone.id.clone(),
+            zone: name,
+            entries: Mutex::new(store.dns_webhook_state(&zone.id)?),
+        })
+    }
+    fn key(&self, entry: &WebhookEntry) -> Result<SetKey> {
+        Ok((
+            entry.record_type,
+            webhook_record_name(&self.zone, &entry.name)?,
+        ))
+    }
+    fn list(&self) -> Vec<RemoteRecord> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, entry)| acknowledged(id, entry.clone()))
+            .collect()
+    }
+    /// Moves record `id` to `next` (`None` removes it): the set it leaves is
+    /// sent first, then the set it joins, and each accepted set is kept, so a
+    /// failure leaves the record out of DNS rather than in two sets.
+    async fn write(&self, id: &str, next: Option<WebhookEntry>) -> Result<()> {
+        let current = self.entries.lock().unwrap().get(id).cloned();
+        let joins = next.as_ref().map(|entry| self.key(entry)).transpose()?;
+        if let Some(current) = current {
+            let leaves = self.key(&current)?;
+            if joins.as_ref() != Some(&leaves) {
+                self.apply(id, None, &leaves, current.ttl).await?;
+            }
+        }
+        if let (Some(entry), Some(key)) = (next, joins) {
+            let ttl = entry.ttl;
+            self.apply(id, Some(entry), &key, ttl).await?;
+        }
+        Ok(())
+    }
+    /// Sends `key`'s set with record `id` set to `entry`, then keeps it.
+    async fn apply(
+        &self,
+        id: &str,
+        entry: Option<WebhookEntry>,
+        key: &SetKey,
+        empty_ttl: u32,
+    ) -> Result<()> {
+        let mut entries = self.entries.lock().unwrap().clone();
+        match entry {
+            Some(entry) => entries.insert(id.to_owned(), entry),
+            None => entries.remove(id),
+        };
+        let members: Vec<&WebhookEntry> = entries
+            .values()
+            .filter(|entry| self.key(entry).is_ok_and(|other| other == *key))
+            .collect();
+        let values: BTreeSet<String> = members
+            .iter()
+            .map(|entry| webhook_value(entry.record_type, &entry.content))
+            .collect();
+        ensure!(
+            key.0 != RecordType::Cname || values.len() <= 1,
+            "CNAME {} can have only one target",
+            key.1
+        );
+        let ttl = members
+            .iter()
+            .map(|entry| entry.ttl)
+            .min()
+            .unwrap_or(empty_ttl);
+        self.put(key, values.into_iter().collect(), ttl).await?;
+        self.store.set_dns_webhook_state(&self.zone_id, &entries)?;
+        *self.entries.lock().unwrap() = entries;
+        Ok(())
+    }
+    async fn put(&self, key: &SetKey, values: Vec<String>, ttl: u32) -> Result<()> {
+        let session = self.store.dns_runtime().webhook_session(&self.hook.source);
+        let mut session = session.lock().await;
+        let generation = match session.generation {
+            Some(generation) => generation,
+            None => self.start(&mut session).await?,
+        };
+        session.seq += 1;
+        let body = serde_json::json!({
+            "version": 1,
+            "source": self.hook.source,
+            "event": "record_set.put",
+            "generation": generation.to_string(),
+            "zone": self.zone,
+            "name": key.1,
+            "type": key.0.as_str(),
+            "ttl": ttl,
+            "values": values,
+            "seq": session.seq.to_string(),
+        });
+        let sent = self.hook.send("record_set.put", &body).await;
+        if let Err(error) = &sent
+            && error
+                .downcast_ref::<WebhookRejected>()
+                .is_some_and(|rejected| rejected.status == 409)
+        {
+            // Another generation or version is current at the receiver:
+            // start a new generation before the next write.
+            session.generation = None;
+        }
+        sent
+    }
+    /// Starts a generation one above the last one persisted, or above the
+    /// receiver's when it reports a higher one (a restored database).
+    async fn start(&self, session: &mut WebhookSession) -> Result<u64> {
+        let mut floor = 0;
+        loop {
+            let generation = self
+                .store
+                .dns_webhook_generation(&self.hook.source, floor)?;
+            let body = serde_json::json!({
+                "version": 1,
+                "source": self.hook.source,
+                "event": "generation.start",
+                "generation": generation.to_string(),
+            });
+            let Err(error) = self.hook.send("generation.start", &body).await else {
+                session.generation = Some(generation);
+                session.seq = 0;
+                return Ok(generation);
+            };
+            match error.downcast_ref::<WebhookRejected>() {
+                Some(rejected) if rejected.status == 409 && floor == 0 => {
+                    match rejected.watermark {
+                        Some(watermark) if watermark >= generation => {
+                            floor = watermark.saturating_add(1);
+                        }
+                        _ => return Err(error),
+                    }
+                }
+                _ => return Err(error),
+            }
+        }
+    }
+}
+fn webhook_entry(record: &Record, ttl: u32) -> WebhookEntry {
+    WebhookEntry {
+        name: record.name.clone(),
+        record_type: record.record_type,
+        content: record.content.clone(),
+        ttl,
+    }
+}
+fn acknowledged(id: &str, entry: WebhookEntry) -> RemoteRecord {
+    RemoteRecord {
+        id: id.to_owned(),
+        name: entry.name,
+        record_type: entry.record_type.as_str().into(),
+        content: entry.content,
+        ttl: entry.ttl,
+        proxied: false,
+        comment: Some(comment(id)),
+    }
+}
+
+/// The provider API of one zone's pass.
+pub enum Client {
+    Cloudflare(Cloudflare),
+    Webhook(Box<WebhookZone>),
+}
+impl Client {
+    pub fn new(
+        store: &Store,
+        http: reqwest::Client,
+        provider: &Provider,
+        zone: &Zone,
+    ) -> Result<Self> {
+        Ok(match provider.kind {
+            ProviderKind::Cloudflare => Self::Cloudflare(Cloudflare::new(http, provider)?),
+            ProviderKind::Webhook => {
+                Self::Webhook(Box::new(WebhookZone::new(store, provider, zone)?))
+            }
+        })
+    }
+    pub async fn list(&self, zone: &str) -> Result<Vec<RemoteRecord>> {
+        match self {
+            Self::Cloudflare(client) => client.list(zone).await,
+            Self::Webhook(client) => Ok(client.list()),
+        }
+    }
+    pub async fn create(&self, zone: &str, record: &Record, ttl: u32) -> Result<RemoteRecord> {
+        match self {
+            Self::Cloudflare(client) => client.create(zone, record, ttl).await,
+            Self::Webhook(client) => {
+                let entry = webhook_entry(record, ttl);
+                client.write(&record.id, Some(entry.clone())).await?;
+                Ok(acknowledged(&record.id, entry))
+            }
+        }
+    }
+    pub async fn update(
+        &self,
+        zone: &str,
+        remote_id: &str,
+        record: &Record,
+        ttl: u32,
+    ) -> Result<RemoteRecord> {
+        match self {
+            Self::Cloudflare(client) => client.update(zone, remote_id, record, ttl).await,
+            Self::Webhook(client) => {
+                let entry = webhook_entry(record, ttl);
+                client.write(remote_id, Some(entry.clone())).await?;
+                Ok(acknowledged(remote_id, entry))
+            }
+        }
+    }
+    pub async fn delete(&self, zone: &str, remote_id: &str) -> Result<()> {
+        match self {
+            Self::Cloudflare(client) => client.delete(zone, remote_id).await,
+            Self::Webhook(client) => client.write(remote_id, None).await,
+        }
+    }
+}
+
+/// Connection test. Cloudflare lists the zones the token can see; a webhook
+/// receives a signed `ping`, and the result lists the provider's configured
+/// zones. 400 for an unusable configuration, 502 when the provider fails.
+pub async fn test_provider(http: reqwest::Client, provider: &Provider) -> Result<ProviderTest> {
+    let failed = |error: anyhow::Error| crate::store::Rejection {
+        status: 502,
+        message: format!("DNS provider test failed: {error:#}"),
+    };
+    let invalid = |error: anyhow::Error| crate::store::Rejection {
+        status: 400,
+        message: format!("{error:#}"),
+    };
+    match provider.kind {
+        ProviderKind::Cloudflare => {
+            let client = Cloudflare::new(http, provider).map_err(invalid)?;
+            let (zones, truncated) = client.zones().await.map_err(failed)?;
+            Ok(ProviderTest {
+                ok: true,
+                zones,
+                truncated,
+            })
+        }
+        ProviderKind::Webhook => {
+            let hook = Webhook::new(provider).map_err(invalid)?;
+            hook.ping(&provider.zones).await.map_err(failed)?;
+            Ok(ProviderTest {
+                ok: true,
+                zones: provider
+                    .zones
+                    .iter()
+                    .map(|zone| ProviderZone {
+                        id: zone.clone(),
+                        name: zone.clone(),
+                    })
+                    .collect(),
+                truncated: false,
+            })
+        }
+    }
+}
+
 /// Provider HTTP client. The timeout bounds how long one pass can hold a
 /// zone's sync lock.
 pub fn http_client() -> reqwest::Client {
@@ -617,6 +1185,8 @@ impl GateState {
 pub struct Runtime {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     state: Mutex<RuntimeState>,
+    /// Webhook sessions by provider ID; a restart starts a new generation.
+    webhooks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<WebhookSession>>>>,
 }
 #[derive(Default)]
 struct RuntimeState {
@@ -633,6 +1203,16 @@ impl Runtime {
             .lock()
             .unwrap()
             .entry(zone_id.to_owned())
+            .or_default()
+            .clone()
+    }
+    /// A provider's webhook session, held across each request so that the
+    /// zones of one receiver send one generation and one `seq` order.
+    fn webhook_session(&self, provider_id: &str) -> Arc<tokio::sync::Mutex<WebhookSession>> {
+        self.webhooks
+            .lock()
+            .unwrap()
+            .entry(provider_id.to_owned())
             .or_default()
             .clone()
     }
@@ -759,7 +1339,7 @@ async fn evaluate(
     let zone = store.dns_zone_raw(zone_id)?;
     let provider = store.dns_provider_raw(&zone.provider_id)?;
     let records = store.dns_records_for_zone(zone_id)?;
-    let client = Cloudflare::new(http.clone(), &provider)?;
+    let client = Client::new(store, http.clone(), &provider, &zone)?;
     let remote = client.list(&zone.name).await?;
     let window_ms = i64::from(zone.failover_confirm_secs) * 1000;
     let mut actions = vec![];
@@ -833,7 +1413,11 @@ async fn evaluate(
     let mut statuses = Vec::with_capacity(records.len());
     for (record, remote_record) in records.iter().zip(matched) {
         let gate = gates.get(&record.id);
-        let ttl = published_ttl(record.ttl, provider.min_ttl);
+        let ttl = match provider.kind {
+            ProviderKind::Cloudflare => published_ttl(record.ttl, provider.min_ttl),
+            // TTL 1 means "automatic" only at Cloudflare.
+            ProviderKind::Webhook => record.ttl.max(provider.min_ttl.unwrap_or(0)),
+        };
         let label = format!("{} {}", record.record_type.as_str(), record.name);
         // The latest sample differs from the decision: inside the window.
         let pending = gate.filter(|gate| record.enabled && gate.ok != gate.confirmed);
@@ -1231,6 +1815,53 @@ mod tests {
         let next = GateState::step(Some(&held), &gate("b"), false, true, 120_000, 60_000);
         assert!(next.confirmed);
         assert_eq!(next.since_ms, 120_000);
+    }
+
+    #[test]
+    fn webhook_signature_covers_timestamp_dot_and_raw_body() {
+        // Expected value from Python's hmac/hashlib, not from this code.
+        let body = br#"{"event":"ping","source":"s","version":1,"zones":["example.com"]}"#;
+        assert_eq!(
+            webhook_signature("0123456789abcdef0123456789abcdef", "1767225600", body),
+            "sha256=d5462f66f3358c44c39a7b58b38cd41d1cccaf261af445200781311813e60483"
+        );
+    }
+
+    #[test]
+    fn webhook_names_values_and_receiver_errors() {
+        assert_eq!(
+            webhook_record_name("Example.COM.", "Edge.example.com.").unwrap(),
+            "edge.example.com"
+        );
+        assert_eq!(
+            webhook_record_name("example.com", "example.com").unwrap(),
+            "example.com"
+        );
+        // A suffix match without a label boundary is outside the zone.
+        assert!(webhook_record_name("example.com", "badexample.com").is_err());
+        assert!(webhook_record_name("example.com", "edge").is_err());
+        assert!(webhook_zone_name("example..com").is_err());
+        assert!(webhook_zone_name("").is_err());
+        assert_eq!(
+            webhook_value(RecordType::Aaaa, "2001:DB8:0::1"),
+            "2001:db8::1"
+        );
+        assert_eq!(
+            webhook_value(RecordType::Cname, "Edge.Example.NET."),
+            "edge.example.net"
+        );
+        let (detail, watermark) = receiver_detail(
+            br#"{"error":"stale_generation","message":"line one\nline two","watermark":"12"}"#,
+        );
+        assert_eq!(
+            detail,
+            "stale_generation: line one line two: receiver generation 12"
+        );
+        assert_eq!(watermark, Some(12));
+        assert_eq!(
+            receiver_detail(b"adapter unavailable\n"),
+            ("adapter unavailable".to_owned(), None)
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 - 确认窗口的计时、每条记录的状态和区域的最近检查时间只保存在控制器进程内存中，不写 metadata，也不跨重启保留（见下文“自动同步”）。
 - 服务商 API 令牌必须可逆保存才能调用外部 API。读取接口只返回 `token_set`，不返回令牌原文；只有系统管理员能读写 DNS。API 令牌即使带 `users:write` 也不能访问 `/dns/*`，只接受登录会话。
 - API 基础地址必须是 HTTPS；只有回环地址允许 HTTP，供本机 mock/测试使用。地址中不允许用户名、密码、查询或片段。系统管理员能把控制器指向可达地址，因此该角色本身必须可信。
-- 目前只实现 Cloudflare 兼容 API。服务商 API 返回 `success:false` 或非 2xx 时记录错误，不用本地期望值伪装成已生效。
+- 服务商类型为 Cloudflare 兼容 API（`cloudflare`）或 DNS Webhook（`webhook`，见下文“DNS Webhook 服务商”）。服务商 API 返回 `success:false`、非 2xx 或 webhook 未确认应用时记录错误，不用本地期望值伪装成已生效。
 
 ## 区域与记录
 
@@ -52,6 +52,65 @@
 令牌无效、权限不足或服务商不可达时返回 502 和 `{"error":"DNS provider test failed: DNS provider rejected the request: … (9109)"}`。错误文本中如果出现令牌原文会被替换为 `[redacted]`；令牌本身不会出现在响应、日志或记录错误中。只列出令牌能看到的区域：仅授予 DNS 编辑权限的 Cloudflare 令牌可能看不到区域列表，此时面板仍可手动填写区域 ID。面板在服务商列表提供“测试”按钮。
 
 可选 `min_ttl`（1..=86400；0 或省略表示不限制，`PUT` 传 0 清除）：TTL 低于它的记录按 `min_ttl` 发布，本地记录的 `ttl` 不变，记录状态的 `published_ttl` 显示实际发送的值。TTL 1 是 Cloudflare 的“自动”，任何套餐都接受，因此不会被提高。Cloudflare 对代理（`proxied`）记录总是返回 TTL 1，同步时不再把这一点当作差异，避免每次同步都重写代理记录。
+
+## DNS Webhook 服务商
+
+`kind: "webhook"` 把记录推送到你自己运行的接收端（例如通过 RFC 2136 写 BIND 的适配器，或自写的 DNS API 适配器），由接收端验签并实际写入 DNS。请求格式按 ZeroForwarder 公开文档对其 DNS Webhook 协议 v1 的说明实现（[DNS Webhook 接入](https://www.zeroforwarder.com/docs/dns-webhook/)）。该文档说明完整字段表、状态码与重试规则只在 ZFC 面板内置文档和下载包中提供；本实现没有用其官方接收端核对，差异见本节末尾。
+
+**服务商字段**
+
+- `endpoint`：接收端的最终 URL，原样使用（包括路径和末尾斜杠），没有默认值。规则与 Cloudflare 相同：必须 HTTPS，只有回环地址允许 HTTP；不能含用户名密码、查询或片段。同一 URL 只能配置一个 webhook 服务商（409），因为接收端按来源和集合保存版本。
+- `token`：HMAC Secret，至少 32 个 UTF-8 字节，可逆保存，读取只返回 `token_set`，不会出现在响应、日志、审计或记录错误中。
+- `zones`：必填，1–100 个 DNS 名称，统一为小写、去掉末尾点并去重；`PUT` 传入时整体替换。
+- `timeout_secs`：每个请求的超时，1–30 秒，默认 15。`min_ttl` 与 Cloudflare 相同。
+- Cloudflare 服务商传 `zones` 或 `timeout_secs` 返回 400。服务商类型保存后不能修改。
+
+**请求**：每个请求都是 `POST endpoint`，`Content-Type: application/json`，带以下请求头：
+
+| 请求头 | 内容 |
+| --- | --- |
+| `X-ZFC-Event` | 与 body 中的 `event` 相同 |
+| `X-ZFC-Delivery` | 每次请求一个新的 UUID |
+| `X-ZFC-Timestamp` | 发送时的 Unix 秒 |
+| `X-ZFC-Signature` | `sha256=` 加小写十六进制的 HMAC-SHA256：密钥是 Secret 的 UTF-8 字节，输入是“时间戳 + `.` + 原始 body 字节” |
+
+body 有三种：
+
+```json
+{"version":1,"source":"<一次性随机 UUID>","event":"ping","zones":["example.com"]}
+{"version":1,"source":"<服务商 ID>","event":"generation.start","generation":"3"}
+{"version":1,"source":"<服务商 ID>","event":"record_set.put","generation":"3","seq":"17",
+ "zone":"example.com","name":"edge.example.com","type":"A","ttl":300,"values":["203.0.113.1","203.0.113.2"]}
+```
+
+`generation`、`seq` 是 1..9223372036854775807 的十进制字符串。`values` 是该区域内该名称和类型的**完整集合**（去重，按字节序排列）；`[]` 表示删除该名称的该类型，其他记录不受影响。A/AAAA 值写成规范 IP 文本；记录名和 CNAME 目标统一小写、去掉末尾点。
+
+**响应**
+
+- 2xx（202 除外）表示接收端已经应用。202 视为失败：它表示“已接收但未确认已应用”。
+- 3xx 视为失败，且不跟随：签名请求不会被转发到其他地址。请填写最终 URL。
+- 其他状态都是失败。错误信息取 JSON 中的 `error`、`code`、`message`、`detail`、`watermark` 字段，或正文的前 300 个字符（最多读取 4 KiB），写入记录的 `last_error` 和同步动作；正文中若出现 Secret 原文会替换为 `[redacted]`。
+- 超时报告 `got no answer within N s; the receiver may still apply it`。结果未知时本地不记为已发布，下一次同步按最新期望以新的 `seq` 重新发送完整集合。本次同步内不重试；应用模式区域每 30 秒自动同步一次，差异仍在时会再次发送。
+
+**代次与序号**：`source` 是服务商 ID。控制器进程第一次需要写入某个服务商时，先把保存在 metadata `dns_webhook_source:<服务商 ID>` 的代次加 1 并写回，再发送 `generation.start`；本进程之后对该服务商的 `record_set.put` 都使用这个代次和递增的 `seq`（同一服务商的请求串行发送）。接收端对 `generation.start` 返回 409 并带有更高的 `watermark` 时（例如控制器数据库从备份恢复），控制器改用 `watermark + 1` 重发一次；`record_set.put` 返回 409 时，下一次写入重新开始一个代次。没有变化时不发送任何请求，也不发送 `generation.start`。
+
+**同步语义**：webhook 无法读回，所以“服务商上的记录”就是接收端确认过的内容，按区域保存在 metadata `dns_webhook_zone:<区域 ID>`（每条记录的名称、类型、内容和 TTL），重启后照常读取。比较、确认窗口、过半失败保护、`min_keep` 和最低 TTL 与 Cloudflare 完全相同，只是每次创建、更新或删除一条记录都发送它所在集合的完整值。
+
+- 同名同类型的多个值共用一个 TTL，取其中最低值（RFC 2181 §5.2）；TTL 1 在 webhook 中没有“自动”的含义，会按最低 TTL 抬高。
+- 记录改名时先从旧集合移除，再加入新集合；中途失败时它暂时不在 DNS 中，下一次同步补上，不会同时留在两个集合里。
+- 同名 CNAME 只能有一个目标；第二个目标在发送前报错。
+- 观察模式不联系接收端，只和接收端最近确认的内容比较，因此看不到在 Relay 之外对 DNS 的修改。
+- 观察模式下删除本地记录时，接收端确认过的值会保留（与 Cloudflare 留下服务商记录相同），之后该集合的推送仍包含它。
+
+**区域与记录限制**：webhook 区域的名称必须是服务商 `zones` 中的 DNS 名称（不是 ID），同一服务商下每个区域只能创建一次（409）；已有确认内容的区域不能改成另一个名称（409），因为接收端按旧区域名保存这些集合。记录名必须是区域本身或区域内的完整域名（400），不能开启 `proxied`（400）。
+
+**连接测试**：发送签名的 `ping`（`source` 为一次性随机 UUID，`zones` 为服务商配置的区域），成功返回 `{"ok":true,"zones":[{"id":"example.com","name":"example.com"}],"truncated":false}`；失败返回 502，信息不含 Secret。测试不验证 DNS 写权限，也不证明记录已经公开解析。
+
+**兼容性与差异（相对 ZFC 公开文档）**
+
+- 一致：请求头、签名输入、三种事件及字段、`values` 完整集合语义与 `[]` 删除、十进制字符串的代次和序号、不跟随重定向、成功前不回 2xx、Secret 至少 32 字节、超时 1–30 秒默认 15 秒。
+- 本实现自行选择（交接中没有约定，不是用户决定）：`source` 固定为服务商 ID；每次控制器启动后第一次写入时开始新代次，新代次不重推未变化的集合；202 视为失败；409 中接收端代次的字段名按公开文档措辞取 `watermark`（字符串或数字）；错误正文按 `error`/`code`/`message`/`detail` 解析；不立即重试，依靠 30 秒自动同步重发；集合 TTL 取最低值；webhook 服务商需要单独列出区域。
+- 未覆盖：ZFC 支持的 TXT、NS 记录和证书 DNS-01（Relay 托管记录只有 A/AAAA/CNAME）；ZFC 面板的“重试失败推送”和接收端离线恢复流程（接收端返回 503 `pending_delivery_requires_recovery` 时记录持续报错，需要按接收端说明处理）；未与 ZFC 下载包中的官方接收端互通测试。
 
 ## 同步
 
@@ -104,9 +163,9 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/api/v1/dns/providers` | 列表/创建服务商 |
-| GET/PUT/DELETE | `/api/v1/dns/providers/{id}` | 读取（令牌脱敏）/更新/删除；可选 `min_ttl` |
-| POST | `/api/v1/dns/providers/{id}/test` | 连接测试，返回可见区域（`id`、`name`）；失败 502 |
+| GET/POST | `/api/v1/dns/providers` | 列表/创建服务商；`kind` 为 `cloudflare` 或 `webhook`（webhook 另需 `zones`，可选 `timeout_secs`） |
+| GET/PUT/DELETE | `/api/v1/dns/providers/{id}` | 读取（令牌脱敏）/更新/删除；可选 `min_ttl`，webhook 可改 `zones`、`timeout_secs`；类型不能改 |
+| POST | `/api/v1/dns/providers/{id}/test` | 连接测试，返回可见区域（`id`、`name`）；webhook 发送签名 ping 并返回配置的区域；失败 502 |
 | GET/POST | `/api/v1/dns/zones` | 列表（含 `status`）/创建区域；可选 `failover_confirm_secs`（默认 60） |
 | GET/PUT/DELETE | `/api/v1/dns/zones/{id}` | 读取（含 `status`）/更新/删除；有记录时删除返回 409 |
 | GET/POST | `/api/v1/dns/zones/{id}/records` | 列表/创建记录 |
@@ -156,5 +215,6 @@ API 见 [API.md](API.md#0137-authoritative-dns-pool)。
 - 4 项单元测试覆盖确认窗口的状态机（零窗口、连续失败/恢复、计时重来、保留记录恢复、更换门控）和 TTL 规则。
 - 健康门控测试写入真实的 `nodes.stats_json` 健康报告并核对 `eligible/status/last_seen`；没有启动真实 Agent 产生探测流量。
 - 未连接真实 Cloudflare 账户，未验证真实 DNS 传播、速率限制、仅有 DNS 权限的令牌能否列出区域，或供应商错误码矩阵。
+- DNS Webhook：5 项集成测试使用本机 mock 接收端（独立实现验签、±300 秒时间窗、按来源的代次水位、按集合的代次/序号与幂等、完整集合替换，并可注入失败、延迟和重定向），覆盖：完整集合与最低 TTL、未变化时零请求、改内容/停用/改名/删除、同名第二个 CNAME 发送前报错、观察模式零请求；重启后不重发且下一次写入开始新代次、接收端代次更高时跳到其上、写入中途 409 后重新开始代次；503/202/401/超时/307 重定向（不跟随）都记为错误且不含 Secret；健康门控的确认窗口、过半失败保护与 `min_keep`；HTTP 接口的输入校验（Secret 长度、明文远程地址、URL 含凭据、缺少区域、超时范围、Cloudflare 不接受 webhook 字段、重复 URL 409）、签名 ping 连接测试与 502、区域必须在列表内且不重复、记录必须在区域内且不能代理、已发布区域不能改名。2 项单元测试用 Python `hmac` 算出的签名核对签名输入，并覆盖名称、值规范化和接收端错误解析。未接入真实 BIND/RFC 2136 或 ZFC 官方接收端。
 - 权威 DNS 池：6 项单元测试覆盖应答规则（大小写、区域内/外 CNAME、NODATA 与 NXDOMAIN 带 SOA、REFUSED、SOA/NS/glue、ANY、TC 截断与 EDNS、拒绝非查询报文）和健康补回顺序；2 项端到端测试使用真实控制器 HTTP API、真实 Agent、真实 TCP 健康探测以及真实 UDP/TCP 查询，覆盖开关 409、通配监听 400、CNAME 冲突 409、健康失败后摘除、成员状态与查询计数、控制器离线时 Agent 重启后按保存内容继续应答、删除区域后停止监听、仍是成员的节点不能删除。真实 53 端口、真实注册商委派、公网解析器缓存、多台名称服务器跨地域一致性尚未验收。
-- 观察模式下的 DNS webhook、节点公网 IP 自动探测、跨记录最少保留策略、真实 Agent 端到端和污染/缓存测试仍未实现。当前模块状态是“部分实现”，不是完整 DNS 模块验收。
+- 节点公网 IP 自动探测、跨记录最少保留策略、真实 Agent 端到端和污染/缓存测试仍未实现。当前模块状态是“部分实现”，不是完整 DNS 模块验收。

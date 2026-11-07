@@ -302,6 +302,7 @@ async fn budget_expiry_and_dns_incidents_follow_tenant_routing_and_clear() {
             "http://127.0.0.1:9/client/v4",
             "fixture-token",
             0,
+            Default::default(),
         )
         .unwrap();
     let zone = db

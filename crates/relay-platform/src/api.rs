@@ -3854,6 +3854,12 @@ struct NewDnsProvider {
     /// 0 or absent: no provider minimum.
     #[serde(default)]
     min_ttl: u32,
+    /// Webhook only: zones the receiver manages.
+    #[serde(default)]
+    zones: Option<Vec<String>>,
+    /// Webhook only: request timeout, 1..=30 s (15 when absent).
+    #[serde(default)]
+    timeout_secs: Option<u32>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3867,6 +3873,10 @@ struct UpdateDnsProvider {
     /// 0 removes the minimum; absent leaves it unchanged.
     #[serde(default)]
     min_ttl: Option<u32>,
+    #[serde(default)]
+    zones: Option<Vec<String>>,
+    #[serde(default)]
+    timeout_secs: Option<u32>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3956,9 +3966,11 @@ async fn create_dns_provider(
     axum::Extension(actor): axum::Extension<Actor>,
     Json(input): Json<NewDnsProvider>,
 ) -> ApiResult<crate::dns::ProviderView> {
-    let endpoint = input
-        .endpoint
-        .unwrap_or_else(|| "https://api.cloudflare.com/client/v4".into());
+    // A webhook has no default receiver URL.
+    let endpoint = input.endpoint.unwrap_or_else(|| match input.kind {
+        crate::dns::ProviderKind::Cloudflare => "https://api.cloudflare.com/client/v4".into(),
+        crate::dns::ProviderKind::Webhook => String::new(),
+    });
     Ok(Json(
         database(state.store, move |db| {
             db.create_dns_provider(
@@ -3968,6 +3980,10 @@ async fn create_dns_provider(
                 &endpoint,
                 &input.token,
                 input.min_ttl,
+                crate::dns::WebhookSettings {
+                    zones: input.zones,
+                    timeout_secs: input.timeout_secs,
+                },
             )
         })
         .await?,
@@ -3985,19 +4001,11 @@ async fn test_dns_provider(
         db.dns_provider_raw(&id)
     })
     .await?;
-    let client = crate::dns::Cloudflare::new(crate::dns::http_client(), &provider)
-        .or_else(|error| reject(400, format!("{error:#}")))
-        .map_err(ApiError)?;
-    let (zones, truncated) = client
-        .zones()
-        .await
-        .or_else(|error| reject(502, format!("DNS provider test failed: {error:#}")))
-        .map_err(ApiError)?;
-    Ok(Json(crate::dns::ProviderTest {
-        ok: true,
-        zones,
-        truncated,
-    }))
+    Ok(Json(
+        crate::dns::test_provider(crate::dns::http_client(), &provider)
+            .await
+            .map_err(ApiError)?,
+    ))
 }
 async fn update_dns_provider(
     State(state): State<AppState>,
@@ -4014,6 +4022,10 @@ async fn update_dns_provider(
                 input.endpoint.as_deref(),
                 input.token.as_deref(),
                 input.min_ttl,
+                crate::dns::WebhookSettings {
+                    zones: input.zones,
+                    timeout_secs: input.timeout_secs,
+                },
             )
         })
         .await?,
@@ -4301,8 +4313,8 @@ async fn delete_dns_record(
             move |db| db.dns_provider_raw(&provider_id)
         })
         .await?;
-        let client =
-            crate::dns::Cloudflare::new(crate::dns::http_client(), &provider).map_err(ApiError)?;
+        let client = crate::dns::Client::new(&store, crate::dns::http_client(), &provider, &zone)
+            .map_err(ApiError)?;
         client
             .delete(&zone.name, remote_id)
             .await

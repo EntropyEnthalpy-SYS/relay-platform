@@ -2636,7 +2636,7 @@ async function renderDns() {
   const [providers, zones, nodes] = await Promise.all([api('/dns/providers'), api('/dns/zones'), api('/nodes')]);
   if (state.view !== 'dns' || state.actor !== actor) return;
   const providerNames = Object.fromEntries(providers.map(p => [p.id, p.name]));
-  const p = panel(translate('DNS 服务商'), translate('保存 Cloudflare 兼容 API 的地址和令牌。令牌可逆保存以调用服务商，接口只显示是否已设置；仅系统管理员可读写。'), button(translate('＋ 新增服务商'), () => dnsProviderForm(null), 'primary'));
+  const p = panel(translate('DNS 服务商'), translate('保存 Cloudflare 兼容 API 或 DNS Webhook 接收端的地址和凭据。令牌和 Secret 可逆保存以调用服务商，接口只显示是否已设置；仅系统管理员可读写。'), button(translate('＋ 新增服务商'), () => dnsProviderForm(null), 'primary'));
   if (!providers.length) p.append(empty(translate('还没有 DNS 服务商'), translate('先添加服务商，再创建区域和托管记录。')));
   else p.append(table([translate('名称'), translate('类型'), translate('API 地址'), translate('令牌'), translate('最低 TTL'), translate('操作')], providers.map(provider => {
     const actions = el('div'); actions.append(button(translate('测试'), () => testDnsProvider(provider), 'table-action'), button(translate('编辑'), () => dnsProviderForm(provider), 'table-action'), button(translate('删除'), () => deleteDnsProvider(provider), 'table-action danger'));
@@ -2659,11 +2659,12 @@ async function renderDns() {
     state.dnsZone = selected.id;
     const records = await api(`/dns/zones/${selected.id}/records`);
     if (state.view !== 'dns' || state.actor !== actor || state.dnsZone !== selected.id) return;
-    const r = panel(msg`托管记录 · ${selected.name}`, translate('每条记录带 relay 标记。删除记录时应用模式会同时删除服务商记录；观察模式只删除本地记录。健康摘除只在节点心跳新鲜且至少一个目标健康时保留记录。'), button(translate('＋ 新增记录'), () => dnsRecordForm(selected, null, nodes), 'primary'));
+    const webhook = providers.find(provider => provider.id === selected.provider_id)?.kind === 'webhook';
+    const r = panel(msg`托管记录 · ${selected.name}`, translate('每条记录带 relay 标记。删除记录时应用模式会同时删除服务商记录；观察模式只删除本地记录。健康摘除只在节点心跳新鲜且至少一个目标健康时保留记录。'), button(translate('＋ 新增记录'), () => dnsRecordForm(selected, null, nodes, webhook), 'primary'));
     if (!records.length) r.append(empty(translate('还没有托管记录'), translate('创建 A/AAAA/CNAME 记录，然后执行“立即同步”。')));
     else r.append(table([translate('名称'), translate('类型'), translate('内容'), 'TTL', translate('状态'), translate('健康摘除'), translate('服务商记录'), translate('操作')], records.map(record => {
       const actions = el('div');
-      actions.append(button(translate('编辑'), () => dnsRecordForm(selected, record, nodes), 'table-action'));
+      actions.append(button(translate('编辑'), () => dnsRecordForm(selected, record, nodes, webhook), 'table-action'));
       if (record.type === 'A' || record.type === 'AAAA') actions.append(button('DDNS', () => ddnsRecord(record), 'table-action'));
       actions.append(button(record.enabled ? translate('停用') : translate('启用'), async () => { await api(`/dns/records/${record.id}`, { method: 'PUT', body: { enabled: !record.enabled } }); await renderDns(); }, 'table-action'));
       actions.append(button(translate('删除'), () => deleteDnsRecord(record), 'table-action danger'));
@@ -2711,6 +2712,10 @@ function dnsRecordStatus(record, zone, now) {
 async function testDnsProvider(provider) {
   const result = await api(`/dns/providers/${provider.id}/test`, { method: 'POST' });
   const body = el('div');
+  if (provider.kind === 'webhook') {
+    body.append(el('p', translate('接收端接受了签名的 ping。测试不验证 DNS 写入权限，也不证明记录已经生效。')), table([translate('区域')], result.zones.map(zone => [zone.name])));
+    modal(msg`连接测试 · ${provider.name}`, body); return;
+  }
   body.append(el('p', result.zones.length ? msg`连接正常，令牌可以看到 ${result.zones.length} 个区域。` : translate('连接正常，但令牌看不到任何区域；请检查令牌的区域权限。')));
   if (result.truncated) body.append(el('p', translate('区域较多，只列出前 1000 个。'), 'fine'));
   if (result.zones.length) body.append(table([translate('区域'), 'ID'], result.zones.map(zone => [zone.name, zone.id])));
@@ -2822,16 +2827,34 @@ function authoritativeRecordForm(zone, record, nodes) {
 function dnsProviderForm(provider) {
   const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'name', translate('名称'), provider?.name || '').maxLength = 120;
-  select(grid, 'kind', translate('服务商类型'), [['cloudflare', translate('Cloudflare 兼容 API')]], provider?.kind || 'cloudflare');
-  field(grid, 'endpoint', translate('API 基础地址'), provider?.endpoint || 'https://api.cloudflare.com/client/v4').maxLength = 500;
+  // The kind is fixed once saved: the update API does not accept it.
+  const kind = select(grid, 'kind', translate('服务商类型'), [['cloudflare', translate('Cloudflare 兼容 API')], ['webhook', translate('DNS Webhook（签名记录集）')]], provider?.kind || 'cloudflare'); kind.disabled = !!provider;
+  const cloudflareApi = 'https://api.cloudflare.com/client/v4';
+  const endpoint = field(grid, 'endpoint', translate('API 基础地址'), provider?.endpoint || cloudflareApi); endpoint.maxLength = 500;
   const token = field(grid, 'token', provider ? translate('令牌（留空保留原值）') : translate('API 令牌'), '', 'password', false); token.maxLength = 4096;
   const minTtl = field(grid, 'min_ttl', translate('最低 TTL（秒，可选）'), provider?.min_ttl ?? '', 'number', false); minTtl.min = 0; minTtl.max = 86400;
-  form.append(grid, el('p', translate('令牌只应授予 DNS 编辑权限；接口不会返回令牌原文。HTTP 只允许回环地址用于本机测试。'), 'fine'), el('p', translate('最低 TTL：TTL 低于它的记录按最低值发布（例如 Cloudflare 免费套餐为 60 秒）。TTL 1 表示由 Cloudflare 自动决定，不受影响；留空表示不限制。'), 'fine'));
+  const zones = field(grid, 'zones', translate('区域（多个用逗号或空格分隔）'), (provider?.zones || []).join(', ')); zones.maxLength = 8000; zones.placeholder = 'example.com, example.net';
+  const timeout = field(grid, 'timeout_secs', translate('请求超时（秒）'), provider?.timeout_secs ?? 15, 'number'); timeout.min = 1; timeout.max = 30;
+  const cloudflareNotes = el('div'), webhookNotes = el('div');
+  cloudflareNotes.append(el('p', translate('令牌只应授予 DNS 编辑权限；接口不会返回令牌原文。HTTP 只允许回环地址用于本机测试。'), 'fine'), el('p', translate('最低 TTL：TTL 低于它的记录按最低值发布（例如 Cloudflare 免费套餐为 60 秒）。TTL 1 表示由 Cloudflare 自动决定，不受影响；留空表示不限制。'), 'fine'));
+  webhookNotes.append(el('p', translate('Webhook：控制器把每个名称和类型的完整值集合以签名 JSON 发送到接收端（HMAC-SHA256，按 ZFC DNS Webhook 协议 v1 的公开说明），只在接收端确认写入后算成功，不跟随重定向。Secret 至少 32 字节，接口不会返回原文；HTTP 只允许回环地址。DNS 区域只能使用这里列出的域名。'), 'fine'));
+  const sync = () => {
+    const webhook = kind.value === 'webhook';
+    sectionVisible(zones.parentElement, webhook); sectionVisible(timeout.parentElement, webhook); sectionVisible(cloudflareNotes, !webhook); sectionVisible(webhookNotes, webhook);
+    endpoint.parentElement.firstChild.textContent = webhook ? translate('接收端 URL') : translate('API 基础地址');
+    token.parentElement.firstChild.textContent = provider ? (webhook ? translate('Secret（留空保留原值）') : translate('令牌（留空保留原值）')) : (webhook ? translate('Secret（至少 32 字节）') : translate('API 令牌'));
+    if (!provider && webhook && endpoint.value === cloudflareApi) endpoint.value = '';
+    if (!provider && !webhook && !endpoint.value) endpoint.value = cloudflareApi;
+  };
+  kind.addEventListener('change', sync); sync();
+  form.append(grid, cloudflareNotes, webhookNotes);
   submit(form, provider ? translate('保存服务商') : translate('添加服务商'), async data => {
-    const body = { name: String(data.get('name')).trim(), kind: data.get('kind'), endpoint: String(data.get('endpoint')).trim() };
+    const body = { name: String(data.get('name')).trim(), endpoint: String(data.get('endpoint')).trim() };
+    if (!provider) body.kind = kind.value;
     const min = number(data, 'min_ttl');
     if (min !== null) body.min_ttl = min; else if (provider?.min_ttl) body.min_ttl = 0;
     if (String(data.get('token') || '')) body.token = String(data.get('token'));
+    if (kind.value === 'webhook') { body.zones = String(data.get('zones')).split(/[\s,]+/).filter(Boolean); body.timeout_secs = number(data, 'timeout_secs'); }
     if (provider) await api(`/dns/providers/${provider.id}`, { method: 'PUT', body });
     else await api('/dns/providers', { method: 'POST', body });
     $('#dialog').close(); notify(translate('DNS 服务商已保存。')); await renderDns();
@@ -2867,13 +2890,13 @@ function dnsZoneForm(zone, providers) {
   });
   modal(zone ? msg`编辑 DNS 区域 · ${zone.name}` : translate('新增 DNS 区域'), form);
 }
-function dnsRecordForm(zone, record, nodes) {
+function dnsRecordForm(zone, record, nodes, webhook) {
   const form = el('form'), grid = el('div', undefined, 'form-grid');
   field(grid, 'name', translate('记录名称'), record?.name || '').maxLength = 253;
   select(grid, 'type', translate('类型'), dnsRecordTypes.map(type => [type, type]), record?.type || 'A');
   field(grid, 'content', translate('内容（IP 或 CNAME）'), record?.content || '').maxLength = 253;
   const ttl = field(grid, 'ttl', translate('TTL（秒）'), record?.ttl ?? 300, 'number'); ttl.min = 1; ttl.max = 86400;
-  select(grid, 'proxied', translate('Cloudflare 代理'), [['no', translate('不代理')], ['yes', translate('代理')]], record?.proxied ? 'yes' : 'no');
+  if (!webhook) select(grid, 'proxied', translate('Cloudflare 代理'), [['no', translate('不代理')], ['yes', translate('代理')]], record?.proxied ? 'yes' : 'no');
   const gating = featureOn('dns-health') || !!record?.health;
   if (gating) {
     select(grid, 'health_node', translate('入口健康摘除节点'), [['', translate('不启用')], ...nodes.map(node => [node.id, node.name])], record?.health?.node_id || '');
@@ -2881,6 +2904,7 @@ function dnsRecordForm(zone, record, nodes) {
     if (record?.health) select(grid, 'health_clear', translate('健康摘除设置'), [['no', translate('保留现有设置')], ['yes', translate('清除健康摘除')]], 'no');
   }
   form.append(grid, el('p', gating ? translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。填写节点和规则 ID 后，节点心跳超过 90 秒或没有健康目标、并且持续达到区域的确认时间时，应用模式会自动摘除该记录；持续健康达到确认时间后自动重建。控制器每 30 秒检查一次，同名记录过半同时失败或不足“最少保留”时暂不摘除。') : translate('应用模式同步后会写入服务商；观察模式只显示“将创建/将更新”。CNAME 内容必须是主机名，A/AAAA 内容必须是 IP。需要按入口健康自动摘除记录时，请系统管理员在「可选功能」中开启 DNS 健康摘除。'), 'fine'));
+  if (webhook) form.append(el('p', translate('Webhook 区域的记录名称必须是区域内的完整域名（例如 edge.example.com）。同名同类型的值作为一个完整集合发送，TTL 取其中最低值；不支持 Cloudflare 代理。'), 'fine'));
   submit(form, record ? translate('保存记录') : translate('添加记录'), async data => {
     const body = { name: String(data.get('name')).trim(), type: data.get('type'), content: String(data.get('content')).trim(), ttl: number(data, 'ttl'), proxied: data.get('proxied') === 'yes' };
     const healthNode = String(data.get('health_node') || ''), healthRule = String(data.get('health_rule') || '').trim();

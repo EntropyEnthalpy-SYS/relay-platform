@@ -389,9 +389,9 @@ DNS 服务商、区域和记录保存在 metadata，schema 仍为 v5、恢复日
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET/POST | `/dns/providers` | 服务商列表/创建 `{name,kind,endpoint,token,min_ttl?}` |
-| GET/PUT/DELETE | `/dns/providers/{id}` | 读取（脱敏）/更新（令牌留空保留，`min_ttl` 传 0 清除）/删除；有区域时 409 |
-| POST | `/dns/providers/{id}/test` | 用已保存令牌列出可见区域 `{ok,zones:[{id,name}],truncated}`；失败 502，错误文本中的令牌替换为 `[redacted]` |
+| GET/POST | `/dns/providers` | 服务商列表/创建 `{name,kind: cloudflare\|webhook,endpoint,token,min_ttl?,zones?,timeout_secs?}`；webhook 必须给出接收端 URL、至少 32 字节的 Secret（`token`）和 1–100 个 `zones`，`timeout_secs` 1–30（默认 15），同一 URL 409；协议见 [DNS.md](DNS.md#dns-webhook-服务商) |
+| GET/PUT/DELETE | `/dns/providers/{id}` | 读取（脱敏）/更新（令牌留空保留，`min_ttl` 传 0 清除，webhook 可改 `zones`/`timeout_secs`，不接受 `kind`）/删除；有区域时 409 |
+| POST | `/dns/providers/{id}/test` | 用已保存令牌列出可见区域 `{ok,zones:[{id,name}],truncated}`；webhook 发送签名 `ping`，返回配置的区域；失败 502，错误文本中的令牌替换为 `[redacted]` |
 | GET/POST | `/dns/zones` | 区域列表（含内存中的 `status`）/创建 `{provider_id,name,mode,min_keep,failover_confirm_secs?}`（确认窗口 0..=1800 秒，省略为 60） |
 | GET/PUT/DELETE | `/dns/zones/{id}` | 读取（含 `status`）/更新/删除；有记录时 409 |
 | GET/POST | `/dns/zones/{id}/records` | 记录列表（含 `status`）/创建 `{name,type,content,ttl,proxied,health?}` |

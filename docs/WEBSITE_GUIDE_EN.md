@@ -533,9 +533,10 @@ With **Plan entitlements** on, a plan can give its traffic per cycle instead of 
 
 ### DNS, DDNS and the authoritative DNS pool
 
-**DNS management** (system administrators) keeps DNS records in step with your servers. Relay currently supports Cloudflare-compatible provider APIs.
+**DNS management** (system administrators) keeps DNS records in step with your servers. Relay supports Cloudflare-compatible provider APIs and DNS webhooks: a receiver you run that checks a signed request and applies whole record sets to your own DNS, for example BIND through RFC 2136.
 
 1. **Add provider** with an API token. The token is never shown again after saving. An optional **Minimum TTL** raises any lower record TTL (Cloudflare's automatic TTL is left alone). **Test** checks the token and lists the zones it can see.
+   For a **DNS webhook**, enter the receiver's final URL, a secret of at least 32 bytes, the zones the receiver manages and a request timeout (15 seconds by default). **Test** sends a signed ping only; it does not prove the receiver can write DNS. Records in a webhook zone use full names inside the zone, values with the same name and type are sent together with the lowest of their TTLs, and Cloudflare proxying is not available.
 2. **Add zone** in one of two modes. **Observe** reads the provider and reports what it would create, update or delete without writing anything. **Apply** creates, updates and deletes the records Relay manages. Relay only touches records it created (marked with a `relay:` comment), never other records with the same name.
 3. **Add record:** an A, AAAA or CNAME record with a TTL.
 4. Zones are checked automatically every 30 seconds: apply-mode zones write only what changed, and observe-mode zones just record what they would do. **Sync now** runs a check immediately. Each zone shows when it was last checked, and each record shows its state and why (published, waiting for the confirmation window, removed, or held back).
@@ -865,7 +866,7 @@ Relay is a development release. Every one of its 22 modules is marked "partially
 - **Certificates:** TLS certificates for forwarding are files you provide. Automatic issuance, renewal and revocation lists are not implemented.
 - **Clients:** subscription output is checked automatically, but the full matrix of real client apps (Clash/mihomo, Surge, Shadowrocket, v2rayN and others) has not been run. Shadowsocks has one key per port, without plugins.
 - **Multipath and MPTCP:** verified locally and in Linux network namespaces; real multi-link performance has not been measured. Relay's multipath protocol is its own and makes no claim of compatibility with other products' protocols.
-- **DNS:** tested against a mock Cloudflare API; a real Cloudflare account, DNS propagation, real port 53 and registrar delegation have not been verified.
+- **DNS:** tested against a mock Cloudflare API and a mock webhook receiver; a real Cloudflare account, a real webhook receiver (including ZeroForwarder's own), DNS propagation, real port 53 and registrar delegation have not been verified.
 - **WireGuard and NAT:** tested in Linux namespaces; real home routers, carrier-grade NAT, IPv6, exit nodes and subnet routes are not covered.
 - **Cross-panel sharing:** not yet verified between two separate panels over the public internet.
 - **Reverse tunnels:** no real public network, NAT, long-running or high-concurrency tests.
