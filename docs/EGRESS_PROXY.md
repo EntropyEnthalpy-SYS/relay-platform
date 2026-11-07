@@ -82,7 +82,7 @@
 
 ### 失败的统计和日志
 
-连不上上游、认证失败、上游的 SOCKS5 错误回复都算作**目的地连接失败**，与直接连接目的地失败一样计入 `failed_connections`（HTTP CONNECT / HTTP/2 CONNECT 客户端收到 502，SOCKS5 客户端收到失败回复）。拦截记录仍只记录被目的地 ACL 拒绝的连接。Agent 日志中的原因形如：
+连不上上游、认证失败、上游的 SOCKS5 错误回复都算作**目的地连接失败**，与直接连接目的地失败一样计入 `failed_connections`（HTTP CONNECT / HTTP/2 CONNECT 客户端收到 502，SOCKS5 客户端收到失败回复）。拦截记录仍只记录被目的地 ACL 拒绝的连接。Agent 调试日志中的原因（默认看不到，见下方说明）形如：
 
 - `egress proxy proxy-a.example.com:1080 is unreachable: …`
 - `egress proxy proxy-a.example.com:1080 did not answer in time`
@@ -90,6 +90,8 @@
 - `egress proxy proxy-a.example.com:1080 could not connect to example.org:443: host unreachable (SOCKS5 reply 4)`
 
 这些信息只包含上游地址和目的地，**从不包含用户名和密码**。
+
+**默认日志级别不显示这些原因。** 它们由 `relay_platform::engine` 模块以调试（DEBUG）级别记录（日志消息为 `TCP session ended`）；Agent 未设置 `RUST_LOG` 时使用 `relay=info,relay_platform=info`，只输出 INFO 及以上。排查时可临时给 Agent 进程设置 `RUST_LOG=relay=info,relay_platform=info,relay_platform::engine=debug` 并重启 Agent；该模块的其他调试信息也会一并输出，日志量会增加。排查结束后去掉这项设置并再次重启，恢复原来的级别。这只是临时排障手段，不要作为生产服务的长期设置。
 
 ### 当前连接
 
