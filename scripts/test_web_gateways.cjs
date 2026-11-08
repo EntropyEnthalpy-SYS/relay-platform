@@ -21,7 +21,7 @@ async function serialize(existing) {
     FormData: class { constructor(element) { this.values = new Map(element.querySelectorAll().filter(c => c.name && !c.disabled && (c.type !== 'checkbox' || c.checked)).map(c => [c.name, c.type === 'checkbox' ? 'on' : c.value])); } get(key) { return this.values.get(key) ?? null; } },
     forwardingPathView: () => ({ box: new Element(), update() {} }), featureOn: () => false,
     state: { config: { node_id: 'node', revision: 3, rules: [existing] }, nodes: [node], actor: { id: 'owner' } },
-    api: async () => ({ configs: [], nodes: [] }), el: tag => new Element(tag),
+    api: async path => path === '/firewall/sets' ? [] : { configs: [], nodes: [] }, el: tag => new Element(tag),
     field(parent, name, _label, value = '', type = 'text') { const label = new Element('label'), input = new Element('input'); Object.assign(input, { name, value: String(value ?? ''), type }); label.append(input); parent.append(label); return input; },
     select(parent, name, label, options, value) { const input = context.field(parent, name, label, value ?? options[0][0]); input.tag = 'select'; return input; },
     textarea(parent, name, label, value = '') { const input = context.field(parent, name, label, value); input.tag = 'textarea'; return input; },

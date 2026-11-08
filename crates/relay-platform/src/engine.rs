@@ -161,6 +161,17 @@ impl Counters {
     fn destination_refused(&self, rule: &RuntimeRule, session: &Live, error: &anyhow::Error) {
         if let Some(denied) = error
             .chain()
+            .find_map(|cause| cause.downcast_ref::<FirewallDenied>())
+        {
+            self.blocks.record(
+                &rule.key,
+                session.protocol(),
+                session.client().ip(),
+                Reason::Firewall,
+                || denied.0.clone(),
+            );
+        } else if let Some(denied) = error
+            .chain()
             .find_map(|cause| cause.downcast_ref::<DestinationDenied>())
         {
             self.blocks.record(
@@ -185,6 +196,7 @@ impl Counters {
             speed_test: None,
             live_connections: None,
             egress_proxy: None,
+            firewall: None,
             multipath: Some(self.multipath.snapshot()),
             meter: None,
             active_probes: self.active_probes.load(Ordering::Relaxed),
@@ -229,6 +241,16 @@ impl std::fmt::Display for DestinationDenied {
     }
 }
 impl std::error::Error for DestinationDenied {}
+/// A destination the server's outbound firewall rule set refuses; the text
+/// names the layer, the set and its rule or default action.
+#[derive(Debug)]
+struct FirewallDenied(String);
+impl std::fmt::Display for FirewallDenied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for FirewallDenied {}
 /// A proxy handshake that failed: authentication or anything else. The
 /// protocol modules' messages name no credentials and no payload.
 fn handshake_refusal(error: &anyhow::Error) -> (Reason, String) {
@@ -977,6 +999,7 @@ struct RuleResources {
     node_rate: Arc<Limits>,
     user_limit: Option<Arc<UserLimit>>,
     salts: Option<shadowsocks::SaltCache>,
+    firewall: Arc<crate::firewall::Runtime>,
 }
 
 struct RuntimeRule {
@@ -1016,6 +1039,8 @@ struct RuntimeRule {
     key: Arc<str>,
     /// How TCP and UDP clients reach the rule, as sessions name it.
     kinds: [&'static str; 2],
+    /// The server's firewall policy, shared by every rule.
+    firewall: Arc<crate::firewall::Runtime>,
 }
 /// Orders same-priority targets by probe latency, unmeasured ones last. The
 /// current choice is kept until another target is faster by more than 10%
@@ -1108,6 +1133,7 @@ impl RuntimeRule {
                 connections::protocol(&spec, false),
                 connections::protocol(&spec, true),
             ],
+            firewall: resources.firewall,
             spec,
             resolver,
             routes,
@@ -1302,16 +1328,66 @@ impl RuntimeRule {
         }
         Some(TargetGuard(count.clone()))
     }
+    /// The first firewall layer that refuses a client at `source`: the
+    /// server's inbound set, then the rule's. A protocol gateway's local
+    /// bridge sees only loopback clients; its public listener is the
+    /// protocol engine's.
+    fn firewall_refusal(&self, source: std::net::IpAddr) -> Option<crate::firewall::Outcome> {
+        let rule_set = self.spec.firewall_inbound_set.as_deref();
+        if self.spec.protocol_gateway.is_some()
+            || (rule_set.is_none() && !self.firewall.server_inbound())
+        {
+            return None;
+        }
+        self.firewall.load().inbound_refusal(rule_set, source)
+    }
+    /// The server's inbound set's refusal of the sender of PROXY headers:
+    /// the rule's publisher chooses whom it trusts, so the server's set
+    /// judges the sender as well as the address in the header.
+    fn server_firewall_refusal(&self, peer: std::net::IpAddr) -> Option<crate::firewall::Outcome> {
+        if self.spec.protocol_gateway.is_some() || !self.firewall.server_inbound() {
+            return None;
+        }
+        self.firewall.load().inbound_refusal(None, peer)
+    }
+    /// The addresses of `endpoint` that the server's outbound set, then the
+    /// rule's destination rules, let this server connect to.
+    fn permitted(&self, endpoint: &str, addresses: Vec<SocketAddr>) -> Result<Vec<SocketAddr>> {
+        let host = destination_acl::host_from_endpoint(endpoint);
+        let addresses = if self.firewall.server_outbound() {
+            let (addresses, refused) = self.firewall.load().filter_outbound(host, addresses);
+            if let (true, Some(refused)) = (addresses.is_empty(), refused) {
+                return Err(FirewallDenied(refused.detail()).into());
+            }
+            addresses
+        } else {
+            addresses
+        };
+        let addresses = self.destination.filter_sockets(host, addresses);
+        if addresses.is_empty() {
+            return Err(DestinationDenied(format!(
+                "destination denied by rule policy: {endpoint}"
+            ))
+            .into());
+        }
+        Ok(addresses)
+    }
     fn accepts(&self, peer: SocketAddr) -> bool {
-        self.spec.permits(peer.ip())
+        self.firewall_refusal(peer.ip()).is_none()
+            && self.spec.permits(peer.ip())
             && self
                 .spec
                 .expires_at_ms
                 .is_none_or(|expiry| expiry > now_ms())
     }
+    /// Whether a connection or datagram from `peer` may go on. With PROXY
+    /// input the rule's set and lists judge the address in the header
+    /// ([`Self::accepts`], once it is read); the sender must be trusted and
+    /// pass the server's inbound set.
     fn accepts_transport(&self, peer: SocketAddr) -> bool {
         if let Some(proxy) = &self.spec.inbound_proxy {
             proxy.trusts(peer.ip())
+                && self.server_firewall_refusal(peer.ip()).is_none()
                 && self
                     .spec
                     .expires_at_ms
@@ -1325,6 +1401,31 @@ impl RuntimeRule {
     fn refuse(&self, stats: &Counters, udp: bool, source: SocketAddr, transport: bool) {
         let ip = canonical_ip(source.ip());
         let spec = &self.spec;
+        let proxied = transport
+            && spec
+                .inbound_proxy
+                .as_ref()
+                .is_some_and(|proxy| !proxy.trusts(ip));
+        let firewall = || {
+            if transport && spec.inbound_proxy.is_some() {
+                self.server_firewall_refusal(ip)
+            } else {
+                self.firewall_refusal(ip)
+            }
+        };
+        if !proxied
+            && spec.expires_at_ms.is_none_or(|expiry| expiry > now_ms())
+            && let Some(refusal) = firewall()
+        {
+            stats.blocks.record(
+                &self.key,
+                self.kinds[udp as usize],
+                ip,
+                Reason::Firewall,
+                || refusal.detail(),
+            );
+            return;
+        }
         let gateway = spec.protocol_gateway.is_some();
         let denied = (!gateway)
             .then(|| spec.deny_sources.iter().find(|n| n.contains(&ip)).copied())
@@ -1656,6 +1757,8 @@ pub struct Engine {
     /// Rules whose limits have a burst, for the burst credit report.
     bursts: StdMutex<Vec<(String, Arc<SharedRule>)>>,
     reverse: Arc<crate::reverse_mux::managed::Server>,
+    /// The server's firewall policy; every rule reads the newest one.
+    firewall: Arc<crate::firewall::Runtime>,
 }
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -1708,7 +1811,13 @@ impl Engine {
             user_limits: UserLimits::default(),
             bursts: StdMutex::new(vec![]),
             reverse: Arc::default(),
+            firewall: Arc::default(),
         }
+    }
+    /// The firewall policy in force; the agent replaces it as the
+    /// controller sends new ones.
+    pub fn firewall(&self) -> &Arc<crate::firewall::Runtime> {
+        &self.firewall
     }
     /// The public ends of reverse tunnels: the agent keeps their listeners;
     /// rules with `reverse_tunnel` open their paths here.
@@ -2024,6 +2133,7 @@ impl Engine {
                                 })
                                 .clone()
                         }),
+                        firewall: self.firewall.clone(),
                     },
                 );
                 if let Some(old) = inner.rules.get(&spec.id)
@@ -2280,6 +2390,14 @@ impl Engine {
                     })
                 })
             });
+        // A set the previous policy had stays only while a rule uses it.
+        self.firewall.retain(
+            config
+                .rules
+                .iter()
+                .filter_map(|r| r.firewall_inbound_set.clone())
+                .collect(),
+        );
         inner.rules = rules;
         inner.resolvers = resolvers;
         inner.config = Some(config);
@@ -2459,6 +2577,7 @@ fn security_policy_changed(old: &Rule, new: &Rule) -> bool {
         || old.protocol != new.protocol
         || old.allow_sources != new.allow_sources
         || old.deny_sources != new.deny_sources
+        || old.firewall_inbound_set != new.firewall_inbound_set
         || old.expires_at_ms != new.expires_at_ms
         || old.quota_bytes != new.quota_bytes
         || old.rate_bytes_per_sec != new.rate_bytes_per_sec
@@ -2760,7 +2879,8 @@ async fn fill_prewarm(rule: Arc<RuntimeRule>, set: Arc<PrewarmSet>, index: usize
         let dial = async {
             let target = rule.spec.target_address(index, rule.spec.listen.port())?;
             let mut last = None;
-            for address in rule.resolver.resolve(&target).await? {
+            let addresses = rule.resolver.resolve(&target).await?;
+            for address in rule.permitted(&target, addresses)? {
                 match dial_target(&rule, index, address, inlet).await {
                     Ok(dialed) => return Ok(dialed),
                     Err(error) => last = Some(error),
@@ -2829,11 +2949,15 @@ fn bind_peer_allowed(
     {
         return false;
     }
-    rule.spec.permits(peer.ip())
-        && rule.destination.permits_socket(peer)
+    rule.firewall_refusal(peer.ip()).is_none()
+        && rule.spec.permits(peer.ip())
+        && rule.permitted(&peer.to_string(), vec![peer]).is_ok()
         && server.permits(peer.ip())
 }
 
+/// Why a target was not connected: the kind counted per hop, the text,
+/// and whether the server's outbound firewall rule set refused it.
+type TargetFailure = (SetupFailure, String, bool);
 /// Dials one target: a pre-warmed connection first, then a fresh one.
 async fn try_target(
     rule: &RuntimeRule,
@@ -2842,15 +2966,16 @@ async fn try_target(
     inlet: ListenerKey,
     stats: &Counters,
     deadline: Instant,
-) -> Result<(BoxStream, LoopGuard, Option<SocketAddr>), (SetupFailure, String)> {
+) -> Result<(BoxStream, LoopGuard, Option<SocketAddr>), TargetFailure> {
     if let (Some(tunnel), Some(server)) = (&rule.spec.reverse_tunnel, &rule.reverse) {
         let idle = Duration::from_secs(rule.spec.idle_timeout_secs);
         return match timeout_at(deadline, server.open_stream(tunnel, idle)).await {
             Ok(Ok(stream)) => Ok((Box::new(stream), LoopGuard::none(), None)),
-            Ok(Err(error)) => Err((SetupFailure::Other, error.to_string())),
+            Ok(Err(error)) => Err((SetupFailure::Other, error.to_string(), false)),
             Err(_) => Err((
                 SetupFailure::Timeout,
                 "reverse tunnel connection timed out".into(),
+                false,
             )),
         };
     }
@@ -2858,18 +2983,25 @@ async fn try_target(
     let target = rule
         .spec
         .target_address(index, inlet.address.port())
-        .map_err(|error| (SetupFailure::Other, error.to_string()))?;
+        .map_err(|error| (SetupFailure::Other, error.to_string(), false))?;
     let addresses = match timeout_at(deadline, rule.resolver.resolve(&target)).await {
-        Ok(Ok(addresses)) => rule
-            .destination
-            .filter_sockets(destination_acl::host_from_endpoint(&target), addresses),
-        Ok(Err(error)) => return Err((SetupFailure::Dns, error.to_string())),
-        Err(_) => return Err((SetupFailure::Timeout, "target resolution timed out".into())),
+        Ok(Ok(addresses)) => addresses,
+        Ok(Err(error)) => return Err((SetupFailure::Dns, error.to_string(), false)),
+        Err(_) => {
+            return Err((
+                SetupFailure::Timeout,
+                "target resolution timed out".into(),
+                false,
+            ));
+        }
     };
-    if addresses.is_empty() {
-        let error = format!("destination denied by rule policy: {target}");
-        return Err((SetupFailure::Other, error));
-    }
+    let addresses = match rule.permitted(&target, addresses) {
+        Ok(addresses) => addresses,
+        Err(error) => {
+            let firewall = error.is::<FirewallDenied>();
+            return Err((SetupFailure::Other, format!("{error:#}"), firewall));
+        }
+    };
     if let Some(dialed) = rule
         .prewarm
         .as_ref()
@@ -2877,10 +3009,11 @@ async fn try_target(
         .and_then(Prewarm::take)
     {
         // A pre-warmed connection that fails to activate falls back to a fresh dial.
-        if !rule.destination.permits_socket(dialed.address) {
+        if rule.permitted(&target, vec![dialed.address]).is_err() {
             last = Some((
                 SetupFailure::Other,
                 "pre-warmed destination denied by rule policy".into(),
+                false,
             ));
         } else {
             let remote = dialed.address;
@@ -2889,11 +3022,12 @@ async fn try_target(
                     stats.prewarmed_connections.fetch_add(1, Ordering::Relaxed);
                     return Ok((stream, route, Some(remote)));
                 }
-                Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string())),
+                Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string(), false)),
                 Err(_) => {
                     last = Some((
                         SetupFailure::Timeout,
                         "pre-warmed connection timed out".into(),
+                        false,
                     ))
                 }
             }
@@ -2907,13 +3041,17 @@ async fn try_target(
         .await
         {
             Ok(Ok((stream, route))) => return Ok((stream, route, Some(address))),
-            Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string())),
+            Ok(Err(error)) => last = Some((SetupFailure::of(&error), error.to_string(), false)),
             Err(_) => {
-                return Err((SetupFailure::Timeout, "target connection timed out".into()));
+                return Err((
+                    SetupFailure::Timeout,
+                    "target connection timed out".into(),
+                    false,
+                ));
             }
         }
     }
-    Err(last.unwrap_or((SetupFailure::Other, String::new())))
+    Err(last.unwrap_or((SetupFailure::Other, String::new(), false)))
 }
 
 /// Dials targets in order. A target that has not connected within its hedge
@@ -2937,6 +3075,9 @@ async fn connect_tcp(
     let mut in_flight = vec![];
     let mut next_at = Some(Instant::now());
     let mut last = None;
+    // A target the server's outbound set refused; recorded once if no
+    // target connects.
+    let mut refused = None;
     loop {
         if next_at.is_some_and(|at| Instant::now() >= at) {
             next_at = None;
@@ -2972,7 +3113,7 @@ async fn connect_tcp(
             Some((index, guard, started, result)) = running.next() => {
                 in_flight.retain(|&other| other != index);
                 let address = &rule.spec.targets[index].address;
-                let outcome = result.as_ref().map(|_| started.elapsed()).map_err(|(kind, _)| *kind);
+                let outcome = result.as_ref().map(|_| started.elapsed()).map_err(|(kind, _, _)| *kind);
                 stats.record_hop(&rule.spec.id, Some((index, address)), outcome);
                 match result {
                     Ok((stream, route, remote)) => {
@@ -2986,7 +3127,10 @@ async fn connect_tcp(
                         }
                         return Ok((stream, guard, route));
                     }
-                    Err((_, error)) => {
+                    Err((_, error, firewall)) => {
+                        if firewall {
+                            refused.get_or_insert_with(|| error.clone());
+                        }
                         last = Some(error);
                         rule.cool(index);
                         next_at = Some(Instant::now());
@@ -2996,20 +3140,21 @@ async fn connect_tcp(
             _ = hedge => {}
         }
     }
+    if let Some(detail) = refused {
+        stats.blocks.record(
+            &rule.key,
+            session.protocol(),
+            session.client().ip(),
+            Reason::Firewall,
+            || detail,
+        );
+    }
     bail!("all targets failed: {}", last.unwrap_or_default())
 }
 
 async fn resolve_destination(rule: &RuntimeRule, endpoint: &str) -> Result<Vec<SocketAddr>> {
     let addresses = rule.resolver.resolve(endpoint).await?;
-    let addresses: Vec<_> = rule
-        .destination
-        .filter_sockets(destination_acl::host_from_endpoint(endpoint), addresses);
-    if addresses.is_empty() {
-        return Err(
-            DestinationDenied(format!("destination denied by rule policy: {endpoint}")).into(),
-        );
-    }
-    Ok(addresses)
+    rule.permitted(endpoint, addresses)
 }
 
 /// Connects a proxy client to the destination it named. Every inbound whose
@@ -3085,13 +3230,25 @@ async fn connect_proxy_destination(
 /// name when the rule can judge it by name and port alone; when private
 /// addresses are refused (the inbound's default) or address entries could
 /// match, the name is resolved here and the permitted addresses are sent
-/// instead, so the proxy reaches nothing the rule would not.
+/// instead, so the proxy reaches nothing the rule would not. A name that is
+/// not a valid hostname is resolved here too, as without the proxy: the
+/// proxy's resolver could read it as another name than the rules judged.
 async fn egress_requests(
     rule: &RuntimeRule,
     allow_private: bool,
     destination: &shadowsocks::Destination,
 ) -> Result<Vec<shadowsocks::Destination>> {
-    if let shadowsocks::Destination::Domain(name, port) = destination {
+    if let shadowsocks::Destination::Domain(name, port) = destination
+        && destination_acl::valid_hostname(&destination_acl::normalize_host(name))
+    {
+        let undecided = if rule.firewall.server_outbound() {
+            match rule.firewall.load().outbound_name(name, *port) {
+                Ok(undecided) => undecided,
+                Err(refused) => return Err(FirewallDenied(refused.detail()).into()),
+            }
+        } else {
+            false
+        };
         match rule.destination.decide_name(name, *port) {
             Some(false) => {
                 return Err(DestinationDenied(format!(
@@ -3099,7 +3256,7 @@ async fn egress_requests(
                 ))
                 .into());
             }
-            Some(true) if allow_private => return Ok(vec![destination.clone()]),
+            Some(true) if allow_private && !undecided => return Ok(vec![destination.clone()]),
             _ => {}
         }
     }
@@ -3174,9 +3331,25 @@ async fn open_egress<'a>(
         let share = now + (deadline - now) / (order.len() - position) as u32;
         let attempt = async {
             let mut last = None;
-            for address in rule.resolver.resolve(server).await.map_err(|error| {
+            let addresses = rule.resolver.resolve(server).await.map_err(|error| {
                 anyhow::anyhow!("egress proxy {server} cannot be resolved: {error}")
-            })? {
+            })?;
+            let addresses = if rule.firewall.server_outbound() {
+                let (addresses, refused) = rule
+                    .firewall
+                    .load()
+                    .filter_outbound(destination_acl::host_from_endpoint(server), addresses);
+                if let (true, Some(refused)) = (addresses.is_empty(), refused) {
+                    return Err(anyhow::Error::from(FirewallDenied(format!(
+                        "egress proxy {server}: {}",
+                        refused.detail()
+                    ))));
+                }
+                addresses
+            } else {
+                addresses
+            };
+            for address in addresses {
                 let route = rule.routes.reserve(inlet, address)?;
                 match network::connect_tcp(
                     rule.spec.outbound_bind.as_ref(),
@@ -3212,6 +3385,8 @@ async fn open_egress<'a>(
                 return Ok((stream, address, route, server));
             }
             Ok(Err(error)) if error.is::<crate::egress::Refusal>() => return Err(error),
+            // This server's outbound set refuses that upstream: try the next.
+            Ok(Err(error)) if error.is::<FirewallDenied>() => last = Some(error),
             Ok(Err(error)) => {
                 rule.egress_failed(index);
                 last = Some(error);
@@ -3266,6 +3441,13 @@ async fn socks5_udp_association(
                 match client {
                     Some(expected) if expected != peer => {
                         stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                    // The first datagram claims the association, so its
+                    // sender must pass the same inbound checks as a client.
+                    None if !rule.accepts(peer) => {
+                        stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
+                        rule.refuse(&stats, true, peer, false);
                         continue;
                     }
                     None => client = Some(peer),
@@ -3510,10 +3692,24 @@ async fn connect_multipath(
             .into_iter()
             .map(|index| timeout_at(path_deadline, open_multipath_path(rule, index, info, inlet)))
             .collect();
+        // A path the server's outbound set refused, kept in the error.
+        let mut refused = None;
         let first = loop {
-            match opens.next().await.context("no multipath path connected")? {
-                Ok(Ok(path)) => break path,
-                Ok(Err(_)) | Err(_) => continue,
+            match opens.next().await {
+                Some(Ok(Ok(path))) => break path,
+                Some(Ok(Err(error))) => {
+                    if let Some(denied) = error.downcast_ref::<FirewallDenied>() {
+                        refused.get_or_insert_with(|| denied.0.clone());
+                    }
+                }
+                Some(Err(_)) => {}
+                None => {
+                    return Err(match refused {
+                        Some(detail) => anyhow::Error::from(FirewallDenied(detail)),
+                        None => anyhow::anyhow!("no path connected"),
+                    }
+                    .context("no multipath path connected"));
+                }
             }
         };
         session.set_target(first.slot, &rule.spec.targets[first.slot], None);
@@ -3978,7 +4174,15 @@ async fn tcp_session(
         (Box::new(ss_session) as BoxStream, target)
     } else if rule.spec.outbound_multipath.is_some() {
         let target =
-            connect_multipath(&rule, info, inlet, stats.multipath.clone(), tasks, session).await?;
+            match connect_multipath(&rule, info, inlet, stats.multipath.clone(), tasks, session)
+                .await
+            {
+                Ok(target) => target,
+                Err(error) => {
+                    stats.destination_refused(&rule, session, &error);
+                    return Err(error);
+                }
+            };
         (client, target)
     } else {
         let (target, target_guard, route_guard) =
@@ -4398,6 +4602,9 @@ async fn udp_target(
         });
     }
     let mut last = None;
+    // A target the server's outbound set refused; recorded once if no
+    // target is reached.
+    let mut refused = None;
     let order = rule.order(info.source, inlet);
     if order.is_empty() {
         rule.no_target(stats, session);
@@ -4410,6 +4617,9 @@ async fn udp_target(
         let addresses = match timeout_at(deadline, resolve_destination(rule, &target)).await {
             Ok(Ok(a)) => a,
             Ok(Err(error)) => {
+                if let Some(denied) = error.downcast_ref::<FirewallDenied>() {
+                    refused.get_or_insert_with(|| denied.0.clone());
+                }
                 last = Some(error.to_string());
                 continue;
             }
@@ -4453,6 +4663,15 @@ async fn udp_target(
                 Err(_) => bail!("UDP target connection timed out"),
             }
         }
+    }
+    if let Some(detail) = refused {
+        stats.blocks.record(
+            &rule.key,
+            session.protocol(),
+            session.client().ip(),
+            Reason::Firewall,
+            || detail,
+        );
     }
     bail!("all UDP targets failed: {}", last.unwrap_or_default())
 }
@@ -4661,16 +4880,7 @@ async fn datagram_address(
     if address.port() == 0 || !server.permits(address.ip()) {
         return Err(DestinationDenied(format!("{destination} is not a public address")).into());
     }
-    let endpoint = destination.to_string();
-    if rule
-        .destination
-        .filter_sockets(destination_acl::host_from_endpoint(&endpoint), [address])
-        .is_empty()
-    {
-        return Err(
-            DestinationDenied(format!("destination denied by rule policy: {destination}")).into(),
-        );
-    }
+    rule.permitted(&destination.to_string(), vec![address])?;
     Ok(address)
 }
 

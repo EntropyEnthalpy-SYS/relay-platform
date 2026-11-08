@@ -170,6 +170,11 @@ fn apply_sync(
             .speed_test
             .as_ref()
             .is_some_and(|r| !r.within_limits())
+        || request
+            .stats
+            .firewall
+            .as_ref()
+            .is_some_and(|r| !r.within_limits())
     {
         return reject(400, "sync payload exceeds limits");
     }
@@ -290,6 +295,8 @@ fn apply_sync(
     };
     super::rate_limits::observe(tx, node, request.stats.rate_limits.as_ref())?;
     super::egress_proxies::observe(tx, node, request.stats.egress_proxy.as_ref())?;
+    super::firewall_sets::observe(tx, node, request.stats.firewall.as_ref())?;
+    let firewall = super::firewall_sets::desired(tx, node, request.stats.firewall.as_ref())?;
     let user_rates = super::user_rates::shares(
         tx,
         &mut rates.lock().unwrap(),
@@ -322,6 +329,7 @@ fn apply_sync(
             live_connection_requests: vec![],
             block_cursor: None,
             egress_proxy: true,
+            firewall: Some(serde_json::to_value(firewall)?),
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

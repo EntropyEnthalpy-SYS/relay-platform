@@ -414,6 +414,12 @@ pub struct Rule {
     /// Destination port denylist; evaluated before the allowlist.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_destination_ports: Vec<String>,
+    /// The inbound firewall rule set this rule's clients must pass, after
+    /// the server's and before `allow_sources`/`deny_sources`. The set
+    /// itself comes with the agent's firewall policy. Only agents that
+    /// report the capability get such rules; older agents reject the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall_inbound_set: Option<String>,
     /// The public end of this panel-managed reverse tunnel: the one target
     /// is connected by the tunnel's private server, not by this node. Only
     /// agents that report the capability get such rules; older agents
@@ -497,6 +503,9 @@ impl Rule {
             policy.validate(self.protocol.tcp())?;
         }
         crate::multipath::validate_rule(self)?;
+        if let Some(set) = &self.firewall_inbound_set {
+            ensure!(identifier(set), "invalid firewall rule set id");
+        }
         crate::destination_acl::DestinationPolicy::parse_with_ports(
             &self.allow_destinations,
             &self.deny_destinations,
@@ -1149,6 +1158,11 @@ pub struct EngineStats {
     /// destinations through their egress proxies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_proxy: Option<crate::egress::Report>,
+    /// Sent only after the controller sent [`SyncResponse::firewall`]; that
+    /// it is sent tells the controller this agent enforces firewall rule
+    /// sets, and which policy is in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall: Option<crate::firewall::Report>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multipath: Option<crate::multipath::Stats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1474,6 +1488,12 @@ pub struct SyncResponse {
     /// controllers older than egress proxies.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub egress_proxy: bool,
+    /// The node's firewall policy as a [`crate::firewall::Desired`]: its
+    /// hash, and the policy unless the agent reported it applied that hash.
+    /// Kept as JSON so a policy this agent cannot read does not stop the
+    /// sync. `None` from controllers older than rule sets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub firewall: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

@@ -29,6 +29,7 @@ mod egress_proxies;
 mod endpoint_allocation;
 mod features;
 mod federation;
+mod firewall_sets;
 mod health;
 mod leases;
 mod node_profiles;
@@ -109,6 +110,8 @@ pub struct Store(
     Arc<Mutex<speed_tests::Live>>,
     /// Live-connection requests, answers and block records.
     Arc<Mutex<connections::Live>>,
+    /// Nodes whose firewall policy changed since their last watch.
+    Arc<Mutex<std::collections::HashSet<String>>>,
 );
 #[derive(Default)]
 struct BudgetSignals {
@@ -189,6 +192,13 @@ pub struct Node {
     /// The agent reported that it reaches destinations through egress proxies.
     #[serde(default)]
     pub egress_proxy_support: bool,
+    /// The agent reported that it enforces firewall rule sets.
+    #[serde(default)]
+    pub firewall_support: bool,
+    /// The server's rule set bindings and whether its agent confirmed the
+    /// policy the panel wants.
+    #[serde(default)]
+    pub firewall: Option<crate::firewall::NodeStatus>,
 }
 
 #[derive(Clone, Debug)]
@@ -340,6 +350,7 @@ impl Store {
             Arc::new(fs::canonicalize(path)?),
             Arc::new(BudgetSignals::default()),
             Arc::new(Mutex::new(leases::LeaseClocks::default())),
+            Arc::default(),
             Arc::default(),
             Arc::default(),
             Arc::default(),
@@ -625,6 +636,8 @@ impl Store {
                 speed_test_support: false,
                 connections_support: false,
                 egress_proxy_support: false,
+                firewall_support: false,
+                firewall: None,
             },
             token,
         ))
@@ -636,7 +649,7 @@ impl Store {
     /// with a line on it, an endpoint group with it as a member and a chain
     /// use with a hop on it show it as missing.
     pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
-        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1,'rate_limit_node:'||?1,'egress_proxy_node:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
+        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1,'rate_limit_node:'||?1,'egress_proxy_node:'||?1,'firewall_node:'||?1,'firewall_binding:'||?1,'firewall_applied:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         require_node(&tx, actor, node, true)?;
@@ -796,6 +809,8 @@ impl Store {
                 speed_test_support: false,
                 connections_support: false,
                 egress_proxy_support: false,
+                firewall_support: false,
+                firewall: None,
             })
         })?;
         let mut nodes: Vec<Node> = rows.collect::<rusqlite::Result<_>>()?;
@@ -811,6 +826,8 @@ impl Store {
             node.connections_support = connections::supported(&conn, &node.id)?;
             node.egress_proxy_support = egress_proxies::supported(&conn, &node.id)?;
         }
+        drop(clocks);
+        firewall_sets::annotate(&conn, &mut nodes)?;
         Ok(nodes)
     }
     /// Recent per-node samples and incidents for the nodes the actor can see.
@@ -1076,9 +1093,11 @@ impl Store {
         self.2.config.notified()
     }
     /// The node's desired revision, and whether its WireGuard interfaces,
-    /// its reverse tunnels or its speed tests changed, or the panel asked
-    /// for live connections, since its last sync (answered yes once).
-    pub fn node_watch(&self, credential: &str) -> Result<(u64, bool, bool, bool, bool)> {
+    /// its reverse tunnels, its speed tests or its firewall policy changed,
+    /// or the panel asked for live connections, since its last sync
+    /// (answered yes once).
+    #[allow(clippy::type_complexity)]
+    pub fn node_watch(&self, credential: &str) -> Result<(u64, bool, bool, bool, bool, bool)> {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let node = leases::authenticated(&tx, credential)?;
@@ -1093,6 +1112,7 @@ impl Store {
             reverse_tunnels::take_wake(&self.10, &node),
             speed_tests::take_wake(&self.11, &node),
             connections::take_wake(&self.12, &node),
+            firewall_sets::take_wake(&self.13, &node),
         ))
     }
     /// A NAT traversal step changed some node's interfaces: its watch returns

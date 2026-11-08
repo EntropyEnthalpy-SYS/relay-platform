@@ -4,7 +4,7 @@ import { createGlobe, cities, cityFor } from '/assets/globe.js';
 import { serviceKind, splitEndpoint, clientEndpoint, applicationState, buildForwardingPath, shadowsocksPath, shadowsocksClientProfile, forwardingDiagram, forwardingPathDiagram, forwardingPathRoots } from '/assets/workflows.js';
 const $ = (s, root = document) => root.querySelector(s);
 const state = { token: sessionStorage.getItem('relay-session'), actor: null, view: 'overview', overviewFilter: '', nodes: [], usage: [], nodeFilter: {}, selectedNodes: new Set(), selectedNode: null, dnsZone: null, config: null, features: {}, busy: false };
-const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', wireguard: 'WireGuard 组网', federation: '跨面板共享', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', features: '可选功能', capabilities: '功能进度', guide: '使用指南' });
+const titles = localize({ overview: '运行总览', nodes: '节点管理', rules: '转发规则 · 按服务器', topology: '转发规则', health: '目标健康', usage: '流量账本', subscriptions: '客户端订阅', dns: 'DNS 管理', wireguard: 'WireGuard 组网', federation: '跨面板共享', announcements: '公告', commerce: '钱包与订单', tickets: '工单', templates: '规则模板', firewall: '防火墙规则集', budgets: '共享额度', users: '用户与权限', account: '账户安全', logs: '实时日志', diagnostics: '诊断报告', audit: '操作审计', alerts: '告警通知', recovery: '恢复保护', features: '可选功能', capabilities: '功能进度', guide: '使用指南' });
 const roleNames = localize({ system_admin: '系统管理员', tenant_admin: '租户管理员', viewer: '只读用户' });
 const canWrite = () => state.actor?.role !== 'viewer';
 const scopeNames = localize({ read: '读取全部可见数据', 'nodes:write': '节点与配置写入', 'budgets:write': '共享额度写入', 'users:write': '用户与租户写入' });
@@ -68,7 +68,7 @@ async function api(path, options = {}) {
   const requestToken = state.token;
   const response = await fetch(`/api/v1${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}), ...options.headers }, body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   const text = await response.text(); let result; try { result = JSON.parse(text); } catch { result = { error: text || `HTTP ${response.status}` }; }
-  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(rateLimitReason(result.error) || speedTestReason(result.error) || egressProxyReason(result.error) || result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
+  if (!response.ok) { if (response.status === 401 && path !== '/auth/login' && state.token === requestToken) loggedOut(); throw Object.assign(new Error(rateLimitReason(result.error) || speedTestReason(result.error) || egressProxyReason(result.error) || firewallReason(result.error) || result.error || msg`请求失败 HTTP ${response.status}`), { detail: result }); } return result;
 }
 setupLanguageSwitcher(() => {
   if (!state.actor) { document.title = translate('Relay · 独立转发平台'); return; }
@@ -292,6 +292,47 @@ function egressProxyReason(message) {
   };
   return Object.hasOwn(known, text) ? translate(known[text]) : null;
 }
+// The controller's English refusals about rule sets, in the panel's language; others stay as they are.
+function firewallReason(message) {
+  const text = String(message ?? '');
+  let m = /^the agent on server (.+) is too old for firewall rule sets; upgrade it first$/.exec(text);
+  if (m) return msg`服务器 ${m[1]} 的 Agent 版本过旧，不支持防火墙规则集；请先升级 Agent`;
+  m = /^server (.+) has not connected to the panel yet; firewall rule sets need its agent to report in first$/.exec(text);
+  if (m) return msg`服务器 ${m[1]} 尚未连接面板；它的 Agent 回报后才能使用防火墙规则集`;
+  m = /^rule set (.+) is still bound: (.+); remove these bindings first$/.exec(text);
+  if (m) return msg`规则集 ${m[1]} 仍在使用中（${m[2]}）；请先解除这些绑定`;
+  m = /^firewall rule set (.+) not found$/.exec(text);
+  if (m) return msg`找不到防火墙规则集 ${m[1]}`;
+  m = /^rule (.+): rule set (.+) is an outbound set; a rule takes an inbound set$/.exec(text);
+  if (m) return msg`规则 ${m[1]}：规则集 ${m[2]} 是出站规则集，规则只能绑定入站规则集`;
+  m = /^rule set (.+) belongs to a tenant; servers take system rule sets$/.exec(text);
+  if (m) return msg`规则集 ${m[1]} 属于租户；服务器只能绑定系统规则集`;
+  m = /^rule (.+) belongs to share (.+); a share's rules cannot have a firewall rule set$/.exec(text);
+  if (m) return msg`规则 ${m[1]} 属于共享 ${m[2]}，共享的规则不能绑定防火墙规则集`;
+  m = /^rule (.+): a protocol gateway checks its clients in the protocol engine and cannot take a firewall rule set$/.exec(text);
+  if (m) return msg`规则 ${m[1]}：受管协议网关在协议引擎中检查客户端，不能绑定防火墙规则集`;
+  m = /^rule set (.+) is an (inbound|outbound) set; bind it as the server's (?:inbound|outbound) set$/.exec(text);
+  if (m) return m[2] === 'inbound' ? msg`规则集 ${m[1]} 是入站规则集，只能绑定为服务器的入站规则集` : msg`规则集 ${m[1]} 是出站规则集，只能绑定为服务器的出站规则集`;
+  m = /^the rule sets used on server (.+) exceed (\d+) KiB together; use fewer or smaller sets$/.exec(text);
+  if (m) return msg`服务器 ${m[1]} 使用的规则集合计超过 ${m[2]} KiB；请减少规则集或缩小规则集`;
+  m = /^a rule set is at most (\d+) KiB; use fewer rules or entries$/.exec(text);
+  if (m) return msg`单个规则集最多 ${m[1]} KiB；请减少规则或条目`;
+  m = /^at most (\d+) (system )?firewall rule sets(?: per tenant)?; delete one first$/.exec(text);
+  if (m) return m[2] ? msg`系统防火墙规则集最多 ${m[1]} 个；请先删除一个` : msg`每个租户最多 ${m[1]} 个防火墙规则集；请先删除一个`;
+  const known = {
+    'the direction of a rule set cannot change': '规则集的方向创建后不能修改',
+    'the rule set changed; reload before saving': '规则集已被其他人修改；请刷新后再保存',
+    'only system administrators bind rule sets to servers': '只有系统管理员可以为服务器绑定规则集',
+    'only system administrators keep system rule sets': '只有系统管理员可以管理系统规则集',
+    'firewall rule set not found': '找不到这个防火墙规则集',
+    'give a source address (inbound) or a destination and port (outbound)': '请填写来源 IP（入站），或目的地和端口（出站）',
+    'an outbound test needs a destination port (1-65535)': '出站测试需要目的地端口（1-65535）',
+    'the destination must be a domain or an IP address': '目的地须为域名或 IP 地址',
+    'rule not found on this server': '这台服务器上没有这条规则',
+    'a protocol gateway checks its clients in the protocol engine; the tester cannot answer for it': '受管协议网关在协议引擎中检查客户端，规则测试无法判断',
+  };
+  return Object.hasOwn(known, text) ? translate(known[text]) : null;
+}
 function websocketEditor(id, spec, inbound, defaultHost = () => '') {
   const box = el('details'); box.open = !!spec; box.append(el('summary', inbound ? translate('入口 WebSocket / WSS 隧道') : translate('出口 WebSocket / WSS 隧道')));
   const mode = select(box, `${id}-mode`, translate('WebSocket 封装'), [['off', translate('关闭')], ['on', translate('启用 · TCP 流隧道')]], spec ? 'on' : 'off');
@@ -465,7 +506,7 @@ new MutationObserver(toneCards).observe($('#content'), { childList: true, subtre
 async function renderGuide() { consoleUI.renderGuide($('#content')); }
 async function refresh() {
   if (!state.actor || state.busy) return; const requestedActor = state.actor, requestedView = state.view, requestedNode = state.selectedNode, requestedHash = location.hash, requestedLanguage = getLanguage(), requestedOverviewLayout = overviewLayout; state.busy = true; $('#refresh').disabled = true;
-  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, wireguard: renderWireguard, federation: renderFederation, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, features: renderFeatures, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
+  try { await ({ overview: renderOverview, nodes: renderNodes, rules: renderRules, usage: renderUsage, subscriptions: renderSubscriptions, dns: renderDns, wireguard: renderWireguard, federation: renderFederation, announcements: renderAnnouncements, commerce: renderCommerce, tickets: renderTickets, templates: renderTemplates, firewall: renderFirewall, budgets: renderBudgets, users: renderUsers, account: renderAccount, audit: renderAudit, logs: renderLogs, diagnostics: renderDiagnostics, alerts: renderAlerts, recovery: renderRecovery, features: renderFeatures, topology: renderTopology, health: renderHealth, capabilities: renderCapabilities, guide: renderGuide })[state.view](); $('#refreshed').textContent = msg`更新于 ${new Date().toLocaleTimeString(getLanguage(), { hour12: false })}`; }
   catch (error) { if (state.actor === requestedActor && state.actor && state.view === requestedView && location.hash === requestedHash && $('#content .loading-state')) $('#content').replaceChildren(empty(translate('页面暂时无法加载'), error.message, button(translate('重新加载'), () => { $('#notification').classList.add('hidden'); return refresh(); }, 'primary'))); throw error; }
   finally { state.busy = false; $('#refresh').disabled = false; if (state.actor && (state.actor !== requestedActor || getLanguage() !== requestedLanguage || state.view !== requestedView || location.hash !== requestedHash || (state.view === 'overview' && requestedOverviewLayout !== overviewLayout) || (['rules', 'health'].includes(requestedView) && requestedNode !== state.selectedNode))) queueMicrotask(() => refresh().catch(e => notify(e.message, true))); }
 }
@@ -862,7 +903,7 @@ function globePanel(rows, topology, now) {
     text.append(el('strong', r.node.name), el('span', location ? [locationName(location), sessions(r)].filter(Boolean).join(' · ') : translate('未设置位置'), 'subline'));
     entry.append(el('i', undefined, `globe-dot ${r.status[2]}`), text, badge(r.status[0], r.status[1]));
     if (location) entry.onclick = () => { state.globeNode = r.node.id; list.querySelectorAll('.globe-node').forEach(n => n.classList.toggle('selected', n === entry)); overviewGlobe.select(r.node.id); };
-    else if (canWrite()) { entry.onclick = () => editNode(r.node); entry.setAttribute('aria-label', msg`为 ${r.node.name} 设置位置`); }
+    else if (canWrite()) { entry.onclick = () => editNode(r.node).catch(e => notify(e.message, true)); entry.setAttribute('aria-label', msg`为 ${r.node.name} 设置位置`); }
     else entry.disabled = true;
     item.append(entry); list.append(item);
   }
@@ -1337,12 +1378,15 @@ function locationEditor(parent, value) {
     return { name: name.value.trim(), latitude_micros: Math.round(latitude * 1e6), longitude_micros: Math.round(longitude * 1e6) };
   } };
 }
-function editNode(node) {
+async function editNode(node) {
   const settings = node.profile.settings;
   if (!canWrite()) { const body = el('div'); body.append(table([translate('资料'), translate('当前记录')], [[translate('名称'), node.name], [translate('类型'), settings.kinds.map(k => nodeKindNames[k]).join('、') || translate('未标注')], [translate('分组'), settings.group || translate('未分组')], [translate('位置'), locationName(settings.location) || translate('未设置')], [translate('标签'), settings.tags.join('、') || translate('无')], [translate('成本'), costLabel(settings.cost)], [translate('到期时间'), settings.expires_at_ms ? timestamp(settings.expires_at_ms) : translate('未设置')]])); body.append(el('pre', settings.notes || translate('无备注'))); modal(translate('节点资料'), body); return; }
   const form = el('form'); field(form, 'node_name', translate('节点名称'), node.name).maxLength = 120;
   const editor = nodeSettingsEditor(form, settings, () => !!node.lease.policy, node.stats?.mptcp_paths);
-  submit(form, translate('保存资料'), async data => { await api(`/nodes/${node.id}/profile`, { method: 'PUT', body: { expected_revision: node.profile.revision, name: String(data.get('node_name')).trim(), settings: editor.read(data) } }); $('#dialog').close(); await refresh(); notify(translate('节点资料已保存；转发配置保持原修订。')); }); modal(translate('编辑节点 · ') + node.name, form);
+  // The server's firewall rule sets (system administrators). Saved first: an agent too old for them is refused
+  // before the profile changes, so saving again does not meet a stale profile revision.
+  const firewall = state.actor.role === 'system_admin' ? serverFirewallFields(form, node, await api('/firewall/sets')) : null;
+  submit(form, translate('保存资料'), async data => { if (firewall?.changed()) await saveServerFirewall(node, firewall.read()); await api(`/nodes/${node.id}/profile`, { method: 'PUT', body: { expected_revision: node.profile.revision, name: String(data.get('node_name')).trim(), settings: editor.read(data) } }); $('#dialog').close(); await refresh(); notify(translate('节点资料已保存；转发配置保持原修订。')); }); modal(translate('编辑节点 · ') + node.name, form);
 }
 function filterNodes() {
   const form = el('form'), current = state.nodeFilter;
@@ -1756,7 +1800,7 @@ function extendRule(config, rule) {
 }
 async function editRule(existing, seed = {}) {
   const shared = seed.shared; let baseConfig = shared?.reference || state.config, nodeLoad = null;
-  const topology = await api('/topology'); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || seed, asTemplate = seed.template;
+  const [topology, firewallSets] = await Promise.all([api('/topology'), api('/firewall/sets')]); const form = el('form'), grid = el('div', undefined, 'form-grid'), r = existing || seed, asTemplate = seed.template;
   if (asTemplate) {
     form.append(el('h3', translate('1. 模板名称与用途'), 'setup-step'));
     const about = el('div', undefined, 'form-grid'); field(about, 'template_name', translate('模板名称'), asTemplate.name || '').maxLength = 120;
@@ -1795,7 +1839,7 @@ async function editRule(existing, seed = {}) {
     reachability.textContent = splitEndpoint(listenControl.value)?.loopback ? translate('当前监听仅限本机。其他 VPS 无法直接连接；跨 VPS 请使用可达网卡地址，并允许对应端口。') : translate('监听地址属于所选 VPS；可达地址用于客户端或上一跳连接。发布配置不会自动修改防火墙。');
   }
   runOn.addEventListener('change', () => {
-    describePlacement();
+    describePlacement(); firewall.show();
     const id = runOn.value;
     nodeLoad = api(`/nodes/${id}/config`).then(config => { if (runOn.value === id) baseConfig = config; });
     nodeLoad.catch(error => notify(error.message, true));
@@ -1810,6 +1854,8 @@ async function editRule(existing, seed = {}) {
   const services = { ss: shadowsocks, socks5, http: httpConnect, h2: http2Connect, gateway };
   // Shown only for a service whose clients choose the destination.
   const egress = egressProxyEditor(r.egress_proxy, () => state.nodes.find(n => n.id === runOn.value)); form.append(egress.box);
+  const firewall = ruleFirewallEditor(firewallSets, tenant, r.firewall_inbound_set, () => state.nodes.find(n => n.id === runOn.value));
+  if (asTemplate) firewall.show(true);
   const dynamicDestination = () => shadowsocks.enabled() || socks5.enabled() || httpConnect.enabled() || http2Connect.enabled();
   const mptcp = mptcpEditor(r.mptcp); form.append(mptcp.box);
   const routed = el('div'); form.append(routed);
@@ -1837,6 +1883,7 @@ async function editRule(existing, seed = {}) {
     if (proxyInput) sectionVisible(proxyInput, !gateway.enabled());
     for (const [kind, editor] of Object.entries(services)) { sectionVisible(editor.box, purpose.value === kind); if (purpose.value === kind) editor.box.open = true; }
     sectionVisible(egress.box, dynamicDestination()); egress.show();
+    firewall.show(gateway.enabled() || !!asTemplate);
     describePlacement();
   }
   const routing = el('details'); routing.append(el('summary', translate('出口绑定与 DNS 缓存'))); const routeFields = el('div', undefined, 'form-grid');
@@ -1884,7 +1931,7 @@ async function editRule(existing, seed = {}) {
   if(existing){const label=el('label',undefined,'inline-check'),fresh=el('input');fresh.type='checkbox';fresh.name='new_meter_period';label.append(fresh,document.createTextNode(translate('明确开始新计量周期：旧账保留，重新发放本规则额度；共享预算不重置')));form.append(label);}
   const details = el('details'); details.append(el('summary', translate('高级：超时、会话上限、到期和来源网段'))); const advanced = el('div', undefined, 'form-grid');
   for (const [name, label, fallback, min, max] of [['connect_timeout_ms', translate('连接超时 / ms'), 5000, 100, 60000], ['idle_timeout_secs', translate('空闲回收 / 秒'), 120, 1, 86400], ['max_connections', translate('TCP 最大连接'), 4096, 1, 1000000], ['udp_max_sessions', translate('UDP 最大会话'), 1024, 1, 100000]]) { const input = field(advanced, name, label, r[name] ?? fallback, 'number'); input.min = min; input.max = max; }
-  const expiry = field(advanced, 'expires_at_ms', translate('到期 / Unix 毫秒（留空永不过期）'), r.expires_at_ms, 'number', false); expiry.min = 0; details.append(advanced); textarea(details, 'allow_sources', translate('允许来源 CIDR（留空允许所有未拒绝来源，每行一个）'), (r.allow_sources || []).join('\n')); textarea(details, 'deny_sources', translate('拒绝来源 CIDR（优先于允许列表，每行一个）'), (r.deny_sources || []).join('\n')); textarea(details, 'allow_destinations', translate('允许目的地（IP/CIDR/域名/*.example.com，留空允许所有未拒绝，每行一个）'), (r.allow_destinations || []).join('\n')); textarea(details, 'deny_destinations', translate('拒绝目的地（优先于允许列表，每行一个）'), (r.deny_destinations || []).join('\n')); textarea(details, 'allow_destination_ports', translate('允许目的地端口（443、8000-8080、*，留空允许所有，每行一个）'), (r.allow_destination_ports || []).join('\n')); textarea(details, 'deny_destination_ports', translate('拒绝目的地端口（优先于允许列表，每行一个）'), (r.deny_destination_ports || []).join('\n')); form.append(details);
+  const expiry = field(advanced, 'expires_at_ms', translate('到期 / Unix 毫秒（留空永不过期）'), r.expires_at_ms, 'number', false); expiry.min = 0; details.append(advanced, firewall.box); textarea(details, 'allow_sources', translate('允许来源 CIDR（留空允许所有未拒绝来源，每行一个）'), (r.allow_sources || []).join('\n')); textarea(details, 'deny_sources', translate('拒绝来源 CIDR（优先于允许列表，每行一个）'), (r.deny_sources || []).join('\n')); textarea(details, 'allow_destinations', translate('允许目的地（IP/CIDR/域名/*.example.com，留空允许所有未拒绝，每行一个）'), (r.allow_destinations || []).join('\n')); textarea(details, 'deny_destinations', translate('拒绝目的地（优先于允许列表，每行一个）'), (r.deny_destinations || []).join('\n')); textarea(details, 'allow_destination_ports', translate('允许目的地端口（443、8000-8080、*，留空允许所有，每行一个）'), (r.allow_destination_ports || []).join('\n')); textarea(details, 'deny_destination_ports', translate('拒绝目的地端口（优先于允许列表，每行一个）'), (r.deny_destination_ports || []).join('\n')); form.append(details);
   const enabledLabel = el('label', undefined, 'inline-check'), enabled = el('input'); enabled.name = 'enabled'; enabled.type = 'checkbox'; enabled.checked = r.enabled ?? true; enabledLabel.append(enabled, document.createTextNode(translate('启用规则'))); form.append(enabledLabel);
   limits.append(el('p', translate('同一规则的所有连接共享额度和速率。速率桶允许 max(64 KiB, 一秒额度) 的突发；这不是跨节点用户总限速。'), 'fine'));
   async function readRule(data) {
@@ -1900,6 +1947,7 @@ async function editRule(existing, seed = {}) {
     else if (http) rule.inbound_http_connect = http;
     else if (h2) rule.inbound_http2_connect = h2;
     if (wire) { rule.protocol_gateway = wire; rule.targets = []; rule.listen = gatewayBridge(r, baseConfig.rules, wire.listen); }
+    const firewallSet = wire ? null : firewall.read(); if (firewallSet) rule.firewall_inbound_set = firewallSet;
     const egressProxy = server || socks || http || h2 ? egress.read() : null;
     if (egressProxy) {
       if (rule.protocol !== 'tcp') throw egress.fail(translate('出口代理只转发 TCP：请把传输协议设为 TCP'));
@@ -2064,6 +2112,24 @@ function egressProxyEditor(spec, nodeOf) {
       try { return egressProxyConfig(mode.value, servers.value, username.value, password.value); } catch (error) { throw fail(error.message); }
     },
   };
+}
+// A rule's inbound firewall rule set: one of the rule tenant's inbound sets, checked after the server's inbound
+// set and before the rule's own source lists. Protocol gateways check their clients in the engine and take none.
+function ruleFirewallEditor(sets, tenant, current, nodeOf) {
+  const box = el('div');
+  const choices = sets.filter(s => s.scope === 'tenant' && s.tenant_id === tenant && s.direction === 'inbound').map(s => [s.id, s.name]);
+  if (current && !choices.some(([id]) => id === current)) choices.push([current, current]);
+  const pick = select(box, 'firewall_inbound_set', translate('入站防火墙规则集（先于下方来源列表检查）'), [['', translate('不使用')], ...choices], current || '');
+  const support = el('p', '', 'workflow-callout warning'); box.append(support);
+  let gateway = false;
+  function show(isGateway = gateway) {
+    gateway = isGateway; sectionVisible(box, !gateway); pick.disabled = gateway;
+    const node = nodeOf();
+    support.textContent = node && pick.value && !node.firewall_support ? msg`服务器 ${node.name || node.id} 的 Agent 尚未报告支持防火墙规则集，发布会被拒绝；请先升级 Agent。` : '';
+    sectionVisible(support, !gateway && !!support.textContent);
+  }
+  pick.addEventListener('change', () => show());
+  return { box, show, read: () => gateway ? null : pick.value || null };
 }
 const shadowsocksMethods = localize([['2022-blake3-aes-256-gcm', '2022-blake3-aes-256-gcm（推荐 · 防重放）'], ['2022-blake3-aes-128-gcm', '2022-blake3-aes-128-gcm（防重放）'], ['2022-blake3-chacha20-poly1305', '2022-blake3-chacha20-poly1305（无 AES 加速的设备）'], ['aes-256-gcm', 'aes-256-gcm（旧客户端兼容）'], ['aes-128-gcm', 'aes-128-gcm（旧客户端兼容）'], ['chacha20-ietf-poly1305', 'chacha20-ietf-poly1305（旧客户端兼容）']]);
 function shadowsocksKey(method) {
@@ -3553,18 +3619,266 @@ async function renderDiagnostics() {
   about.append(items, el('p', translate('报告包含服务器地址和日志内容，只分享给你信任的人。'), 'diagnostics-note'));
   if (state.view === 'diagnostics') $('#content').replaceChildren(head, speedTestPanel(nodes, speedTests), about);
 }
+// Firewall rule sets: named, ordered allow/deny rules with a default action. System sets bind to a server's
+// inbound or outbound side (system administrators); a tenant's sets bind to the inbound side of that tenant's
+// rules. The first matching rule decides, and every bound layer must allow. An edit reaches every server
+// that uses the set without publishing; each server shows the policy the panel wants and the one its agent
+// confirmed. The tester asks the controller, which evaluates with the agents' code.
+const firewallActions = localize({ allow: '允许', deny: '拒绝' });
+const firewallDirections = localize({ inbound: '入站 · 匹配客户端来源', outbound: '出站 · 匹配目的地' });
+const firewallLayers = localize({ server_inbound: '服务器入站', rule_inbound: '规则入站', server_outbound: '服务器出站', set: '规则集', rule_lists: '规则自身的来源 / 目的地列表' });
+const firewallStates = localize({ applied: '已生效', waiting: '等待 Agent 确认', offline: 'Agent 离线 · 重新连接后确认', too_old: 'Agent 版本过旧，不支持规则集', not_connected: 'Agent 尚未连接', unused: '未使用' });
+const firewallAnswers = localize({ allow: '允许', deny: '拒绝', needs_address: '需要解析后的地址', missing: '规则集不可用 · 拒绝' });
+const shortHash = hash => hash ? hash.slice(0, 12) : '—';
+// One server's desired and confirmed policy, and why they differ.
+function firewallStatusCell(status) {
+  const cell = el('div'), s = status || { state: 'unused' };
+  cell.append(badge(firewallStates[s.state] || s.state, s.state === 'applied' ? 'green' : s.state === 'unused' ? '' : s.state === 'too_old' ? 'red' : 'orange'));
+  // One hash per line, so the column stays narrow enough for the actions beside it.
+  if (s.state !== 'unused') cell.append(el('div', msg`期望 ${shortHash(s.desired_hash)}`, 'subline mono'), el('div', msg`已确认 ${shortHash(s.applied_hash)}`, 'subline mono'));
+  if (s.error) cell.append(el('div', s.error, 'subline'));
+  return cell;
+}
+const firewallPlace = b => b.rule_id ? msg`${b.node_name} · 规则 ${b.rule_name || b.rule_id}` : msg`${b.node_name} · ${firewallLayers[b.layer]}`;
+function firewallBindingsCell(bindings) {
+  if (!bindings.length) return el('span', translate('未使用'), 'subline');
+  const cell = el('div');
+  for (const b of bindings.slice(0, 4)) cell.append(el('div', firewallPlace(b), 'subline'));
+  if (bindings.length > 4) cell.append(el('div', msg`等 ${bindings.length} 处`, 'subline'));
+  return cell;
+}
+// `10.0.0.1` → `10.0.0.1/32`; networks stay as they are.
+function firewallNetwork(text) {
+  const value = text.trim();
+  if (!value || value.includes('/')) return value;
+  return value.includes(':') ? `${value}/128` : `${value}/32`;
+}
+const firewallList = text => String(text ?? '').split(/[\s,]+/).map(v => v.trim()).filter(Boolean);
+// Reads one rule row: an inbound row matches sources, an outbound row destinations and/or ports.
+function firewallRuleBody(direction, action, sources, destinations, ports, number) {
+  if (direction === 'inbound') {
+    const list = firewallList(sources).map(firewallNetwork);
+    if (!list.length) throw new Error(msg`第 ${number} 条规则：请填写至少一个来源 IP 或 CIDR`);
+    if (list.length > 256) throw new Error(msg`第 ${number} 条规则：来源最多 256 个`);
+    return { action, match: { sources: list } };
+  }
+  const targets = firewallList(destinations), portList = firewallList(ports);
+  if (!targets.length && !portList.length) throw new Error(msg`第 ${number} 条规则：请填写目的地、端口或两者`);
+  if (targets.length > 256 || portList.length > 256) throw new Error(msg`第 ${number} 条规则：目的地和端口各最多 256 个`);
+  const bad = portList.find(p => !/^\d{1,5}(-\d{1,5})?$/.test(p) || p.split('-').some(n => Number(n) > 65535) || (p.includes('-') && Number(p.split('-')[0]) > Number(p.split('-')[1])));
+  if (bad) throw new Error(msg`第 ${number} 条规则：端口 ${bad} 无效；请写成 443 或 8000-8080`);
+  return { action, match: { ...(targets.length ? { destinations: targets } : {}), ...(portList.length ? { ports: portList } : {}) } };
+}
+function editFirewallSet(set = null) {
+  const admin = state.actor.role === 'system_admin', form = el('form'), grid = el('div', undefined, 'form-grid');
+  const name = field(grid, 'fw_name', translate('名称'), set?.name || ''); name.maxLength = 120;
+  const direction = select(grid, 'fw_direction', translate('方向'), Object.entries(firewallDirections), set?.direction || 'inbound'); direction.disabled = !!set;
+  const tenants = [...new Set((state.nodes || []).map(n => n.tenant_id).concat(state.actor.tenant_id))];
+  const scope = select(grid, 'fw_scope', translate('范围'), [['tenant', translate('租户 · 绑定到该租户的规则')], ...(admin ? [['system', translate('系统 · 绑定到服务器')]] : [])], set?.scope || 'tenant'); scope.disabled = !!set;
+  const tenant = select(grid, 'fw_tenant', translate('租户'), tenants.map(t => [t, t]), set?.tenant_id || state.actor.tenant_id); tenant.disabled = !!set;
+  sectionVisible(tenant.parentElement, admin && !set && scope.value === 'tenant');
+  const fallback = select(grid, 'fw_default', translate('默认动作（没有规则匹配时）'), Object.entries(firewallActions), set?.default_action || 'allow');
+  form.append(grid);
+  const hint = el('p', '', 'fine'), rowsBox = el('div', undefined, 'firewall-rules');
+  form.append(el('h3', translate('规则（按顺序检查，第一条匹配的规则生效）'), 'setup-step'), hint, rowsBox);
+  const rows = [];
+  function describe() {
+    hint.textContent = direction.value === 'inbound' ? translate('每条规则匹配客户端来源 IP 或 CIDR（IPv4 / IPv6，每条 1 到 256 个）。单个 IP 自动按 /32 或 /128 保存。') : translate('每条规则匹配目的地（IP、CIDR、域名或 *.域名，*.example.com 只匹配子域名）和/或端口（443、8000-8080）。两者都填时须同时满足。');
+  }
+  function draw() {
+    rowsBox.replaceChildren(...rows.map((row, index) => {
+      row.number.textContent = `#${index + 1}`;
+      row.up.disabled = index === 0; row.down.disabled = index === rows.length - 1;
+      const inbound = direction.value === 'inbound';
+      sectionVisible(row.sources.parentElement, inbound); sectionVisible(row.destinations.parentElement, !inbound); sectionVisible(row.ports.parentElement, !inbound);
+      return row.box;
+    }));
+    if (!rows.length) rowsBox.append(el('p', translate('没有规则：所有连接都按默认动作处理。'), 'fine'));
+    add.disabled = rows.length >= 256;
+  }
+  function addRow(rule = null) {
+    const box = el('div', undefined, 'firewall-rule'), head = el('div', undefined, 'firewall-rule-head'), body = el('div', undefined, 'form-grid');
+    const row = { box, number: el('strong', '') };
+    row.action = select(body, 'fw_rule_action', translate('动作'), Object.entries(firewallActions), rule?.action || 'deny');
+    row.sources = textarea(body, 'fw_rule_sources', translate('来源 IP / CIDR（每行一个）'), (rule?.match?.sources || []).join('\n'));
+    row.destinations = textarea(body, 'fw_rule_destinations', translate('目的地（IP、CIDR、域名、*.域名，每行一个）'), (rule?.match?.destinations || []).join('\n'));
+    row.ports = field(body, 'fw_rule_ports', translate('端口（可留空；443、8000-8080，空格或逗号分隔）'), (rule?.match?.ports || []).join(', '), 'text', false);
+    const move = offset => { const at = rows.indexOf(row), to = at + offset; if (to < 0 || to >= rows.length) return; rows.splice(at, 1); rows.splice(to, 0, row); draw(); };
+    row.up = button('↑', () => move(-1), 'table-action'); row.up.setAttribute('aria-label', translate('上移'));
+    row.down = button('↓', () => move(1), 'table-action'); row.down.setAttribute('aria-label', translate('下移'));
+    const remove = button(translate('删除'), () => { rows.splice(rows.indexOf(row), 1); draw(); }, 'table-action danger');
+    const tools = el('div', undefined, 'row-actions'); tools.append(row.up, row.down, remove);
+    head.append(row.number, tools); box.append(head, body); rows.push(row);
+  }
+  const add = button(translate('＋ 添加规则'), () => { addRow(); draw(); });
+  form.append(add);
+  for (const rule of set?.rules || []) addRow(rule);
+  scope.addEventListener('change', () => sectionVisible(tenant.parentElement, admin && !set && scope.value === 'tenant'));
+  direction.addEventListener('change', () => { describe(); draw(); });
+  describe(); draw();
+  if (set?.bindings?.length) form.append(el('p', msg`保存后，使用这个规则集的 ${set.bindings.length} 处会自动更新，无需重新发布配置。`, 'workflow-callout'));
+  submit(form, set ? translate('保存规则集') : translate('创建规则集'), async () => {
+    const title = name.value.trim();
+    if (!title || [...title].length > 120) throw new Error(translate('名称须为 1 到 120 个字符'));
+    const rules = rows.map((row, index) => firewallRuleBody(direction.value, row.action.value, row.sources.value, row.destinations.value, row.ports.value, index + 1));
+    const body = { name: title, direction: direction.value, default_action: fallback.value, rules };
+    if (set) await api(`/firewall/sets/${encodeURIComponent(set.id)}`, { method: 'PUT', body: { ...body, expected_revision: set.revision } });
+    else await api('/firewall/sets', { method: 'POST', body: { ...body, scope: scope.value, ...(scope.value === 'tenant' ? { tenant_id: tenant.value } : {}) } });
+    $('#dialog').close(); await refresh(); notify(set ? translate('规则集已保存；使用它的服务器会自动更新。') : translate('规则集已创建。'));
+  });
+  modal(set ? msg`编辑规则集 · ${set.name}` : translate('新建防火墙规则集'), form);
+}
+async function deleteFirewallSet(set) {
+  if (set.bindings.length) throw new Error(msg`规则集 ${set.name} 仍在使用中（${set.bindings.map(firewallPlace).join('、')}）；请先解除这些绑定`);
+  if (!await confirmAction(msg`删除规则集「${set.name}」？`)) return;
+  await api(`/firewall/sets/${encodeURIComponent(set.id)}`, { method: 'DELETE' }); await refresh(); notify(translate('规则集已删除。'));
+}
+// A server's own sets: system sets only, chosen by system administrators. Shown in the server settings too.
+function serverFirewallFields(form, node, sets) {
+  const box = el('fieldset'); box.append(el('legend', translate('服务器防火墙规则集')));
+  const pick = direction => [['', translate('不使用')], ...sets.filter(s => s.scope === 'system' && s.direction === direction).map(s => [s.id, s.name])];
+  const inbound = select(box, 'fw_server_inbound', translate('入站规则集（所有规则的客户端先经过它）'), pick('inbound'), node.firewall?.inbound_set_id || '');
+  const outbound = select(box, 'fw_server_outbound', translate('出站规则集（本服务器连接的每个目的地都经过它）'), pick('outbound'), node.firewall?.outbound_set_id || '');
+  const support = el('p', '', 'workflow-callout warning');
+  support.textContent = node.firewall_support ? '' : msg`服务器 ${node.name} 的 Agent 尚未报告支持防火墙规则集，绑定会被拒绝；请先升级 Agent。`;
+  sectionVisible(support, !node.firewall_support);
+  box.append(support, firewallStatusCell(node.firewall));
+  form.append(box);
+  const read = () => ({ inbound_set_id: inbound.value || null, outbound_set_id: outbound.value || null });
+  return { read, changed: () => { const value = read(); return value.inbound_set_id !== (node.firewall?.inbound_set_id || null) || value.outbound_set_id !== (node.firewall?.outbound_set_id || null); } };
+}
+async function saveServerFirewall(node, binding) {
+  return api(`/nodes/${encodeURIComponent(node.id)}/firewall`, { method: 'PUT', body: binding });
+}
+function bindServerFirewall(node, sets) {
+  const form = el('form'), fields = serverFirewallFields(form, node, sets);
+  form.append(el('p', translate('连接须依次通过服务器入站规则集、规则的入站规则集和规则自身的来源列表；任何一层拒绝即拒绝。出站规则集在连接目标、代理目的地和出口代理之前检查。'), 'fine'));
+  submit(form, translate('保存绑定'), async () => { await saveServerFirewall(node, fields.read()); $('#dialog').close(); await refresh(); notify(translate('绑定已保存；Agent 确认后生效。')); });
+  modal(msg`服务器规则集 · ${node.name}`, form);
+}
+// The tester: a set alone, or a server's bindings (and a rule's), for a source or a destination.
+function firewallTesterPanel(sets, nodes, seed = {}) {
+  const box = panel(translate('规则测试'), translate('输入来源 IP，或目的地和端口，查看每一层由哪条规则决定，以及最终结果。按服务器测试时使用该服务器的期望策略，与 Agent 的判断方式相同。'));
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  const mode = select(grid, 'fw_test_mode', translate('测试对象'), [['set', translate('一个规则集')], ['node', translate('服务器（及规则）的全部绑定')]], seed.set_id ? 'set' : 'node');
+  const setPick = select(grid, 'fw_test_set', translate('规则集'), sets.map(s => [s.id, `${s.name} · ${firewallDirections[s.direction]}`]), seed.set_id || sets[0]?.id || '');
+  const nodePick = select(grid, 'fw_test_node', translate('服务器'), nodes.map(n => [n.id, n.name || n.id]), seed.node_id || nodes[0]?.id || '');
+  const rulePick = select(grid, 'fw_test_rule', translate('规则（可选）'), [['', translate('只测服务器绑定')]], '');
+  const kind = select(grid, 'fw_test_kind', translate('方向'), [['inbound', translate('入站 · 客户端来源')], ['outbound', translate('出站 · 目的地')]], 'inbound');
+  const source = field(grid, 'fw_test_source', translate('来源 IP'), seed.source || '', 'text', false); source.placeholder = '203.0.113.7';
+  const destination = field(grid, 'fw_test_destination', translate('目的地（域名或 IP）'), '', 'text', false); destination.placeholder = 'api.example.com';
+  const port = field(grid, 'fw_test_port', translate('目的地端口'), '443', 'number', false); port.min = 1; port.max = 65535;
+  const address = field(grid, 'fw_test_address', translate('解析后的地址（域名时可选）'), '', 'text', false);
+  const result = el('div', undefined, 'firewall-result'), error = el('p', undefined, 'error'); error.setAttribute('role', 'alert');
+  async function loadRules() {
+    const id = nodePick.value; if (!id) return;
+    try {
+      const config = await api(`/nodes/${encodeURIComponent(id)}/config`);
+      if (nodePick.value !== id) return;
+      const keep = rulePick.value; rulePick.replaceChildren();
+      for (const [value, text] of [['', translate('只测服务器绑定')], ...config.rules.filter(r => !r.protocol_gateway).map(r => [r.id, r.name])]) { const option = el('option', text); option.value = value; rulePick.append(option); }
+      rulePick.value = config.rules.some(r => r.id === keep) ? keep : (seed.rule_id && config.rules.some(r => r.id === seed.rule_id) ? seed.rule_id : '');
+    } catch (e) { error.textContent = e.message; }
+  }
+  function show() {
+    const bySet = mode.value === 'set', set = sets.find(s => s.id === setPick.value);
+    const direction = bySet ? set?.direction || 'inbound' : kind.value;
+    sectionVisible(setPick.parentElement, bySet); sectionVisible(nodePick.parentElement, !bySet); sectionVisible(rulePick.parentElement, !bySet); sectionVisible(kind.parentElement, !bySet);
+    sectionVisible(source.parentElement, direction === 'inbound');
+    for (const input of [destination, port, address]) sectionVisible(input.parentElement, direction === 'outbound');
+    return direction;
+  }
+  for (const control of [mode, setPick, kind]) control.addEventListener('change', show);
+  nodePick.addEventListener('change', loadRules);
+  form.append(grid);
+  const run = el('button', translate('测试'), 'primary'); run.type = 'submit';
+  const actions = el('div', undefined, 'speed-test-actions'); actions.append(run); form.append(actions, error, result);
+  form.onsubmit = async event => {
+    event.preventDefault(); error.textContent = ''; run.disabled = true;
+    try {
+      const direction = show(), body = mode.value === 'set' ? { set_id: setPick.value } : { node_id: nodePick.value, ...(rulePick.value ? { rule_id: rulePick.value } : {}) };
+      if (direction === 'inbound') body.source = source.value.trim();
+      else { body.destination = destination.value.trim(); body.port = Number(port.value); if (address.value.trim()) body.address = address.value.trim(); }
+      result.replaceChildren(firewallResult(await api('/firewall/test', { method: 'POST', body })));
+    } catch (e) { error.textContent = e.message; result.replaceChildren(); } finally { run.disabled = false; }
+  };
+  show(); if (nodes.length) loadRules();
+  const body = el('div', undefined, 'panel-body'); body.append(form); box.append(body);
+  return box;
+}
+// The rule's own lists answer in English; shown in the panel's language.
+function firewallListDetail(text) {
+  const m = /^matches deny-list network (.+)$/.exec(text || '');
+  if (m) return msg`命中拒绝列表网段 ${m[1]}`;
+  const known = { 'not in the allow list': '不在允许列表中', 'destination denied by rule policy': '被规则的目的地列表拒绝', 'a rule set outside your tenant decides': '由租户之外的规则集决定' };
+  return Object.hasOwn(known, text || '') ? translate(known[text]) : text;
+}
+function firewallResult(answer) {
+  const box = el('div'), color = { allow: 'green', deny: 'red', needs_address: 'orange', missing: 'red' };
+  const head = el('p', undefined, 'firewall-decision'); head.append(el('strong', translate('最终结果：')), badge(firewallAnswers[answer.decision] || answer.decision, color[answer.decision]));
+  box.append(head);
+  if (!answer.layers.length) box.append(el('p', translate('没有绑定任何规则集或列表：允许。'), 'fine'));
+  else box.append(table([translate('层'), translate('规则集'), translate('决定于'), translate('结果')], answer.layers.map(layer => [
+    firewallLayers[layer.layer] || layer.layer, layer.set_name || layer.set_id || '—',
+    layer.result === 'missing' ? translate('规则集未送达或方向不符') : layer.rule_index !== undefined && layer.rule_index !== null ? msg`第 ${layer.rule_index + 1} 条规则` : layer.default_action ? translate('默认动作') : layer.result === 'needs_address' ? translate('域名本身无法判断：请填写解析后的地址') : firewallListDetail(layer.detail) || translate('列表允许'),
+    badge(firewallAnswers[layer.result] || layer.result, color[layer.result])])));
+  if (answer.policy_hash) box.append(el('p', msg`按服务器的期望策略 ${shortHash(answer.policy_hash)} 计算。`, 'fine'));
+  return box;
+}
+function openFirewallTester(seed) {
+  const body = firewallTesterPanel(state.firewallSets || [], state.nodes || [], seed);
+  modal(translate('规则测试'), body);
+}
+async function renderFirewall() {
+  const actor = state.actor;
+  const [sets, nodes] = await Promise.all([api('/firewall/sets'), api('/nodes')]);
+  if (state.view !== 'firewall' || state.actor !== actor) return;
+  state.nodes = nodes; state.firewallSets = sets;
+  const admin = actor.role === 'system_admin', writer = canWrite();
+  const create = () => editFirewallSet();
+  const list = panel(translate('防火墙规则集'), translate('规则按列表顺序检查，第一条匹配的规则决定允许或拒绝；没有规则匹配时使用默认动作。修改规则集后，所有使用它的服务器自动更新，无需重新发布配置。'), writer ? button(translate('＋ 新建规则集'), create, 'primary') : null);
+  if (!sets.length) list.append(empty(translate('还没有规则集'), admin ? translate('系统规则集绑定到服务器的入站或出站；租户规则集在规则编辑器里绑定到该租户的规则。') : translate('新建规则集后，在规则编辑器的高级选项里为规则选择入站规则集。'), writer ? button(translate('＋ 新建规则集'), create, 'primary') : null));
+  else list.append(table([translate('名称 / 范围'), translate('方向'), translate('默认动作'), translate('规则数'), translate('使用位置'), translate('操作')], sets.map(set => {
+    const actions = el('div', undefined, 'row-actions');
+    actions.append(button(translate('测试'), () => openFirewallTester({ set_id: set.id }), 'table-action'));
+    if (writer && (set.scope === 'tenant' || admin)) actions.append(button(translate('编辑'), () => editFirewallSet(set), 'table-action'), button(translate('删除'), () => deleteFirewallSet(set), 'table-action danger'));
+    return [namedCell(set.name, set.scope === 'system' ? translate('系统 · 绑定服务器') : msg`租户 ${set.tenant_id} · 绑定规则`), firewallDirections[set.direction], firewallActions[set.default_action], String(set.rules.length), firewallBindingsCell(set.bindings), actions];
+  })));
+  let serverTable = null;
+  const servers = panel(translate('服务器策略'), translate('每台服务器的期望策略与 Agent 已确认的策略。两者一致时，Agent 正在执行最新的规则集；不一致时显示原因。'));
+  if (!nodes.length) servers.append(el('p', translate('还没有服务器。'), 'fine'));
+  else servers.append(serverTable = table([translate('服务器'), translate('入站规则集'), translate('出站规则集'), translate('规则绑定'), translate('期望 / 已确认'), translate('操作')], nodes.map(node => {
+    const f = node.firewall || {}, actions = el('div', undefined, 'row-actions');
+    if (admin) actions.append(button(translate('绑定…'), () => bindServerFirewall(node, sets), 'table-action'));
+    actions.append(button(translate('测试'), () => openFirewallTester({ node_id: node.id }), 'table-action'));
+    return [namedCell(node.name, node.firewall_support ? translate('支持规则集') : translate('未报告支持')), f.inbound_set_name || '—', f.outbound_set_name || '—', String(f.rule_bindings || 0), firewallStatusCell(node.firewall), actions];
+  })));
+  serverTable?.classList.add('firewall-servers');
+  if (state.view === 'firewall') $('#content').replaceChildren(list, servers, firewallTesterPanel(sets, nodes));
+}
 // Connections: a rule's open sessions, taken by its agent when the panel asks, the rule's counters since
 // the agent started and its block records; and a server's block records. Client addresses are personal
 // data; only users who may read the server's configuration see them.
-const blockReasons = localize({ source_not_allowed: '来源不在允许列表', source_denied: '来源在拒绝列表', proxy_untrusted: 'PROXY 头的发送方不受信任', expired: '规则已到期', connection_limit: '达到连接数上限', udp_session_limit: '达到 UDP 会话上限', http2_stream_limit: '达到 HTTP/2 并发隧道上限', quota: '配额已用完', budget: '共享额度拒绝或未及时授予', inactive: '规则未在这台服务器生效', no_target: '没有可用目标（全部暂停、不可用或已满）', destination_denied: '目的地址不在允许范围', auth_failed: '代理认证失败', handshake_failed: '代理或网关握手失败' });
+const blockReasons = localize({ source_not_allowed: '来源不在允许列表', source_denied: '来源在拒绝列表', proxy_untrusted: 'PROXY 头的发送方不受信任', expired: '规则已到期', connection_limit: '达到连接数上限', udp_session_limit: '达到 UDP 会话上限', http2_stream_limit: '达到 HTTP/2 并发隧道上限', quota: '配额已用完', budget: '共享额度拒绝或未及时授予', inactive: '规则未在这台服务器生效', no_target: '没有可用目标（全部暂停、不可用或已满）', destination_denied: '目的地址不在允许范围', auth_failed: '代理认证失败', handshake_failed: '代理或网关握手失败', firewall: '防火墙规则集拒绝' });
 const connectionProtocols = localize({ tcp: 'TCP', tls: 'TLS', websocket: 'WebSocket', wss: 'WebSocket + TLS', socks5: 'SOCKS5', socks5_udp: 'SOCKS5 UDP', http_connect: 'HTTP CONNECT', http2_connect: 'HTTP/2 CONNECT', shadowsocks: 'Shadowsocks', shadowsocks_uot: 'Shadowsocks UDP over TCP', shadowsocks_udp: 'Shadowsocks UDP', multipath: '多路径聚合', gateway: '协议网关', udp: 'UDP' });
 const connectionStates = localize({ pending: '正在等待服务器回报当前连接…', no_answer: '服务器 30 秒内没有回报当前连接，它可能正忙或刚断开；请稍后点“刷新”重试。', unsupported: '这台服务器的 Agent 版本过旧，不记录当前连接和拦截记录；请先升级 Agent。下方的累计统计仍然有效。', offline: '服务器离线，无法获取当前连接。' });
 function connectionsReason(message) { return /^too many connection snapshots are waiting for this server/.test(String(message ?? '')) ? translate('这台服务器有太多连接快照在等待回报；请几秒后再试') : ''; }
+// A firewall refusal's detail as the agent writes it ("server inbound rule set: rule 2 denies (Name)", after
+// "egress proxy host:port: " for a refused upstream), in the panel's language; rules count from 1.
+function firewallDetail(detail) {
+  const text = String(detail ?? ''), layers = { 'server inbound': '服务器入站', 'rule inbound': '规则入站', 'server outbound': '服务器出站' };
+  let m = /^egress proxy (\S+): (.+)$/.exec(text);
+  if (m) return msg`出口代理 ${m[1]}：${firewallDetail(m[2])}`;
+  m = /^(server inbound|rule inbound|server outbound) rule set: (?:rule (\d+)|default action) denies \((.*)\)$/.exec(text);
+  if (m) return m[2] ? msg`${translate(layers[m[1]])}规则集「${m[3]}」第 ${m[2]} 条规则拒绝` : msg`${translate(layers[m[1]])}规则集「${m[3]}」默认动作拒绝`;
+  m = /^(server inbound|rule inbound|server outbound) rule set (.+) is not available here: refused$/.exec(text);
+  return m ? msg`${translate(layers[m[1]])}规则集 ${m[2]} 在这台服务器上不可用：拒绝` : text;
+}
 function connectionHop(via) { if (!via) return '—'; const node = state.nodes?.find(n => n.id === via.node_id); return namedCell(node?.name || via.node_id, via.rule_id); }
 function blockTable(blocks, ruleNames) {
   return table([translate('最近一次'), translate('来源'), ...(ruleNames ? [translate('规则')] : []), translate('协议'), translate('原因 / 详情'), translate('次数')], blocks.map(b => [
     namedCell(timestamp(b.last_ms), b.count > 1 && b.first_ms !== b.last_ms ? msg`首次 ${timestamp(b.first_ms)}` : ''), el('span', b.source, 'mono'),
-    ...(ruleNames ? [ruleNames.get(b.rule_id) || b.rule_id] : []), connectionProtocols[b.protocol] || b.protocol, namedCell(blockReasons[b.reason] || b.reason, b.detail || ''), String(b.count)]));
+    ...(ruleNames ? [ruleNames.get(b.rule_id) || b.rule_id] : []), connectionProtocols[b.protocol] || b.protocol, namedCell(blockReasons[b.reason] || b.reason, (b.reason === 'firewall' ? firewallDetail(b.detail) : b.detail) || ''), String(b.count)]));
 }
 function connectionCounters(view) {
   const box = el('div'), { inbound, targets, refused } = view.counters, connected = targets.reduce((sum, t) => sum + t.counts.connected, 0);

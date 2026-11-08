@@ -50,7 +50,7 @@ async function expiredResponse(replaced, path = '/nodes') {
     assert.equal(options.headers.Authorization, 'Bearer original-session');
     return new Promise(resolve => { finish = resolve; });
   } };
-  vm.createContext(context); vm.runInContext(`${definition('rateLimitReason')}\n${definition('speedTestReason')}\n${definition('egressProxyReason')}\n${definition('api')}\nthis.run = api;`, context);
+  vm.createContext(context); vm.runInContext(`${definition('rateLimitReason')}\n${definition('speedTestReason')}\n${definition('egressProxyReason')}\n${definition('firewallReason')}\n${definition('api')}\nthis.run = api;`, context);
   const result = context.run(path);
   if (replaced) state.token = 'new-session';
   finish({ ok: false, status: 401, text: async () => '{"error":"expired"}' });
@@ -116,11 +116,12 @@ async function subscriptionDialogs() {
 
 (async () => {
   await subscriptionDialogs();
-  for (const [name, view] of [['renderOverview', 'overview'], ['renderNodes', 'nodes'], ['renderTemplates', 'templates'], ['renderSubscriptions', 'subscriptions'], ['renderUsage', 'usage'], ['renderUsers', 'users'], ['renderAccount', 'account'], ['renderAudit', 'audit'], ['renderAlerts', 'alerts'], ['renderCapabilities', 'capabilities'], ['renderFeatures', 'features'], ['renderBudgets', 'budgets'], ['renderRecovery', 'recovery'], ['renderTopology', 'topology'], ['renderRules', 'rules'], ['renderHealth', 'health'], ['renderTickets', 'tickets'], ['renderCommerce', 'commerce'], ['renderAnnouncements', 'announcements'], ['renderDns', 'dns']]) {
+  const pages = [['renderOverview', 'overview'], ['renderNodes', 'nodes'], ['renderTemplates', 'templates'], ['renderSubscriptions', 'subscriptions'], ['renderUsage', 'usage'], ['renderUsers', 'users'], ['renderAccount', 'account'], ['renderAudit', 'audit'], ['renderAlerts', 'alerts'], ['renderCapabilities', 'capabilities'], ['renderFeatures', 'features'], ['renderBudgets', 'budgets'], ['renderRecovery', 'recovery'], ['renderTopology', 'topology'], ['renderRules', 'rules'], ['renderHealth', 'health'], ['renderTickets', 'tickets'], ['renderCommerce', 'commerce'], ['renderAnnouncements', 'announcements'], ['renderDns', 'dns'], ['renderFirewall', 'firewall']];
+  for (const [name, view] of pages) {
     for (const transition of ['navigation', 'logout', 'account change']) await lateResponse(name, view, transition);
   }
   await expiredResponse(false); await expiredResponse(true); await expiredResponse(false, '/auth/login');
-  console.log('UI runtime passed: unknown/zero telemetry, byte conservation, repeated timestamps, counter reset and 57 delayed-response cases across all 19 API-backed pages');
+  console.log(`UI runtime passed: unknown/zero telemetry, byte conservation, repeated timestamps, counter reset and ${pages.length * 3} delayed-response cases across all ${pages.length} API-backed pages`);
   console.log('Authentication runtime passed: current-session expiry, old-session expiry and failed sign-in');
   console.log('Subscription dialogs passed: in-place edit keeps settings and expiry, source lists, create defaults and rotation grace');
 })().catch(error => { console.error(error); process.exitCode = 1; });

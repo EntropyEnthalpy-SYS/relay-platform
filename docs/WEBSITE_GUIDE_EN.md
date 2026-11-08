@@ -434,7 +434,7 @@ Proxy services let the client choose the destination. They have no fixed targets
 | Service | Built in? | Notes |
 | --- | --- | --- |
 | **Shadowsocks** | Yes | 2022 methods (`2022-blake3-aes-128-gcm`, `2022-blake3-aes-256-gcm`, `2022-blake3-chacha20-poly1305`) and legacy AEAD methods; TCP and UDP; replay protection. **Share link** gives an `ss://` link. An optional UDP-over-TCP mode helps on networks that break UDP fragments. One key per port; multiple users per port and plugins are not supported. See [Shadowsocks](SHADOWSOCKS.md). |
-| **SOCKS5** | Yes | CONNECT, BIND and UDP ASSOCIATE, optional username and password. See [SOCKS5](SOCKS5.md). |
+| **SOCKS5** | Yes | CONNECT, BIND and UDP ASSOCIATE, optional username and password. The first UDP datagram claims an association and must come from an address the rule accepts (its source lists and any firewall sets), so a client whose UDP leaves from a different address than its TCP connection is refused. See [SOCKS5](SOCKS5.md). |
 | **HTTP CONNECT** | Yes | HTTP/1.x proxy with optional Basic authentication. See [HTTP CONNECT](HTTP_CONNECT.md). |
 | **HTTP/2 CONNECT** | Yes | Basic credentials and/or Bearer tokens (only the tokens' hashes are stored), optional mutual TLS, a stream limit per rule. See [HTTP/2](HTTP2.md). |
 | **VLESS** (TLS or Reality, optional Vision), **Hysteria2**, **TUIC v5**, **AnyTLS**, **Trojan**, **VMess** | Needs the optional engine | Runs through sing-box 1.14.4 installed on the server. See below. |
@@ -545,9 +545,11 @@ With **Plan entitlements** on, a plan can give its traffic per cycle instead of 
 
 - **Source addresses:** each rule has allowed and denied source CIDR lists. Denied entries win. A blank allow list admits every source that is not denied. On a relay hop, the source is usually the previous server.
 - **Destinations:** each rule can allow or deny destination IPs, CIDR ranges, exact domains and domain suffixes (`*.example.com`), plus destination ports and port ranges. Deny wins, and every address a domain resolves to is checked. This applies to fixed targets and to every proxy service. See [Destination ACL](DESTINATION_ACL.md).
+- **Domain suffixes:** `*.example.com` matches subdomains such as `api.example.com` only, not `example.com` itself and not lookalikes such as `badexample.com`. Since this release that holds for deny lists too: a deny entry `*.example.com` no longer blocks `badexample.com`, so add such names on their own if you relied on that.
 - **Private destinations:** proxy services refuse loopback, private and link-local destinations (including cloud metadata addresses) unless you allow them per rule.
 - **Client certificates:** an entry with TLS can require a certificate from your own CA.
 - **PROXY protocol sources:** a rule only accepts PROXY headers from the source ranges you trust.
+- **Firewall rule sets:** for lists you use in many places, open **Firewall rule sets** under Forwarding setup. A set has a name, a direction (**Inbound** checks who is connecting, **Outbound** checks where your server connects to), a list of allow or deny rules and a **default action** for anything no rule matches. Rules are checked from the top and the first match decides, so put exceptions above broader rules; the arrows move a rule up or down. A system administrator attaches sets to a server (in the server's settings or with **Bind…**); a tenant administrator attaches their own inbound sets to their own rules in the rule editor. A connection has to pass every set that applies plus the rule's own lists, so a set can only make a rule stricter. When you edit a set, every server that uses it updates by itself; **Server policies** shows **Applied** once the server has confirmed the change, or why not yet (waiting, offline, or the agent is too old and must be upgraded first). The **Rule tester** tells you, for an address you type, which rule of which set decides. Refusals appear in the blocked-connection records as **Refused by a firewall rule set**. If clients come through a load balancer that sends PROXY headers, the server's inbound set checks the load balancer as well as the client, so allow the load balancer's address in it. Outbound sets do not cover reverse tunnels: the private server connects to the target without checking them. Name entries match the name as the client sent it, and a resolver with a search list can turn a short name such as `db` into `db.internal.corp`, so block internal services with address ranges. Don't downgrade the agent on a server that uses rule sets. In tests with the 0.149.0 agent, a server whose rules had rule sets stopped forwarding because the older agent would not start; reinstalling the newer agent on the same server brought it back with its sets. Removing the sets from the server's rules and waiting until the server applied that change let the 0.149.0 agent start, but it ignores server-level sets, so sources they refused are let in. See [Firewall rule sets](FIREWALL.md) (Chinese).
 
 ### DNS, DDNS and the authoritative DNS pool
 
@@ -803,7 +805,7 @@ When a user says “it doesn't connect” or a port looks busy, you can see who 
 - **Who can see it:** everyone who can see the server's rules, including read-only accounts, and API tokens with `read`. Client addresses are personal data: blur them before you share a screenshot.
 - **What is kept:** current connections are fetched when you look and never stored. The panel keeps the latest 1000 blocked connections per server in memory only; they are gone after the panel restarts. Each server keeps its own latest 1000.
 - **Older agents:** the server needs the agent of this release; otherwise the dialog says “This server's agent is too old to keep current connections and blocked connections; upgrade the agent first”, and still shows the counters. An offline server, or one that does not answer within 30 seconds, is reported as such. Older agents keep forwarding as before.
-- **Not included:** samples of probe or scanner traffic, closing connections from the panel, and firewall rule sets. Refusals by a protocol gateway's own public side are not visible, and its connections show the local bridge address as the client.
+- **Not included:** samples of probe or scanner traffic, and closing connections from the panel. Connections refused by a firewall rule set appear in the block records with their own reason. Refusals by a protocol gateway's own public side are not visible, and its connections show the local bridge address as the client.
 
 See [Connections and blocked connections](CONNECTIONS.md) (Chinese) for the details.
 
@@ -902,7 +904,7 @@ Relay is a development release. Every one of its 22 modules is marked "partially
 - **WireGuard and NAT:** tested in Linux namespaces; real home routers, carrier-grade NAT, IPv6, exit nodes and subnet routes are not covered.
 - **Cross-panel sharing:** not yet verified between two separate panels over the public internet.
 - **Reverse tunnels:** no real public network, NAT, long-running or high-concurrency tests.
-- **Routing and access control:** no GeoIP or ASN rules, and no automatic path selection by cost.
+- **Routing and access control:** no GeoIP or ASN rules, no rule files from outside the panel, no protocol filters (such as BitTorrent or QUIC), and no automatic path selection by cost.
 - **Accounts:** no per-object permissions and no password recovery by email.
 - **Commerce:** no adapters for specific payment providers, commissions, taxes or invoices. Plans do not set speed limits or device counts.
 

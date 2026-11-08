@@ -22,6 +22,8 @@ const USER_SHARES: &str = "agent_user_shares";
 /// Agent metadata key of the authoritative DNS answers last received, served
 /// again after a restart while the controller is unreachable.
 const AUTHORITATIVE_DNS: &str = "agent_authoritative_dns";
+/// The firewall policy in force, as the controller sent it (empty: none).
+const FIREWALL_POLICY: &str = "agent_firewall_policy";
 
 pub struct AgentOptions {
     pub controller: String,
@@ -333,6 +335,18 @@ async fn run_agent(
         store.clone(),
         options.tls_directory,
     ));
+    // The firewall policy in force when the agent stopped holds until the
+    // controller sends another.
+    if let Some(saved) = store.metadata(FIREWALL_POLICY)?
+        && let Ok(desired) = serde_json::from_str::<crate::firewall::Desired>(&saved)
+        && desired.policy.is_some()
+    {
+        engine.firewall().apply(Some(desired));
+    }
+    // Reported only to a controller that sent a policy, as older ones
+    // reject the unknown field.
+    let mut firewall_reporting = false;
+    let mut firewall_error: Option<String> = None;
     let mut saved_shares = store.metadata(USER_SHARES)?.unwrap_or_default();
     if let Ok(shares) = serde_json::from_str::<Vec<UserShare>>(&saved_shares) {
         engine.restore_user_shares(&shares);
@@ -408,7 +422,8 @@ async fn run_agent(
                     body["wireguard_changed"] == true
                         || body["reverse_tunnels_changed"] == true
                         || body["speed_tests_changed"] == true
-                        || body["connections_requested"] == true,
+                        || body["connections_requested"] == true
+                        || body["firewall_changed"] == true,
                 ))
             };
             match watched.await {
@@ -559,6 +574,12 @@ async fn run_agent(
                     stats.live_connections = connections_reporting
                         .then(|| engine.connection_report(&answered, &block_cursor));
                     stats.egress_proxy = egress_reporting.then(Default::default);
+                    // Why the newest policy was not taken, else why sets of
+                    // the policy in force refuse everything.
+                    stats.firewall = firewall_reporting.then(|| crate::firewall::Report {
+                        applied_hash: engine.firewall().applied_hash(),
+                        error: firewall_error.clone().or_else(|| engine.firewall().error()),
+                    });
                     stats.system = Some(sampler.sample());
                     stats
                 },
@@ -657,6 +678,45 @@ async fn run_agent(
                                 db.accept_sync_reply(&run, &synced.acknowledgements, synced.budget)
                             })
                             .await??;
+                            // The policy goes in before the configuration
+                            // whose rules use it.
+                            firewall_reporting = synced.firewall.is_some();
+                            match synced
+                                .firewall
+                                .map(serde_json::from_value::<crate::firewall::Desired>)
+                            {
+                                // An older controller: no rule sets.
+                                None => {
+                                    if engine.firewall().applied_hash().is_some() {
+                                        engine.firewall().apply(None);
+                                        store.set_metadata(FIREWALL_POLICY, "")?;
+                                    }
+                                    firewall_error = None;
+                                }
+                                Some(Ok(desired)) => {
+                                    if desired.policy.is_some()
+                                        && engine.firewall().applied_hash().as_deref()
+                                            != Some(desired.hash.as_str())
+                                    {
+                                        store.set_metadata(
+                                            FIREWALL_POLICY,
+                                            &serde_json::to_string(&desired)?,
+                                        )?;
+                                        engine.firewall().apply(Some(desired));
+                                        receipt_due = true;
+                                    }
+                                    firewall_error = None;
+                                }
+                                // Kept as it is; the panel shows why.
+                                Some(Err(error)) => {
+                                    let message = crate::firewall::report_error(&format!(
+                                        "firewall policy not understood: {error}"
+                                    ));
+                                    receipt_due |= firewall_error.as_ref() != Some(&message);
+                                    tracing::warn!(%message, "firewall policy not applied");
+                                    firewall_error = Some(message);
+                                }
+                            }
                             if let Some(config) = synced.config {
                                 ensure!(
                                     config.node_id == credential.node_id,

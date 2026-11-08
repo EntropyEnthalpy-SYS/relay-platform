@@ -15,6 +15,7 @@ pub mod egress;
 pub mod email;
 pub mod engine;
 pub mod federation;
+pub mod firewall;
 pub mod health;
 pub mod history;
 pub mod http2_connect;

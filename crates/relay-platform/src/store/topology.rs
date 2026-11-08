@@ -125,6 +125,7 @@ pub(super) fn prepare(
         config.validate().map_err(bad_input)?;
         rate_limits::require(conn, &config)?;
         egress_proxies::require(conn, &config)?;
+        firewall_sets::require(conn, &tenant, &config)?;
         if config
             .rules
             .iter()

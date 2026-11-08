@@ -53,7 +53,7 @@ const context = {
   FormData: class { constructor(element) { this.values = new Map(element.querySelectorAll().filter(c => c.name && !c.disabled && (c.type !== 'checkbox' || c.checked)).map(c => [c.name, c.type === 'checkbox' ? 'on' : c.value])); } get(key) { return this.values.get(key) ?? null; } },
   forwardingPathView: () => ({ box: new Element(), update() {} }), featureOn: () => false, canWrite: () => true,
   state: { config: { node_id: 'n1', revision: 3, rules: [socks, forward] }, nodes: [{ id: 'n1', name: 'Tokyo', tenant_id: 't', egress_proxy_support: false, stats: {} }], actor: { id: 'owner', role: 'system_admin' } },
-  async api(path) { if (path === '/nodes') return context.state.nodes; return { configs: [], nodes: [] }; },
+  async api(path) { if (path === '/nodes') return context.state.nodes; if (path === '/firewall/sets') return []; return { configs: [], nodes: [] }; },
   el: (tag, text, className) => new Element(tag, text, className),
   field(parent, name, label, value = '', type = 'text', required = true) { const wrap = new Element('label', label), input = new Element('input'); Object.assign(input, { name, value: String(value ?? ''), type, required }); wrap.append(input); parent.append(wrap); return input; },
   select(parent, name, label, options, value) { const input = context.field(parent, name, label, value ?? options[0]?.[0] ?? ''); input.tag = 'select'; for (const [id, text] of options) input.append(Object.assign(new Element('option', text), { value: id })); return input; },

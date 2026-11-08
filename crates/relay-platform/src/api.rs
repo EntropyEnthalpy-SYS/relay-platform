@@ -239,7 +239,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
             scopes.contains(&Scope::UsersWrite)
         };
     }
-    let needed = if method == Method::GET || method == Method::HEAD {
+    let needed = if method == Method::GET || method == Method::HEAD || path == "firewall/test" {
         Scope::Read
     } else if path.starts_with("nodes")
         || path.starts_with("configurations/")
@@ -248,6 +248,7 @@ fn scope_permits(scopes: &[Scope], method: &Method, path: &str) -> bool {
         || path.starts_with("chains")
         || path.starts_with("reverse-tunnels")
         || path.starts_with("speed-tests")
+        || path.starts_with("firewall/sets")
     {
         Scope::NodesWrite
     } else if path.starts_with("budgets") {
@@ -353,6 +354,21 @@ pub fn router(state: AppState) -> Router {
             get(rule_connections),
         )
         .route("/api/v1/nodes/{node}/blocks", get(node_blocks))
+        .route(
+            "/api/v1/nodes/{node}/firewall",
+            get(node_firewall).put(bind_node_firewall),
+        )
+        .route(
+            "/api/v1/firewall/sets",
+            get(firewall_sets).post(create_firewall_set),
+        )
+        .route(
+            "/api/v1/firewall/sets/{id}",
+            get(firewall_set)
+                .put(update_firewall_set)
+                .delete(delete_firewall_set),
+        )
+        .route("/api/v1/firewall/test", post(test_firewall))
         .route("/api/v1/nodes/{node}/drain", post(drain))
         .route("/api/v1/topology", get(topology))
         .route("/api/v1/telemetry", get(telemetry))
@@ -1313,6 +1329,104 @@ async fn delete_reverse_tunnel(
     database(state.store, move |db| db.delete_reverse_tunnel(&actor, &id)).await?;
     Ok(Json(serde_json::json!({"ok": true})))
 }
+/// A body that does not parse is invalid input (400), like the other
+/// checks of a rule set.
+fn firewall_body<T: serde::de::DeserializeOwned>(
+    body: serde_json::Value,
+    what: &str,
+) -> anyhow::Result<T> {
+    serde_json::from_value(body).map_err(|error| {
+        Rejection {
+            status: 400,
+            message: format!("invalid {what}: {error}"),
+        }
+        .into()
+    })
+}
+async fn firewall_sets(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> ApiResult<Vec<crate::firewall::SetView>> {
+    Ok(Json(
+        database(state.store, move |db| db.firewall_sets(&actor)).await?,
+    ))
+}
+async fn firewall_set(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<crate::firewall::SetView> {
+    Ok(Json(
+        database(state.store, move |db| db.firewall_set(&actor, &id)).await?,
+    ))
+}
+async fn create_firewall_set(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::firewall::SetView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.create_firewall_set(&actor, firewall_body(body, "firewall rule set")?)
+        })
+        .await?,
+    ))
+}
+async fn update_firewall_set(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::firewall::SetView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.update_firewall_set(&actor, &id, firewall_body(body, "firewall rule set")?)
+        })
+        .await?,
+    ))
+}
+async fn delete_firewall_set(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<serde_json::Value> {
+    database(state.store, move |db| db.delete_firewall_set(&actor, &id)).await?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+async fn node_firewall(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+) -> ApiResult<crate::firewall::NodeStatus> {
+    Ok(Json(
+        database(state.store, move |db| db.node_firewall(&actor, &node)).await?,
+    ))
+}
+async fn bind_node_firewall(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path(node): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::firewall::NodeStatus> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.bind_node_firewall(&actor, &node, firewall_body(body, "server binding")?)
+        })
+        .await?,
+    ))
+}
+async fn test_firewall(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<crate::firewall::TestResult> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.test_firewall(&actor, firewall_body(body, "firewall test")?)
+        })
+        .await?,
+    ))
+}
 async fn speed_tests(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -2069,8 +2183,14 @@ async fn watch_config(
     loop {
         let published = state.store.config_published();
         let credential = token.clone();
-        let (revision, wireguard_changed, tunnels_changed, speed_tests_changed, connections_asked) =
-            database(state.store.clone(), move |db| db.node_watch(&credential)).await?;
+        let (
+            revision,
+            wireguard_changed,
+            tunnels_changed,
+            speed_tests_changed,
+            connections_asked,
+            firewall_changed,
+        ) = database(state.store.clone(), move |db| db.node_watch(&credential)).await?;
         let mut reply = serde_json::json!({ "desired_revision": revision });
         if wireguard_changed {
             reply["wireguard_changed"] = true.into();
@@ -2084,12 +2204,16 @@ async fn watch_config(
         if connections_asked {
             reply["connections_requested"] = true.into();
         }
+        if firewall_changed {
+            reply["firewall_changed"] = true.into();
+        }
         let reply = Json(reply);
         if revision > query.after
             || wireguard_changed
             || tunnels_changed
             || speed_tests_changed
             || connections_asked
+            || firewall_changed
         {
             return Ok(reply);
         }

@@ -249,9 +249,10 @@ impl Report {
 
 /// Rule fields the rule editor may change on a tunnel's public end; every
 /// other field comes from the tunnel.
-const EDITABLE: [&str; 11] = [
+const EDITABLE: [&str; 12] = [
     "allow_sources",
     "deny_sources",
+    "firewall_inbound_set",
     "rate_bytes_per_sec",
     "rate_limits",
     "max_connections",

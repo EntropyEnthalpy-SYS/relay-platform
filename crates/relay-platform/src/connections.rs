@@ -78,9 +78,12 @@ pub enum Reason {
     DestinationDenied,
     AuthFailed,
     HandshakeFailed,
+    /// A firewall rule set refused the client or the destination; the
+    /// detail names the layer, the set and its rule or default action.
+    Firewall,
 }
 impl Reason {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::SourceNotAllowed,
         Self::SourceDenied,
         Self::ProxyUntrusted,
@@ -95,6 +98,7 @@ impl Reason {
         Self::DestinationDenied,
         Self::AuthFailed,
         Self::HandshakeFailed,
+        Self::Firewall,
     ];
     pub fn as_str(self) -> &'static str {
         match self {
@@ -112,6 +116,7 @@ impl Reason {
             Self::DestinationDenied => "destination_denied",
             Self::AuthFailed => "auth_failed",
             Self::HandshakeFailed => "handshake_failed",
+            Self::Firewall => "firewall",
         }
     }
     fn index(self) -> usize {

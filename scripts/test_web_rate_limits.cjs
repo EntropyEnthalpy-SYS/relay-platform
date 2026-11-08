@@ -53,6 +53,7 @@ const context = {
   async api(path, options = {}) {
     calls.push({ path, method: options.method || 'GET', body: options.body === undefined ? undefined : JSON.parse(JSON.stringify(options.body)) });
     if (path === '/nodes') return context.state.nodes;
+    if (path === '/firewall/sets') return [];
     if (path.startsWith('/users/') && !options.method) return JSON.parse(JSON.stringify(view));
     return { configs: [], nodes: [] };
   },

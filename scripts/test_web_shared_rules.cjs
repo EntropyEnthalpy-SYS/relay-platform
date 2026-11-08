@@ -45,6 +45,7 @@ const context = {
     if (path === '/nodes') return nodes;
     if (path.startsWith('/nodes/')) return { node_id: decodeURIComponent(path.split('/')[2]), revision: 4, rules: [] };
     if (path === '/topology') return { configs: [], nodes: [] };
+    if (path === '/firewall/sets') return [];
     if (path === '/shared-rules/precheck') return { listen_port: options.body.listen_port ?? 25505, ok: true, error: null, lines: options.body.node_ids.map(id => ({ node_id: id, node_name: id, online: true, in_range: true, port_start: 20000, port_end: 29999, port_free: true, valid: true, error: null })) };
     return {};
   },

@@ -1022,6 +1022,7 @@ mod tests {
             inbound_http_connect: None,
             inbound_http2_connect: None,
             egress_proxy: None,
+            firewall_inbound_set: None,
             advertise: Some("edge.example.com:9000".into()),
             targets: vec![],
             balance: crate::model::Balance::WeightedRoundRobin,

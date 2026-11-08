@@ -161,6 +161,15 @@ pub(super) fn merge(
                     ),
                 );
             }
+            if rule.firewall_inbound_set.is_some() {
+                return reject(
+                    400,
+                    format!(
+                        "rule {} belongs to share {}; a share's rules cannot have a firewall rule set",
+                        rule.name, grant.name
+                    ),
+                );
+            }
         }
     }
     rules.retain(|r| {
