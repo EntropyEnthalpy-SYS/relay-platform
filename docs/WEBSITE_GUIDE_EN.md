@@ -1,6 +1,6 @@
 # Relay documentation
 
-Relay is a self-hosted platform for people who run forwarding and relay servers. A web panel keeps your servers, forwarding rules, users and usage records. A small agent on each server opens the ports and carries the traffic, and your customers' apps connect to those servers directly. This page explains what Relay is, how to install it, how to use each feature in the panel, how to handle common deployments, and where to look when something goes wrong. It describes Relay 0.149.0. Relay is still a development release. Read [Current limits](#current-limits) before you depend on it.
+Relay is a self-hosted platform for people who run forwarding and relay servers. A web panel keeps your servers, forwarding rules, users and usage records. A small agent on each server opens the ports and carries the traffic, and your customers' apps connect to those servers directly. This page explains what Relay is, how to install it, how to use each feature in the panel, how to handle common deployments, and where to look when something goes wrong. It describes Relay 0.150.0. Relay is still a development release. Read [Current limits](#current-limits) before you depend on it.
 
 ## Contents
 
