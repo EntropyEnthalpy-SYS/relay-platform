@@ -17,6 +17,7 @@ use relay_platform::{
     agent::{self, AgentOptions},
     api::{self, AppState},
     http_connect,
+    lease::{LeasePolicy, LeaseProof, LeaseRelease, LeaseRequest},
     model::*,
     socks5,
     store::{Role, Store, write_secret},
@@ -1131,11 +1132,19 @@ async fn a_bound_set_cannot_be_deleted() {
 
 /// One sync as an agent of 0.149.0 or earlier, which reports no support.
 fn old_sync(store: &Store, node: &str) -> Value {
+    sync_applied(store, node, 0)
+}
+/// One sync as an agent that runs `revision` and reports nothing else.
+fn sync_applied(store: &Store, node: &str, revision: u64) -> Value {
+    sync_leased(store, node, None, revision)
+}
+/// [`sync_applied`] under `lease`.
+fn sync_leased(store: &Store, node: &str, lease: Option<&LeaseProof>, revision: u64) -> Value {
     let ledger_id = store
         .reconcile(
             node,
             ReconcileRequest {
-                lease: None,
+                lease: lease.cloned(),
                 ledger_id: None,
                 after: None,
                 expected_revision: None,
@@ -1148,11 +1157,11 @@ fn old_sync(store: &Store, node: &str) -> Value {
             node,
             SyncRequest {
                 logs: None,
-                lease: None,
+                lease: lease.cloned(),
                 budget: None,
                 ledger_id,
                 need_config: true,
-                applied_revision: 0,
+                applied_revision: revision,
                 apply_error: None,
                 usage: vec![],
                 stats: EngineStats::default(),
@@ -1281,6 +1290,13 @@ async fn servers_whose_agent_is_too_old_refuse_bindings_with_409() {
 
 /// One sync as a current agent that reports `firewall`.
 fn report_sync(store: &Store, node: &str, firewall: relay_platform::firewall::Report) {
+    try_report_sync(store, node, firewall).unwrap();
+}
+fn try_report_sync(
+    store: &Store,
+    node: &str,
+    firewall: relay_platform::firewall::Report,
+) -> anyhow::Result<()> {
     let ledger_id = store
         .reconcile(
             node,
@@ -1311,7 +1327,7 @@ fn report_sync(store: &Store, node: &str, firewall: relay_platform::firewall::Re
                 },
             },
         )
-        .unwrap();
+        .map(|_| ())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1329,7 +1345,7 @@ async fn an_agent_that_stops_reporting_is_no_longer_shown_as_applied() {
         .to_owned();
     let confirms = || relay_platform::firewall::Report {
         applied_hash: Some(desired.clone()),
-        error: None,
+        ..Default::default()
     };
     report_sync(store, &node.id, confirms());
     let status = api.node(&node.id).await["firewall"].clone();
@@ -1779,4 +1795,401 @@ async fn sets_check_their_rules_and_bindings_their_direction() {
     rule.firewall_inbound_set = Some(outbound.clone());
     let (code, _) = api.publish(&node, &[&rule]).await;
     assert_eq!(code, 404, "a rule takes only its tenant's sets");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protocol_gateways_take_sets_only_on_agents_that_judge_their_clients() {
+    use relay_platform::firewall::{COVERS, Report};
+    let panel = Panel::new().await;
+    let (api, store, admin) = (&panel.api, &panel.store, &panel.admin);
+    let (node, _) = store.create_node(admin, "default", "edge").unwrap();
+    let node = node.id;
+    let covering = |covers: &[&str]| Report {
+        covers: covers.iter().map(|c| c.to_string()).collect(),
+        ..Default::default()
+    };
+    // An agent of 0.150.0: it enforces sets on its own rules only.
+    report_sync(store, &node, covering(&[]));
+    let support = || store.metadata(&format!("firewall_node:{node}")).unwrap();
+    assert_eq!(support().as_deref(), Some("1"));
+    let server_set = api
+        .create_set(inbound(
+            "Server",
+            "system",
+            "allow",
+            &[("deny", &["127.0.0.3/32"])],
+        ))
+        .await;
+    let rule_set = api
+        .create_set(inbound(
+            "Rule",
+            "tenant",
+            "allow",
+            &[("deny", &["127.0.0.4/32"])],
+        ))
+        .await;
+    let gateway = |id: &str, port: u16| {
+        let mut rule = forward(id, "127.0.0.1:9".parse().unwrap());
+        rule.listen = free_address();
+        rule.targets.clear();
+        rule.protocol_gateway = Some(
+            serde_json::from_value(json!({"listen": format!("0.0.0.0:{port}"),
+                "protocol": {"type": "trojan", "password": "test-gateway-password"},
+                "security": {"type": "certificate", "identity": "server"}}))
+            .unwrap(),
+        );
+        rule
+    };
+    let gw = gateway("gw", free_address().port());
+    let refused = "the agent on server edge does not apply firewall rule sets to protocol gateways; upgrade it first";
+    let error = |reply: (u16, Value)| (reply.0, reply.1["error"].as_str().map(str::to_owned));
+    let refusal = (409, Some(refused.to_owned()));
+    // A gateway without sets publishes as before; sets that would not hold
+    // it are refused, and the tester does not answer for it.
+    let (code, reply) = api.publish(&node, &[&gw]).await;
+    assert_eq!(code, 200, "{reply}");
+    let path = format!("/nodes/{node}/firewall");
+    let bind = |inbound: Option<&str>| {
+        api.call(
+            reqwest::Method::PUT,
+            &path,
+            Some(json!({"inbound_set_id": inbound, "outbound_set_id": null})),
+        )
+    };
+    assert_eq!(error(bind(Some(&server_set)).await), refusal);
+    let mut bound = gw.clone();
+    bound.firewall_inbound_set = Some(rule_set.clone());
+    assert_eq!(error(api.publish(&node, &[&bound]).await), refusal);
+    let test = |source: &str| json!({"node_id": node, "rule_id": "gw", "source": source});
+    let tester =
+        |source: &str| api.call(reqwest::Method::POST, "/firewall/test", Some(test(source)));
+    assert_eq!(error(tester("127.0.0.1").await), refusal);
+    // A path this controller does not know is kept and covers nothing; a
+    // report naming too many paths is refused and changes nothing.
+    report_sync(store, &node, covering(&["future_path"]));
+    assert_eq!(support().as_deref(), Some(r#"{"covers":["future_path"]}"#));
+    assert_eq!(error(bind(Some(&server_set)).await), refusal);
+    let too_many: Vec<String> = (0..17).map(|n| format!("path_{n}")).collect();
+    let too_many: Vec<&str> = too_many.iter().map(String::as_str).collect();
+    let refused_report = try_report_sync(store, &node, covering(&too_many)).unwrap_err();
+    assert!(
+        refused_report
+            .to_string()
+            .contains("sync payload exceeds limits"),
+        "{refused_report:#}"
+    );
+    assert_eq!(support().as_deref(), Some(r#"{"covers":["future_path"]}"#));
+    // An agent that judges gateway clients: the same requests go through.
+    report_sync(store, &node, covering(&COVERS));
+    let reported: Value = serde_json::from_str(&support().unwrap()).unwrap();
+    assert_eq!(reported, json!({"covers": COVERS}));
+    assert_eq!(bind(Some(&server_set)).await.0, 200);
+    let (code, reply) = api.publish(&node, &[&bound]).await;
+    assert_eq!(code, 200, "{reply}");
+    let status = api.node(&node).await["firewall"].clone();
+    assert_eq!(status["uncovered"], json!([]), "{status}");
+    let answer = api
+        .ok(reqwest::Method::POST, "/firewall/test", test("127.0.0.4"))
+        .await;
+    assert_eq!(answer["decision"], "deny", "{answer}");
+    assert_eq!(answer["layers"][1]["layer"], "rule_inbound", "{answer}");
+    let answer = api
+        .ok(reqwest::Method::POST, "/firewall/test", test("127.0.0.3"))
+        .await;
+    assert_eq!(answer["layers"][0]["result"], "deny", "{answer}");
+    // Downgraded: the support goes back to what the agent says, its running
+    // gateways stay and the status names them; gateways it would take anew,
+    // or sets on one, wait for the agent.
+    report_sync(store, &node, covering(&[]));
+    assert_eq!(support().as_deref(), Some("1"));
+    let status = api.node(&node).await["firewall"].clone();
+    assert_eq!(status["uncovered"], json!(["gateways"]), "{status}");
+    assert_eq!(error(api.publish(&node, &[&bound]).await), refusal);
+    let (code, reply) = api.publish(&node, &[&gw]).await;
+    assert_eq!(code, 200, "a running gateway stays: {reply}");
+    let another = gateway("gw2", free_address().port());
+    assert_eq!(error(api.publish(&node, &[&gw, &another]).await), refusal);
+    assert_eq!(bind(None).await.0, 200);
+    let status = api.node(&node).await["firewall"].clone();
+    assert_eq!(status["uncovered"], json!([]), "{status}");
+    let (code, reply) = api.publish(&node, &[&gw, &another]).await;
+    assert_eq!(code, 200, "{reply}");
+}
+
+/// Publishing a rule that turns into a protocol gateway, or back, on an
+/// address it listens on is refused, as its agent would refuse to apply
+/// it; disabled and published first, the rule may change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listening_rule_turns_into_a_gateway_or_back_only_once_disabled() {
+    let panel = Panel::new().await;
+    let (api, store, admin) = (&panel.api, &panel.store, &panel.admin);
+    let (node, _) = store.create_node(admin, "default", "edge").unwrap();
+    let node = node.id;
+    let native = forward("same", "127.0.0.1:9".parse().unwrap());
+    let mut gateway = native.clone();
+    gateway.listen = free_address();
+    gateway.targets.clear();
+    gateway.protocol_gateway = Some(
+        serde_json::from_value(json!({"listen": native.listen,
+            "protocol": {"type": "trojan", "password": "test-gateway-password"},
+            "security": {"type": "certificate", "identity": "server"}}))
+        .unwrap(),
+    );
+    let disabled = |rule: &Rule| Rule {
+        enabled: false,
+        ..rule.clone()
+    };
+    let error = |reply: (u16, Value)| (reply.0, reply.1["error"].as_str().map(str::to_owned));
+    let refusal = (
+        409,
+        Some(format!(
+            "rule same listens on {}: disable it, publish that and wait until the server applies it before turning it into a protocol gateway there or back",
+            native.listen
+        )),
+    );
+    let path = format!("/nodes/{node}/config");
+    let published = |rule: Rule| {
+        let node = &node;
+        async move {
+            let (status, body) = api.publish(node, &[&rule]).await;
+            assert_eq!(status, 200, "{body}");
+        }
+    };
+    // The server applies what was published last.
+    let applied = || {
+        let desired = store
+            .nodes(admin)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == node)
+            .unwrap()
+            .desired_revision;
+        sync_applied(store, &node, desired);
+    };
+    published(native.clone()).await;
+    applied();
+    let before = api.get(&path).await;
+    assert_eq!(error(api.publish(&node, &[&gateway]).await), refusal);
+    assert_eq!(api.get(&path).await, before, "the configuration changed");
+    published(disabled(&native)).await;
+    // Until the server applies that, it still listens.
+    let before = api.get(&path).await;
+    assert_eq!(error(api.publish(&node, &[&gateway]).await), refusal);
+    assert_eq!(api.get(&path).await, before, "the configuration changed");
+    applied();
+    published(gateway.clone()).await;
+    applied();
+    // And back the same way only.
+    let before = api.get(&path).await;
+    assert_eq!(error(api.publish(&node, &[&native]).await), refusal);
+    assert_eq!(api.get(&path).await, before, "the configuration changed");
+    published(disabled(&gateway)).await;
+    assert_eq!(error(api.publish(&node, &[&native]).await), refusal);
+    applied();
+    published(native).await;
+}
+
+/// A server's agent may still run a configuration it was given after the one
+/// it last reported applying, and after it restarts, until it reports, any
+/// it was ever given; a server whose agent never connected runs none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rule_turns_only_once_no_configuration_its_server_may_run_listens() {
+    let panel = Panel::new().await;
+    let (api, store, admin) = (&panel.api, &panel.store, &panel.admin);
+    // A rule of its own on each server, listening, disabled or a gateway.
+    let kinds = |id: &str| {
+        let native = forward(id, "127.0.0.1:9".parse().unwrap());
+        let mut gateway = native.clone();
+        gateway.listen = free_address();
+        gateway.targets.clear();
+        gateway.protocol_gateway = Some(
+            serde_json::from_value(json!({"listen": native.listen,
+                "protocol": {"type": "trojan", "password": "test-gateway-password"},
+                "security": {"type": "certificate", "identity": "server"}}))
+            .unwrap(),
+        );
+        let disabled = Rule {
+            enabled: false,
+            ..native.clone()
+        };
+        let refusal = (
+            409,
+            Some(format!(
+                "rule {id} listens on {}: disable it, publish that and wait until the server applies it before turning it into a protocol gateway there or back",
+                native.listen
+            )),
+        );
+        (native, disabled, gateway, refusal)
+    };
+    let ok = (200, None);
+    let publish = |node: &str, rules: &[&Rule]| {
+        let node = node.to_string();
+        let rules: Vec<Rule> = rules.iter().map(|&rule| rule.clone()).collect();
+        async move {
+            let (status, body) = api.publish(&node, &rules.iter().collect::<Vec<_>>()).await;
+            (status, body["error"].as_str().map(str::to_owned))
+        }
+    };
+    let desired = |node: &str| {
+        let path = format!("/nodes/{node}/config");
+        async move { api.get(&path).await["revision"].as_u64().unwrap() }
+    };
+    let lease = |credential: &str| {
+        let (run_id, token) = (
+            relay_platform::store::secret(),
+            relay_platform::store::secret(),
+        );
+        let generation = store
+            .exchange_lease(
+                credential,
+                LeaseRequest {
+                    run_id: run_id.clone(),
+                    token: token.clone(),
+                    generation: None,
+                    resume_generation: None,
+                },
+            )
+            .unwrap()
+            .generation
+            .unwrap();
+        LeaseProof {
+            run_id,
+            generation,
+            token,
+        }
+    };
+
+    // An agent that restarted after applying the rule enabled, before it
+    // applied it disabled.
+    let (native, disabled, gateway, refusal) = kinds("restarted");
+    let (node, token) = store
+        .create_node_with_lease(admin, "default", "restarted", Some(LeasePolicy::default()))
+        .unwrap();
+    let credential = relay_platform::store::secret();
+    store.enroll(&node.id, &token, &credential).unwrap();
+    let first = lease(&credential);
+    assert_eq!(publish(&node.id, &[&native]).await, ok);
+    sync_leased(store, &node.id, Some(&first), desired(&node.id).await);
+    assert_eq!(publish(&node.id, &[&disabled]).await, ok);
+    store
+        .release_lease(
+            &credential,
+            LeaseRelease {
+                proof: first,
+                stats: EngineStats::default(),
+            },
+        )
+        .unwrap();
+    let second = lease(&credential);
+    let path = format!("/nodes/{}/config", node.id);
+    let before = api.get(&path).await;
+    assert_eq!(publish(&node.id, &[&gateway]).await, refusal);
+    assert_eq!(api.get(&path).await, before, "the configuration changed");
+    sync_leased(store, &node.id, Some(&second), desired(&node.id).await);
+    assert_eq!(publish(&node.id, &[&gateway]).await, ok);
+    // Restarted again once the gateway was applied: a rule a publication
+    // leaves listening as it was is not looked up, so another rule can be
+    // added; turning the gateway back still waits for a report.
+    sync_leased(store, &node.id, Some(&second), desired(&node.id).await);
+    store
+        .release_lease(
+            &credential,
+            LeaseRelease {
+                proof: second,
+                stats: EngineStats::default(),
+            },
+        )
+        .unwrap();
+    let _third = lease(&credential);
+    let other = forward("restarted-other", "127.0.0.1:9".parse().unwrap());
+    assert_eq!(publish(&node.id, &[&gateway, &other]).await, ok);
+    let gateway_off = Rule {
+        enabled: false,
+        ..gateway.clone()
+    };
+    assert_eq!(publish(&node.id, &[&gateway_off, &other]).await, ok);
+    assert_eq!(publish(&node.id, &[&native, &other]).await, refusal);
+
+    // An agent that has not reported a configuration given after the one
+    // it applied, which listens.
+    let (native, disabled, gateway, refusal) = kinds("lagging");
+    let (node, _) = store.create_node(admin, "default", "lagging").unwrap();
+    assert_eq!(publish(&node.id, &[&disabled]).await, ok);
+    sync_applied(store, &node.id, desired(&node.id).await);
+    assert_eq!(publish(&node.id, &[&native]).await, ok);
+    assert_eq!(publish(&node.id, &[&disabled]).await, ok);
+    assert_eq!(publish(&node.id, &[&gateway]).await, refusal);
+    sync_applied(store, &node.id, desired(&node.id).await);
+    assert_eq!(publish(&node.id, &[&gateway]).await, ok);
+
+    // A rule moved back to where a configuration the agent may still run
+    // had it as the other kind is looked up too.
+    let (native, _, gateway, refusal) = kinds("moved");
+    let (node, _) = store.create_node(admin, "default", "moved").unwrap();
+    assert_eq!(publish(&node.id, &[&gateway]).await, ok);
+    sync_applied(store, &node.id, desired(&node.id).await);
+    let elsewhere = Rule {
+        listen: free_address(),
+        ..native.clone()
+    };
+    assert_eq!(publish(&node.id, &[&elsewhere]).await, ok);
+    assert_eq!(publish(&node.id, &[&native]).await, refusal);
+
+    // So is a gateway moved onto the address its bridge listened on there.
+    let (_, _, gateway, _) = kinds("swapped");
+    let (node, _) = store.create_node(admin, "default", "swapped").unwrap();
+    assert_eq!(publish(&node.id, &[&gateway]).await, ok);
+    sync_applied(store, &node.id, desired(&node.id).await);
+    let gateway_off = Rule {
+        enabled: false,
+        ..gateway.clone()
+    };
+    assert_eq!(publish(&node.id, &[&gateway_off]).await, ok);
+    let mut onto_bridge = gateway.clone();
+    onto_bridge.listen = free_address();
+    onto_bridge.protocol_gateway.as_mut().unwrap().listen = gateway.listen;
+    assert_eq!(
+        publish(&node.id, &[&onto_bridge]).await,
+        (
+            409,
+            Some(format!(
+                "rule swapped listens on {}: disable it, publish that and wait until the server applies it before turning it into a protocol gateway there or back",
+                gateway.listen
+            ))
+        )
+    );
+
+    // A server awaiting a replacement agent: what its agent last reported
+    // applying is forgotten, so it may run any configuration it was given.
+    let (native, disabled, gateway, refusal) = kinds("replaced");
+    let (node, _) = store.create_node(admin, "default", "replaced").unwrap();
+    assert_eq!(publish(&node.id, &[&native]).await, ok);
+    sync_applied(store, &node.id, desired(&node.id).await);
+    assert_eq!(publish(&node.id, &[&disabled]).await, ok);
+    sync_applied(store, &node.id, desired(&node.id).await);
+    let revision = store
+        .node_credential_status(admin, &node.id)
+        .unwrap()
+        .revision;
+    store
+        .revoke_node_credential(
+            admin,
+            &node.id,
+            relay_platform::credential::RevokeCredential {
+                operation_id: format!("revoke-replaced-{revision}"),
+                expected_revision: revision,
+                reason: "lost".into(),
+            },
+        )
+        .unwrap();
+    let other = forward("replaced-other", "127.0.0.1:9".parse().unwrap());
+    assert_eq!(publish(&node.id, &[&disabled, &other]).await, ok);
+    assert_eq!(publish(&node.id, &[&gateway, &other]).await, refusal);
+
+    // No agent ever connected.
+    let (native, disabled, gateway, _) = kinds("new");
+    let (node, _) = store.create_node(admin, "default", "new").unwrap();
+    assert_eq!(publish(&node.id, &[&native]).await, ok);
+    assert_eq!(publish(&node.id, &[&disabled]).await, ok);
+    assert_eq!(publish(&node.id, &[&gateway]).await, ok);
 }

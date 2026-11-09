@@ -310,6 +310,13 @@ enum Command {
         /// Acknowledge that a TLS reverse proxy protects a non-loopback listener.
         #[arg(long)]
         behind_tls_proxy: bool,
+        /// Keep each server's block records this many days after their latest
+        /// change (STATE/blocks.sqlite, outside backups and the recovery log).
+        #[arg(long,default_value_t=30,value_parser=clap::value_parser!(u32).range(1..=365))]
+        block_record_days: u32,
+        /// Keep at most this many block records per server, oldest change first to go.
+        #[arg(long,default_value_t=10000,value_parser=clap::value_parser!(u32).range(100..=100000))]
+        block_records_per_node: u32,
     },
     /// Enroll once, then synchronize configuration and meter real traffic.
     Agent {
@@ -333,10 +340,21 @@ enum Command {
         /// TLS still verifies the controller's name end to end.
         #[arg(long = "controller-address", value_name = "HOST:PORT")]
         controller_addresses: Vec<String>,
-        /// Send every controller request through this HTTP CONNECT proxy
-        /// (http://host:port). Environment proxy variables are never used.
+        /// Send every controller request through this proxy: http://host:port
+        /// (HTTP CONNECT), socks5://host:port (this server resolves the
+        /// controller's name) or socks5h://host:port (the proxy resolves it).
+        /// TLS still verifies the controller's name end to end. Environment
+        /// proxy variables are never used.
         #[arg(long, value_name = "URL", conflicts_with = "controller_addresses")]
         controller_proxy: Option<String>,
+        /// SOCKS5 user name and password for --controller-proxy, one per
+        /// line, in a file only the agent's user can read (mode 0600). Each
+        /// is 1 to 255 bytes; together at most 234 bytes with socks5://,
+        /// or 249 less the length of the panel's host name with socks5h://
+        /// (a non-ASCII name counts in its ASCII xn-- form; 246 when the
+        /// panel URL is an IPv4 address, 234 for IPv6).
+        #[arg(long, value_name = "PATH", requires = "controller_proxy")]
+        controller_proxy_credentials_file: Option<PathBuf>,
     },
     /// Run the same forwarding engine without a controller.
     Standalone {
@@ -1087,6 +1105,8 @@ async fn main() -> Result<()> {
             recovery_log,
             sync_batch_size,
             behind_tls_proxy,
+            block_record_days,
+            block_records_per_node,
         } => {
             ensure!(
                 listen.ip().is_loopback() || behind_tls_proxy,
@@ -1099,6 +1119,15 @@ async fn main() -> Result<()> {
                 .enable_recovery_log(&recovery_log.unwrap_or_else(|| state.join("recovery.log")))?;
             store.set_kind("controller")?;
             store.enable_history(&state.join("history.sqlite"))?;
+            // A block-record file that cannot be used is logged and the
+            // controller runs without records.
+            store.enable_block_records(
+                &state.join("blocks.sqlite"),
+                relay_platform::connections::Retention {
+                    days: block_record_days,
+                    per_node: block_records_per_node,
+                },
+            );
             if store.needs_bootstrap()? {
                 let password_path =
                     admin_password_file.unwrap_or_else(|| state.join("admin-password.secret"));
@@ -1124,6 +1153,12 @@ async fn main() -> Result<()> {
             tokio::spawn(relay_platform::federation::run(
                 store.clone(),
                 Duration::from_secs(60),
+                stop.clone(),
+            ));
+            // Saved-chain refreshes move on as soon as their servers report.
+            tokio::spawn(relay_platform::chain::run(
+                store.clone(),
+                Duration::from_secs(2),
                 stop.clone(),
             ));
             // Provider DNS: every 30 s, after the 90 s heartbeat window so that
@@ -1182,6 +1217,7 @@ async fn main() -> Result<()> {
             poll_seconds,
             controller_addresses,
             controller_proxy,
+            controller_proxy_credentials_file,
         } => {
             private_directory(&state)?;
             let store = Store::open(&state.join("agent.sqlite"))?;
@@ -1195,7 +1231,10 @@ async fn main() -> Result<()> {
                     tls_directory: Some(tls_directory.unwrap_or_else(|| state.join("tls"))),
                     poll_interval: Duration::from_secs(poll_seconds),
                     controller_addresses,
-                    controller_proxy,
+                    controller_proxy: controller_proxy.map(|url| agent::ControllerProxy {
+                        url,
+                        credentials_file: controller_proxy_credentials_file,
+                    }),
                 },
                 stop,
             )

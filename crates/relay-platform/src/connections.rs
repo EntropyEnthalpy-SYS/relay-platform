@@ -17,19 +17,30 @@
 //! every sync reply, asks for one rule's sessions with
 //! `SyncResponse::live_connection_requests` and for block records after a
 //! [`Cursor`], as for log lines ([`crate::logs`]). An entry that changes gets
-//! a new sequence number and is sent again; the controller ([`Kept`])
-//! replaces its copy, so nothing is counted twice.
+//! a new sequence number and is sent again; the controller keeps one copy
+//! per record in its block-record database, so nothing is counted twice.
+//!
+//! A controller that also sends `SyncResponse::connection_termination` may
+//! ask to end single sessions ([`Termination`]). Session ids count from 1 in
+//! every agent process, so a request names the [`Registry::instance`] too: a
+//! request for another instance is `stale_instance` and never ends a
+//! session of this run that happens to have the same id. Ending a session
+//! cancels its task, which closes its sockets on every protocol; the answer
+//! ([`TerminationResult`]) says `closed` only once the session left the
+//! registry.
 use crate::model::{ConnectionCounts, RuleRef, Target, canonical_ip, identifier, now_ms};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     net::{IpAddr, SocketAddr},
     ops::Bound,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
+    time::Duration,
 };
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 /// Sessions in one snapshot, newest first; the totals count all of them.
 pub const MAX_SESSIONS: usize = 200;
@@ -49,6 +60,45 @@ const SHARDS: usize = 16;
 /// Rules whose refusals are counted by reason. A stream of new rule ids
 /// stops being counted there; their records are still kept.
 const COUNTED_RULES: usize = 4096;
+/// Termination requests in one sync reply, and answers in one report.
+pub const MAX_TERMINATIONS: usize = 16;
+/// How long an agent waits for a cancelled session to end before it answers
+/// `timed_out`.
+pub const CLOSE_WAIT: Duration = Duration::from_secs(3);
+/// Answers an agent repeats when the controller asks again.
+const ANSWERED: usize = 64;
+const ID_BYTES: usize = 64;
+
+/// Whether a `udp` (else TCP) session of `rule` can be ended alone, fixed
+/// from the rule when the session is listed and never from its shown
+/// protocol, which changes as setup goes on. True only where ending a
+/// session was tested to stop its traffic on both sides (see
+/// docs/CONNECTIONS.md): plain TCP and UDP, TLS, a WebSocket or a multipath
+/// inbound, HTTP CONNECT, SOCKS5 and HTTP/2 CONNECT directly or inside TLS,
+/// TCP sessions with a PROXY header (plain, before the TLS handshake or
+/// inside TLS), MPTCP, with TLS, WebSocket or multipath towards the target.
+/// Not a protocol gateway's bridge sessions, whose client connection
+/// belongs to the gateway's engine; not a multipath inbound over WebSocket,
+/// whose joining paths' WebSocket connections end with the session that
+/// created it and not with its own; and not (untested) Shadowsocks, egress
+/// proxies, reverse tunnels, a proxy inbound inside WebSocket or multipath,
+/// or UDP sessions with PROXY headers.
+pub fn terminable(rule: &crate::model::Rule, udp: bool) -> bool {
+    let proxy_inbound = rule.inbound_socks5.is_some()
+        || rule.inbound_http_connect.is_some()
+        || rule.inbound_http2_connect.is_some();
+    let (websocket, multipath) = (
+        rule.inbound_websocket.is_some(),
+        rule.inbound_multipath.is_some(),
+    );
+    rule.protocol_gateway.is_none()
+        && rule.inbound_shadowsocks.is_none()
+        && rule.egress_proxy.is_none()
+        && rule.reverse_tunnel.is_none()
+        && !(websocket && multipath)
+        && !(proxy_inbound && (websocket || multipath))
+        && !(udp && rule.inbound_proxy.is_some())
+}
 
 /// Why a connection, UDP session or datagram was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -135,12 +185,90 @@ pub struct Report {
     /// Records changed after the controller's cursor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<BlockBatch>,
+    /// The agent run whose session ids the snapshots carry. Sent, with
+    /// `terminations`, only to a controller that sent
+    /// `SyncResponse::connection_termination`, since older ones reject
+    /// unknown fields here; its presence tells the controller this agent
+    /// ends single sessions.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance: String,
+    /// Answers to termination requests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub terminations: Vec<TerminationResult>,
 }
 impl Report {
     pub fn within_limits(&self) -> bool {
         self.snapshots.len() <= MAX_SNAPSHOTS
             && self.snapshots.iter().all(Snapshot::within_limits)
             && self.blocks.as_ref().is_none_or(BlockBatch::within_limits)
+            && (self.instance.is_empty()
+                || (self.instance.len() <= ID_BYTES && identifier(&self.instance)))
+            && self.terminations.len() <= MAX_TERMINATIONS
+            && self.terminations.iter().all(|t| {
+                t.id.len() <= ID_BYTES
+                    && t.outcome.len() <= NAME_BYTES
+                    && t.detail.chars().count() <= DETAIL_CHARS
+                    && t.detail.len() <= DETAIL_CHARS * 4
+            })
+    }
+}
+
+/// `SyncResponse::connection_terminations`: end session `session_id` of
+/// `rule_id` if it belongs to agent run `instance`. Sent by the controller,
+/// so unknown fields are ignored: a newer controller may add some.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Termination {
+    pub id: String,
+    pub rule_id: String,
+    pub instance: String,
+    pub session_id: u64,
+}
+
+/// What became of a [`Termination`]. `outcome` is one of
+/// [`Outcome::as_str`]; it is a string so that a newer agent's outcome does
+/// not fail an older controller's sync.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminationResult {
+    pub id: String,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// The session's task ended and it left the registry.
+    Closed,
+    /// No session of the rule has this id in this run: it already ended.
+    NotFound,
+    /// The request names another agent run; its sessions ended with it.
+    StaleInstance,
+    /// Sessions of this protocol cannot be ended one by one.
+    Unsupported,
+    /// Cancelled, but still open after [`CLOSE_WAIT`].
+    TimedOut,
+}
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::NotFound => "not_found",
+            Self::StaleInstance => "stale_instance",
+            Self::Unsupported => "unsupported",
+            Self::TimedOut => "timed_out",
+        }
+    }
+    pub fn parse(text: &str) -> Option<Self> {
+        [
+            Self::Closed,
+            Self::NotFound,
+            Self::StaleInstance,
+            Self::Unsupported,
+            Self::TimedOut,
+        ]
+        .into_iter()
+        .find(|o| o.as_str() == text)
     }
 }
 
@@ -210,6 +338,11 @@ pub struct Session {
     pub destination: String,
     pub upload_bytes: u64,
     pub download_bytes: u64,
+    /// Whether the agent can end this session alone ([`terminable`]). Sent,
+    /// like [`Report::instance`], only to a controller that said
+    /// `connection_termination`; absent means it cannot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub terminable: bool,
 }
 impl Session {
     fn within_limits(&self) -> bool {
@@ -329,14 +462,20 @@ pub fn protocol(rule: &crate::model::Rule, udp: bool) -> &'static str {
 
 /// Every open session of an agent.
 pub struct Registry {
+    /// New in every agent process; session ids are unique within it.
+    instance: String,
     next: AtomicU64,
     shards: [Mutex<HashMap<u64, Arc<Live>>>; SHARDS],
+    /// The latest answers, repeated when a request comes again.
+    answered: Mutex<VecDeque<TerminationResult>>,
 }
 impl Default for Registry {
     fn default() -> Self {
         Self {
+            instance: uuid::Uuid::new_v4().simple().to_string(),
             next: AtomicU64::new(1),
             shards: std::array::from_fn(|_| Mutex::default()),
+            answered: Mutex::default(),
         }
     }
 }
@@ -351,6 +490,12 @@ pub struct Live {
     upload: AtomicU64,
     download: AtomicU64,
     detail: Mutex<Detail>,
+    /// Cancelled to end the session from the panel.
+    cancel: CancellationToken,
+    /// Fixed when listed: see [`terminable`].
+    terminable: bool,
+    /// Tasks the session spawned; it stays listed until they ended.
+    work: TaskTracker,
 }
 struct Detail {
     protocol: &'static str,
@@ -361,14 +506,33 @@ struct Detail {
     destination: String,
 }
 
-/// Keeps a session listed until dropped.
+/// Keeps a session listed until dropped and the tasks it spawned ended.
 pub struct Tracked {
     registry: Arc<Registry>,
     live: Arc<Live>,
 }
 impl Drop for Tracked {
+    /// However the session's task ended, also by a panic or an abort without
+    /// [`Live::finish`]: what it spawned is cancelled, and the session stays
+    /// listed, so not `closed`, until that ended.
     fn drop(&mut self) {
-        lock(&self.registry.shards[self.live.id as usize % SHARDS]).remove(&self.live.id);
+        self.live.cancel.cancel();
+        self.live.work.close();
+        let (registry, id) = (self.registry.clone(), self.live.id);
+        let unlist = move || {
+            lock(&registry.shards[id as usize % SHARDS]).remove(&id);
+        };
+        let work = self.live.work.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) if !work.is_empty() => {
+                runtime.spawn(async move {
+                    work.wait().await;
+                    unlist();
+                });
+            }
+            // Ended, or no runtime is left to run what it spawned.
+            _ => unlist(),
+        }
     }
 }
 impl std::ops::Deref for Tracked {
@@ -379,13 +543,15 @@ impl std::ops::Deref for Tracked {
 }
 
 impl Registry {
-    /// Lists a new session of `rule` until the returned guard is dropped.
+    /// Lists a new session of `rule` until the returned guard is dropped;
+    /// `terminable` says whether it can be ended alone ([`terminable`]).
     pub fn track(
         self: &Arc<Self>,
         rule: &Arc<str>,
         protocol: &'static str,
         udp: bool,
         client: SocketAddr,
+        terminable: bool,
     ) -> Tracked {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let live = Arc::new(Live {
@@ -403,12 +569,96 @@ impl Registry {
                 via: None,
                 destination: String::new(),
             }),
+            cancel: CancellationToken::new(),
+            terminable,
+            work: TaskTracker::new(),
         });
         lock(&self.shards[id as usize % SHARDS]).insert(id, live.clone());
         Tracked {
             registry: self.clone(),
             live,
         }
+    }
+    /// This agent run; see [`Termination`].
+    pub fn instance(&self) -> &str {
+        &self.instance
+    }
+    fn get(&self, id: u64) -> Option<Arc<Live>> {
+        lock(&self.shards[id as usize % SHARDS]).get(&id).cloned()
+    }
+    /// Ends the sessions the controller asked for and answers each request:
+    /// `closed` once, within [`CLOSE_WAIT`], the session's task ended (it
+    /// left the registry) and so did every task it spawned (its task group
+    /// is empty), whether or not the task called [`Live::finish`].
+    /// A request answered before gets the same answer again.
+    pub async fn terminate(&self, requests: &[Termination]) -> Vec<TerminationResult> {
+        let mut results: Vec<(String, Outcome, String)> = vec![];
+        let mut waiting: Vec<(usize, Arc<Live>)> = vec![];
+        let mut repeated: Vec<TerminationResult> = vec![];
+        for request in requests.iter().take(MAX_TERMINATIONS) {
+            if let Some(answer) = lock(&self.answered)
+                .iter()
+                .find(|a| a.id == request.id)
+                .cloned()
+            {
+                repeated.push(answer);
+                continue;
+            }
+            let outcome = if request.instance != self.instance {
+                Outcome::StaleInstance
+            } else {
+                match self
+                    .get(request.session_id)
+                    .filter(|live| *live.rule == *request.rule_id)
+                {
+                    None => Outcome::NotFound,
+                    Some(live) if !live.terminable => Outcome::Unsupported,
+                    Some(live) => {
+                        live.cancel.cancel();
+                        waiting.push((results.len(), live));
+                        Outcome::TimedOut
+                    }
+                }
+            };
+            results.push((request.id.clone(), outcome, String::new()));
+        }
+        let deadline = tokio::time::Instant::now() + CLOSE_WAIT;
+        loop {
+            waiting.retain(|(index, live)| {
+                let ended = self.get(live.id).is_none() && live.work.is_empty();
+                if ended {
+                    results[*index].1 = Outcome::Closed;
+                }
+                !ended
+            });
+            if waiting.is_empty() || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for (index, _) in waiting {
+            results[index].2 = format!(
+                "the session was cancelled but had not ended after {} s",
+                CLOSE_WAIT.as_secs()
+            );
+        }
+        let answers: Vec<TerminationResult> = results
+            .into_iter()
+            .map(|(id, outcome, detail)| TerminationResult {
+                id,
+                outcome: outcome.as_str().to_owned(),
+                detail,
+            })
+            .collect();
+        let mut answered = lock(&self.answered);
+        for answer in &answers {
+            answered.push_back(answer.clone());
+            if answered.len() > ANSWERED {
+                answered.pop_front();
+            }
+        }
+        repeated.extend(answers);
+        repeated
     }
     /// Open sessions of every rule.
     pub fn len(&self) -> usize {
@@ -417,8 +667,9 @@ impl Registry {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    /// `rule`'s open TCP and UDP sessions and the newest [`MAX_SESSIONS`].
-    pub fn snapshot(&self, rule: &str) -> (u64, u64, Vec<Session>) {
+    /// `rule`'s open TCP and UDP sessions and the newest [`MAX_SESSIONS`];
+    /// with `terminable` whether each can be ended alone.
+    pub fn snapshot(&self, rule: &str, terminable: bool) -> (u64, u64, Vec<Session>) {
         let mut found: Vec<Arc<Live>> = vec![];
         for shard in &self.shards {
             found.extend(
@@ -432,13 +683,50 @@ impl Registry {
         let tcp = found.len() as u64 - udp;
         found.sort_unstable_by_key(|live| std::cmp::Reverse((live.started_ms, live.id)));
         found.truncate(MAX_SESSIONS);
-        (tcp, udp, found.iter().map(|live| live.view()).collect())
+        (
+            tcp,
+            udp,
+            found.iter().map(|live| live.view(terminable)).collect(),
+        )
     }
 }
 
 impl Live {
+    /// This session's number, unique within its engine.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
     pub fn rule(&self) -> &Arc<str> {
         &self.rule
+    }
+    /// Completes when the panel ended the session; a session's task selects
+    /// on it next to its rule's cancellation.
+    pub fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
+        self.cancel.cancelled()
+    }
+    /// A token for a task the session spawned, cancelled with the session.
+    pub fn child_token(&self) -> CancellationToken {
+        self.cancel.child_token()
+    }
+    /// Where the session spawns its tasks, so that it stays listed, and is
+    /// not reported `closed`, until they ended. Closing the group does not
+    /// refuse later spawns, so only these spawn into it, each while the
+    /// group cannot have emptied: the engine's TCP session task before it
+    /// ends (a SOCKS5 UDP association, multipath drivers, the WebSocket
+    /// drivers of its client and target sides, HTTP/2 CONNECT stream
+    /// handlers through its executor), and tasks already in the group
+    /// (HTTP/2 tunnels, multipath path workers, SOCKS5 UDP reply readers).
+    pub(crate) fn tasks(&self) -> TaskTracker {
+        self.work.clone()
+    }
+    /// Called by the session's task as it ends: cancels what the session
+    /// spawned and waits for it, so that the engine's shutdown, which waits
+    /// for session tasks, also waits for what they spawned. Dropping the
+    /// [`Tracked`] guard does the rest without it.
+    pub async fn finish(&self) {
+        self.cancel.cancel();
+        self.work.close();
+        self.work.wait().await;
     }
     pub fn add_upload(&self, bytes: u64) {
         self.upload.fetch_add(bytes, Ordering::Relaxed);
@@ -473,7 +761,7 @@ impl Live {
         detail.via = target.via.clone();
         detail.remote = remote;
     }
-    fn view(&self) -> Session {
+    fn view(&self, terminable: bool) -> Session {
         let detail = lock(&self.detail);
         Session {
             id: self.id,
@@ -492,6 +780,7 @@ impl Live {
             destination: detail.destination.clone(),
             upload_bytes: self.upload.load(Ordering::Relaxed),
             download_bytes: self.download.load(Ordering::Relaxed),
+            terminable: terminable && self.terminable,
         }
     }
 }
@@ -666,73 +955,6 @@ impl Blocks {
     }
 }
 
-/// The controller's copy of one node's latest block records.
-#[derive(Default)]
-pub struct Kept {
-    cursor: Cursor,
-    arrivals: u64,
-    entries: HashMap<(String, u64), (u64, Block)>,
-    /// Records by arrival of their latest change.
-    order: BTreeMap<u64, (String, u64)>,
-}
-impl Kept {
-    /// Keeps the records of `batch` newer than the copy and returns where
-    /// the copy now ends. A record sent again replaces the kept one.
-    pub fn add(&mut self, batch: Option<BlockBatch>) -> Cursor {
-        if let Some(batch) = batch.filter(|b| identifier(&b.stream)) {
-            let mut last = if batch.stream == self.cursor.stream {
-                self.cursor.seq
-            } else {
-                0
-            };
-            for block in batch.entries.into_iter().take(BATCH) {
-                if block.seq <= last {
-                    continue;
-                }
-                last = block.seq;
-                let key = (batch.stream.clone(), block.id);
-                if let Some((arrival, _)) = self.entries.remove(&key) {
-                    self.order.remove(&arrival);
-                }
-                self.arrivals += 1;
-                self.order.insert(self.arrivals, key.clone());
-                self.entries.insert(key, (self.arrivals, block));
-                while self.entries.len() > KEEP {
-                    let Some((_, oldest)) = self.order.pop_first() else {
-                        break;
-                    };
-                    self.entries.remove(&oldest);
-                }
-            }
-            self.cursor = Cursor {
-                stream: batch.stream,
-                seq: last,
-            };
-        }
-        self.cursor.clone()
-    }
-    pub fn cursor(&self) -> Cursor {
-        self.cursor.clone()
-    }
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-    /// Up to `limit` records that `keep` accepts, latest change first.
-    pub fn read(&self, keep: impl Fn(&Block) -> bool, limit: usize) -> Vec<Block> {
-        self.order
-            .values()
-            .rev()
-            .filter_map(|key| self.entries.get(key).map(|(_, block)| block))
-            .filter(|block| keep(block))
-            .take(limit)
-            .cloned()
-            .collect()
-    }
-}
-
 /// `GET /api/v1/nodes/{node}/rules/{rule}/connections`.
 #[derive(Clone, Debug, Serialize)]
 pub struct RuleView {
@@ -742,10 +964,52 @@ pub struct RuleView {
     /// When the agent took the sessions shown; absent before the first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub taken_at_ms: Option<i64>,
+    /// The agent run the session ids belong to; absent from agents that
+    /// cannot end single sessions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    /// The user may end sessions of this rule here now: they may write, the
+    /// server is online and its agent ends single sessions.
+    pub can_terminate: bool,
     pub totals: Totals,
-    pub sessions: Vec<Session>,
+    pub sessions: Vec<SessionView>,
     pub truncated: bool,
     pub counters: RuleCounters,
+}
+/// A listed session and whether the panel may offer to end it.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionView {
+    #[serde(flatten)]
+    pub session: Session,
+    pub terminable: bool,
+}
+/// `POST /api/v1/nodes/{node}/rules/{rule}/connections/terminate` and
+/// `GET .../connections/terminations/{id}`: one request to end a session.
+#[derive(Clone, Debug, Serialize)]
+pub struct TerminationView {
+    pub id: String,
+    pub node_id: String,
+    pub rule_id: String,
+    pub instance: String,
+    pub session_id: u64,
+    /// As the latest snapshot listed the session; empty when it did not.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<SocketAddr>,
+    /// `pending` (waiting for the agent), an [`Outcome`] the agent or the
+    /// controller determined, or `expired`: no answer within 30 s, so the
+    /// controller does not know whether the session ended.
+    pub state: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    pub requested_by: String,
+    pub requested_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<i64>,
+    /// The same unfinished or answered request existed: nothing new was sent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub duplicate: bool,
 }
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct Totals {
@@ -776,6 +1040,35 @@ pub struct BlocksView {
     /// False while the node's agent has not reported that it keeps records.
     pub supported: bool,
     pub blocks: Vec<BlockView>,
+    /// Pass as `before` for the next, older page; absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_before: Option<i64>,
+    /// How long and how many records the controller keeps.
+    pub retention: Retention,
+    /// The controller could not open its block-record file (see its log):
+    /// it runs without records until it restarts, and `blocks` is empty.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
+}
+/// The controller keeps each server's block records for `days` after their
+/// latest change, and at most `per_node` of them, the oldest change first
+/// to go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Retention {
+    pub days: u32,
+    pub per_node: u32,
+}
+impl Retention {
+    pub const DAYS: std::ops::RangeInclusive<u32> = 1..=365;
+    pub const PER_NODE: std::ops::RangeInclusive<u32> = 100..=100_000;
+}
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            days: 30,
+            per_node: 10_000,
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct BlockView {
@@ -817,14 +1110,14 @@ mod tests {
         let (a, b): (Arc<str>, Arc<str>) = ("a".into(), "b".into());
         // Returned normally.
         {
-            let tracked = registry.track(&a, "tcp", false, client(1));
+            let tracked = registry.track(&a, "tcp", false, client(1), true);
             tracked.add_upload(5);
-            assert_eq!(registry.snapshot("a").0, 1);
+            assert_eq!(registry.snapshot("a", true).0, 1);
         }
         assert!(registry.is_empty());
         // An error returned early with `?`.
         let failing = || -> Result<(), ()> {
-            let _tracked = registry.track(&a, "tcp", false, client(2));
+            let _tracked = registry.track(&a, "tcp", false, client(2), true);
             Err(())?;
             Ok(())
         };
@@ -834,7 +1127,7 @@ mod tests {
         let shared = registry.clone();
         let rule = a.clone();
         let panicked = std::thread::spawn(move || {
-            let _tracked = shared.track(&rule, "tcp", false, client(3));
+            let _tracked = shared.track(&rule, "tcp", false, client(3), true);
             panic!("session task failed");
         })
         .join();
@@ -848,7 +1141,7 @@ mod tests {
         runtime.block_on(async {
             let (shared, rule) = (registry.clone(), a.clone());
             let waiting = async move {
-                let _tracked = shared.track(&rule, "udp", true, client(4));
+                let _tracked = shared.track(&rule, "udp", true, client(4), true);
                 std::future::pending::<()>().await;
             };
             let cancel = tokio_util::sync::CancellationToken::new();
@@ -857,7 +1150,7 @@ mod tests {
             let (shared, rule) = (registry.clone(), a.clone());
             let (started, ready) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(async move {
-                let _tracked = shared.track(&rule, "tcp", false, client(5));
+                let _tracked = shared.track(&rule, "tcp", false, client(5), true);
                 let _ = started.send(());
                 std::future::pending::<()>().await;
             });
@@ -868,14 +1161,14 @@ mod tests {
         });
         assert!(registry.is_empty());
         // Each guard removes its own session only.
-        let first = registry.track(&a, "tcp", false, client(6));
-        let second = registry.track(&b, "udp", true, client(7));
-        let third = registry.track(&a, "udp", true, client(8));
+        let first = registry.track(&a, "tcp", false, client(6), true);
+        let second = registry.track(&b, "udp", true, client(7), true);
+        let third = registry.track(&a, "udp", true, client(8), true);
         drop(first);
-        let (tcp, udp, sessions) = registry.snapshot("a");
+        let (tcp, udp, sessions) = registry.snapshot("a", true);
         assert_eq!((tcp, udp, sessions.len()), (0, 1, 1));
         assert_eq!(sessions[0].client, client(8));
-        assert_eq!(registry.snapshot("b").1, 1);
+        assert_eq!(registry.snapshot("b", true).1, 1);
         drop((second, third));
         assert!(registry.is_empty());
     }
@@ -886,9 +1179,9 @@ mod tests {
         let rule: Arc<str> = "web".into();
         let other: Arc<str> = "other".into();
         let held: Vec<Tracked> = (0..MAX_SESSIONS as u16 + 25)
-            .map(|i| registry.track(&rule, "tcp", i % 5 == 0, client(i)))
+            .map(|i| registry.track(&rule, "tcp", i % 5 == 0, client(i), true))
             .collect();
-        let _elsewhere = registry.track(&other, "tcp", false, client(9));
+        let _elsewhere = registry.track(&other, "tcp", false, client(9), true);
         let newest = held.last().unwrap();
         newest.set_client(client(40_000));
         newest.set_protocol("socks5");
@@ -905,7 +1198,7 @@ mod tests {
         newest.add_upload(10);
         newest.add_upload(5);
         newest.add_download(7);
-        let (tcp, udp, sessions) = registry.snapshot("web");
+        let (tcp, udp, sessions) = registry.snapshot("web", true);
         assert_eq!((tcp + udp, udp), (MAX_SESSIONS as u64 + 25, 45));
         assert_eq!(sessions.len(), MAX_SESSIONS);
         // Newest first: the last registered, then the one before.
@@ -936,6 +1229,8 @@ mod tests {
                 })
                 .collect(),
             blocks: None,
+            instance: registry.instance().to_owned(),
+            terminations: vec![],
         };
         assert!(report.within_limits(), "built reports stay within bounds");
         let mut over = report.clone();
@@ -948,7 +1243,7 @@ mod tests {
         over.snapshots[0].sessions[0].destination = "y".repeat(ADDRESS_BYTES + 1);
         assert!(!over.within_limits());
         drop(held);
-        assert_eq!(registry.snapshot("web"), (0, 0, vec![]));
+        assert_eq!(registry.snapshot("web", true), (0, 0, vec![]));
     }
 
     fn ip(last: u8) -> IpAddr {
@@ -1098,62 +1393,399 @@ mod tests {
         assert_eq!(lock(&blocks.0).entries.len(), KEEP);
     }
 
-    fn batch(stream: &str, entries: &[(u64, u64, u64)]) -> Option<BlockBatch> {
-        Some(BlockBatch {
-            stream: stream.into(),
-            entries: entries
+    #[test]
+    fn a_session_ends_only_for_its_own_run_and_rule_and_answers_repeat() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let registry = Arc::new(Registry::default());
+            let (web, other): (Arc<str>, Arc<str>) = ("web".into(), "other".into());
+            // A session task as the engine runs it: it ends when cancelled.
+            let run = |rule: &Arc<str>, protocol: &'static str, terminable: bool, port: u16| {
+                let tracked = registry.track(rule, protocol, false, client(port), terminable);
+                let id = tracked.id;
+                tokio::spawn(async move {
+                    tracked.cancelled().await;
+                    tracked.finish().await;
+                });
+                id
+            };
+            let first = run(&web, "tcp", true, 1);
+            let second = run(&web, "tcp", true, 2);
+            let bridged = run(&web, "gateway", false, 3);
+            let elsewhere = run(&other, "tcp", true, 4);
+            let instance = registry.instance().to_owned();
+            assert_eq!(instance.len(), 32);
+            assert_ne!(
+                instance,
+                Registry::default().instance(),
+                "every run is another instance"
+            );
+            let ask = |id: &str, rule: &str, instance: &str, session_id: u64| Termination {
+                id: id.into(),
+                rule_id: rule.into(),
+                instance: instance.into(),
+                session_id,
+            };
+            let outcomes = |answers: Vec<TerminationResult>| -> Vec<(String, String)> {
+                answers.into_iter().map(|a| (a.id, a.outcome)).collect()
+            };
+            let pair = |id: &str, outcome: &str| (id.to_owned(), outcome.to_owned());
+            // The same session id of an earlier run, another rule's session
+            // with that id, and a gateway bridge: nothing ends.
+            let answers = registry
+                .terminate(&[
+                    ask("r1", "web", "0123456789abcdef0123456789abcdef", first),
+                    ask("r2", "web", &instance, elsewhere),
+                    ask("r3", "web", &instance, bridged),
+                    ask("r4", "web", &instance, 999),
+                ])
+                .await;
+            assert_eq!(
+                outcomes(answers),
+                [
+                    pair("r1", "stale_instance"),
+                    pair("r2", "not_found"),
+                    pair("r3", "unsupported"),
+                    pair("r4", "not_found"),
+                ]
+            );
+            assert_eq!(registry.snapshot("web", true).0, 3);
+            assert_eq!(registry.snapshot("other", true).0, 1);
+            // What a session shows as its protocol changes as setup goes on
+            // (a gateway's bridge is a SOCKS5 server, and a UDP association
+            // shows as `socks5_udp`); whether it can end does not.
+            let shown = |terminable: bool| -> Vec<(u64, bool)> {
+                let (_, _, sessions) = registry.snapshot("web", terminable);
+                sessions.iter().map(|s| (s.id, s.terminable)).collect()
+            };
+            assert_eq!(
+                shown(true),
+                [(bridged, false), (second, true), (first, true)]
+            );
+            assert!(shown(false).iter().all(|(_, can)| !can), "only when asked");
+            registry.get(bridged).unwrap().set_protocol("socks5_udp");
+            registry.get(second).unwrap().set_protocol("gateway");
+            let answers = registry
+                .terminate(&[ask("r3b", "web", &instance, bridged)])
+                .await;
+            assert_eq!(outcomes(answers), [pair("r3b", "unsupported")]);
+            assert_eq!(shown(true)[0], (bridged, false));
+            // The right one ends; the others stay.
+            let answers = registry
+                .terminate(&[ask("r5", "web", &instance, first)])
+                .await;
+            assert_eq!(outcomes(answers), [pair("r5", "closed")]);
+            let left: Vec<u64> = registry
+                .snapshot("web", true)
+                .2
                 .iter()
-                .map(|&(id, seq, count)| Block {
-                    id,
-                    seq,
-                    rule_id: "web".into(),
-                    protocol: "tcp".into(),
-                    source: ip(id as u8),
-                    reason: "source_denied".into(),
-                    detail: String::new(),
-                    first_ms: 0,
-                    last_ms: seq as i64,
-                    count,
-                })
-                .collect(),
-        })
+                .map(|s| s.id)
+                .collect();
+            assert_eq!(left, [bridged, second]);
+            // Asked again (a lost reply), the request gets the same answer;
+            // a new request for the ended session finds nothing.
+            let answers = registry
+                .terminate(&[
+                    ask("r5", "web", &instance, first),
+                    ask("r6", "web", &instance, first),
+                ])
+                .await;
+            assert_eq!(
+                outcomes(answers),
+                [pair("r5", "closed"), pair("r6", "not_found")]
+            );
+            // A session that does not end in time is reported as such.
+            let stuck = registry.track(&web, "tcp", false, client(5), true);
+            let started = tokio::time::Instant::now();
+            let answers = registry
+                .terminate(&[ask("r7", "web", &instance, stuck.id)])
+                .await;
+            assert!(started.elapsed() >= CLOSE_WAIT);
+            assert_eq!(answers[0].outcome, "timed_out");
+            assert!(answers[0].detail.contains("had not ended"));
+            drop(stuck);
+            let report = Report {
+                instance,
+                terminations: (0..=MAX_TERMINATIONS)
+                    .map(|i| TerminationResult {
+                        id: format!("r{i}"),
+                        outcome: "closed".into(),
+                        detail: String::new(),
+                    })
+                    .collect(),
+                ..Report::default()
+            };
+            assert!(!report.within_limits(), "at most 16 answers");
+            let bad = Report {
+                instance: "../x".into(),
+                ..Report::default()
+            };
+            assert!(!bad.within_limits());
+        });
     }
 
     #[test]
-    fn the_controller_keeps_each_record_once_through_resends_updates_and_restarts() {
-        let mut kept = Kept::default();
-        assert_eq!(kept.add(None), Cursor::default());
-        assert_eq!(kept.add(batch("a", &[(1, 1, 1), (2, 2, 1)])).seq, 2);
-        // A lost reply: the agent sends the same records again, plus a newer one.
-        let cursor = kept.add(batch("a", &[(1, 1, 1), (2, 2, 1), (3, 3, 1)]));
-        assert_eq!((cursor.stream.as_str(), cursor.seq), ("a", 3));
-        assert_eq!(kept.len(), 3);
-        // Record 1 grew: it comes again with a new sequence number and
-        // replaces the kept copy instead of adding to it.
-        kept.add(batch("a", &[(1, 4, 5)]));
-        kept.add(batch("a", &[(1, 4, 5)]));
-        assert_eq!(kept.len(), 3);
-        let read = kept.read(|_| true, 10);
-        let seen: Vec<_> = read.iter().map(|b| (b.id, b.count)).collect();
-        assert_eq!(seen, [(1, 5), (3, 1), (2, 1)], "latest change first");
-        // The agent restarted: a new stream starts again at 1 and is kept
-        // next to the old records.
-        assert_eq!(kept.add(batch("b", &[(1, 1, 2)])).seq, 1);
-        assert_eq!(kept.len(), 4);
-        assert_eq!(kept.read(|b| b.count == 2, 10).len(), 1);
-        assert_eq!(kept.read(|_| true, 2).len(), 2);
-        // An invalid stream name is ignored.
-        assert_eq!(kept.add(batch("../x", &[(9, 9, 9)])).stream, "b");
-        // At most KEEP records, the oldest change dropped first.
-        let many: Vec<(u64, u64, u64)> = (2..=KEEP as u64 + 1).map(|i| (i, i, 1)).collect();
-        for chunk in many.chunks(BATCH) {
-            kept.add(batch("b", chunk));
+    fn a_session_is_closed_only_after_what_it_spawned_ended_however_its_task_ended() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let registry = Arc::new(Registry::default());
+            let web: Arc<str> = "web".into();
+            let instance = registry.instance().to_owned();
+            let ask = |id: &str, session_id: u64| Termination {
+                id: id.into(),
+                rule_id: "web".into(),
+                instance: instance.clone(),
+                session_id,
+            };
+            let listed = |id: u64| {
+                let (_, _, sessions) = registry.snapshot("web", true);
+                sessions.iter().any(|s| s.id == id)
+            };
+            // The session's task ends without `finish`: dropped, by a panic,
+            // or aborted. One task it spawned only ends when released, one
+            // when the session is cancelled.
+            for (round, way) in ["drop", "panic", "abort"].into_iter().enumerate() {
+                let tracked = registry.track(&web, "tcp", false, client(20 + round as u16), true);
+                let id = tracked.id;
+                let (release, released) = tokio::sync::oneshot::channel::<()>();
+                tracked.tasks().spawn(async move {
+                    let _ = released.await;
+                });
+                let token = tracked.child_token();
+                let cancelled = tracked
+                    .tasks()
+                    .spawn(async move { token.cancelled().await });
+                match way {
+                    "drop" => drop(tracked),
+                    "panic" => {
+                        let task = tokio::spawn(async move {
+                            let _tracked = tracked;
+                            panic!("a session task failed");
+                        });
+                        assert!(task.await.unwrap_err().is_panic());
+                    }
+                    _ => {
+                        let task = tokio::spawn(async move {
+                            let _tracked = tracked;
+                            std::future::pending::<()>().await;
+                        });
+                        tokio::task::yield_now().await;
+                        task.abort();
+                        assert!(task.await.unwrap_err().is_cancelled());
+                    }
+                }
+                tokio::time::timeout(Duration::from_secs(5), cancelled)
+                    .await
+                    .expect("what the session spawned is cancelled")
+                    .unwrap();
+                assert!(listed(id), "{way}: listed while a task it spawned runs");
+                let answers = registry.terminate(&[ask(&format!("{way}-1"), id)]).await;
+                assert_eq!(answers[0].outcome, "timed_out", "{way}");
+                assert!(listed(id), "{way}");
+                // Released while a request waits: that request gets `closed`.
+                let again = [ask(&format!("{way}-2"), id)];
+                let (answers, ()) = tokio::join!(registry.terminate(&again), async {
+                    release.send(()).unwrap()
+                });
+                assert_eq!(answers[0].outcome, "closed", "{way}");
+                assert!(!listed(id), "{way}");
+            }
+            assert!(registry.is_empty());
+        });
+    }
+
+    #[test]
+    fn only_rules_whose_sessions_were_tested_to_end_alone_say_so() {
+        let base: crate::model::Rule = serde_json::from_value(serde_json::json!({
+            "id": "r", "tenant_id": "t", "owner_id": "o", "name": "n",
+            "listen": "127.0.0.1:1", "protocol": "both", "targets": [{"address": "x:1"}],
+            "quota_bytes": null, "expires_at_ms": null, "rate_bytes_per_sec": null, "meter_epoch": "e",
+        }))
+        .unwrap();
+        let with = |change: &dyn Fn(&mut crate::model::Rule)| {
+            let mut rule = base.clone();
+            change(&mut rule);
+            rule
+        };
+        let shadowsocks = |udp_over_tcp: bool, protocol: crate::model::Protocol| {
+            with(&move |rule| {
+                rule.protocol = protocol;
+                rule.inbound_shadowsocks = Some(crate::shadowsocks::ServerConfig {
+                    method: crate::shadowsocks::Method::Blake3Aes128Gcm,
+                    password: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+                    allow_private_destinations: false,
+                    udp_over_tcp,
+                })
+            })
+        };
+        let not = [
+            (
+                "protocol gateway",
+                with(&|rule| {
+                    rule.protocol_gateway = Some(crate::gateway::Config {
+                        listen: "127.0.0.1:2".parse().unwrap(),
+                        protocol: crate::gateway::WireProtocol::Vless {
+                            uuid: "bf000d23-0752-40b4-affe-68f7707a9661".into(),
+                            vision: false,
+                        },
+                        security: crate::gateway::Security::Certificate {
+                            identity: "server".into(),
+                            server_name: None,
+                        },
+                        allow_private_destinations: false,
+                    })
+                }),
+            ),
+            (
+                "Shadowsocks TCP",
+                shadowsocks(false, crate::model::Protocol::Tcp),
+            ),
+            (
+                "Shadowsocks UDP over TCP",
+                shadowsocks(true, crate::model::Protocol::Tcp),
+            ),
+            (
+                "Shadowsocks UDP",
+                shadowsocks(false, crate::model::Protocol::Udp),
+            ),
+            (
+                "egress proxy",
+                with(&|rule| {
+                    rule.egress_proxy = Some(
+                        serde_json::from_value(
+                            serde_json::json!({"kind": "socks5", "servers": ["127.0.0.1:1080"]}),
+                        )
+                        .unwrap(),
+                    )
+                }),
+            ),
+            (
+                "reverse tunnel public side",
+                with(&|rule| rule.reverse_tunnel = Some("tunnel".into())),
+            ),
+            (
+                "SOCKS5 inside WebSocket",
+                with(&|rule| {
+                    rule.protocol = crate::model::Protocol::Tcp;
+                    rule.inbound_socks5 =
+                        Some(serde_json::from_value(serde_json::json!({})).unwrap());
+                    rule.inbound_websocket = Some(crate::model::WebSocketServer {
+                        path: "/w".into(),
+                        host: None,
+                        allowed_origins: vec![],
+                    });
+                }),
+            ),
+            (
+                "HTTP CONNECT inside multipath",
+                with(&|rule| {
+                    rule.protocol = crate::model::Protocol::Tcp;
+                    rule.inbound_http_connect =
+                        Some(serde_json::from_value(serde_json::json!({})).unwrap());
+                    rule.inbound_multipath = Some(crate::multipath::ServerConfig {
+                        limits: Default::default(),
+                        max_paths: 2,
+                        allow_replication: false,
+                    });
+                }),
+            ),
+            (
+                "multipath inbound over WebSocket",
+                with(&|rule| {
+                    rule.protocol = crate::model::Protocol::Tcp;
+                    rule.inbound_tls = Some(crate::model::TlsServer {
+                        identity: "c".into(),
+                        client_ca: Some("root".into()),
+                    });
+                    rule.inbound_websocket = Some(crate::model::WebSocketServer {
+                        path: "/w".into(),
+                        host: None,
+                        allowed_origins: vec![],
+                    });
+                    rule.inbound_multipath = Some(crate::multipath::ServerConfig {
+                        limits: Default::default(),
+                        max_paths: 2,
+                        allow_replication: false,
+                    });
+                }),
+            ),
+        ];
+        for (name, rule) in &not {
+            assert!(
+                !terminable(rule, false) && !terminable(rule, true),
+                "{name}"
+            );
         }
-        assert_eq!(kept.len(), KEEP);
-        assert!(
-            kept.read(|b| b.count == 5, KEEP).is_empty(),
-            "stream a's records were the oldest"
-        );
+        // PROXY headers: TCP sessions of a TCP and UDP rule can end alone,
+        // its UDP sessions cannot.
+        let proxied = with(&|rule| {
+            rule.inbound_proxy = Some(
+                serde_json::from_value(serde_json::json!({
+                    "version": "v2", "trusted_sources": ["127.0.0.1/32"],
+                }))
+                .unwrap(),
+            )
+        });
+        assert!(terminable(&proxied, false) && !terminable(&proxied, true));
+        assert!(terminable(&base, true));
+        let yes = [
+            ("plain TCP", base.clone()),
+            (
+                "TLS with a PROXY header inside",
+                with(&|rule| {
+                    rule.protocol = crate::model::Protocol::Tcp;
+                    rule.inbound_tls = Some(crate::model::TlsServer {
+                        identity: "c".into(),
+                        client_ca: None,
+                    });
+                    rule.inbound_proxy = Some(
+                        serde_json::from_value(serde_json::json!({
+                            "version": "v2", "trusted_sources": ["127.0.0.1/32"],
+                            "placement": "inside_tls",
+                        }))
+                        .unwrap(),
+                    );
+                }),
+            ),
+            (
+                "SOCKS5",
+                with(&|rule| {
+                    rule.inbound_socks5 =
+                        Some(serde_json::from_value(serde_json::json!({})).unwrap())
+                }),
+            ),
+            (
+                "WebSocket inbound",
+                with(&|rule| {
+                    rule.protocol = crate::model::Protocol::Tcp;
+                    rule.inbound_websocket = Some(crate::model::WebSocketServer {
+                        path: "/w".into(),
+                        host: None,
+                        allowed_origins: vec![],
+                    });
+                }),
+            ),
+            (
+                "multipath inbound",
+                with(&|rule| {
+                    rule.protocol = crate::model::Protocol::Tcp;
+                    rule.inbound_multipath = Some(crate::multipath::ServerConfig {
+                        limits: Default::default(),
+                        max_paths: 2,
+                        allow_replication: false,
+                    });
+                }),
+            ),
+        ];
+        for (name, rule) in &yes {
+            assert!(terminable(rule, false), "{name}");
+        }
     }
 
     #[test]

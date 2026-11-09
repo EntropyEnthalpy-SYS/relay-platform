@@ -10,6 +10,12 @@ use tokio_util::sync::CancellationToken;
 
 pub const PASSWORD: &str = "test-password-only-29x!";
 pub fn free_address() -> SocketAddr {
+    free_address_on(std::net::Ipv4Addr::LOCALHOST)
+}
+/// A port free for TCP and UDP on loopback address `ip`, tried on `ip`
+/// itself: a probe bound on 127.0.0.1 is one some sandboxes mirror and hold
+/// for a moment after it closes.
+pub fn free_address_on(ip: std::net::Ipv4Addr) -> SocketAddr {
     use std::sync::atomic::{AtomicU32, Ordering};
     // Keep test listeners outside the usual ephemeral client-port range.
     // A process-local counter avoids two tests in the same binary randomly
@@ -21,8 +27,7 @@ pub fn free_address() -> SocketAddr {
     for _ in 0..4_500 {
         let slot = NEXT.fetch_add(1, Ordering::Relaxed) % 4_500;
         let port = (12_000 + (start - 12_000 + slot * 4) % 18_000) as u16;
-        let Ok(listener) = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-        else {
+        let Ok(listener) = std::net::TcpListener::bind((ip, port)) else {
             continue;
         };
         let address = listener.local_addr().unwrap();

@@ -10,6 +10,7 @@
 - 同一控制器的完整 `recovery.log`，从文件头到最新已提交记录。
 - 该日志相邻的 `recovery.log.head.json`，它声明最新事务序号、提交字节数、数据库结构校验值和日志链校验值。
 - Agent 私有状态库、证书、CA、私钥另行保护；控制器备份不包含这些节点文件。
+- 状态目录中的 `history.sqlite`（7 天图表）和 `blocks.sqlite`（拦截记录）不在 `relay backup` 备份和恢复日志内，`relay restore` 也不恢复它们；丢失只影响图表和排障记录，不影响配置、计量和审计。需要保留拦截记录时，在控制器停止后单独复制 `blocks.sqlite`（连同可能存在的 `blocks.sqlite-wal`），并保持 0600 权限；记录含来源 IP，属于个人数据。
 
 `relay server` 默认把日志写到 `STATE/recovery.log`。可用 `--recovery-log /private-volume/controller-recovery.log` 指定另一个已存在的目录，相应进度清单会命名为 `controller-recovery.log.head.json`。目录不能由组或其他用户写入，日志和清单要求私有权限 0600。日志持有独占文件锁，恢复命令不能同时读取仍在运行的日志写入器。
 

@@ -305,6 +305,9 @@ struct Control {
     sessions: Sessions,
     responses: Responses,
     datagrams: StdMutex<HashMap<u32, mpsc::Sender<Vec<u8>>>>,
+    /// Why the private server's firewall refused a stream or association
+    /// that is still open or awaited here.
+    refusals: StdMutex<HashMap<u32, String>>,
     next_id: AtomicU32,
     cancel: CancellationToken,
 }
@@ -516,6 +519,9 @@ impl Server {
             control.responses.lock().await.remove(&id);
             stream_cancel.cancel();
             let _ = write_frame(&control.writer, RESET, id, &[]).await;
+            if let Some(detail) = control.refusals.lock().unwrap().remove(&id) {
+                return Err(Refused(detail).into());
+            }
             bail!("the private server could not connect to the target");
         }
         let (near, far) = tokio::io::duplex(64 * 1024);
@@ -574,9 +580,15 @@ impl Datagrams {
     pub async fn recv(&self) -> Option<Vec<u8>> {
         self.incoming.lock().await.recv().await
     }
+    /// Why the private server's firewall refused this association's
+    /// target, once it closed for that.
+    pub fn refusal(&self) -> Option<String> {
+        self.control.refusals.lock().unwrap().remove(&self.id)
+    }
 }
 impl Drop for Datagrams {
     fn drop(&mut self) {
+        self.control.refusals.lock().unwrap().remove(&self.id);
         let open = self
             .control
             .datagrams
@@ -689,6 +701,7 @@ async fn serve<S>(
         sessions: Arc::default(),
         responses: Arc::default(),
         datagrams: StdMutex::new(HashMap::new()),
+        refusals: StdMutex::default(),
         next_id: AtomicU32::new(1),
         cancel: cancel.clone(),
     });
@@ -711,7 +724,13 @@ async fn serve<S>(
             break;
         };
         if matches!(kind, FAIL | FIN | RESET) {
-            control.datagrams.lock().unwrap().remove(&id);
+            let sender = control.datagrams.lock().unwrap().remove(&id);
+            // Kept until why is known: dropping it ends the association, and
+            // its owner asks why at once.
+            if sender.is_some() && kind == FAIL {
+                refused_by_firewall(&control, id, &payload);
+            }
+            drop(sender);
         }
         match kind {
             ATTACH => {
@@ -745,6 +764,9 @@ async fn serve<S>(
                     inbox.flow.enabled.store(true, Ordering::Relaxed);
                 }
                 if let Some(response) = control.responses.lock().await.remove(&id) {
+                    if kind == FAIL {
+                        refused_by_firewall(&control, id, &payload);
+                    }
                     let _ = response.send(kind == OK);
                 }
             }
@@ -767,6 +789,79 @@ async fn serve<S>(
     if let Some(server) = server.upgrade() {
         server.detach(&control);
     }
+}
+
+/// Starts the FAIL of a stream or association that the private server's
+/// outbound firewall set refused; the rest says which layer and rule.
+/// Older public servers ignore what a FAIL carries.
+pub(super) const FIREWALL_REFUSAL: &[u8] = b"firewall: ";
+/// Keeps why the private server's firewall refused `id`, for the stream or
+/// association that waits for it.
+fn refused_by_firewall(control: &Control, id: u32, payload: &[u8]) {
+    if let Some(detail) = payload.strip_prefix(FIREWALL_REFUSAL) {
+        let detail = crate::firewall::report_error(&String::from_utf8_lossy(detail));
+        control.refusals.lock().unwrap().insert(id, detail);
+    }
+}
+/// The private server's outbound firewall set refused the tunnel's target;
+/// the detail names the layer and rule as a block record does.
+#[derive(Debug)]
+pub struct Refused(pub String);
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "reverse tunnel private server: {}", self.0)
+    }
+}
+impl std::error::Error for Refused {}
+
+/// Why the private server did not reach a tunnel's target.
+pub(super) enum Unreached {
+    /// Its outbound firewall set refused every address: the detail.
+    Refused(String),
+    Failed(std::io::Error),
+}
+/// The addresses of a tunnel's `target` that this server's outbound
+/// firewall set lets it connect to, in the resolver's order: every address
+/// is judged, as for the server's own rules.
+pub(super) async fn permitted(
+    firewall: &crate::firewall::Runtime,
+    target: &str,
+) -> Result<Vec<SocketAddr>, Unreached> {
+    let addresses: Vec<SocketAddr> = tokio::net::lookup_host(target)
+        .await
+        .map_err(Unreached::Failed)?
+        .collect();
+    if !firewall.server_outbound() {
+        return Ok(addresses);
+    }
+    let host = crate::destination_acl::host_from_endpoint(target);
+    match firewall.load().filter_outbound(host, addresses) {
+        (allowed, Some(refused)) if allowed.is_empty() => Err(Unreached::Refused(refused.detail())),
+        (allowed, _) => Ok(allowed),
+    }
+}
+/// Connects to a tunnel's TCP target, as [`permitted`] allows.
+pub(super) async fn connect(
+    firewall: &crate::firewall::Runtime,
+    target: &str,
+) -> Result<TcpStream, Unreached> {
+    if !firewall.server_outbound() {
+        return TcpStream::connect(target).await.map_err(Unreached::Failed);
+    }
+    let mut last = None;
+    for address in permitted(firewall, target).await? {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(Unreached::Failed(last.unwrap_or_else(|| {
+        std::io::Error::other("the tunnel's target has no addresses")
+    })))
+}
+/// The FAIL payload for a target the firewall refused.
+pub(super) fn refusal_payload(detail: &str) -> Vec<u8> {
+    [FIREWALL_REFUSAL, detail.as_bytes()].concat()
 }
 
 /// A tunnel the private server dials.
@@ -832,11 +927,19 @@ struct Group {
     cancel: CancellationToken,
 }
 
-/// The private end: one connection per public server and key.
+/// The private end: one connection per public server and key. Targets are
+/// held to the server's outbound firewall set.
 #[derive(Default)]
-pub struct Client(StdMutex<HashMap<(String, String), Group>>);
+pub struct Client(
+    StdMutex<HashMap<(String, String), Group>>,
+    Arc<crate::firewall::Runtime>,
+);
 
 impl Client {
+    /// A private end whose dials `firewall`'s outbound set judges.
+    pub fn new(firewall: Arc<crate::firewall::Runtime>) -> Self {
+        Self(StdMutex::default(), firewall)
+    }
     /// Makes `dials` the tunnels this server keeps. Tunnels to the same
     /// server and key share a connection; adding or removing one attaches
     /// or forgets it on that connection without reconnecting.
@@ -900,6 +1003,7 @@ impl Client {
                 receiver,
                 state.clone(),
                 cancel.clone(),
+                self.1.clone(),
             ));
             groups.insert(
                 key,
@@ -966,13 +1070,14 @@ async fn run_group(
     mut tokens: watch::Receiver<BTreeMap<String, String>>,
     state: Arc<StdMutex<GroupState>>,
     cancel: CancellationToken,
+    firewall: Arc<crate::firewall::Runtime>,
 ) {
     let mut delay = FIRST_RETRY;
     loop {
         let started = std::time::Instant::now();
         let result = tokio::select! {
             _ = cancel.cancelled() => return,
-            result = session(&server, &fingerprint, &routes, &mut tokens, &state) => result,
+            result = session(&server, &fingerprint, &routes, &mut tokens, &state, &firewall) => result,
         };
         let error = match result {
             Ok(()) => return,
@@ -1024,6 +1129,7 @@ async fn session(
     routes: &Routes,
     tokens: &mut watch::Receiver<BTreeMap<String, String>>,
     state: &StdMutex<GroupState>,
+    firewall: &Arc<crate::firewall::Runtime>,
 ) -> Result<()> {
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(server))
         .await
@@ -1060,6 +1166,7 @@ async fn session(
         ClientTargets::Managed {
             routes: routes.clone(),
             replies,
+            firewall: firewall.clone(),
         },
         writer.clone(),
         Arc::default(),
@@ -1185,6 +1292,83 @@ mod tests {
         assert_eq!(restored.fingerprint(), fingerprint);
         assert_ne!(Identity::generate().unwrap().fingerprint(), fingerprint);
         assert!(parse_fingerprint("zz").is_none());
+    }
+
+    /// The public end knows why the private server refused a target as soon
+    /// as the stream or association ends, without waiting for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refusal_is_known_when_its_stream_or_association_ends() {
+        use crate::firewall::{Action, Desired, Direction, Match, Policy, SetRule, Spec};
+        let (tcp_target, udp_target) = echo().await;
+        let firewall = Arc::new(crate::firewall::Runtime::default());
+        firewall.apply(Some(Desired {
+            hash: "one".into(),
+            policy: Some(Policy {
+                server_inbound: None,
+                server_outbound: Some("lab".into()),
+                sets: vec![Spec {
+                    id: "lab".into(),
+                    name: "No lab".into(),
+                    direction: Direction::Outbound,
+                    default_action: Action::Allow,
+                    rules: vec![SetRule {
+                        action: Action::Deny,
+                        matches: Match {
+                            destinations: vec!["127.0.0.1".into()],
+                            ..Default::default()
+                        },
+                    }],
+                }],
+            }),
+        }));
+        let identity = Identity::generate().unwrap();
+        let server = Arc::new(Server::default());
+        let listen = free();
+        let token = "ab".repeat(32);
+        let admitted = |id: &str| Admitted {
+            id: id.into(),
+            token: token.clone(),
+        };
+        server.reconcile(
+            Some(&identity),
+            &[Listener {
+                listen,
+                tunnels: vec![admitted("tcp"), admitted("udp")],
+            }],
+        );
+        let client = Client::new(firewall);
+        let dial = |id: &str, target: SocketAddr, udp: bool| Dial {
+            id: id.into(),
+            server: listen.to_string(),
+            fingerprint: identity.fingerprint(),
+            token: token.clone(),
+            target: target.to_string(),
+            tcp: !udp,
+            udp,
+        };
+        client.reconcile(&[
+            dial("tcp", tcp_target, false),
+            dial("udp", udp_target, true),
+        ]);
+        wait_status(&client, "tcp", true).await;
+        wait_status(&client, "udp", true).await;
+        let detail = "server outbound rule set: rule 1 denies (No lab)";
+        for _ in 0..50 {
+            let error = server
+                .open_stream("tcp", Duration::from_secs(10))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<Refused>().map(|r| r.0.as_str()),
+                Some(detail)
+            );
+            let datagrams = server.open_datagrams("udp").await.unwrap();
+            datagrams.send(b"no").await.unwrap();
+            assert_eq!(datagrams.recv().await, None);
+            assert_eq!(datagrams.refusal().as_deref(), Some(detail));
+        }
+        client.shutdown();
+        server.shutdown();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

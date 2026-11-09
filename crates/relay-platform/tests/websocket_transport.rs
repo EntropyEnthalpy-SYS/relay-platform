@@ -380,13 +380,22 @@ async fn ws_and_mutual_wss_hops_preserve_payload_with_both_proxy_positions() {
 #[tokio::test]
 async fn transport_flush_waits_for_wire_backpressure() {
     let (server, mut peer) = tokio::io::duplex(256);
+    // The driver, which owns the socket, runs in the task group given.
+    let tasks = tokio_util::task::TaskTracker::new();
+    let driver = tasks.clone();
     let task = tokio::spawn(async move {
-        websocket::accept(Box::new(server), &server_spec(), Duration::from_secs(1))
-            .await
-            .unwrap()
+        websocket::accept(
+            Box::new(server),
+            &server_spec(),
+            Duration::from_secs(1),
+            &driver,
+        )
+        .await
+        .unwrap()
     });
     raw_client(&mut peer).await;
     let mut stream = task.await.unwrap();
+    assert_eq!(tasks.len(), 1, "the driver is not in the group given");
     stream.write_all(&vec![5; 65536]).await.unwrap();
     assert!(
         timeout(Duration::from_millis(30), stream.flush())
@@ -405,7 +414,19 @@ async fn transport_flush_waits_for_wire_backpressure() {
         .unwrap()
         .unwrap();
     let mut peer = drain.await.unwrap();
+    tasks.close();
+    assert!(
+        timeout(Duration::from_millis(50), tasks.wait())
+            .await
+            .is_err(),
+        "the group emptied while the stream was open"
+    );
+    // Dropping the stream aborts the driver; the group empties once it, and
+    // with it the socket, was dropped.
     drop(stream);
+    timeout(Duration::from_secs(1), tasks.wait())
+        .await
+        .expect("the aborted driver left the group");
     assert_eq!(
         timeout(Duration::from_secs(1), peer.read(&mut [0; 1]))
             .await
@@ -617,9 +638,14 @@ async fn ping_after_remote_fin_is_served_while_application_reply_is_waiting() {
 async fn bounded_incoming_queue_backpressures_and_drop_stops_the_driver() {
     let (server, mut peer) = tokio::io::duplex(256);
     let task = tokio::spawn(async move {
-        websocket::accept(Box::new(server), &server_spec(), Duration::from_secs(1))
-            .await
-            .unwrap()
+        websocket::accept(
+            Box::new(server),
+            &server_spec(),
+            Duration::from_secs(1),
+            &tokio_util::task::TaskTracker::new(),
+        )
+        .await
+        .unwrap()
     });
     raw_client(&mut peer).await;
     let mut stream = task.await.unwrap();
@@ -877,9 +903,14 @@ fn invalid_ws_configurations_are_rejected_without_optional_protocol_fallback() {
 async fn blocked_control_flush_cannot_hold_half_closed_stream_indefinitely() {
     let (server, mut peer) = tokio::io::duplex(64);
     let task = tokio::spawn(async move {
-        websocket::accept(Box::new(server), &server_spec(), Duration::from_millis(100))
-            .await
-            .unwrap()
+        websocket::accept(
+            Box::new(server),
+            &server_spec(),
+            Duration::from_millis(100),
+            &tokio_util::task::TaskTracker::new(),
+        )
+        .await
+        .unwrap()
     });
     raw_client(&mut peer).await;
     let mut stream = task.await.unwrap();

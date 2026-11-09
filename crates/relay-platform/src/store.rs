@@ -649,7 +649,7 @@ impl Store {
     /// with a line on it, an endpoint group with it as a member and a chain
     /// use with a hop on it show it as missing.
     pub fn delete_node(&self, actor: &Actor, node: &str) -> Result<()> {
-        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1,'rate_limit_node:'||?1,'egress_proxy_node:'||?1,'firewall_node:'||?1,'firewall_binding:'||?1,'firewall_applied:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
+        const OWNED: &str = "key IN ('node_credential:'||?1,'node_lease:'||?1,'node_profile:'||?1,'wg_node_key:'||?1,'reverse_tunnel_node:'||?1,'rate_limit_node:'||?1,'egress_proxy_node:'||?1,'firewall_node:'||?1,'firewall_binding:'||?1,'firewall_applied:'||?1,'connections_node:'||?1,'connection_termination_node:'||?1) OR key GLOB 'node_identity_operation:'||?1||':*' OR key GLOB 'revoked_meter:'||?1||':*'";
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         require_node(&tx, actor, node, true)?;
@@ -671,7 +671,7 @@ impl Store {
         let reference: Option<String> = tx
             .query_row(
                 &format!("SELECT 'node '||n.name FROM nodes n JOIN config_history c ON c.node_id=n.id AND c.revision IN (n.desired_revision,n.applied_revision) WHERE n.id<>?1 AND instr(c.config_json,?1)>0
-                 UNION ALL SELECT key FROM metadata WHERE instr(value,?1)>0 AND NOT ({OWNED}) AND key NOT GLOB 'retired_node_*' AND key NOT GLOB 'rollout:*' AND key NOT GLOB 'shared_rule:*' AND key NOT GLOB 'endpoint_group:*' AND key NOT GLOB 'chain_use:*' AND key NOT GLOB 'reverse_tunnel:*'
+                 UNION ALL SELECT key FROM metadata WHERE instr(value,?1)>0 AND NOT ({OWNED}) AND key NOT GLOB 'retired_node_*' AND key NOT GLOB 'rollout:*' AND key NOT GLOB 'shared_rule:*' AND key NOT GLOB 'endpoint_group:*' AND key NOT GLOB 'chain_use:*' AND key NOT GLOB 'chain_refresh:*' AND key NOT GLOB 'reverse_tunnel:*'
                  UNION ALL SELECT 'budget '||id FROM budgets WHERE scope='node' AND scope_id=?1
                  UNION ALL SELECT 'budget grant '||id FROM budget_grants WHERE node_id=?1
                  UNION ALL SELECT 'budget request '||request_id FROM cancelled_budget_requests WHERE node_id=?1
@@ -707,6 +707,8 @@ impl Store {
             &serde_json::json!({ "name": name }).to_string(),
         )?;
         tx.commit()?;
+        // Not while holding the database: the block records are another file.
+        drop(conn);
         if published {
             self.2.config.notify_waiters();
         }

@@ -1520,27 +1520,55 @@ async fn listen_address_moves_between_one_address_and_all_addresses_on_the_same_
     let db = Store::open(&temp.path().join("agent.db")).unwrap();
     let engine = Engine::new(db.clone());
     let mut c = config(rule(echo.address, Protocol::Both));
-    let port = c.rules[0].listen.port();
-    let one = format!("127.0.0.1:{port}").parse().unwrap();
     // Linux routes all of 127.0.0.0/8 locally, so a wildcard listener is the
     // only one that answers 127.0.0.2. macOS has no such route; use the same
-    // local address there and keep the wildcard behaviour portable.
-    let other: std::net::SocketAddr = if cfg!(target_os = "linux") {
-        format!("127.0.0.2:{port}").parse().unwrap()
+    // local address there and keep the wildcard behaviour portable. The one
+    // address, and the port's probes, are on 127.0.0.3 on Linux: some
+    // sandboxes mirror listeners on 127.0.0.1 and hold the port for a moment
+    // after they close.
+    let (one, other): (std::net::SocketAddr, std::net::SocketAddr) = if cfg!(target_os = "linux") {
+        let one = free_address_on(std::net::Ipv4Addr::new(127, 0, 0, 3));
+        (one, format!("127.0.0.2:{}", one.port()).parse().unwrap())
     } else {
-        one
+        let one = free_address();
+        (one, one)
     };
+    let port = one.port();
     let all = format!("0.0.0.0:{port}").parse().unwrap();
     c.rules[0].listen = one;
+    // Another rule on its own port keeps one UDP association and its TCP
+    // listener through every move and failed move of the first.
+    let mut steady_rule = rule(echo.address, Protocol::Both);
+    steady_rule.id = "rule-two".into();
+    let unrelated = steady_rule.listen;
+    c.rules.push(steady_rule);
     engine.apply(c.clone()).await.unwrap();
+    let steady = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let unaffected = |round: &'static [u8]| {
+        let steady = &steady;
+        async move {
+            steady.send_to(round, unrelated).await.unwrap();
+            let mut buf = [0; 64];
+            let (n, _) = timeout(Duration::from_secs(5), steady.recv_from(&mut buf))
+                .await
+                .expect("the unrelated rule's association stopped answering")
+                .unwrap();
+            assert_eq!(&buf[..n], round);
+            assert_eq!(exchange(unrelated, round).await, round);
+        }
+    };
+    unaffected(b"steady-1").await;
     #[cfg(target_os = "linux")]
     assert!(TcpStream::connect(other).await.is_err());
+    // Each move below releases a listener that still has a UDP association.
+    assert_eq!(udp_exchange(one, b"before").await, b"before");
 
     c.revision = 2;
     c.rules[0].listen = all;
     engine.apply(c.clone()).await.unwrap();
     assert_eq!(exchange(other, b"wildcard").await, b"wildcard");
     assert_eq!(udp_exchange(other, b"datagram").await, b"datagram");
+    unaffected(b"steady-2").await;
 
     #[cfg(target_os = "linux")]
     {
@@ -1548,7 +1576,9 @@ async fn listen_address_moves_between_one_address_and_all_addresses_on_the_same_
         c.rules[0].listen = one;
         engine.apply(c.clone()).await.unwrap();
         assert_eq!(exchange(one, b"specific").await, b"specific");
+        assert_eq!(udp_exchange(one, b"specific-udp").await, b"specific-udp");
         assert!(TcpStream::connect(other).await.is_err());
+        unaffected(b"steady-3").await;
         // The wildcard cannot be bound while another program holds 127.0.0.2
         // on this port: both old listeners return and the revision stays.
         let occupied = std::net::TcpListener::bind(other).unwrap();
@@ -1559,9 +1589,29 @@ async fn listen_address_moves_between_one_address_and_all_addresses_on_the_same_
         assert_eq!(db.agent_config().unwrap().unwrap().revision, 3);
         assert_eq!(exchange(one, b"restored").await, b"restored");
         assert_eq!(udp_exchange(one, b"restored-udp").await, b"restored-udp");
+        unaffected(b"steady-4").await;
         drop(occupied);
-        engine.apply(c).await.unwrap();
+        engine.apply(c.clone()).await.unwrap();
         assert_eq!(exchange(other, b"after-retry").await, b"after-retry");
+        assert_eq!(
+            udp_exchange(other, b"after-retry-udp").await,
+            b"after-retry-udp"
+        );
+        // Only the UDP wildcard is held: the TCP wildcard binds first and
+        // must close again before the old listeners reopen on their address.
+        c.revision = 5;
+        c.rules[0].listen = one;
+        engine.apply(c.clone()).await.unwrap();
+        let occupied = std::net::UdpSocket::bind(other).unwrap();
+        c.revision = 6;
+        c.rules[0].listen = all;
+        assert!(engine.apply(c.clone()).await.is_err());
+        assert_eq!(engine.revision().await, 5);
+        assert_eq!(db.agent_config().unwrap().unwrap().revision, 5);
+        assert_eq!(exchange(one, b"tcp-back").await, b"tcp-back");
+        assert_eq!(udp_exchange(one, b"udp-back").await, b"udp-back");
+        unaffected(b"steady-6").await;
+        drop(occupied);
     }
     #[cfg(not(target_os = "linux"))]
     {

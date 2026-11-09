@@ -14,6 +14,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import unicodedata
 from urllib.parse import urlsplit
 import uuid
 
@@ -60,18 +61,23 @@ def provision_file(layout, path, data, mode, uid=None, gid=None):
 def settings(role, supplied):
     require(isinstance(supplied, dict), 'settings must be a JSON object')
     if role == 'controller':
-        require(set(supplied) <= {'listen', 'behind_tls_proxy'}, 'unknown controller setting')
+        require(set(supplied) <= {'listen', 'behind_tls_proxy', 'block_record_days', 'block_records_per_node'}, 'unknown controller setting')
         result = {'listen': '127.0.0.1:8080', 'behind_tls_proxy': False, **supplied}
         require(type(result['behind_tls_proxy']) is bool, 'behind_tls_proxy must be boolean')
+        # Block record retention (STATE/blocks.sqlite); absent keeps the server's defaults of 30 days
+        # and 10000 records per server, and an installed wrapper stays the same.
+        for key, low, high in (('block_record_days', 1, 365), ('block_records_per_node', 100, 100000)):
+            if key in result:
+                require(type(result[key]) is int and low <= result[key] <= high, f'{key} must be an integer {low}..{high}')
         address, separator, port = result['listen'].rpartition(':')
         require(separator and port.isdigit() and 1024 <= int(port) <= 65535, 'controller listen requires a nonprivileged port')
         ip = ipaddress.ip_address(address.strip('[]'))
         require(ip.is_loopback or result['behind_tls_proxy'], 'non-loopback controller requires behind_tls_proxy')
         require('[' not in address if ip.version == 4 else address.startswith('[') and address.endswith(']'), 'invalid listen address')
         return result
-    require(set(supplied) <= {'controller', 'node_id', 'poll_seconds', 'protocol_engine', 'tls_directory', 'controller_addresses', 'controller_proxy'} and {'controller', 'node_id'} <= set(supplied), 'agent settings require controller and node_id')
+    require(set(supplied) <= {'controller', 'node_id', 'poll_seconds', 'protocol_engine', 'tls_directory', 'controller_addresses', 'controller_proxy', 'controller_proxy_credentials_file'} and {'controller', 'node_id'} <= set(supplied), 'agent settings require controller and node_id')
     result = {'poll_seconds': 5, **supplied}
-    for key in ('protocol_engine', 'tls_directory'):
+    for key in ('protocol_engine', 'tls_directory', 'controller_proxy_credentials_file'):
         if key in result:
             value = result[key]
             require(isinstance(value, str) and re.fullmatch(r'/[A-Za-z0-9_./-]+', value) and '..' not in Path(value).parts, f'{key} must be an absolute local path without traversal or shell metacharacters')
@@ -105,9 +111,70 @@ def settings(role, supplied):
             port_ok = parsed is not None and parsed.port is not None and parsed.port > 0
         except ValueError:
             port_ok = False
-        require(port_ok and parsed.scheme == 'http' and parsed.hostname and not parsed.username and not parsed.password and parsed.path in ('', '/') and not parsed.query and not parsed.fragment and re.fullmatch(r'[A-Za-z0-9.:\[\]/-]+', proxy), 'controller_proxy must be an http://host:port URL without credentials (SOCKS is not supported)')
+        require(port_ok and parsed.scheme in ('http', 'socks5', 'socks5h') and parsed.hostname and not parsed.username and not parsed.password and parsed.path in ('', '/') and not parsed.query and not parsed.fragment and re.fullmatch(r'[A-Za-z0-9.:\[\]/-]+', proxy), 'controller_proxy must be an http://, socks5:// or socks5h://host:port URL without credentials')
         require(not addresses, 'use controller_addresses or controller_proxy, not both')
+    if 'controller_proxy_credentials_file' in result:
+        # The agent reads the SOCKS5 login from this file at start; the
+        # service cannot see /home, /root or its own /tmp.
+        file = os.path.normpath(re.sub('/+', '/', result['controller_proxy_credentials_file']))
+        require(urlsplit(result.get('controller_proxy', '')).scheme in ('socks5', 'socks5h'), 'controller_proxy_credentials_file requires a socks5:// or socks5h:// controller_proxy')
+        require(not any(file == p or file.startswith(p + '/') for p in ('/home', '/root', '/tmp', '/var/tmp', '/run/user')), 'controller_proxy_credentials_file must be outside /home, /root and temporary directories, which the agent service cannot read')
+        # A file that already exists is checked now, so an upgrade does not
+        # install an agent that refuses to start; otherwise the agent checks
+        # it when it starts.
+        proxy_login(file, proxy_login_room(result['controller_proxy'], result['controller']))
     return result
+
+
+def proxy_login_room(proxy, controller):
+    """Bytes the agent's SOCKS5 client has for the user name and password
+    together: it sends negotiation, login and connect request from one
+    262-byte buffer, so 253 less the request's address (7 for IPv4, 19 for
+    IPv6, 4 plus its length for a name). With socks5:// the agent resolves
+    the panel's name itself and either address family may come back. The
+    agent sends a non-ASCII name in its UTS 46 ASCII form, which Python's
+    IDNA 2003 codec does not always produce (it turns ß into ss), so such a
+    name must be given in its xn-- form."""
+    host = urlsplit(controller).hostname
+    try:
+        version = ipaddress.ip_address(host).version
+    except ValueError:
+        version = None
+    if version == 4:
+        address = 7
+    elif version is None and urlsplit(proxy).scheme == 'socks5h':
+        require(host.isascii(), "with a socks5h:// controller_proxy and controller_proxy_credentials_file, write the controller URL's non-ASCII host name in its ASCII form (xn--…), so the login length can be checked as the agent counts it")
+        address = 4 + len(host)
+    else:
+        address = 19
+    return max(0, 253 - address)
+
+
+def proxy_login(path, room):
+    """Applies the agent's checks to an existing SOCKS5 credentials file:
+    a regular file of at most 1 KiB, not readable by group or others,
+    holding a user name and a password on two lines, each 1 to 255 bytes
+    without control characters, together at most `room` bytes. Errors name
+    the file, never what it holds."""
+    path = Path(path)
+    if not path.exists():
+        return
+    info = path.stat()
+    what = f'controller proxy credentials file {path}'
+    require(stat.S_ISREG(info.st_mode) and info.st_size <= 1024, f'{what} must be a regular file of at most 1 KiB')
+    require(info.st_mode & 0o077 == 0, f'{what} must not be readable by group or others (chmod 600)')
+    try:
+        text = path.read_bytes().decode()
+    except UnicodeDecodeError:
+        raise DeployError(f'{what} must be UTF-8 text') from None
+    lines = text.split('\n')
+    if text.endswith('\n'):
+        lines.pop()
+    lines = [line[:-1] if line.endswith('\r') else line for line in lines]
+    require(len(lines) >= 2 and not any(lines[2:]), f'{what} must hold two lines: user name, then password')
+    for name, value in (('user name', lines[0]), ('password', lines[1])):
+        require(1 <= len(value.encode()) <= 255 and not any(unicodedata.category(c) == 'Cc' for c in value), f'the {name} in {what} must be 1 to 255 bytes without control characters')
+    require(len(lines[0].encode()) + len(lines[1].encode()) <= room, f'the user name and password in {what} are too long together: at most {room} bytes are possible through this proxy to this panel')
 
 
 def endpoint(address):
@@ -297,6 +364,9 @@ class Layout:
             args += ['server', '--listen', config['listen'], '--state', str(self.state)]
             if config['behind_tls_proxy']:
                 args += ['--behind-tls-proxy']
+            for key, flag in (('block_record_days', '--block-record-days'), ('block_records_per_node', '--block-records-per-node')):
+                if key in config:
+                    args += [flag, str(config[key])]
         else:
             args += ['agent', '--controller', config['controller'], '--node-id', config['node_id'],
                      '--state', str(self.state), '--poll-seconds', str(config['poll_seconds']),
@@ -309,6 +379,8 @@ class Layout:
                 args += ['--controller-address', address]
             if config.get('controller_proxy'):
                 args += ['--controller-proxy', config['controller_proxy']]
+            if config.get('controller_proxy_credentials_file'):
+                args += ['--controller-proxy-credentials-file', config['controller_proxy_credentials_file']]
             if config.get('protocol_engine'):
                 args = ['/usr/bin/env', 'RELAY_PROTOCOL_ENGINE=' + config['protocol_engine'], *args]
         return ('#!/bin/sh\numask 077\nexec ' + shlex.join(args) + '\n').encode()

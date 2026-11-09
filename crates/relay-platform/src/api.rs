@@ -190,8 +190,8 @@ async fn require_session(
 ) -> Result<Response, ApiError> {
     let token = bearer(request.headers())?;
     let (actor, scopes) = database(state.store, move |db| db.authenticate(&token)).await?;
-    if let Some(scopes) = scopes
-        && !scope_permits(&scopes, request.method(), request.uri().path())
+    if let Some(scopes) = &scopes
+        && !scope_permits(scopes, request.method(), request.uri().path())
     {
         return Err(Rejection {
             status: 403,
@@ -200,8 +200,12 @@ async fn require_session(
         .into());
     }
     request.extensions_mut().insert(actor);
+    request.extensions_mut().insert(TokenScopes(scopes));
     Ok(next.run(request).await)
 }
+/// The scopes of the API token a request came with; `None` for a session.
+#[derive(Clone)]
+struct TokenScopes(Option<Vec<Scope>>);
 /// API tokens narrow the owner's role: reads need `read`, writes need the
 /// scope of their resource. Account security and token management stay
 /// limited to interactive sessions, so a token cannot extend itself.
@@ -353,6 +357,14 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/nodes/{node}/rules/{rule}/connections",
             get(rule_connections),
         )
+        .route(
+            "/api/v1/nodes/{node}/rules/{rule}/connections/terminate",
+            post(terminate_session),
+        )
+        .route(
+            "/api/v1/nodes/{node}/rules/{rule}/connections/terminations/{id}",
+            get(session_termination),
+        )
         .route("/api/v1/nodes/{node}/blocks", get(node_blocks))
         .route(
             "/api/v1/nodes/{node}/firewall",
@@ -407,6 +419,22 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/v1/chains/{id}/plan", post(plan_chain))
         .route("/api/v1/chains/{id}/apply", post(apply_chain))
+        .route(
+            "/api/v1/chains/{id}/uses/{entry}/refresh/plan",
+            post(plan_chain_refresh),
+        )
+        .route(
+            "/api/v1/chains/{id}/uses/{entry}/refresh",
+            post(refresh_chain_use),
+        )
+        .route(
+            "/api/v1/chains/{id}/uses/{entry}/refresh/cancel",
+            post(cancel_chain_refresh),
+        )
+        .route(
+            "/api/v1/chains/{id}/uses/{entry}/sync",
+            axum::routing::put(set_chain_auto_sync),
+        )
         .route(
             "/api/v1/reverse-tunnels",
             get(reverse_tunnels).post(create_reverse_tunnel),
@@ -1600,6 +1628,68 @@ async fn apply_chain(
 ) -> ApiResult<crate::chain::ChainApplied> {
     Ok(Json(
         database(state.store, move |db| db.apply_chain(&actor, &id, input)).await?,
+    ))
+}
+async fn plan_chain_refresh(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((id, entry)): Path<(String, String)>,
+    Json(input): Json<crate::chain::RefreshPlanInput>,
+) -> ApiResult<crate::chain::RefreshPlan> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.plan_chain_refresh(&actor, &id, &entry, input)
+        })
+        .await?,
+    ))
+}
+async fn refresh_chain_use(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((id, entry)): Path<(String, String)>,
+    Json(input): Json<crate::chain::RefreshInput>,
+) -> ApiResult<crate::chain::RefreshView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.refresh_chain_use(&actor, &id, &entry, input)
+        })
+        .await?,
+    ))
+}
+async fn cancel_chain_refresh(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((id, entry)): Path<(String, String)>,
+    body: axum::body::Bytes,
+) -> ApiResult<crate::chain::RefreshView> {
+    // The body is optional, also with a JSON content type as the panel sends.
+    let input: crate::chain::CancelInput = if body.iter().all(u8::is_ascii_whitespace) {
+        Default::default()
+    } else {
+        // As the JSON extractor: bad syntax 400, an unknown field 422.
+        serde_json::from_slice(&body).map_err(|error| Rejection {
+            status: if error.is_data() { 422 } else { 400 },
+            message: format!("invalid cancel request: {error}"),
+        })?
+    };
+    Ok(Json(
+        database(state.store, move |db| {
+            db.cancel_chain_refresh(&actor, &id, &entry, input)
+        })
+        .await?,
+    ))
+}
+async fn set_chain_auto_sync(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((id, entry)): Path<(String, String)>,
+    Json(input): Json<crate::chain::AutoSyncInput>,
+) -> ApiResult<crate::chain::UseView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.set_chain_auto_sync(&actor, &id, &entry, input)
+        })
+        .await?,
     ))
 }
 #[derive(Deserialize)]
@@ -3008,11 +3098,67 @@ struct ShareQuery {
 async fn rule_connections(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
+    axum::Extension(TokenScopes(scopes)): axum::Extension<TokenScopes>,
     Path((node, rule)): Path<(String, String)>,
 ) -> ApiResult<crate::connections::RuleView> {
+    // Offered only where ending one would be allowed: a token needs the
+    // scope that writes nodes.
+    let may_end = scopes.as_deref().is_none_or(|scopes| {
+        scope_permits(
+            scopes,
+            &Method::POST,
+            &format!("/api/v1/nodes/{node}/rules/{rule}/connections/terminate"),
+        )
+    });
     Ok(Json(
         database(state.store, move |db| {
-            db.rule_connections(&actor, &node, &rule)
+            db.rule_connections(&actor, &node, &rule, may_end)
+        })
+        .await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminateSession {
+    instance: String,
+    session_id: u64,
+    #[serde(default)]
+    confirm: bool,
+}
+/// Asks the node's agent to end one session; 202 for a new request, 200 for
+/// the same request made before.
+async fn terminate_session(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((node, rule)): Path<(String, String)>,
+    Json(input): Json<TerminateSession>,
+) -> Result<(StatusCode, Json<crate::connections::TerminationView>), ApiError> {
+    let (created, view) = database(state.store, move |db| {
+        db.terminate_session(
+            &actor,
+            &node,
+            &rule,
+            &input.instance,
+            input.session_id,
+            input.confirm,
+        )
+    })
+    .await?;
+    let status = if created {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(view)))
+}
+async fn session_termination(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    Path((node, rule, id)): Path<(String, String, String)>,
+) -> ApiResult<crate::connections::TerminationView> {
+    Ok(Json(
+        database(state.store, move |db| {
+            db.session_termination(&actor, &node, &rule, &id)
         })
         .await?,
     ))
@@ -3022,8 +3168,10 @@ async fn rule_connections(
 struct BlocksQuery {
     rule_id: Option<String>,
     limit: Option<usize>,
+    /// `next_before` of the previous page.
+    before: Option<i64>,
 }
-/// A node's latest block records, newest change first.
+/// A node's kept block records, newest change first, one page at a time.
 async fn node_blocks(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
@@ -3036,6 +3184,7 @@ async fn node_blocks(
                 &actor,
                 &node,
                 query.rule_id.as_deref(),
+                query.before,
                 query.limit.unwrap_or(200),
             )
         })

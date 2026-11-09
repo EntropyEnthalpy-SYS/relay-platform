@@ -447,6 +447,22 @@ pub struct Desired {
     pub policy: Option<Policy>,
 }
 
+/// [`Report::covers`]: protocol gateways judge each client's own address
+/// by the server's and the rule's inbound sets before the protocol engine
+/// sees anything of it.
+pub const COVERS_GATEWAY_INBOUND: &str = "gateway_inbound";
+/// [`Report::covers`]: the private end of a reverse tunnel checks the
+/// server's outbound set before it connects to the tunnel's target.
+pub const COVERS_REVERSE_PRIVATE_OUTBOUND: &str = "reverse_private_outbound";
+/// [`NodeStatus::uncovered`]: the server's protocol gateways take clients
+/// that its inbound sets do not judge.
+pub const UNCOVERED_GATEWAYS: &str = "gateways";
+/// [`NodeStatus::uncovered`]: the server dials reverse tunnel targets that
+/// its outbound set does not judge.
+pub const UNCOVERED_REVERSE_TUNNELS: &str = "reverse_tunnels";
+/// What this agent's [`Report::covers`] names.
+pub const COVERS: [&str; 2] = [COVERS_GATEWAY_INBOUND, COVERS_REVERSE_PRIVATE_OUTBOUND];
+
 /// What the agent reports to a controller that sent [`Desired`]. Its
 /// presence tells the controller the agent enforces rule sets.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -458,6 +474,11 @@ pub struct Report {
     /// Why the last policy sent was not applied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Paths beyond the agent's own rules that it holds to rule sets
+    /// ([`COVERS`]); agents of 0.150.0 send none. Unknown names are kept
+    /// and ignored.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub covers: Vec<String>,
 }
 impl Report {
     pub fn within_limits(&self) -> bool {
@@ -466,6 +487,12 @@ impl Report {
                 .error
                 .as_ref()
                 .is_none_or(|e| e.len() <= MAX_ERROR_BYTES)
+            && self.covers.len() <= 16
+            && self.covers.iter().all(|c| c.len() <= 64)
+    }
+    /// Whether the agent reported that it covers `path`.
+    pub fn covers(&self, path: &str) -> bool {
+        self.covers.iter().any(|c| c == path)
     }
 }
 
@@ -818,6 +845,10 @@ pub enum PolicyState {
 /// agent confirmed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeStatus {
+    /// Paths of this server that its bindings do not hold, because its
+    /// agent does not cover them ([`UNCOVERED_GATEWAYS`],
+    /// [`UNCOVERED_REVERSE_TUNNELS`]): bound before the controller knew.
+    pub uncovered: Vec<String>,
     pub inbound_set_id: Option<String>,
     pub inbound_set_name: Option<String>,
     pub outbound_set_id: Option<String>,
@@ -1327,10 +1358,37 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_names_a_few_short_paths_and_unknown_ones_cover_nothing() {
+        let report = |covers: Vec<String>| Report {
+            covers,
+            ..Default::default()
+        };
+        assert!(report(vec!["x".repeat(64); 16]).within_limits());
+        assert!(!report(vec!["x".into(); 17]).within_limits());
+        assert!(!report(vec!["x".repeat(65)]).within_limits());
+        // A later agent may name paths this one does not know.
+        let later: Report = serde_json::from_value(serde_json::json!({
+            "applied_hash": "h",
+            "covers": ["future_path", COVERS_GATEWAY_INBOUND]
+        }))
+        .unwrap();
+        assert!(later.covers(COVERS_GATEWAY_INBOUND));
+        assert!(!later.covers(COVERS_REVERSE_PRIVATE_OUTBOUND));
+        assert!(!later.covers("future"));
+        // 0.150.0 names none, and this one's are left out when empty.
+        let old: Report = serde_json::from_value(serde_json::json!({"applied_hash": "h"})).unwrap();
+        assert!(old.covers.is_empty());
+        assert_eq!(
+            serde_json::to_value(&old).unwrap(),
+            serde_json::json!({"applied_hash": "h"})
+        );
+    }
+
+    #[test]
     fn an_error_the_agent_reports_always_fits_what_the_controller_takes() {
         let report = |error: String| Report {
-            applied_hash: None,
             error: Some(error),
+            ..Default::default()
         };
         // Cut by characters: 512 three-byte characters are 1536 bytes.
         let chinese = report_error(&"规".repeat(600));

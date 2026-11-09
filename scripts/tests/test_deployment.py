@@ -427,6 +427,44 @@ class DeploymentTests(unittest.TestCase):
                 install.settings(role, config)
 
 
+class ControllerBlockRecordSettings(unittest.TestCase):
+    """controller.json retention settings for block records. Only settings and
+    the service wrapper are checked; no binary is needed."""
+
+    def arguments(self, extra):
+        config = install.settings('controller', extra)
+        with tempfile.TemporaryDirectory(prefix='relay-controller-blocks-') as root:
+            text = install.Layout(root, 'controller', 'systemd').wrapper(config, Path(root) / 'generation', False).decode()
+        line = next(line for line in text.splitlines() if line.startswith('exec '))
+        return shlex.split(line)[1:]
+
+    def values(self, args, flag):
+        return [args[i + 1] for i, arg in enumerate(args) if arg == flag]
+
+    def test_retention_becomes_server_flags_and_absent_settings_keep_the_wrapper(self):
+        args = self.arguments({'block_record_days': 7, 'block_records_per_node': 500})
+        self.assertEqual(self.values(args, '--block-record-days'), ['7'])
+        self.assertEqual(self.values(args, '--block-records-per-node'), ['500'])
+        self.assertEqual(args[1], 'server')
+        # Installed generations compare their wrapper byte for byte: without
+        # the settings the server keeps its defaults and no flag is written.
+        args = self.arguments({})
+        self.assertNotIn('--block-record-days', args)
+        self.assertNotIn('--block-records-per-node', args)
+        self.assertEqual(self.values(args, '--listen'), ['127.0.0.1:8080'])
+        for days, records in [(1, 100), (365, 100000)]:
+            args = self.arguments({'block_record_days': days, 'block_records_per_node': records})
+            self.assertEqual(self.values(args, '--block-record-days'), [str(days)])
+
+    def test_out_of_range_or_mistyped_retention_is_rejected(self):
+        for extra in [{'block_record_days': 0}, {'block_record_days': 366}, {'block_record_days': '30'},
+                      {'block_record_days': 7.0}, {'block_record_days': True}, {'block_records_per_node': 99},
+                      {'block_records_per_node': 100001}, {'block_records_per_node': None},
+                      {'block_record_days': '7 --behind-tls-proxy'}, {'block_records': 500}]:
+            with self.subTest(extra=extra), self.assertRaises(DeployError):
+                install.settings('controller', extra)
+
+
 class AgentControlRouteSettings(unittest.TestCase):
     """agent.json settings for servers that cannot reach the panel directly.
     Only settings and the service wrapper are checked; no binary is needed."""
@@ -450,6 +488,15 @@ class AgentControlRouteSettings(unittest.TestCase):
         args = self.arguments({'controller_proxy': 'http://10.0.0.8:3128'})
         self.assertEqual(self.values(args, '--controller-proxy'), ['http://10.0.0.8:3128'])
         self.assertEqual(self.values(args, '--controller-address'), [])
+        self.assertEqual(self.values(args, '--controller-proxy-credentials-file'), [])
+        # SOCKS5: the login stays in a file; only its path is on the command line.
+        args = self.arguments({'controller_proxy': 'socks5h://[2001:db8::8]:1080',
+                               'controller_proxy_credentials_file': '/etc/relay-platform/agent-proxy.secret'})
+        self.assertEqual(self.values(args, '--controller-proxy'), ['socks5h://[2001:db8::8]:1080'])
+        self.assertEqual(self.values(args, '--controller-proxy-credentials-file'), ['/etc/relay-platform/agent-proxy.secret'])
+        args = self.arguments({'controller_proxy': 'socks5://10.0.0.8:1080'})
+        self.assertEqual(self.values(args, '--controller-proxy'), ['socks5://10.0.0.8:1080'])
+        self.assertEqual(self.values(args, '--controller-proxy-credentials-file'), [])
         # The default port written out is the same as no port.
         args = self.arguments({'controller_addresses': ['relay.example.net:30443']}, 'https://panel.example.com:443')
         self.assertEqual(self.values(args, '--controller-address'), ['relay.example.net:30443'])
@@ -463,8 +510,18 @@ class AgentControlRouteSettings(unittest.TestCase):
 
     def test_unusable_routes_are_rejected_before_installation(self):
         for controller, extra in [
-            ('https://panel.example.com', {'controller_proxy': 'socks5://10.0.0.8:1080'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks4://10.0.0.8:1080'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://10.0.0.8'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://user:secret@10.0.0.8:1080'}),
             ('https://panel.example.com', {'controller_proxy': 'http://user:secret@10.0.0.8:3128'}),
+            ('https://panel.example.com', {'controller_proxy_credentials_file': '/etc/relay-platform/agent-proxy.secret'}),
+            ('https://panel.example.com', {'controller_proxy': 'http://10.0.0.8:3128', 'controller_proxy_credentials_file': '/etc/relay-platform/agent-proxy.secret'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://10.0.0.8:1080', 'controller_proxy_credentials_file': 'agent-proxy.secret'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://10.0.0.8:1080', 'controller_proxy_credentials_file': '/etc/relay platform/x'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://10.0.0.8:1080', 'controller_proxy_credentials_file': '/etc/../root/x'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://10.0.0.8:1080', 'controller_proxy_credentials_file': '/root/proxy.secret'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://10.0.0.8:1080', 'controller_proxy_credentials_file': '//home/ops/proxy.secret'}),
+            ('https://panel.example.com', {'controller_proxy': 'socks5h://10.0.0.8:1080', 'controller_proxy_credentials_file': '/tmp/proxy.secret'}),
             ('https://panel.example.com', {'controller_proxy': 'http://10.0.0.8'}),
             ('https://panel.example.com', {'controller_proxy': 'http://10.0.0.8:3128/path'}),
             ('https://panel.example.com', {'controller_addresses': ['relay.example.net:443'], 'controller_proxy': 'http://10.0.0.8:3128'}),
@@ -481,6 +538,46 @@ class AgentControlRouteSettings(unittest.TestCase):
                 install.settings('agent', {'controller': controller, 'node_id': 'cn-1', **extra})
         same_port = install.settings('agent', {'controller': 'https://panel.example.com:8443', 'node_id': 'cn-1', 'controller_addresses': ['relay.example.net:8443']})
         self.assertEqual(same_port['controller_addresses'], ['relay.example.net:8443'])
+
+    def test_socks5_login_room_and_existing_files_follow_the_agent(self):
+        # 253 bytes less the SOCKS5 address: a name (4 + its length) only
+        # with socks5h; socks5 may resolve to IPv6 (19); an IPv4 URL is 7.
+        room = install.proxy_login_room
+        self.assertEqual(room('socks5h://10.0.0.8:1080', 'https://relay.test'), 239)
+        self.assertEqual(room('socks5://10.0.0.8:1080', 'https://relay.test'), 234)
+        self.assertEqual(room('socks5h://10.0.0.8:1080', 'https://[2001:db8::9]'), 234)
+        self.assertEqual(room('socks5://10.0.0.8:1080', 'https://203.0.113.9'), 246)
+        # The agent counts a non-ASCII name in its UTS 46 form: straße.test is
+        # xn--strae-oqa.test (231 left), where IDNA 2003 would give
+        # strasse.test (237). Only the xn-- form is accepted with socks5h.
+        self.assertEqual(room('socks5h://10.0.0.8:1080', 'https://xn--strae-oqa.test'), 231)
+        for panel in ('https://straße.test', 'https://bücher.test:8443'):
+            with self.subTest(panel=panel), self.assertRaises(DeployError) as raised:
+                room('socks5h://10.0.0.8:1080', panel)
+            self.assertIn('xn--', str(raised.exception))
+        self.assertEqual(room('socks5://10.0.0.8:1080', 'https://straße.test'), 234)
+        with tempfile.TemporaryDirectory(prefix='relay-proxy-login-') as root:
+            def login(content, mode=0o600):
+                path = Path(root) / 'login.secret'
+                path.write_bytes(content)
+                path.chmod(mode)
+                return path
+            install.proxy_login(Path(root) / 'missing.secret', 239)
+            # Bytes, not characters; %XX is kept as written.
+            install.proxy_login(login(('%41' + 'é' * 58 + '\n' + 'p' * 120 + '\n').encode()), 239)
+            for content, mode, room_left in [
+                (('%41' + 'é' * 58 + '\n' + 'p' * 121 + '\n').encode(), 0o600, 239),
+                (b'user\npassword-Q7\n', 0o644, 239),
+                (b'user:password-Q7\n', 0o600, 239),
+                (b'user\npassword-Q7\nthird\n', 0o600, 239),
+                (b'user\npass\tword-Q7\n', 0o600, 239),
+                (b'user\n' + b'x' * 256 + b'\n', 0o600, 512),
+                (b'user\n\xffpassword-Q7\n', 0o600, 239),
+            ]:
+                with self.subTest(content=content[:12], mode=mode), self.assertRaises(DeployError) as raised:
+                    install.proxy_login(login(content, mode), room_left)
+                self.assertNotIn('password-Q7', str(raised.exception))
+                self.assertNotIn('ppp', str(raised.exception))
 
 
 if __name__ == '__main__':

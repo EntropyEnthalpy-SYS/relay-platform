@@ -35,8 +35,28 @@ pub struct AgentOptions {
     /// `host:port` addresses dialed, in order, instead of the controller host
     /// name's own addresses, e.g. a TCP relay. TLS still verifies the name.
     pub controller_addresses: Vec<String>,
-    /// HTTP CONNECT proxy (`http://host:port`) for every controller request.
-    pub controller_proxy: Option<String>,
+    /// Proxy that carries every controller request.
+    pub controller_proxy: Option<ControllerProxy>,
+}
+
+/// The proxy for controller requests: `http://host:port` (HTTP CONNECT),
+/// `socks5://host:port` (this server looks up the controller's name) or
+/// `socks5h://host:port` (the proxy looks it up). A SOCKS5 user name and
+/// password come from `credentials_file`, never from the URL, so they stay
+/// out of the process list and of every log line and error.
+#[derive(Clone, Debug, Default)]
+pub struct ControllerProxy {
+    pub url: String,
+    /// Two lines, user name then password, readable by the agent's user only.
+    pub credentials_file: Option<PathBuf>,
+}
+impl From<String> for ControllerProxy {
+    fn from(url: String) -> Self {
+        Self {
+            url,
+            credentials_file: None,
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Credential {
@@ -111,30 +131,136 @@ impl reqwest::dns::Resolve for ControllerAddresses {
     }
 }
 
-/// Checks `--controller-proxy`: plain HTTP CONNECT only. reqwest's SOCKS
-/// support needs a crate this build does not include.
-pub fn controller_proxy(input: &str) -> Result<reqwest::Proxy> {
-    let url = Url::parse(input).context("invalid controller proxy URL")?;
-    ensure!(
-        !url.scheme().starts_with("socks"),
-        "SOCKS proxies are not supported by this agent; use an HTTP CONNECT proxy (http://host:port) or --controller-address with a TCP relay"
-    );
-    ensure!(
-        url.scheme() == "http",
-        "controller proxy must be an http://host:port URL"
-    );
+/// Checks `--controller-proxy` and its credentials file for reaching
+/// `controller`. Whatever fails, the client is not built, so no request ever
+/// goes around a configured proxy.
+pub fn controller_proxy(controller: &Url, proxy: &ControllerProxy) -> Result<reqwest::Proxy> {
+    let mut url = Url::parse(&proxy.url).context("invalid controller proxy URL")?;
+    let socks = match url.scheme() {
+        "http" => false,
+        "socks5" | "socks5h" => true,
+        "socks4" | "socks4a" => bail!(
+            "SOCKS4 proxies are not supported; use socks5://, socks5h:// or http:// for the controller proxy"
+        ),
+        _ => bail!(
+            "controller proxy must be an http://host:port, socks5://host:port or socks5h://host:port URL"
+        ),
+    };
     ensure!(
         url.username().is_empty() && url.password().is_none(),
-        "controller proxy credentials would be visible in the process list; use a proxy that admits this server by address"
+        "controller proxy credentials would be visible in the process list; put SOCKS5 credentials in --controller-proxy-credentials-file, or use a proxy that admits this server by address"
     );
     ensure!(
         url.host_str().is_some_and(|h| !h.is_empty())
-            && url.path() == "/"
+            // A socks5h:// URL has an empty path where http:// has "/".
+            && matches!(url.path(), "" | "/")
             && url.query().is_none()
             && url.fragment().is_none(),
-        "controller proxy must be an http://host:port URL without path, query or fragment"
+        "controller proxy must be a host:port URL without path, query or fragment"
     );
+    ensure!(
+        !socks || url.port().is_some(),
+        "a SOCKS5 controller proxy needs an explicit port, such as socks5h://proxy.example.net:1080"
+    );
+    if let Some(path) = &proxy.credentials_file {
+        ensure!(
+            socks,
+            "--controller-proxy-credentials-file is for SOCKS5 proxies only; use an HTTP proxy that admits this server by address"
+        );
+        let (user, password) = proxy_credentials(path)?;
+        // The SOCKS5 client sends the negotiation, the login and the connect
+        // request from one 262-byte buffer, so the login has room for 253
+        // bytes less the request's address: 7 for IPv4, 19 for IPv6 and
+        // 4 plus its length for a name. With socks5 the name is resolved
+        // here and either family may come back.
+        let ipv4 = controller
+            .host_str()
+            .is_some_and(|host| host.parse::<std::net::Ipv4Addr>().is_ok());
+        let address = match (url.scheme(), controller.domain()) {
+            _ if ipv4 => 7,
+            ("socks5h", Some(name)) => 4 + name.len(),
+            _ => 19,
+        };
+        let room = 253usize.saturating_sub(address);
+        ensure!(
+            user.len() + password.len() <= room,
+            "the user name and password in {} are too long together: through a {} proxy to {} they may have at most {room} bytes together",
+            context_path(path),
+            url.scheme(),
+            controller.host_str().unwrap_or_default()
+        );
+        // reqwest takes SOCKS5 credentials from the URL only and decodes
+        // them, so every byte but unreserved characters is escaped here to
+        // arrive unchanged; reqwest keeps them apart from the address it logs.
+        url.set_username(&userinfo(&user))
+            .ok()
+            .context("invalid controller proxy user name")?;
+        url.set_password(Some(&userinfo(&password)))
+            .ok()
+            .context("invalid controller proxy password")?;
+    }
     Ok(reqwest::Proxy::all(url)?)
+}
+
+/// Percent-encodes every byte of a URL user name or password except
+/// unreserved characters, so decoding gives back exactly `value`.
+fn userinfo(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+fn context_path(path: &std::path::Path) -> String {
+    format!("controller proxy credentials file {}", path.display())
+}
+
+/// Reads a SOCKS5 user name and password (RFC 1929: 1 to 255 bytes each),
+/// one per line. Errors name the file, never its contents.
+fn proxy_credentials(path: &std::path::Path) -> Result<(String, String)> {
+    let context = || context_path(path);
+    let metadata = std::fs::metadata(path).with_context(context)?;
+    ensure!(
+        metadata.is_file() && metadata.len() <= 1024,
+        "{} must be a regular file of at most 1 KiB",
+        context()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        ensure!(
+            metadata.permissions().mode() & 0o077 == 0,
+            "{} must not be readable by group or others (chmod 600)",
+            context()
+        );
+    }
+    let text = std::fs::read_to_string(path).with_context(context)?;
+    let mut lines = text.lines();
+    let (Some(user), Some(password)) = (lines.next(), lines.next()) else {
+        bail!(
+            "{} must hold two lines: user name, then password",
+            context()
+        );
+    };
+    ensure!(
+        lines.all(str::is_empty),
+        "{} must hold only two lines: user name, then password",
+        context()
+    );
+    for (what, value) in [("user name", user), ("password", password)] {
+        ensure!(
+            (1..=255).contains(&value.len()) && !value.chars().any(char::is_control),
+            "the {what} in {} must be 1 to 255 bytes without control characters",
+            context()
+        );
+    }
+    Ok((user.to_owned(), password.to_owned()))
 }
 
 /// The one HTTP client for every controller request. It never uses proxies
@@ -143,7 +269,7 @@ pub fn controller_proxy(input: &str) -> Result<reqwest::Proxy> {
 pub fn controller_client(
     base: &Url,
     addresses: &[String],
-    proxy: Option<&str>,
+    proxy: Option<&ControllerProxy>,
     ca_certificate: Option<&[u8]>,
 ) -> Result<Client> {
     let mut builder = Client::builder()
@@ -159,7 +285,7 @@ pub fn controller_client(
         "use either --controller-address or --controller-proxy, not both"
     );
     if let Some(proxy) = proxy {
-        builder = builder.proxy(controller_proxy(proxy)?);
+        builder = builder.proxy(controller_proxy(base, proxy)?);
     }
     if !addresses.is_empty() {
         ensure!(
@@ -243,7 +369,7 @@ async fn run_agent(
     let client = controller_client(
         &base,
         &options.controller_addresses,
-        options.controller_proxy.as_deref(),
+        options.controller_proxy.as_ref(),
         ca.as_deref(),
     )?;
     let mut credential: Credential = if let Some(saved) = store.metadata("agent_credential")? {
@@ -372,7 +498,11 @@ async fn run_agent(
     )?;
     // Reported only to a controller that sent a desired state.
     let mut overlay_report: Option<crate::wireguard::Report> = None;
-    let mut tunnels = reverse_tunnel::Tunnels::new(&store, engine.reverse_tunnels().clone())?;
+    let mut tunnels = reverse_tunnel::Tunnels::new(
+        &store,
+        engine.reverse_tunnels().clone(),
+        engine.firewall().clone(),
+    )?;
     // Reported only to a controller that sent tunnels, as older ones reject
     // the unknown field.
     let mut tunnel_reporting = false;
@@ -387,6 +517,10 @@ async fn run_agent(
     // that takes them; sessions only of the rules it asked for.
     let mut connections_reporting = false;
     let mut connection_requests: Vec<String> = vec![];
+    // The run's instance and answers to termination requests go only to a
+    // controller that takes them, as older ones reject the unknown fields.
+    let mut termination_reporting = false;
+    let mut termination_answers: Vec<crate::connections::TerminationResult> = vec![];
     // Support for egress proxies is reported only to a controller that
     // takes the report, as older ones reject the unknown field.
     let mut egress_reporting = false;
@@ -396,6 +530,11 @@ async fn run_agent(
     let mut connection_failed = false;
     let mut reconciled = false;
     let mut controller_instance: Option<String> = None;
+    // After a controller refused the optional reports (HTTP 422) they are
+    // off for a sync; after its second refusal in one run (the run that
+    // refused, and whether twice), off until another run answers.
+    let mut reports_off = false;
+    let mut refused_reports: Option<(String, bool)> = None;
     let mut log_cursor: Option<crate::logs::Cursor> = None;
     let mut mptcp_paths = crate::mptcp::paths::Applier::from_env();
     // Reported only to a controller that sent desired paths, as older ones
@@ -552,6 +691,12 @@ async fn run_agent(
             // answered at once, the same ones again only at the next poll.
             let answered = std::mem::take(&mut connection_requests);
             let mut answer_due = false;
+            if reports_off {
+                (firewall_reporting, dns_reporting, tunnel_reporting) = (false, false, false);
+                (rate_reporting, speed_reporting, egress_reporting) = (false, false, false);
+                (connections_reporting, termination_reporting) = (false, false);
+                (overlay_report, mptcp_report) = (None, None);
+            }
             let request = SyncRequest {
                 lease: lease.proof.clone(),
                 budget: Some(budget),
@@ -571,14 +716,20 @@ async fn run_agent(
                     stats.reverse_tunnel = tunnel_reporting.then(|| tunnels.report());
                     stats.rate_limits = rate_reporting.then(|| engine.rate_limit_report());
                     stats.speed_test = speed_reporting.then(|| speed_tests.report());
-                    stats.live_connections = connections_reporting
-                        .then(|| engine.connection_report(&answered, &block_cursor));
+                    stats.live_connections = connections_reporting.then(|| {
+                        engine.connection_report(
+                            &answered,
+                            &block_cursor,
+                            termination_reporting.then(|| std::mem::take(&mut termination_answers)),
+                        )
+                    });
                     stats.egress_proxy = egress_reporting.then(Default::default);
                     // Why the newest policy was not taken, else why sets of
                     // the policy in force refuse everything.
                     stats.firewall = firewall_reporting.then(|| crate::firewall::Report {
                         applied_hash: engine.firewall().applied_hash(),
                         error: firewall_error.clone().or_else(|| engine.firewall().error()),
+                        covers: crate::firewall::COVERS.map(String::from).to_vec(),
                     });
                     stats.system = Some(sampler.sample());
                     stats
@@ -591,7 +742,42 @@ async fn run_agent(
                 _ = stop.cancelled() => break,
                 response = credential.send(client.post(base.join("api/v1/agent/sync")?).json(&request)) => response,
             };
+            // What this agent reports only because the controller asked.
+            let optional = firewall_reporting
+                || dns_reporting
+                || overlay_report.is_some()
+                || tunnel_reporting
+                || rate_reporting
+                || speed_reporting
+                || connections_reporting
+                || termination_reporting
+                || egress_reporting
+                || mptcp_report.is_some();
             match response {
+                // A controller replaced by an older release rejects fields it
+                // does not know (HTTP 422): report none of them until its next
+                // reply says what it takes, instead of stopping forwarding. One
+                // that says it takes them and refuses them again gets none
+                // until it restarts, instead of every other sync.
+                Ok(response)
+                    if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                        && optional =>
+                {
+                    let again = refused_reports
+                        .as_ref()
+                        .is_some_and(|(run, _)| Some(run) == controller_instance.as_ref());
+                    if again {
+                        tracing::error!(
+                            "controller rejected this agent's optional reports again; they stay off until the controller restarts"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "controller rejected this agent's optional reports; retrying without them"
+                        );
+                    }
+                    refused_reports = controller_instance.clone().map(|run| (run, again));
+                    reports_off = true;
+                }
                 Ok(response)
                     if (response.status().is_client_error()
                         && response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS)
@@ -611,6 +797,15 @@ async fn run_agent(
                 Ok(response) if response.status().is_success() => {
                     match bounded_json::<SyncResponse>(response).await {
                         Ok(synced) => {
+                            // Taken with this sync, or another run: start over.
+                            if optional
+                                || refused_reports
+                                    .as_ref()
+                                    .is_some_and(|(run, _)| *run != synced.controller_instance)
+                            {
+                                refused_reports = None;
+                            }
+                            reports_off = refused_reports.as_ref().is_some_and(|(_, twice)| *twice);
                             let rotation = synced.credential_rotation;
                             log_cursor = synced.log_cursor;
                             mptcp_report = match &synced.mptcp_paths {
@@ -639,6 +834,22 @@ async fn run_agent(
                                 connection_requests = synced.live_connection_requests;
                                 answer_due =
                                     connection_requests.iter().any(|r| !answered.contains(r));
+                            }
+                            termination_reporting =
+                                connections_reporting && synced.connection_termination;
+                            // Not while this run refused the reports that
+                            // carry the answers, also once, as the next one
+                            // may be refused again: a session would end and
+                            // its request expire unanswered.
+                            if termination_reporting
+                                && refused_reports.is_none()
+                                && !synced.connection_terminations.is_empty()
+                            {
+                                // Answered with the next report, sent at once.
+                                termination_answers = engine
+                                    .terminate_sessions(&synced.connection_terminations)
+                                    .await;
+                                answer_due = true;
                             }
                             if let Err(error) = tunnels
                                 .reconcile(&store, &synced.reverse_tunnels.unwrap_or_default())

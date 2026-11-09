@@ -9,7 +9,7 @@ use hyper::{
     header::PROXY_AUTHORIZATION,
     service::service_fn,
 };
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -253,9 +253,10 @@ pub(crate) async fn serve_managed(
     let idle_activity = activity.clone();
     let idle = session.idle_timeout;
     let max_streams = session.config.max_concurrent_streams;
+    let executor = InSession(session.tasks.clone());
     let service =
         service_fn(move |request| handle(request, session.clone(), activity.clone(), peer));
-    let mut builder = hyper::server::conn::http2::Builder::new(TokioExecutor::new());
+    let mut builder = hyper::server::conn::http2::Builder::new(executor);
     builder
         .max_concurrent_streams(max_streams)
         .max_header_list_size(16 * 1024)
@@ -282,6 +283,21 @@ pub(crate) async fn serve_managed(
         _ = inactive => {}
     }
     Ok(())
+}
+
+/// Runs a connection's stream handlers in its session's task group: a
+/// handler still dialing, and the tunnel it then spawns, keep the session
+/// open until they ended.
+#[derive(Clone)]
+struct InSession(TaskTracker);
+impl<F> hyper::rt::Executor<F> for InSession
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, future: F) {
+        self.0.spawn(future);
+    }
 }
 
 async fn read_preface<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Vec<u8>> {
@@ -476,5 +492,147 @@ async fn resolve_target(destination: &Destination, allow_private: bool) -> Optio
             let mut addresses = tokio::net::lookup_host((name.as_str(), *port)).await.ok()?;
             addresses.find(|address| allow_private || crate::shadowsocks::public(address.ip()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::{
+        io::AsyncWriteExt,
+        sync::{mpsc, oneshot},
+    };
+
+    /// Holds a tunnel's streams, as it ends, until the test lets go.
+    struct Held(Option<std::sync::mpsc::Receiver<()>>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.recv();
+            }
+        }
+    }
+
+    /// A stream handler still dialing, and the tunnel it then spawns, are
+    /// in the session's task group: it cannot empty, and the session cannot
+    /// be reported closed, before they ended.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stream_handlers_and_their_tunnels_are_in_the_sessions_task_group() {
+        let (server, client) = tokio::io::duplex(1 << 16);
+        let tasks = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let (dialing, mut dials) = mpsc::unbounded_channel();
+        let (release, released) = oneshot::channel::<()>();
+        let released = Arc::new(Mutex::new(Some(released)));
+        let (targets, mut target) = mpsc::unbounded_channel();
+        let (let_go, hold) = std::sync::mpsc::channel();
+        let hold = Arc::new(Mutex::new(Some(hold)));
+        let session = Session {
+            config: Arc::new(
+                http_connect::ServerConfig {
+                    username: None,
+                    password: None,
+                    allow_private_destinations: true,
+                }
+                .into(),
+            ),
+            // Port 1 dials until released, then fails; any other port is
+            // the near end of a pipe whose far end the test holds.
+            dial: Arc::new(move |destination| {
+                let (dialing, targets) = (dialing.clone(), targets.clone());
+                let released = released.lock().unwrap().take();
+                Box::pin(async move {
+                    dialing.send(()).unwrap();
+                    if matches!(destination, Destination::Ip(address) if address.port() == 1) {
+                        let _ = released.unwrap().await;
+                        return Err(StatusCode::BAD_GATEWAY);
+                    }
+                    let (near, far) = tokio::io::duplex(1024);
+                    targets.send(far).unwrap();
+                    Ok(Box::new(near) as BoxStream)
+                })
+            }),
+            relay: Arc::new(move |mut client, mut target| {
+                let held = Held(hold.lock().unwrap().take());
+                Box::pin(async move {
+                    let _held = held;
+                    copy_bidirectional(&mut client, &mut target).await?;
+                    Ok(())
+                })
+            }),
+            cancel: cancel.clone(),
+            tasks: tasks.clone(),
+            handshake_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(60),
+            idle_timeout: Duration::from_secs(60),
+        };
+        let served = tokio::spawn(serve_managed(
+            Box::new(server),
+            session,
+            "127.0.0.1:9".parse().unwrap(),
+        ));
+        let (sender, connection) = hyper::client::conn::http2::handshake(
+            hyper_util::rt::TokioExecutor::new(),
+            TokioIo::new(client),
+        )
+        .await
+        .unwrap();
+        tokio::spawn(connection);
+        let connect = |port: u16| {
+            let mut sender = sender.clone();
+            let request = Request::builder()
+                .method("CONNECT")
+                .uri(format!("http://127.0.0.1:{port}"))
+                .body(Empty::<Bytes>::new())
+                .unwrap();
+            async move { sender.send_request(request).await.unwrap() }
+        };
+        // Dialing: only the stream's handler runs, in the group.
+        let stuck = tokio::spawn(connect(1));
+        timeout(Duration::from_secs(5), dials.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!tasks.is_empty(), "a handler still dialing is not counted");
+        release.send(()).unwrap();
+        assert_eq!(stuck.await.unwrap().status(), StatusCode::BAD_GATEWAY);
+        // A tunnel: it relays, and keeps the group from emptying.
+        let mut response = timeout(Duration::from_secs(5), connect(2)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut tunnel = TokioIo::new(hyper::upgrade::on(&mut response).await.unwrap());
+        let mut far = target.recv().await.unwrap();
+        tunnel.write_all(b"ping").await.unwrap();
+        let mut got = [0u8; 4];
+        timeout(Duration::from_secs(5), far.read_exact(&mut got))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&got, b"ping");
+        tasks.close();
+        assert!(
+            timeout(Duration::from_millis(200), tasks.wait())
+                .await
+                .is_err(),
+            "the group emptied while a tunnel relays"
+        );
+        // Cancelled, the connection ends; the tunnel, still letting go of
+        // its streams, keeps the group from emptying until it did.
+        cancel.cancel();
+        assert!(
+            timeout(Duration::from_millis(300), tasks.wait())
+                .await
+                .is_err(),
+            "the group emptied while its tunnel was ending"
+        );
+        let_go.send(()).unwrap();
+        timeout(Duration::from_secs(5), tasks.wait())
+            .await
+            .expect("the group empties once its tunnel ended");
+        let mut rest = vec![];
+        timeout(Duration::from_secs(5), far.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap();
+        served.await.unwrap().unwrap();
     }
 }

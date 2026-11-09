@@ -65,6 +65,8 @@ sudo python3 scripts/relay_deploy.py start --role controller
 sudo python3 scripts/relay_deploy.py enable --role controller
 ```
 
+`controller.json` 还可以写 `block_record_days`（1–365，默认 30）和 `block_records_per_node`（100–100000，默认 10000），对应控制器的 `--block-record-days`、`--block-records-per-node`：拦截记录在状态目录 `blocks.sqlite` 中保留的天数和每台服务器的条数上限，见 [CONNECTIONS.md](CONNECTIONS.md#拦截记录)。不写时服务包装脚本不带这两个参数，已安装版本的包装脚本保持不变。
+
 控制器首次管理员密码仍在私有状态目录的 `admin-password.secret`；忘记密码时可停止控制器后用 `relay reset-password` 离线重置，见 [RECOVERY.md](RECOVERY.md#离线重置用户密码)。远程管理应按现有 Caddy 示例配置 HTTPS；非回环监听须明确设置 `behind_tls_proxy:true`。安装器不自动配置域名、证书或反向代理。
 
 创建节点后，把一次性注册令牌保存为私有普通文件。`agent.json`：
@@ -73,7 +75,7 @@ sudo python3 scripts/relay_deploy.py enable --role controller
 {"controller":"https://relay.example.com","node_id":"实际节点ID","poll_seconds":5}
 ```
 
-无法直连控制器的服务器可增加 `"controller_addresses":["中转主机:端口", …]`（按顺序尝试，最多 8 个，生成重复的 `--controller-address`）或 `"controller_proxy":"http://代理:端口"`（HTTP CONNECT 代理，生成 `--controller-proxy`），二者只能选一。TLS 仍校验控制器域名；`controller` 必须是域名，带端口时中转须监听同一端口；代理地址不接受账号密码，不支持 SOCKS。用法和用现有 Relay 规则做中转的步骤见 [部署指南](DEPLOYMENT_GUIDE_EN.md#servers-that-cannot-reach-the-panel-directly)。
+无法直连控制器的服务器可增加 `"controller_addresses":["中转主机:端口", …]`（按顺序尝试，最多 8 个，生成重复的 `--controller-address`）或 `"controller_proxy":"代理地址"`（生成 `--controller-proxy`），二者只能选一。代理地址可以是 `http://代理:端口`（HTTP CONNECT）、`socks5h://代理:端口`（由代理解析控制器域名）或 `socks5://代理:端口`（由本机解析域名，只用第一个地址，本机解析不了就报错，不会把域名交给代理）；SOCKS5 必须写端口，不支持 SOCKS4。TLS 仍校验控制器域名；`controller` 必须是域名，带端口时中转须监听同一端口；代理地址里不接受账号密码。SOCKS5 账号密码放在 `"controller_proxy_credentials_file":"/etc/relay-platform/agent-proxy.secret"` 这样的文件里（生成 `--controller-proxy-credentials-file`）：第一行用户名、第二行密码，各 1–255 字节，两者合计用 `socks5://` 时最多 234 字节，用 `socks5h://` 时最多 249 字节减去控制器域名长度（控制器 URL 是 IPv4 地址时 246，IPv6 时 234；非 ASCII 域名按 Agent 实际发送的 ASCII `xn--` 形式计长，用 `socks5h://` 加凭据文件时控制器 URL 须写成这种形式，例如 `straße.test` 写作 `xn--strae-oqa.test`，否则安装器拒绝），按字节计（非 ASCII 字符占 2 字节以上），`%` 等字符原样传给代理；更长的登录 Agent 的 SOCKS5 客户端发不出去，所以 Agent 启动时拒绝，文件已存在时安装器也会拒绝；属主 `relayp-agent`、权限 0600，不能放在 `/home`、`/root`、`/tmp` 下；Agent 启动时读取，改了要重启；文件缺失、属主或权限不对、格式错误时 Agent 不启动，该服务器停止转发直到修好；SOCKS5 登录本身不加密。代理不可用时 Agent 不会绕过它直连。用法和用现有 Relay 规则做中转的步骤见 [部署指南](DEPLOYMENT_GUIDE_EN.md#servers-that-cannot-reach-the-panel-directly)。
 
 ```sh
 sudo python3 scripts/relay_deploy.py install \

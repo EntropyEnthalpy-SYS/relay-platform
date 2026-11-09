@@ -1220,3 +1220,485 @@ async fn real_agents_carry_metered_tcp_and_udp_through_the_tunnel() {
     }
     stop_api.cancel();
 }
+
+/// A TCP and UDP echo on one port that counts what reached it.
+struct Counted {
+    address: SocketAddr,
+    tcp: Arc<AtomicUsize>,
+    udp: Arc<AtomicUsize>,
+    stop: CancellationToken,
+}
+impl Counted {
+    async fn start() -> Self {
+        let (listener, socket) = loop {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            if let Ok(socket) = UdpSocket::bind(listener.local_addr().unwrap()).await {
+                break (listener, socket);
+            }
+        };
+        let address = listener.local_addr().unwrap();
+        let (tcp, udp) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+        let stop = CancellationToken::new();
+        let (count, done) = (tcp.clone(), stop.clone());
+        tokio::spawn(async move {
+            loop {
+                let accepted =
+                    tokio::select! {_ = done.cancelled() => break, a = listener.accept() => a};
+                let Ok((mut stream, _)) = accepted else {
+                    break;
+                };
+                count.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let (mut read, mut write) = stream.split();
+                    let _ = tokio::io::copy(&mut read, &mut write).await;
+                });
+            }
+        });
+        let (count, done) = (udp.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut buffer = vec![0; 65536];
+            loop {
+                let received = tokio::select! {_ = done.cancelled() => break, r = socket.recv_from(&mut buffer) => r};
+                let Ok((length, peer)) = received else {
+                    break;
+                };
+                count.fetch_add(1, Ordering::SeqCst);
+                let _ = socket.send_to(&buffer[..length], peer).await;
+            }
+        });
+        Self {
+            address,
+            tcp,
+            udp,
+            stop,
+        }
+    }
+    fn reached(&self) -> (usize, usize) {
+        (
+            self.tcp.load(Ordering::SeqCst),
+            self.udp.load(Ordering::SeqCst),
+        )
+    }
+}
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+/// One TCP exchange from the loopback address `source`.
+async fn exchange_from(source: [u8; 4], address: SocketAddr, payload: &[u8]) -> Option<Vec<u8>> {
+    timeout(Duration::from_secs(3), async {
+        let socket = tokio::net::TcpSocket::new_v4().ok()?;
+        socket.bind(SocketAddr::from((source, 0))).ok()?;
+        let mut stream = socket.connect(address).await.ok()?;
+        stream.write_all(payload).await.ok()?;
+        stream.shutdown().await.ok()?;
+        let mut bytes = vec![];
+        stream.read_to_end(&mut bytes).await.ok()?;
+        Some(bytes)
+    })
+    .await
+    .ok()?
+}
+/// One UDP datagram and its reply, from the loopback address `source`.
+async fn datagram_from(source: [u8; 4], address: SocketAddr, payload: &[u8]) -> Option<Vec<u8>> {
+    let socket = UdpSocket::bind(SocketAddr::from((source, 0)))
+        .await
+        .unwrap();
+    socket.send_to(payload, address).await.ok()?;
+    let mut buffer = vec![0; 65536];
+    let length = timeout(Duration::from_secs(1), socket.recv(&mut buffer))
+        .await
+        .ok()?
+        .ok()?;
+    buffer.truncate(length);
+    Some(buffer)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_private_end_holds_its_targets_to_its_outbound_set() {
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("controller.db")).unwrap();
+    control.set_kind("controller").unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let (address, stop_api) = serve(control.clone()).await;
+    let api = Api {
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        origin: format!("http://{address}"),
+    };
+    let token = login(&api.client, &api.origin, "admin").await;
+    let (public, public_enrollment) = control.create_node(&admin, "default", "public").unwrap();
+    let (private, private_enrollment) = control.create_node(&admin, "default", "private").unwrap();
+    let tunnel_port = free_address().port();
+    let public_port = free_address().port();
+    let node = control
+        .nodes(&admin)
+        .unwrap()
+        .into_iter()
+        .find(|n| n.id == public.id)
+        .unwrap();
+    control
+        .update_node(
+            &admin,
+            &public.id,
+            NodeUpdate {
+                expected_revision: node.profile.revision,
+                name: node.name.clone(),
+                settings: NodeSettings {
+                    forwarding: Some(ForwardingDefaults {
+                        host: "127.0.0.1".into(),
+                        listen_ip: None,
+                        port_start: tunnel_port,
+                        port_end: tunnel_port,
+                        public_port_start: None,
+                    }),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    // A named target: the private server resolves it, and the set judges
+    // the name and every address it resolves to.
+    let target = Counted::start().await;
+    let port = target.address.port();
+    let (code, created) = api
+        .call(
+            reqwest::Method::POST,
+            "/reverse-tunnels",
+            &token,
+            Some(json!({"name": "Home lab", "public_node_id": public.id, "private_node_id": private.id,
+                        "public_port": public_port, "protocol": "tcp_udp",
+                        "target": format!("localhost:{port}"), "tunnel_port": tunnel_port})),
+        )
+        .await;
+    assert_eq!(code, 200, "{created}");
+    let entry: SocketAddr = created["entry"].as_str().unwrap().parse().unwrap();
+    let mut agents = vec![];
+    for (name, node, enrollment) in [
+        ("public", &public.id, &public_enrollment),
+        ("private", &private.id, &private_enrollment),
+    ] {
+        let secret = temp.path().join(format!("{name}.secret"));
+        write_secret(&secret, enrollment.as_bytes()).unwrap();
+        let db = Store::open(&temp.path().join(format!("{name}.db"))).unwrap();
+        let stop = CancellationToken::new();
+        agents.push((
+            stop.clone(),
+            tokio::spawn(agent::run(
+                db,
+                agent_options(&api.origin, node, &secret),
+                stop,
+            )),
+        ));
+    }
+    let view = wait_for(&api, &token, "the tunnel", |v| v["state"] == "connected").await;
+    let rule_id = view["rule_id"].as_str().unwrap().to_owned();
+    let node_view = |id: String| {
+        let api = &api;
+        let token = &token;
+        async move {
+            let (_, nodes) = api.call(reqwest::Method::GET, "/nodes", token, None).await;
+            nodes
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["id"] == id)
+                .unwrap()
+                .clone()
+        }
+    };
+    let works = |source: [u8; 4]| async move {
+        exchange_from(source, entry, b"through").await.as_deref() == Some(&b"through"[..])
+            && datagram_from(source, entry, b"datagram").await.as_deref() == Some(&b"datagram"[..])
+    };
+    let until = Instant::now() + Duration::from_secs(10);
+    while !works([127, 0, 0, 1]).await {
+        assert!(Instant::now() < until, "the open tunnel never answered");
+    }
+    // Shown as covered: this agent holds tunnels to the outbound set.
+    let private_view = node_view(private.id.clone()).await;
+    assert_eq!(
+        private_view["firewall"]["uncovered"],
+        json!([]),
+        "{private_view}"
+    );
+
+    // Bound and confirmed on the private server: neither TCP nor UDP from
+    // the public port reaches the target any more.
+    let set_rules = |destination: &str, port: u16| json!([{"action": "deny", "match": {"destinations": [destination], "ports": [port.to_string()]}}]);
+    let (code, set) = api
+        .call(
+            reqwest::Method::POST,
+            "/firewall/sets",
+            &token,
+            Some(
+                json!({"name": "No lab", "scope": "system", "direction": "outbound",
+                        "default_action": "allow", "rules": set_rules("localhost", port)}),
+            ),
+        )
+        .await;
+    assert_eq!(code, 200, "{set}");
+    let set_id = set["id"].as_str().unwrap().to_owned();
+    let (code, bound) = api
+        .call(
+            reqwest::Method::PUT,
+            &format!("/nodes/{}/firewall", private.id),
+            &token,
+            Some(json!({"inbound_set_id": null, "outbound_set_id": set_id})),
+        )
+        .await;
+    assert_eq!(code, 200, "{bound}");
+    let confirmed = |revision: Option<Value>| {
+        let node_view = &node_view;
+        let private = private.id.clone();
+        async move {
+            let until = Instant::now() + Duration::from_secs(20);
+            loop {
+                let view = node_view(private.clone()).await;
+                if view["firewall"]["state"] == "applied"
+                    && revision
+                        .as_ref()
+                        .is_none_or(|r| view["firewall"]["desired_hash"] != *r)
+                {
+                    return view;
+                }
+                assert!(Instant::now() < until, "not confirmed: {view}");
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let first = confirmed(None).await;
+    let before = target.reached();
+    assert_eq!(
+        exchange_from([127, 0, 0, 2], entry, b"through")
+            .await
+            .unwrap_or_default(),
+        b"",
+        "the public end closed the refused TCP connection"
+    );
+    // One refused datagram, one record: the public end learns why the
+    // association ended before it ends.
+    assert_eq!(
+        datagram_from([127, 0, 0, 3], entry, b"datagram").await,
+        None
+    );
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        target.reached(),
+        before,
+        "nothing reached the refused target"
+    );
+    // The public end records the refusal against the tunnel's client.
+    let blocks = |source: &'static str| {
+        let api = &api;
+        let token = &token;
+        let path = format!("/nodes/{}/blocks?rule_id={rule_id}", public.id);
+        async move {
+            let until = Instant::now() + Duration::from_secs(20);
+            loop {
+                let (_, view) = api.call(reqwest::Method::GET, &path, token, None).await;
+                if let Some(block) = view["blocks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|b| b["source"] == source && b["reason"] == "firewall")
+                {
+                    return block.clone();
+                }
+                assert!(Instant::now() < until, "no record for {source}: {view}");
+                sleep(Duration::from_millis(50)).await;
+            }
+        }
+    };
+    let detail = "reverse tunnel private server: server outbound rule set: rule 1 denies (No lab)";
+    let tcp = blocks("127.0.0.2").await;
+    assert_eq!(
+        (tcp["protocol"].as_str(), tcp["detail"].as_str()),
+        (Some("tcp"), Some(detail))
+    );
+    let udp = blocks("127.0.0.3").await;
+    assert_eq!(
+        (
+            udp["protocol"].as_str(),
+            udp["detail"].as_str(),
+            udp["count"].as_u64()
+        ),
+        (Some("udp"), Some(detail), Some(1))
+    );
+
+    // Edits reach the private server without publishing anything. Its
+    // addresses are judged too, not only the name it was given.
+    let edit = |revision: u64, destinations: &[&str]| {
+        let api = &api;
+        let token = &token;
+        let path = format!("/firewall/sets/{set_id}");
+        let mut rules = set_rules("", port);
+        rules[0]["match"]["destinations"] = json!(destinations);
+        let body = json!({"name": "No lab", "direction": "outbound", "default_action": "allow",
+                          "expected_revision": revision, "rules": rules});
+        async move {
+            let (code, edited) = api
+                .call(reqwest::Method::PUT, &path, token, Some(body))
+                .await;
+            assert_eq!(code, 200, "{edited}");
+        }
+    };
+    // localhost resolves to 127.0.0.1 and ::1 here; refusing ::1 leaves the
+    // address the target listens on.
+    edit(1, &["::1/128"]).await;
+    let second = confirmed(Some(first["firewall"]["desired_hash"].clone())).await;
+    let until = Instant::now() + Duration::from_secs(10);
+    while !works([127, 0, 0, 4]).await {
+        assert!(
+            Instant::now() < until,
+            "the edited set never let the target through"
+        );
+    }
+    edit(2, &["127.0.0.0/8", "::1/128"]).await;
+    let third = confirmed(Some(second["firewall"]["desired_hash"].clone())).await;
+    let before = target.reached();
+    assert_eq!(
+        exchange_from([127, 0, 0, 5], entry, b"through")
+            .await
+            .unwrap_or_default(),
+        b""
+    );
+    assert_eq!(
+        datagram_from([127, 0, 0, 5], entry, b"datagram").await,
+        None
+    );
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(target.reached(), before, "refused by its addresses");
+    assert_eq!(
+        third["desired_revision"], first["desired_revision"],
+        "no configuration was published"
+    );
+    for (stop, task) in agents {
+        stop.cancel();
+        timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+    stop_api.cancel();
+}
+
+/// One sync of an agent that carries tunnels and enforces rule sets, also
+/// on the paths `covers` names (none, as 0.150.0).
+fn sync_covering(db: &Store, node: &str, report: Report, covers: &[&str]) -> Desired {
+    let stats = EngineStats {
+        reverse_tunnel: Some(report),
+        firewall: Some(relay_platform::firewall::Report {
+            covers: covers.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        }),
+        ..EngineStats::default()
+    };
+    db.sync(
+        node,
+        SyncRequest {
+            logs: None,
+            lease: None,
+            budget: None,
+            ledger_id: ledger(db, node),
+            need_config: false,
+            applied_revision: 0,
+            apply_error: None,
+            usage: vec![],
+            stats,
+        },
+    )
+    .unwrap()
+    .reverse_tunnels
+    .expect("this controller always sends tunnels")
+}
+fn refusal<T: std::fmt::Debug>(result: anyhow::Result<T>) -> (u16, String) {
+    let error = result.unwrap_err();
+    let rejection = error.downcast_ref::<Rejection>().expect("a rejection");
+    (rejection.status, rejection.message.clone())
+}
+
+#[test]
+fn a_private_server_bound_to_an_outbound_set_needs_an_agent_that_holds_its_tunnels_to_it() {
+    use relay_platform::firewall::{COVERS, ServerBinding, SetInput};
+    let f = Fixture::new(2);
+    f.behind_nat(0);
+    let (public, private) = (f.id(0), f.id(1));
+    let key = Identity::generate().unwrap().fingerprint();
+    sync_covering(&f.store, &public, able(Some(&key)), &COVERS);
+    // The private agent enforces rule sets but not on tunnels, as 0.150.0.
+    sync_covering(&f.store, &private, able(None), &[]);
+    let set: SetInput = serde_json::from_value(json!({
+        "name": "No lab", "scope": "system", "direction": "outbound", "default_action": "allow",
+        "rules": [{"action": "deny", "match": {"destinations": ["192.168.10.0/24"]}}]}))
+    .unwrap();
+    let set = f.store.create_firewall_set(&f.admin, set).unwrap().set.id;
+    let bind = |outbound: Option<&str>| {
+        f.store.bind_node_firewall(
+            &f.admin,
+            &private,
+            ServerBinding {
+                inbound_set_id: None,
+                outbound_set_id: outbound.map(str::to_owned),
+            },
+        )
+    };
+    let uncovered = || f.store.node_firewall(&f.admin, &private).unwrap().uncovered;
+    // Nothing dials from it yet: the binding holds everything it does.
+    bind(Some(&set)).unwrap();
+    let refused = (
+        409,
+        "the agent on server line-1 does not apply its outbound firewall rule set to reverse tunnels; upgrade it first".to_owned(),
+    );
+    assert_eq!(refusal(f.create(f.input(0, 1, 22000))), refused);
+    // A switched-off tunnel dials nothing; switching it on would.
+    let mut off = f.input(0, 1, 22000);
+    off.enabled = Some(false);
+    let tunnel = f.create(off.clone()).unwrap();
+    let mut on = off.clone();
+    on.enabled = Some(true);
+    assert_eq!(
+        refusal(
+            f.store
+                .update_reverse_tunnel(&f.admin, &tunnel.id, on.clone())
+        ),
+        refused
+    );
+    assert_eq!(uncovered(), Vec::<String>::new());
+    // Once the agent covers tunnels, it goes through.
+    sync_covering(&f.store, &private, able(None), &COVERS);
+    f.store
+        .update_reverse_tunnel(&f.admin, &tunnel.id, on.clone())
+        .unwrap();
+    assert_eq!(uncovered(), Vec::<String>::new());
+    assert_eq!(
+        sync_covering(&f.store, &private, able(None), &COVERS)
+            .dials
+            .len(),
+        1
+    );
+    // The agent is downgraded: the tunnel keeps running and the server says
+    // what its set does not hold; only edits that change what it dials, or
+    // a new set over it, wait for the agent.
+    let dials = sync_covering(&f.store, &private, able(None), &[]).dials;
+    assert_eq!(dials.len(), 1, "a running tunnel is not stopped");
+    assert_eq!(uncovered(), ["reverse_tunnels"]);
+    let mut renamed = on.clone();
+    renamed.name = "renamed".into();
+    f.store
+        .update_reverse_tunnel(&f.admin, &tunnel.id, renamed.clone())
+        .unwrap();
+    let mut retargeted = renamed.clone();
+    retargeted.target = "192.168.10.21:8080".into();
+    assert_eq!(
+        refusal(
+            f.store
+                .update_reverse_tunnel(&f.admin, &tunnel.id, retargeted)
+        ),
+        refused
+    );
+    bind(None).unwrap();
+    assert_eq!(uncovered(), Vec::<String>::new());
+    assert_eq!(refusal(bind(Some(&set))), refused);
+}

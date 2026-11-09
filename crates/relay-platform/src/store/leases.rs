@@ -162,6 +162,12 @@ pub(super) fn initialize(
 pub(super) fn deleted(clocks: &mut LeaseClocks, node: &str) {
     clocks.nodes.remove(node);
 }
+/// Whether an agent of `node` may have held a lease: revoking its
+/// credential ([`invalidate`]) also counts, since it raises the generation
+/// whether or not an agent ever connected.
+pub(super) fn ever_held(conn: &Connection, node: &str) -> Result<bool> {
+    Ok(read(conn, node)?.generation > 0)
+}
 pub(super) fn created(clocks: &mut LeaseClocks, node: &str) {
     let now = Instant::now();
     clocks.nodes.insert(

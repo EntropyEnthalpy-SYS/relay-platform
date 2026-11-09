@@ -1,5 +1,9 @@
 //! Typed, fail-closed protocol gateways backed by one pinned sing-box process.
 //! Every destination uses an authenticated loopback SOCKS bridge in this Engine.
+//! Clients never reach the process directly: this Engine owns each gateway's
+//! public listener, judges the client's own address there, and only then
+//! passes its bytes to the loopback port the process listens on
+//! ([`Upstream`]).
 use crate::{
     model::{NodeConfig, Protocol, Rule, identifier, validate_target},
     socks5,
@@ -341,9 +345,11 @@ impl Config {
         Ok(())
     }
 
-    /// The engine inbound for this gateway, without its TLS block.
+    /// The engine inbound for this gateway, without its TLS block. It
+    /// listens on a loopback port of its choice ([`Upstream`]); clients
+    /// reach it through the Engine's public listener at `listen`.
     fn engine_inbound(&self, rule: &Rule, tag: &str) -> serde_json::Value {
-        let mut inbound = json!({"type":self.protocol.kind(), "tag":tag, "listen":self.listen.ip().to_string(), "listen_port":self.listen.port(), "tcp_fast_open":false});
+        let mut inbound = json!({"type":self.protocol.kind(), "tag":tag, "listen":"127.0.0.1", "listen_port":0, "tcp_fast_open":false});
         let user = match &self.protocol {
             WireProtocol::Vless { uuid, vision } => {
                 json!({"name":rule.id,"uuid":uuid,"flow":if *vision {"xtls-rprx-vision"} else {""}})
@@ -699,14 +705,66 @@ pub struct Snapshot {
 }
 pub(crate) type Metrics = Arc<Mutex<Snapshot>>;
 
+/// Where the protocol engine takes one gateway's clients: a loopback port it
+/// picks at each start and names in its log. The Engine's public listener
+/// passes judged clients there; a connection made to one start ends when
+/// that start stops listening.
+#[derive(Default)]
+pub(crate) struct Upstream(Mutex<Option<(SocketAddr, CancellationToken)>>);
+impl Upstream {
+    /// The engine's address now, and a token cancelled once it no longer
+    /// listens there; `None` while it is not running.
+    pub(crate) fn current(&self) -> Option<(SocketAddr, CancellationToken)> {
+        self.0.lock().unwrap().clone()
+    }
+    fn set(&self, address: SocketAddr) {
+        if let Some((_, gone)) = self
+            .0
+            .lock()
+            .unwrap()
+            .replace((address, CancellationToken::new()))
+        {
+            gone.cancel();
+        }
+    }
+    fn clear(&self) {
+        if let Some((_, gone)) = self.0.lock().unwrap().take() {
+            gone.cancel();
+        }
+    }
+}
+/// The gateway tag, transport and address of an engine log line saying an
+/// inbound listens, as sing-box 1.14.4 writes it:
+/// `inbound/vless[in-gw]: tcp server started at 127.0.0.1:41000`.
+fn listening(line: &str) -> Option<(&str, bool, SocketAddr)> {
+    let (head, address) = line.rsplit_once(" server started at ")?;
+    let (head, udp) = if let Some(head) = head.strip_suffix("]: udp") {
+        (head, true)
+    } else {
+        (head.strip_suffix("]: tcp")?, false)
+    };
+    let (_, tag) = head.rsplit_once('[')?;
+    let address: SocketAddr = address.trim().parse().ok()?;
+    (address.ip().is_loopback() && address.port() != 0).then_some((tag, udp, address))
+}
+
 /// A private immutable generation. Files are removed only after its process exits.
 pub(crate) struct Plan {
     directory: PathBuf,
     pub auth: HashMap<String, socks5::ServerConfig>,
     count: usize,
+    /// Per rule id, where the engine takes the gateway's clients.
+    upstreams: HashMap<String, Arc<Upstream>>,
+    /// Per inbound tag, the rule id and whether the inbound listens on UDP.
+    tags: HashMap<String, (String, bool)>,
+    /// Counts the engine's starts; `upstreams` hold the ports of this one.
+    start: Mutex<u64>,
 }
 impl Drop for Plan {
     fn drop(&mut self) {
+        for upstream in self.upstreams.values() {
+            upstream.clear();
+        }
         let _ = std::fs::remove_file(self.directory.join("config.json"));
         let _ = std::fs::remove_dir(&self.directory);
     }
@@ -763,6 +821,8 @@ impl Plan {
         let mut outbounds = vec![];
         let mut route = vec![];
         let mut auth = HashMap::new();
+        let mut upstreams = HashMap::new();
+        let mut tags = HashMap::new();
         for rule in &rules {
             let gateway = rule.protocol_gateway.as_ref().expect("filtered");
             gateway.validate(rule)?;
@@ -781,14 +841,13 @@ impl Plan {
             inbound["tls"] = gateway.engine_tls(tls, &out)?;
             inbounds.push(inbound);
             outbounds.push(json!({"type":"socks","tag":out,"server":rule.listen.ip().to_string(),"server_port":rule.listen.port(),"version":"5","username":rule.id,"password":credential,"udp_over_tcp":false}));
-            if !rule.deny_sources.is_empty() {
-                route.push(
-                    json!({"inbound":[tag],"source_ip_cidr":rule.deny_sources,"action":"reject"}),
-                );
-            }
-            if !rule.allow_sources.is_empty() {
-                route.push(json!({"type":"logical","mode":"and","rules":[{"inbound":[tag]},{"source_ip_cidr":rule.allow_sources,"invert":true}],"action":"reject"}));
-            }
+            // The engine sees every client as loopback: the Engine's public
+            // listener applies the source lists and inbound sets first.
+            upstreams.insert(rule.id.clone(), Arc::new(Upstream::default()));
+            tags.insert(
+                tag.clone(),
+                (rule.id.clone(), gateway.protocol.uses_udp_socket()),
+            );
             if rule.protocol == Protocol::Tcp {
                 route.push(json!({"inbound":[tag],"network":"udp","action":"reject"}));
             }
@@ -809,6 +868,9 @@ impl Plan {
             directory,
             auth,
             count: rules.len(),
+            upstreams,
+            tags,
+            start: Mutex::new(0),
         });
         crate::store::write_secret(
             &plan.directory.join("config.json"),
@@ -860,6 +922,48 @@ impl Plan {
             }
         }
         command.spawn().context("cannot start protocol engine")
+    }
+    /// Where the engine takes the clients of the gateway of rule `id`.
+    pub(crate) fn upstream(&self, id: &str) -> Option<Arc<Upstream>> {
+        self.upstreams.get(id).cloned()
+    }
+    /// A new start of the engine: where earlier ones listened is forgotten,
+    /// and connections made to them end.
+    fn begin(&self) -> u64 {
+        let mut start = self.start.lock().unwrap();
+        *start += 1;
+        for upstream in self.upstreams.values() {
+            upstream.clear();
+        }
+        *start
+    }
+    /// The rule id of the gateway whose inbound an engine log line says
+    /// listens, and where: the inbound's tag and transport must match.
+    fn port(&self, line: &str) -> Option<(&str, SocketAddr)> {
+        let (tag, udp, address) = listening(line)?;
+        let (id, expected) = self.tags.get(tag)?;
+        (*expected == udp).then_some((id.as_str(), address))
+    }
+    /// Passes clients to the ports `found` names, if start `start` named
+    /// them, is still the engine's newest start and named every gateway's.
+    fn publish(&self, start: u64, found: &HashMap<String, SocketAddr>) -> bool {
+        let current = self.start.lock().unwrap();
+        if *current != start || self.upstreams.keys().any(|id| !found.contains_key(id)) {
+            return false;
+        }
+        for (id, upstream) in &self.upstreams {
+            upstream.set(found[id]);
+        }
+        true
+    }
+    /// Start `start` of the engine stopped: connections made to it end.
+    fn end(&self, start: u64) {
+        let current = self.start.lock().unwrap();
+        if *current == start {
+            for upstream in self.upstreams.values() {
+                upstream.clear();
+            }
+        }
     }
     pub async fn start(self: &Arc<Self>, executable: PathBuf, metrics: Metrics) -> Result<Running> {
         let child = self.spawn(&executable)?;
@@ -917,28 +1021,47 @@ async fn monitor(
     let mut first_ready = Some(ready);
     let mut failures = 0u32;
     loop {
+        // Ready once this start of the engine named the port of every
+        // gateway's inbound; until then, or when its log cannot be read, the
+        // gateways take no client.
+        let start = plan.begin();
         let mut stderr = child.stderr.take().expect("piped stderr");
         let (seen_tx, seen_rx) = oneshot::channel();
+        let lines = plan.clone();
         let reader = tokio::spawn(async move {
             let mut sender = Some(seen_tx);
-            let mut carry = Vec::new();
+            let mut found = HashMap::new();
+            let mut line = Vec::new();
             let mut bytes = [0u8; 4096];
             while let Ok(n) = stderr.read(&mut bytes).await {
                 if n == 0 {
                     break;
                 }
-                carry.extend_from_slice(&bytes[..n]);
-                if sender.is_some()
-                    && String::from_utf8_lossy(&carry).contains("sing-box started (")
-                {
-                    let _ = sender.take().unwrap().send(());
-                }
-                if carry.len() > 128 {
-                    carry.drain(..carry.len() - 128);
+                for &byte in &bytes[..n] {
+                    if byte != b'\n' {
+                        if line.len() < 4096 {
+                            line.push(byte);
+                        }
+                        continue;
+                    }
+                    let text = String::from_utf8_lossy(&line);
+                    if sender.is_some() {
+                        if let Some((id, address)) = lines.port(&text) {
+                            found.insert(id.to_owned(), address);
+                        }
+                        if text.contains("sing-box started (") {
+                            let published = lines.publish(start, &found);
+                            let _ = sender.take().unwrap().send(published);
+                        }
+                    }
+                    line.clear();
                 }
             }
         });
-        let ready = tokio::select! { biased; _ = stop.cancelled() => false, result = tokio::time::timeout(Duration::from_secs(10), seen_rx) => matches!(result, Ok(Ok(()))) };
+        let ready = tokio::select! { biased; _ = stop.cancelled() => false, result = tokio::time::timeout(Duration::from_secs(10), seen_rx) => matches!(result, Ok(Ok(true))) };
+        if !ready && !stop.is_cancelled() {
+            tracing::warn!("protocol engine did not start with a known port for every gateway");
+        }
         if ready {
             {
                 let mut m = metrics.lock().unwrap();
@@ -956,6 +1079,7 @@ async fn monitor(
         let _ = child.kill().await;
         reader.abort();
         let _ = reader.await;
+        plan.end(start);
         {
             let mut m = metrics.lock().unwrap();
             m.running = false;
@@ -1315,5 +1439,78 @@ mod tests {
         assert!(any.share_link("edge.example", 443, "a").unwrap().is_none());
         assert!(tuic.share_link("https://edge.example", 443, "q").is_err());
         assert!(tuic.share_link("edge.example", 0, "q").is_err());
+    }
+
+    #[test]
+    fn engine_ports_are_read_per_start_and_only_whole() {
+        let line = |tag: &str, udp: bool, address: &str| {
+            let transport = if udp { "udp" } else { "tcp" };
+            format!(
+                "\u{1b}[36mINFO\u{1b}[0m[0000] inbound/vless[{tag}]: {transport} server started at {address}"
+            )
+        };
+        assert_eq!(
+            listening(&line("in-gw", false, "127.0.0.1:41000")),
+            Some(("in-gw", false, "127.0.0.1:41000".parse().unwrap()))
+        );
+        assert_eq!(
+            listening(&line("in-gw", true, "[::1]:41000")),
+            Some(("in-gw", true, "[::1]:41000".parse().unwrap()))
+        );
+        // Clients go nowhere but to this host's loopback, on a real port.
+        for address in [
+            "0.0.0.0:41000",
+            "10.0.0.1:41000",
+            "127.0.0.1:0",
+            "nowhere",
+            "",
+        ] {
+            assert_eq!(listening(&line("in-gw", false, address)), None, "{address}");
+        }
+        assert_eq!(listening("sing-box started (0.00s)"), None);
+        let upstream = |id: &str| (id.to_owned(), Arc::new(Upstream::default()));
+        let plan = Plan {
+            directory: std::env::temp_dir().join(format!("relay-gateway-{}", uuid::Uuid::new_v4())),
+            auth: HashMap::new(),
+            count: 2,
+            upstreams: [upstream("a"), upstream("b")].into_iter().collect(),
+            tags: [
+                ("in-a".to_owned(), ("a".to_owned(), false)),
+                ("in-b".to_owned(), ("b".to_owned(), true)),
+            ]
+            .into_iter()
+            .collect(),
+            start: Mutex::new(0),
+        };
+        // A port belongs to its inbound's tag and transport.
+        assert_eq!(plan.port(&line("in-b", false, "127.0.0.1:41001")), None);
+        assert_eq!(plan.port(&line("in-c", false, "127.0.0.1:41001")), None);
+        let found = |ports: &[(&str, u16)]| -> HashMap<String, SocketAddr> {
+            ports
+                .iter()
+                .map(|(id, port)| (id.to_string(), SocketAddr::from(([127, 0, 0, 1], *port))))
+                .collect()
+        };
+        let first = plan.begin();
+        assert!(!plan.publish(first, &found(&[("a", 1000)])), "incomplete");
+        assert!(plan.upstreams["a"].current().is_none());
+        let second = plan.begin();
+        // What the earlier start named, read late, is not this start's.
+        assert!(!plan.publish(first, &found(&[("a", 1000), ("b", 1001)])));
+        assert!(plan.upstreams["a"].current().is_none());
+        assert!(plan.publish(second, &found(&[("a", 2000), ("b", 2001)])));
+        let (address, gone) = plan.upstreams["a"].current().unwrap();
+        assert_eq!(address.port(), 2000);
+        plan.end(first);
+        assert!(!gone.is_cancelled(), "an older start's end changes nothing");
+        // A new start ends what was passed to the one before.
+        let third = plan.begin();
+        assert!(gone.is_cancelled());
+        assert!(plan.upstreams["b"].current().is_none());
+        assert!(plan.publish(third, &found(&[("a", 3000), ("b", 3001)])));
+        let (_, gone) = plan.upstreams["b"].current().unwrap();
+        plan.end(third);
+        assert!(gone.is_cancelled());
+        assert!(plan.upstreams["b"].current().is_none());
     }
 }

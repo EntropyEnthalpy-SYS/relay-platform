@@ -12,8 +12,17 @@
 //! Agents older than rule sets ignore the policy and reject a rule with
 //! `firewall_inbound_set`, so binding a set to a server, or publishing a
 //! rule bound to one, is refused (409) until the server's agent reported
-//! support, kept in `firewall_node:<node id>` and written once, as for
-//! egress proxies. Every publish path goes through [`require`].
+//! support, kept in `firewall_node:<node id>`, as for egress proxies. Every
+//! publish path goes through [`require`].
+//!
+//! Its value is `1`, or `{"covers":[...]}` when the agent also holds
+//! protocol gateways' clients ([`firewall::COVERS_GATEWAY_INBOUND`]) or its
+//! reverse tunnels' targets ([`firewall::COVERS_REVERSE_PRIVATE_OUTBOUND`])
+//! to the sets; it follows the agent's latest report, so a downgraded
+//! agent loses them. A binding, gateway or tunnel that would leave one of
+//! these paths outside the sets is refused (409) on an agent without the
+//! path; one from before the controller upgrade keeps running and the
+//! server's status names it in `uncovered`.
 use super::*;
 use crate::firewall::{
     self, BindingRef, Desired, Direction, Layer, Layers, NodeStatus, Policy, PolicyState, Report,
@@ -186,20 +195,98 @@ fn unsupported(conn: &Connection, node: &str) -> Result<Option<String>> {
     }))
 }
 
-/// Keeps that `node`'s agent enforces rule sets, written once, and the
-/// policy it confirmed, written when it changes. A sync without a report
-/// confirms nothing: the agent was downgraded, or starts afresh and reports
-/// from its next sync on.
+/// The paths beyond its own rules that `node`'s agent last reported it
+/// holds to rule sets.
+fn covers(conn: &Connection, node: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Coverage {
+        covers: Vec<String>,
+    }
+    Ok(get(conn, &node_key(node))?
+        .and_then(|value| serde_json::from_str::<Coverage>(&value).ok())
+        .map(|coverage| coverage.covers)
+        .unwrap_or_default())
+}
+fn node_name(conn: &Connection, node: &str) -> Result<String> {
+    Ok(conn.query_row("SELECT name FROM nodes WHERE id=?1", [node], |r| r.get(0))?)
+}
+/// The refusal of a protocol gateway, or of a server inbound set over one,
+/// on a server whose agent does not hold gateways to the sets.
+fn gateways_uncovered(conn: &Connection, node: &str) -> Result<String> {
+    Ok(format!(
+        "the agent on server {} does not apply firewall rule sets to protocol gateways; upgrade it first",
+        node_name(conn, node)?
+    ))
+}
+/// The refusal of a reverse tunnel, or of a server outbound set over one,
+/// on a private server whose agent does not hold its dials to the set.
+fn reverse_uncovered(conn: &Connection, node: &str) -> Result<String> {
+    Ok(format!(
+        "the agent on server {} does not apply its outbound firewall rule set to reverse tunnels; upgrade it first",
+        node_name(conn, node)?
+    ))
+}
+/// Enabled protocol gateways of `rules`.
+fn gateways(rules: &[Rule]) -> BTreeSet<&str> {
+    rules
+        .iter()
+        .filter(|r| r.enabled && r.protocol_gateway.is_some())
+        .map(|r| r.id.as_str())
+        .collect()
+}
+/// The enabled protocol gateways of `node`'s desired configuration; only
+/// read when its configuration has one.
+fn desired_gateways(conn: &Connection, node: &str) -> Result<BTreeSet<String>> {
+    let json: Option<String> = conn
+        .query_row(
+            "SELECT c.config_json FROM config_history c JOIN nodes n ON n.id=c.node_id AND n.desired_revision=c.revision WHERE n.id=?1 AND instr(c.config_json,'\"protocol_gateway\"')>0",
+            [node],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match json {
+        Some(json) => gateways(&serde_json::from_str::<NodeConfig>(&json)?.rules)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        None => BTreeSet::new(),
+    })
+}
+/// Whether `node` is the private end of an enabled reverse tunnel.
+fn dials_tunnels(conn: &Connection, node: &str) -> Result<bool> {
+    Ok(super::reverse_tunnels::all(conn)?
+        .iter()
+        .any(|t| t.enabled && t.private_node_id == node))
+}
+/// Refuses an enabled reverse tunnel whose private server binds an outbound
+/// set its agent does not hold the tunnel's target to.
+pub(super) fn require_tunnel(conn: &Connection, private_node: &str) -> Result<()> {
+    if binding(conn, private_node)?.outbound_set_id.is_some()
+        && !covers(conn, private_node)?
+            .iter()
+            .any(|c| c == firewall::COVERS_REVERSE_PRIVATE_OUTBOUND)
+    {
+        return reject(409, reverse_uncovered(conn, private_node)?);
+    }
+    Ok(())
+}
+
+/// Keeps that `node`'s agent enforces rule sets and the paths it covers,
+/// written when they change, and the policy it confirmed, written when it
+/// changes. A sync without a report confirms nothing: the agent was
+/// downgraded, or starts afresh and reports from its next sync on.
 pub(super) fn observe(tx: &Transaction<'_>, node: &str, report: Option<&Report>) -> Result<()> {
     let Some(report) = report else {
         tx.execute("DELETE FROM metadata WHERE key=?1", [applied_key(node)])?;
         return Ok(());
     };
-    if !supported(tx, node)? {
-        tx.execute(
-            "INSERT INTO metadata(key,value) VALUES(?1,'1')",
-            [node_key(node)],
-        )?;
+    let support = if report.covers.is_empty() {
+        "1".to_owned()
+    } else {
+        serde_json::json!({ "covers": report.covers }).to_string()
+    };
+    if get(tx, &node_key(node))?.as_deref() != Some(support.as_str()) {
+        put(tx, &node_key(node), &support)?;
     }
     let value = serde_json::to_string(report)?;
     if get(tx, &applied_key(node))?.as_deref() != Some(value.as_str()) {
@@ -226,11 +313,13 @@ pub(super) fn desired(conn: &Connection, node: &str, report: Option<&Report>) ->
 }
 
 /// Refuses a configuration whose rules use sets the server cannot take:
-/// a set that is missing or another tenant's (404), an outbound one or one
-/// on a protocol gateway (400), or any set on a server whose agent has not
-/// reported support (409).
+/// a set that is missing or another tenant's (404), an outbound one (400),
+/// any set on a server whose agent has not reported support (409), and a
+/// protocol gateway bound to a set, or newly enabled on a server with an
+/// inbound set, when the agent does not hold gateways to sets (409).
 pub(super) fn require(conn: &Connection, tenant: &str, config: &NodeConfig) -> Result<()> {
     let mut bound = false;
+    let mut gateway_bound = false;
     for rule in &config.rules {
         let Some(id) = &rule.firewall_inbound_set else {
             continue;
@@ -251,18 +340,26 @@ pub(super) fn require(conn: &Connection, tenant: &str, config: &NodeConfig) -> R
                 ),
             );
         }
-        if rule.protocol_gateway.is_some() {
-            return reject(
-                400,
-                format!(
-                    "rule {}: a protocol gateway checks its clients in the protocol engine and cannot take a firewall rule set",
-                    rule.name
-                ),
-            );
-        }
+        gateway_bound |= rule.protocol_gateway.is_some();
     }
     if bound && let Some(reason) = unsupported(conn, &config.node_id)? {
         return reject(409, reason);
+    }
+    let enabled = gateways(&config.rules);
+    if !enabled.is_empty()
+        && !covers(conn, &config.node_id)?
+            .iter()
+            .any(|c| c == firewall::COVERS_GATEWAY_INBOUND)
+    {
+        // A gateway already published stays: refusing it would stop every
+        // publish to this server until its agent is upgraded.
+        let added = || -> Result<bool> {
+            let current = desired_gateways(conn, &config.node_id)?;
+            Ok(enabled.iter().any(|id| !current.contains(*id)))
+        };
+        if gateway_bound || (binding(conn, &config.node_id)?.inbound_set_id.is_some() && added()?) {
+            return reject(409, gateways_uncovered(conn, &config.node_id)?);
+        }
     }
     if bound {
         check_size(
@@ -361,7 +458,29 @@ fn status(conn: &Connection, node: &str, last_seen: Option<i64>, now: i64) -> Re
     } else {
         PolicyState::Waiting
     };
+    let covered = covers(conn, node)?;
+    let mut uncovered = vec![];
+    if (binding.inbound_set_id.is_some()
+        || rules
+            .iter()
+            .any(|r| r.protocol_gateway.is_some() && r.firewall_inbound_set.is_some()))
+        && !covered
+            .iter()
+            .any(|c| c == firewall::COVERS_GATEWAY_INBOUND)
+        && !desired_gateways(conn, node)?.is_empty()
+    {
+        uncovered.push(firewall::UNCOVERED_GATEWAYS.to_owned());
+    }
+    if binding.outbound_set_id.is_some()
+        && !covered
+            .iter()
+            .any(|c| c == firewall::COVERS_REVERSE_PRIVATE_OUTBOUND)
+        && dials_tunnels(conn, node)?
+    {
+        uncovered.push(firewall::UNCOVERED_REVERSE_TUNNELS.to_owned());
+    }
     Ok(NodeStatus {
+        uncovered,
         inbound_set_name: name(&binding.inbound_set_id)?,
         outbound_set_name: name(&binding.outbound_set_id)?,
         inbound_set_id: binding.inbound_set_id,
@@ -699,6 +818,25 @@ impl Store {
         if adds && let Some(reason) = unsupported(&tx, node)? {
             return reject(409, reason);
         }
+        let covered = covers(&tx, node)?;
+        if input.inbound_set_id.is_some()
+            && input.inbound_set_id != old.inbound_set_id
+            && !covered
+                .iter()
+                .any(|c| c == firewall::COVERS_GATEWAY_INBOUND)
+            && !desired_gateways(&tx, node)?.is_empty()
+        {
+            return reject(409, gateways_uncovered(&tx, node)?);
+        }
+        if input.outbound_set_id.is_some()
+            && input.outbound_set_id != old.outbound_set_id
+            && !covered
+                .iter()
+                .any(|c| c == firewall::COVERS_REVERSE_PRIVATE_OUTBOUND)
+            && dials_tunnels(&tx, node)?
+        {
+            return reject(409, reverse_uncovered(&tx, node)?);
+        }
         if input == ServerBinding::default() {
             tx.execute("DELETE FROM metadata WHERE key=?1", [binding_key(node)])?;
         } else {
@@ -804,11 +942,14 @@ impl Store {
                     },
                     None => None,
                 };
-                if rule.as_ref().is_some_and(|r| r.protocol_gateway.is_some()) {
-                    return reject(
-                        400,
-                        "a protocol gateway checks its clients in the protocol engine; the tester cannot answer for it",
-                    );
+                // A gateway's public listener judges its clients with
+                // these layers only on an agent that says so.
+                if rule.as_ref().is_some_and(|r| r.protocol_gateway.is_some())
+                    && !covers(&conn, node)?
+                        .iter()
+                        .any(|c| c == firewall::COVERS_GATEWAY_INBOUND)
+                {
+                    return reject(409, gateways_uncovered(&conn, node)?);
                 }
                 let policy = policy_for(&conn, node, &rules)?;
                 let hash = policy.hash();

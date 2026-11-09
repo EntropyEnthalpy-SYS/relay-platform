@@ -20,7 +20,7 @@ impl Store {
         )?;
         // Sessions and block records go to memory, not into the stored stats.
         let connections = request.stats.live_connections.take();
-        super::connections::observe(&tx, node, connections.as_ref())?;
+        let observed = super::connections::observe(&tx, &self.12, node, connections.as_ref())?;
         let report = Report::of(&mut request);
         let (mut response, stored_seen, tunnels_changed) = apply_sync(
             &tx, node, request, &self.6, &self.8, &self.3, &self.10, &self.11,
@@ -33,8 +33,8 @@ impl Store {
         response.log_cursor = Some(report.record(&self.4, node, stored_seen));
         response.authoritative_dns =
             Some(super::dns_authoritative::snapshot(&conn, &self.4, node)?);
-        let supported = super::connections::supported(&conn, node)?;
-        super::connections::answer(&self.12, node, supported, connections, &mut response);
+        drop(conn);
+        self.answer_connections(node, connections, observed, &mut response);
         Ok(response)
     }
 
@@ -72,13 +72,20 @@ impl Store {
                     input.budget.as_ref().map(|b| b.run_id.as_str()),
                 )?;
                 let connections = input.stats.live_connections.take();
-                super::connections::observe(&tx, &node, connections.as_ref())?;
+                let observed =
+                    super::connections::observe(&tx, &self.12, &node, connections.as_ref())?;
                 let report = Report::of(&mut input);
                 let (response, stored_seen, changed) = apply_sync(
                     &tx, &node, input, &self.6, &self.8, &self.3, &self.10, &self.11,
                 )?;
                 tunnels_changed |= changed;
-                reports.push((node, report, stored_seen, responses.len(), connections));
+                reports.push((
+                    node,
+                    report,
+                    stored_seen,
+                    responses.len(),
+                    (connections, observed),
+                ));
                 Ok(response)
             })();
             if let Err(error) = &result {
@@ -95,14 +102,20 @@ impl Store {
         if tunnels_changed {
             self.2.config.notify_waiters();
         }
+        let mut answers = vec![];
         for (node, report, stored_seen, index, connections) in reports {
             let cursor = report.record(&self.4, &node, stored_seen);
             if let Ok(response) = &mut responses[index] {
                 response.log_cursor = Some(cursor);
                 response.authoritative_dns =
                     Some(super::dns_authoritative::snapshot(&conn, &self.4, &node)?);
-                let supported = super::connections::supported(&conn, &node)?;
-                super::connections::answer(&self.12, &node, supported, connections, response);
+                answers.push((node, index, connections));
+            }
+        }
+        drop(conn);
+        for (node, index, (connections, observed)) in answers {
+            if let Ok(response) = &mut responses[index] {
+                self.answer_connections(&node, connections, observed, response);
             }
         }
         Ok(responses)
@@ -330,6 +343,9 @@ fn apply_sync(
             block_cursor: None,
             egress_proxy: true,
             firewall: Some(serde_json::to_value(firewall)?),
+            connection_termination: true,
+            // Filled in after the commit, from memory.
+            connection_terminations: vec![],
             user_rates: Some(user_rates),
             credential_rotation: super::credentials::read(tx, node)?.pending,
             budget,

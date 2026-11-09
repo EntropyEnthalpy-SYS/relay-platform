@@ -37,6 +37,7 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+mod gateway_front;
 mod rate;
 mod uot;
 use rate::{Limiter, Limits, Pace};
@@ -764,13 +765,13 @@ impl UserLane {
             waited_us: AtomicU64::new(0),
         }
     }
-    async fn throttle(&self, bytes: usize, user: u64) {
+    async fn throttle(&self, bytes: usize, user: u64, session: u64) {
         if !self.limited.load(Ordering::Relaxed) {
             return;
         }
         self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         let started = Instant::now();
-        self.rate.throttle(bytes, user).await;
+        self.rate.throttle(bytes, user, session).await;
         let waited = started.elapsed().as_micros() as u64;
         // Ignores lock and scheduling noise; a real wait sleeps at least 1 ms.
         if waited >= 100 {
@@ -819,10 +820,10 @@ impl HeldShare {
     }
 }
 impl UserLimit {
-    async fn throttle(&self, bytes: usize, user: u64, upload: bool) {
-        self.lanes[0].throttle(bytes, user).await;
+    async fn throttle(&self, bytes: usize, user: u64, session: u64, upload: bool) {
+        self.lanes[0].throttle(bytes, user, session).await;
         self.lanes[if upload { 1 } else { 2 }]
-            .throttle(bytes, user)
+            .throttle(bytes, user, session)
             .await;
     }
     fn hold(&self, share: Option<HeldShare>) {
@@ -995,6 +996,7 @@ impl Drop for TargetGuard {
 struct RuleResources {
     reverse: Arc<crate::reverse_mux::managed::Server>,
     gateway_auth: Option<socks5::ServerConfig>,
+    gateway_upstream: Option<Arc<crate::gateway::Upstream>>,
     mptcp: Arc<crate::mptcp::Tracker>,
     node_rate: Arc<Limits>,
     user_limit: Option<Arc<UserLimit>>,
@@ -1041,6 +1043,9 @@ struct RuntimeRule {
     kinds: [&'static str; 2],
     /// The server's firewall policy, shared by every rule.
     firewall: Arc<crate::firewall::Runtime>,
+    /// Where a protocol gateway's engine takes the clients its public
+    /// listener lets in.
+    gateway_upstream: Option<Arc<crate::gateway::Upstream>>,
 }
 /// Orders same-priority targets by probe latency, unmeasured ones last. The
 /// current choice is kept until another target is faster by more than 10%
@@ -1134,6 +1139,7 @@ impl RuntimeRule {
                 connections::protocol(&spec, true),
             ],
             firewall: resources.firewall,
+            gateway_upstream: resources.gateway_upstream,
             spec,
             resolver,
             routes,
@@ -1148,13 +1154,20 @@ impl RuntimeRule {
     }
     /// Waits for the rule's, the user's and the node's limits: each one's
     /// combined limit, then the one for this direction. `upload` is a send
-    /// from this hop's client toward the target.
-    async fn throttle(&self, bytes: usize, upload: bool) {
-        self.shared.rate.throttle(bytes, self.user, upload).await;
+    /// from this hop's client toward the target. Each limit shares its rate
+    /// evenly between users and then between each user's sessions.
+    async fn throttle(&self, bytes: usize, upload: bool, session: &Live) {
+        let session = session.id();
+        self.shared
+            .rate
+            .throttle(bytes, self.user, session, upload)
+            .await;
         if let Some(limit) = &self.user_limit {
-            limit.throttle(bytes, self.user, upload).await;
+            limit.throttle(bytes, self.user, session, upload).await;
         }
-        self.node_rate.throttle(bytes, self.user, upload).await;
+        self.node_rate
+            .throttle(bytes, self.user, session, upload)
+            .await;
     }
     /// Moves a target behind the others for new sessions without waiting for
     /// health probes; it stays eligible, so a lone target is still tried.
@@ -1330,8 +1343,8 @@ impl RuntimeRule {
     }
     /// The first firewall layer that refuses a client at `source`: the
     /// server's inbound set, then the rule's. A protocol gateway's local
-    /// bridge sees only loopback clients; its public listener is the
-    /// protocol engine's.
+    /// bridge sees only loopback clients: its public listener judges the
+    /// client's own address ([`gateway_front`]).
     fn firewall_refusal(&self, source: std::net::IpAddr) -> Option<crate::firewall::Outcome> {
         let rule_set = self.spec.firewall_inbound_set.as_deref();
         if self.spec.protocol_gateway.is_some()
@@ -1555,7 +1568,7 @@ async fn probe_target(
     for address in addresses {
         let result = async {
             if key.tcp {
-                let (stream, route) = open_tcp_target(rule, key.index, address, inlet, None)
+                let (stream, route) = open_tcp_target(rule, key.index, address, inlet, None, tasks)
                     .await
                     .map_err(|_| F::Transport)?;
                 let mut stream = transport::hold(stream, route);
@@ -1697,14 +1710,56 @@ struct ListenerHandle {
     update: watch::Sender<Arc<RuntimeRule>>,
     stop: CancellationToken,
     task: JoinHandle<()>,
+    /// Tasks of this listener that use its socket after spawning: a UDP
+    /// listener's associations send their replies from it. Registered before
+    /// they start; the listener's own task is not one of them.
+    work: TaskTracker,
+}
+/// How long releasing a listener waits for its associations to end once
+/// stopped. They end at once when cancelled; one that does not is reported.
+const RELEASE_WAIT: Duration = Duration::from_secs(5);
+impl ListenerHandle {
+    /// Stops the listener and returns once nothing holds its socket: its
+    /// task has ended, and so has every association that sends from it, or
+    /// `wait` passed and the error says how many still do.
+    async fn release(self, key: ListenerKey, wait: Duration) -> Result<()> {
+        self.stop.cancel();
+        let ended = self.task.await;
+        // The listener's task spawned the associations and has ended, even
+        // if it failed, so no more can register.
+        self.work.close();
+        if tokio::time::timeout(wait, self.work.wait()).await.is_err() {
+            bail!(
+                "{} {} still has {} association(s) using its socket {} ms after it was stopped",
+                if key.tcp {
+                    "TCP listener"
+                } else {
+                    "UDP listener"
+                },
+                key.address,
+                self.work.len(),
+                wait.as_millis()
+            );
+        }
+        ended.context("listener task failed")
+    }
 }
 enum StagedSocket {
     Tcp(TcpListener),
     Udp(UdpSocket),
+    /// A protocol gateway's public listener ([`gateway_front`]).
+    GatewayTcp(TcpListener),
+    GatewayUdp(UdpSocket),
 }
 impl StagedSocket {
-    fn bind(key: ListenerKey, mode: crate::mptcp::Mode) -> Result<Self> {
+    /// Binds `key`, one of the listeners of rule `spec`.
+    fn bind(key: ListenerKey, spec: &Rule) -> Result<Self> {
         let address = key.address;
+        if gateway_front::key(spec) == Some(key) {
+            return gateway_front::bind(key)
+                .with_context(|| format!("cannot stage gateway listener {address}"));
+        }
+        let mode = spec.mptcp_inbound();
         Ok(if key.tcp {
             Self::Tcp(
                 network::tcp_listener(address, mode)
@@ -1718,14 +1773,76 @@ impl StagedSocket {
         })
     }
 }
-/// Whether `a` and `b` are distinct listeners the kernel will not bind at
-/// once: same protocol, port and family, and one of them a wildcard.
-fn overlapping(a: ListenerKey, b: ListenerKey) -> bool {
+/// Whether `a` and `b` are distinct listeners the kernel may not bind at
+/// once: same protocol and port, one of them a wildcard, and the same
+/// family; or a protocol gateway's public `[::]`, which also takes IPv4
+/// ([`gateway_front::bind`]), against either family. `a_public` and
+/// `b_public` say which is a gateway's public listener: a rule's own `[::]`
+/// is IPv6 only.
+fn overlapping(a: ListenerKey, a_public: bool, b: ListenerKey, b_public: bool) -> bool {
+    let dual = |k: ListenerKey, public: bool| {
+        public && k.address.is_ipv6() && k.address.ip().is_unspecified()
+    };
     a != b
         && a.tcp == b.tcp
         && a.address.port() == b.address.port()
-        && a.address.is_ipv4() == b.address.is_ipv4()
+        && (a.address.is_ipv4() == b.address.is_ipv4() || dual(a, a_public) || dual(b, b_public))
         && (a.address.ip().is_unspecified() || b.address.ip().is_unspecified())
+}
+/// The listeners an enabled `spec` opens: its own address for each of its
+/// transports, and a protocol gateway's public one as well as its bridge.
+fn listener_keys(spec: &Rule) -> Vec<ListenerKey> {
+    [true, false]
+        .into_iter()
+        .filter(|&tcp| {
+            if tcp {
+                spec.protocol.tcp()
+            } else {
+                spec.protocol.udp()
+            }
+        })
+        .flat_map(|tcp| {
+            spec.listen_addresses()
+                .map(move |address| ListenerKey { address, tcp })
+        })
+        .chain(gateway_front::key(spec))
+        .collect()
+}
+/// Whether `key` is `spec`'s protocol gateway's public listener, another
+/// kind of listener than a rule's own.
+fn public(spec: &Rule, key: ListenerKey) -> bool {
+    gateway_front::key(spec) == Some(key)
+}
+/// A rule of `new` and the address of a listener it holds in `old` as
+/// another kind ([`public`]): an agent running `old` refuses to apply `new`
+/// ([`Engine::apply`]), since only a rule that is not listening may turn
+/// into a protocol gateway or back. Disabled rules hold no listener.
+pub(crate) fn kind_change<'a>(old: &[Rule], new: &'a [Rule]) -> Option<(&'a Rule, SocketAddr)> {
+    new.iter().filter(|spec| spec.enabled).find_map(|spec| {
+        let previous = old.iter().find(|r| r.enabled && r.id == spec.id)?;
+        let held = listener_keys(previous);
+        listener_keys(spec)
+            .into_iter()
+            .find(|&key| held.contains(&key) && public(previous, key) != public(spec, key))
+            .map(|key| (spec, key.address))
+    })
+}
+/// Whether `previous` is enabled and holds every listener `spec` holds, each
+/// as the same kind: then a configuration [`kind_change`] finds `spec`
+/// refused against, it finds `previous` refused against too.
+pub(crate) fn listens_as(previous: &Rule, spec: &Rule) -> bool {
+    let held = listener_keys(previous);
+    previous.enabled
+        && listener_keys(spec)
+            .into_iter()
+            .all(|key| held.contains(&key) && public(previous, key) == public(spec, key))
+}
+/// Whether [`kind_change`] may find `spec` refused against an enabled rule
+/// of its id that is the gateway `gateway`, or an ordinary rule if `None`:
+/// two rules that are no gateway, or gateways on the same public listener,
+/// hold no listener as different kinds.
+pub(crate) fn may_change_kind(gateway: Option<&crate::gateway::Config>, spec: &Rule) -> bool {
+    gateway.map(gateway_front::public_key) != gateway_front::key(spec)
 }
 #[derive(Default)]
 struct EngineInner {
@@ -1737,6 +1854,15 @@ struct EngineInner {
     /// Replay state per (method, key), shared by rule revisions so a rename
     /// or rate change keeps a captured request unacceptable.
     shadowsocks_salts: HashMap<Vec<u8>, shadowsocks::SaltCache>,
+    /// Listeners of the running revision that a failed change closed and
+    /// could not reopen, such as when another program took the port in the
+    /// meantime. Every later failed change names them; a change that
+    /// succeeds binds what it wants afresh and clears them.
+    closed: Vec<String>,
+    /// Listeners a saved change removed whose associations outlasted the
+    /// wait, so their sockets may still hold the address. Every later failed
+    /// change names those that still have associations.
+    lingering: Vec<(String, TaskTracker)>,
     stopped: bool,
 }
 
@@ -1759,6 +1885,7 @@ pub struct Engine {
     reverse: Arc<crate::reverse_mux::managed::Server>,
     /// The server's firewall policy; every rule reads the newest one.
     firewall: Arc<crate::firewall::Runtime>,
+    release_wait: Duration,
 }
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -1812,6 +1939,7 @@ impl Engine {
             bursts: StdMutex::new(vec![]),
             reverse: Arc::default(),
             firewall: Arc::default(),
+            release_wait: RELEASE_WAIT,
         }
     }
     /// The firewall policy in force; the agent replaces it as the
@@ -1954,11 +2082,13 @@ impl Engine {
     }
     /// Open sessions of the `rules` a controller asked for and the block
     /// records changed after `cursor`. The agent sends it only to
-    /// controllers that take it.
+    /// controllers that take it. With `terminations`, for a controller that
+    /// ends single sessions, it names this run and carries those answers.
     pub fn connection_report(
         &self,
         rules: &[String],
         cursor: &connections::Cursor,
+        terminations: Option<Vec<connections::TerminationResult>>,
     ) -> connections::Report {
         let taken_at_ms = now_ms();
         connections::Report {
@@ -1967,7 +2097,10 @@ impl Engine {
                 .filter(|rule| identifier(rule))
                 .take(connections::MAX_SNAPSHOTS)
                 .map(|rule| {
-                    let (tcp, udp, sessions) = self.stats.sessions.snapshot(rule);
+                    // Whether each session can end goes, like the run, only
+                    // to a controller that asked for answers.
+                    let (tcp, udp, sessions) =
+                        self.stats.sessions.snapshot(rule, terminations.is_some());
                     connections::Snapshot {
                         rule_id: rule.clone(),
                         taken_at_ms,
@@ -1979,7 +2112,21 @@ impl Engine {
                 })
                 .collect(),
             blocks: self.stats.blocks.after(cursor),
+            instance: if terminations.is_some() {
+                self.stats.sessions.instance().to_owned()
+            } else {
+                String::new()
+            },
+            terminations: terminations.unwrap_or_default(),
         }
+    }
+    /// Ends the sessions a controller asked for; see
+    /// [`connections::Registry::terminate`].
+    pub async fn terminate_sessions(
+        &self,
+        requests: &[connections::Termination],
+    ) -> Vec<connections::TerminationResult> {
+        self.stats.sessions.terminate(requests).await
     }
     pub fn stats(&self) -> EngineStats {
         let mut stats = self.stats.snapshot();
@@ -2045,7 +2192,42 @@ impl Engine {
             .unwrap_or(0)
     }
 
+    /// Activates `config`, or keeps the running revision and returns why
+    /// not. If that revision lost a listener on the way, the error says so
+    /// first: the revision then runs without it. Removed listeners whose
+    /// sockets associations still hold come next.
     pub async fn apply(&self, config: NodeConfig) -> Result<()> {
+        let Err(error) = self.change(config).await else {
+            return Ok(());
+        };
+        let mut inner = self.inner.lock().await;
+        inner.lingering.retain(|(_, work)| !work.is_empty());
+        let mut notes = vec![];
+        if !inner.closed.is_empty() {
+            notes.push(format!(
+                "listeners of the running revision are closed and could not be reopened: {}",
+                inner.closed.join(", ")
+            ));
+        }
+        if !inner.lingering.is_empty() {
+            let held: Vec<_> = inner
+                .lingering
+                .iter()
+                .map(|(listener, work)| format!("{listener} ({} association(s))", work.len()))
+                .collect();
+            notes.push(format!(
+                "removed listeners are still held by their associations: {}",
+                held.join(", ")
+            ));
+        }
+        if notes.is_empty() {
+            return Err(error);
+        }
+        let message = format!("{}; {error}", notes.join("; "));
+        Err(error.context(message))
+    }
+
+    async fn change(&self, config: NodeConfig) -> Result<()> {
         config.validate()?;
         let mut inner = self.inner.lock().await;
         ensure!(!inner.stopped, "engine stopped");
@@ -2120,6 +2302,7 @@ impl Engine {
                             .as_ref()
                             .and_then(|p| p.auth.get(&spec.id))
                             .cloned(),
+                        gateway_upstream: gateway_plan.as_ref().and_then(|p| p.upstream(&spec.id)),
                         mptcp: self.stats.mptcp.clone(),
                         node_rate: self.node_rate.clone(),
                         user_limit: Some(self.user_limits.get(&spec.tenant_id, &spec.owner_id)),
@@ -2156,36 +2339,36 @@ impl Engine {
                 Arc::new(new)
             };
             rules.insert(spec.id.clone(), runtime.clone());
-            for tcp in [true, false] {
-                if (tcp && !spec.protocol.tcp()) || (!tcp && !spec.protocol.udp()) {
-                    continue;
-                }
-                for address in spec.listen_addresses() {
-                    let key = ListenerKey { address, tcp };
-                    wanted.insert(key, runtime.clone());
-                    if let Some(existing) = inner.listeners.get(&key) {
-                        ensure!(
-                            !tcp || existing.update.borrow().spec.mptcp_inbound()
+            for key in listener_keys(spec) {
+                wanted.insert(key, runtime.clone());
+                if let Some(existing) = inner.listeners.get(&key) {
+                    ensure!(
+                        !key.tcp
+                            || existing.update.borrow().spec.mptcp_inbound()
                                 == spec.mptcp_inbound(),
-                            "changing MPTCP listener mode on an active port requires disabling and applying the rule first"
-                        );
-                        ensure!(
-                            existing.rule_id == spec.id,
-                            "listener ownership change requires removing the old listener first"
-                        );
-                    } else {
-                        match StagedSocket::bind(key, spec.mptcp_inbound()) {
-                            Ok(socket) => {
-                                staged.insert(key, socket);
-                            }
-                            Err(error)
-                                if error.downcast_ref::<std::io::Error>().map(|e| e.kind())
-                                    == Some(std::io::ErrorKind::AddrInUse) =>
-                            {
-                                deferred.push((key, error))
-                            }
-                            Err(error) => return Err(error),
+                        "changing MPTCP listener mode on an active port requires disabling and applying the rule first"
+                    );
+                    ensure!(
+                        existing.rule_id == spec.id,
+                        "listener ownership change requires removing the old listener first"
+                    );
+                    // A protocol gateway's public listener is another kind.
+                    ensure!(
+                        public(&existing.update.borrow().spec, key) == public(spec, key),
+                        "turning a rule into a protocol gateway or back on an active port requires disabling and applying the rule first"
+                    );
+                } else {
+                    match StagedSocket::bind(key, spec) {
+                        Ok(socket) => {
+                            staged.insert(key, socket);
                         }
+                        Err(error)
+                            if error.downcast_ref::<std::io::Error>().map(|e| e.kind())
+                                == Some(std::io::ErrorKind::AddrInUse) =>
+                        {
+                            deferred.push((key, error))
+                        }
+                        Err(error) => return Err(error),
                     }
                 }
             }
@@ -2202,7 +2385,15 @@ impl Engine {
                     inner
                         .listeners
                         .keys()
-                        .filter(|old| !wanted.contains_key(old) && overlapping(**old, *key))
+                        .filter(|old| {
+                            !wanted.contains_key(old)
+                                && overlapping(
+                                    **old,
+                                    public(&inner.listeners[*old].update.borrow().spec, **old),
+                                    *key,
+                                    public(&wanted[key].spec, *key),
+                                )
+                        })
                         .copied()
                         .collect()
                 })
@@ -2216,20 +2407,19 @@ impl Engine {
             blocking.dedup();
             for key in blocking {
                 let listener = inner.listeners.remove(&key).expect("listed above");
-                listener.stop.cancel();
                 released.push((key, listener.update.borrow().clone()));
-                if let Err(error) = listener.task.await {
-                    self.reopen(&mut inner, released);
-                    return Err(anyhow::Error::from(error).context("listener task failed"));
+                if let Err(error) = listener.release(key, self.release_wait).await {
+                    self.reopen(&mut inner, released, &mut staged);
+                    return Err(error);
                 }
             }
             for (key, _) in deferred {
-                match StagedSocket::bind(key, wanted[&key].spec.mptcp_inbound()) {
+                match StagedSocket::bind(key, &wanted[&key].spec) {
                     Ok(socket) => {
                         staged.insert(key, socket);
                     }
                     Err(error) => {
-                        self.reopen(&mut inner, released);
+                        self.reopen(&mut inner, released, &mut staged);
                         return Err(error);
                     }
                 }
@@ -2252,7 +2442,7 @@ impl Engine {
             {
                 Ok(running) => Some(running),
                 Err(error) => {
-                    self.reopen(&mut inner, released);
+                    self.reopen(&mut inner, released, &mut staged);
                     self.restore_gateway(&mut inner, previous_gateway).await?;
                     return Err(error);
                 }
@@ -2271,7 +2461,7 @@ impl Engine {
             if let Some(running) = &mut next_gateway {
                 running.stop().await;
             }
-            self.reopen(&mut inner, released);
+            self.reopen(&mut inner, released, &mut staged);
             self.restore_gateway(&mut inner, previous_gateway).await?;
             return Err(error);
         }
@@ -2351,8 +2541,20 @@ impl Engine {
             .collect();
         for key in removed {
             if let Some(listener) = inner.listeners.remove(&key) {
-                listener.stop.cancel();
-                listener.task.await.context("listener task failed")?;
+                // The new revision is saved, so this change stands. A
+                // listener whose associations outlast the wait is named by
+                // every later failed change, such as one that binds its port.
+                let name = format!(
+                    "{} {} of rule {}",
+                    if key.tcp { "TCP" } else { "UDP" },
+                    key.address,
+                    listener.rule_id
+                );
+                let work = listener.work.clone();
+                if let Err(error) = listener.release(key, self.release_wait).await {
+                    tracing::error!(error = %format!("{error:#}"), "removed listener not released");
+                    inner.lingering.push((name, work));
+                }
             }
         }
         for (key, runtime) in wanted {
@@ -2401,6 +2603,8 @@ impl Engine {
         inner.rules = rules;
         inner.resolvers = resolvers;
         inner.config = Some(config);
+        inner.closed.clear();
+        inner.lingering.retain(|(_, work)| !work.is_empty());
         inner.gateway = next_gateway;
         if inner.gateway.is_none() {
             *self.gateway_metrics.lock().unwrap() = Default::default();
@@ -2437,6 +2641,7 @@ impl Engine {
     fn start_listener(&self, runtime: Arc<RuntimeRule>, socket: StagedSocket) -> ListenerHandle {
         let (update, receiver) = watch::channel(runtime.clone());
         let stop = CancellationToken::new();
+        let work = TaskTracker::new();
         let task = match socket {
             StagedSocket::Tcp(socket) => tokio::spawn(tcp_listener(
                 socket,
@@ -2452,6 +2657,23 @@ impl Engine {
                 stop.clone(),
                 self.meter.clone(),
                 self.stats.clone(),
+                Spawner {
+                    tasks: self.tasks.clone(),
+                    work: work.clone(),
+                },
+            )),
+            StagedSocket::GatewayTcp(socket) => tokio::spawn(gateway_front::tcp(
+                socket,
+                receiver,
+                stop.clone(),
+                self.stats.clone(),
+                self.tasks.clone(),
+            )),
+            StagedSocket::GatewayUdp(socket) => tokio::spawn(gateway_front::udp(
+                socket,
+                receiver,
+                stop.clone(),
+                self.stats.clone(),
                 self.tasks.clone(),
             )),
         };
@@ -2460,20 +2682,36 @@ impl Engine {
             update,
             stop,
             task,
+            work,
         }
     }
 
-    /// Restores listeners closed for a handover that did not complete.
-    fn reopen(&self, inner: &mut EngineInner, released: Vec<(ListenerKey, Arc<RuntimeRule>)>) {
+    /// Restores listeners closed for a handover that did not complete. The
+    /// new sockets staged for it close first: one of them can hold the
+    /// address an old listener needs, such as a wildcard on the same port.
+    fn reopen(
+        &self,
+        inner: &mut EngineInner,
+        released: Vec<(ListenerKey, Arc<RuntimeRule>)>,
+        staged: &mut HashMap<ListenerKey, StagedSocket>,
+    ) {
+        staged.clear();
         for (key, runtime) in released {
-            match StagedSocket::bind(key, runtime.spec.mptcp_inbound()) {
+            match StagedSocket::bind(key, &runtime.spec) {
                 Ok(socket) => {
                     inner
                         .listeners
                         .insert(key, self.start_listener(runtime, socket));
                 }
                 Err(error) => {
-                    tracing::error!(%error, "previous listener could not be reopened")
+                    let listener = format!(
+                        "{} {} of rule {} ({error:#})",
+                        if key.tcp { "TCP" } else { "UDP" },
+                        key.address,
+                        runtime.spec.id
+                    );
+                    tracing::error!(%listener, "previous listener could not be reopened");
+                    inner.closed.push(listener);
                 }
             }
         }
@@ -2632,16 +2870,22 @@ async fn tcp_listener(
             continue;
         };
         stats.accepted_tcp.fetch_add(1, Ordering::Relaxed);
-        // Listed until the task ends, however it ends.
-        let session = stats.sessions.track(&rule.key, rule.kinds[0], false, peer);
+        // Listed until the task and the tasks it spawned end, however they end.
+        let session = stats.sessions.track(
+            &rule.key,
+            rule.kinds[0],
+            false,
+            peer,
+            connections::terminable(&rule.spec, false),
+        );
         let meter = meter.clone();
         let stats = stats.clone();
-        let session_tasks = tasks.clone();
         tasks.spawn(async move {
             // A session that fails while this is unset counts as an inbound
             // setup failure; cancelled sessions count as neither.
             let settled = AtomicBool::new(false);
-            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),result=tcp_session(stream,inlet,rule.clone(),meter,stats.clone(),guard,session_tasks,&settled,&session)=>result};
+            let outcome=tokio::select!{biased;_=rule.cancel.cancelled()=>Ok(()),_=session.cancelled()=>Ok(()),result=tcp_session(stream,inlet,rule.clone(),meter,stats.clone(),guard,session.tasks(),&settled,&session)=>result};
+            session.finish().await;
             if let Err(error)=outcome {
                 if !settled.load(Ordering::Relaxed) {
                     stats.record_hop(&rule.spec.id, None, Err(SetupFailure::of(&error)));
@@ -2723,11 +2967,13 @@ async fn dial_target(
 }
 
 /// Writes the PROXY header and completes TLS and WebSocket setup.
+/// `tasks` takes a WebSocket target's driver (see [`websocket::connect`]).
 async fn activate_target(
     rule: &RuntimeRule,
     index: usize,
     dialed: Dialed,
     info: Option<ConnectionInfo>,
+    tasks: &TaskTracker,
 ) -> Result<(BoxStream, LoopGuard)> {
     let info = info.unwrap_or(ConnectionInfo {
         source: dialed.local,
@@ -2759,6 +3005,7 @@ async fn activate_target(
             spec,
             rule.spec.targets[index].tls.is_some(),
             Duration::from_millis(rule.spec.connect_timeout_ms),
+            tasks,
         )
         .await?;
     }
@@ -2771,9 +3018,10 @@ async fn open_tcp_target(
     address: SocketAddr,
     inlet: ListenerKey,
     info: Option<ConnectionInfo>,
+    tasks: &TaskTracker,
 ) -> Result<(BoxStream, LoopGuard)> {
     let dialed = dial_target(rule, index, address, inlet).await?;
-    activate_target(rule, index, dialed, info).await
+    activate_target(rule, index, dialed, info, tasks).await
 }
 
 /// Per target, connections opened before clients need them. A rule's set is
@@ -2966,12 +3214,18 @@ async fn try_target(
     inlet: ListenerKey,
     stats: &Counters,
     deadline: Instant,
+    tasks: &TaskTracker,
 ) -> Result<(BoxStream, LoopGuard, Option<SocketAddr>), TargetFailure> {
     if let (Some(tunnel), Some(server)) = (&rule.spec.reverse_tunnel, &rule.reverse) {
         let idle = Duration::from_secs(rule.spec.idle_timeout_secs);
         return match timeout_at(deadline, server.open_stream(tunnel, idle)).await {
             Ok(Ok(stream)) => Ok((Box::new(stream), LoopGuard::none(), None)),
-            Ok(Err(error)) => Err((SetupFailure::Other, error.to_string(), false)),
+            // The private server's outbound set refused the target: a
+            // firewall block of this client, recorded here.
+            Ok(Err(error)) => {
+                let refused = error.is::<crate::reverse_mux::managed::Refused>();
+                Err((SetupFailure::Other, error.to_string(), refused))
+            }
             Err(_) => Err((
                 SetupFailure::Timeout,
                 "reverse tunnel connection timed out".into(),
@@ -3017,7 +3271,12 @@ async fn try_target(
             ));
         } else {
             let remote = dialed.address;
-            match timeout_at(deadline, activate_target(rule, index, dialed, Some(info))).await {
+            match timeout_at(
+                deadline,
+                activate_target(rule, index, dialed, Some(info), tasks),
+            )
+            .await
+            {
                 Ok(Ok((stream, route))) => {
                     stats.prewarmed_connections.fetch_add(1, Ordering::Relaxed);
                     return Ok((stream, route, Some(remote)));
@@ -3036,7 +3295,7 @@ async fn try_target(
     for address in addresses {
         match timeout_at(
             deadline,
-            open_tcp_target(rule, index, address, inlet, Some(info)),
+            open_tcp_target(rule, index, address, inlet, Some(info), tasks),
         )
         .await
         {
@@ -3071,6 +3330,7 @@ async fn connect_tcp(
         rule.no_target(stats, session);
     }
     let mut pending = order.iter().copied().enumerate();
+    let tasks = session.tasks();
     let mut running = FuturesUnordered::new();
     let mut in_flight = vec![];
     let mut next_at = Some(Instant::now());
@@ -3094,7 +3354,7 @@ async fn connect_tcp(
                 in_flight.push(index);
                 let started = Instant::now();
                 running.push(
-                    try_target(rule, index, info, inlet, stats, deadline)
+                    try_target(rule, index, info, inlet, stats, deadline, &tasks)
                         .map(move |result| (index, guard, started, result)),
                 );
                 break;
@@ -3466,7 +3726,17 @@ async fn socks5_udp_association(
                     session.set_destination(&endpoint);
                     last_endpoint.clone_from(&endpoint);
                 }
-                let addresses = match resolve_destination(&rule, &endpoint).await {
+                // A lookup that does not answer must not hold an ended session.
+                let resolved = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => None,
+                    _ = rule.cancel.cancelled() => None,
+                    resolved = resolve_destination(&rule, &endpoint) => Some(resolved),
+                };
+                let Some(resolved) = resolved else {
+                    break;
+                };
+                let addresses = match resolved {
                     Ok(addresses) => addresses,
                     Err(error) => {
                         stats.dropped_datagrams.fetch_add(1, Ordering::Relaxed);
@@ -3486,7 +3756,7 @@ async fn socks5_udp_association(
                         Ok(outbound) => {
                             let outbound = Arc::new(outbound);
                             *family_slot = Some(outbound.clone());
-                            tokio::spawn(socks5_udp_replies(
+                            session.tasks().spawn(socks5_udp_replies(
                                 outbound,
                                 reply_tx.clone(),
                                 peer,
@@ -3530,7 +3800,7 @@ async fn socks5_udp_association(
                 let throttled = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => false,
-                    _ = rule.throttle(datagram.payload.len(), true) => true,
+                    _ = rule.throttle(datagram.payload.len(), true, &session) => true,
                 };
                 if !throttled {
                     break;
@@ -3599,7 +3869,7 @@ async fn socks5_udp_replies(
                     let throttled = tokio::select! {
                         biased;
                         _ = cancel.cancelled() => false,
-                        _ = rule.throttle(size, false) => true,
+                        _ = rule.throttle(size, false, &session) => true,
                     };
                     if !throttled {
                         break;
@@ -3643,6 +3913,7 @@ async fn open_multipath_path(
     index: usize,
     info: ConnectionInfo,
     inlet: ListenerKey,
+    tasks: &TaskTracker,
 ) -> Result<multipath::Path> {
     let target_guard = rule
         .target_guard(index)
@@ -3651,7 +3922,7 @@ async fn open_multipath_path(
     let addresses = resolve_destination(rule, &target).await?;
     let mut last = None;
     for address in addresses {
-        match open_tcp_target(rule, index, address, inlet, Some(info)).await {
+        match open_tcp_target(rule, index, address, inlet, Some(info), tasks).await {
             Ok((stream, route)) => {
                 let path = &rule.spec.outbound_multipath.as_ref().unwrap().paths[index];
                 return Ok(multipath::Path {
@@ -3690,7 +3961,12 @@ async fn connect_multipath(
         let mut opens: FuturesUnordered<_> = rule
             .order(info.source, inlet)
             .into_iter()
-            .map(|index| timeout_at(path_deadline, open_multipath_path(rule, index, info, inlet)))
+            .map(|index| {
+                timeout_at(
+                    path_deadline,
+                    open_multipath_path(rule, index, info, inlet, &tasks),
+                )
+            })
             .collect();
         // A path the server's outbound set refused, kept in the error.
         let mut refused = None;
@@ -3733,6 +4009,7 @@ async fn connect_multipath(
                 }
             }
         }
+        drop(opens);
         session.finish(paths, stats, tasks, Box::new(permit)).await
     })
     .await
@@ -3830,12 +4107,24 @@ async fn tcp_session(
         return Ok(());
     }
     let client = if let Some(spec) = &rule.spec.inbound_websocket {
+        // A connection that joins a multipath session hands its stream to
+        // the session that created it and ends at once, so its driver, which
+        // owns the socket, is not its session's (nor, then, its creator's:
+        // such sessions cannot be ended alone, see `connections::terminable`);
+        // dropping the stream still aborts it.
+        let own = TaskTracker::new();
+        let driver = if rule.multipath_server.is_some() {
+            &own
+        } else {
+            &tasks
+        };
         timeout_at(
             handshake_deadline,
             websocket::accept(
                 client,
                 spec,
                 Duration::from_millis(rule.spec.connect_timeout_ms),
+                driver,
             ),
         )
         .await
@@ -4073,7 +4362,8 @@ async fn tcp_session(
                 let relay = socket.local_addr()?;
                 socks5::udp_bind_reply(&mut client, relay).await?;
                 session.set_protocol("socks5_udp");
-                let cancel = CancellationToken::new();
+                // Ended with the session, also from the panel.
+                let cancel = session.child_token();
                 let relay_task = tasks.spawn(socks5_udp_association(
                     rule.clone(),
                     socket,
@@ -4247,7 +4537,7 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         let filled = read == buffer.len();
         *activity.lock().unwrap() = Instant::now();
-        rule.throttle(read, upload).await;
+        rule.throttle(read, upload, session).await;
         let mut offset = 0;
         while offset < read {
             let allowed = meter
@@ -4410,13 +4700,26 @@ const MAX_ROUTE_GUARDS: usize = 1024;
 const NAME_MEMORY: Duration = Duration::from_secs(60);
 const MAX_NAMES: usize = 256;
 
+/// Starts a UDP listener's associations: the engine waits for them when it
+/// shuts down, and the listener's `work` before its socket is bound again.
+struct Spawner {
+    tasks: TaskTracker,
+    work: TaskTracker,
+}
+impl Spawner {
+    fn spawn(&self, association: impl Future<Output = ()> + Send + 'static) {
+        // Both count it from here, before it first runs.
+        self.tasks.spawn(self.work.track_future(association));
+    }
+}
+
 async fn udp_listener(
     listener: UdpSocket,
     mut updates: watch::Receiver<Arc<RuntimeRule>>,
     stop: CancellationToken,
     meter: Meter,
     stats: Arc<Counters>,
-    tasks: TaskTracker,
+    tasks: Spawner,
 ) {
     let bound = listener.local_addr().expect("bound UDP listener");
     let listener = Arc::new(listener);
@@ -4500,10 +4803,10 @@ async fn udp_listener(
                     associations.insert(id,Association{generation:generation_id,sender,window});
                     let replies=server.replies(datagram.session);
                     let socket=listener.clone();let meter=meter.clone();let stats=stats.clone();let ended=ended_tx.clone();let listener_stop=stop.clone();
-                    let session=stats.sessions.track(&runtime.key,runtime.kinds[1],true,info.source);
+                    let session=stats.sessions.track(&runtime.key,runtime.kinds[1],true,info.source,connections::terminable(&runtime.spec, true));
                     tasks.spawn(async move {
                         let _guard=guard;
-                        let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=shadowsocks_association(socket,receiver,replies,runtime.clone(),meter,stats.clone(),&session)=>result};
+                        let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),_=session.cancelled()=>Ok(()),result=shadowsocks_association(socket,receiver,replies,runtime.clone(),meter,stats.clone(),&session)=>result};
                         if let Err(error)=outcome{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"Shadowsocks association ended");}
                         let _=ended.send((id,generation_id));
                     });
@@ -4524,10 +4827,10 @@ async fn udp_listener(
                 sender.push(size-header_size,buffer[header_size..size].to_vec());generation=generation.wrapping_add(1);let id=generation;
                 sessions.insert(key,UdpEntry{generation:id,sender});
                 let socket=listener.clone();let meter=meter.clone();let stats=stats.clone();let finished=finished_tx.clone();let listener_stop=stop.clone();
-                let session=stats.sessions.track(&runtime.key,runtime.kinds[1],true,info.source);
+                let session=stats.sessions.track(&runtime.key,runtime.kinds[1],true,info.source,connections::terminable(&runtime.spec, true));
                 tasks.spawn(async move {
                     let _guard=guard;
-                    let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),result=udp_session(socket,key,receiver,runtime.clone(),meter,stats.clone(),&session)=>result};
+                    let outcome=tokio::select!{biased;_=runtime.cancel.cancelled()=>Ok(()),_=listener_stop.cancelled()=>Ok(()),_=session.cancelled()=>Ok(()),result=udp_session(socket,key,receiver,runtime.clone(),meter,stats.clone(),&session)=>result};
                     if let Err(error)=outcome{stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);tracing::debug!(rule_id=%runtime.spec.id,%error,"UDP session ended");}
                     let _=finished.send((key,id));
                 });
@@ -4716,7 +5019,7 @@ async fn udp_session(
             message=incoming.recv(&stats)=>{
                 let Some(payload)=message else{return Ok(());};
                 if payload.len()+target.header.len()>target.wire_limit {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);continue;}
-                rule.throttle(payload.len(), true).await;
+                rule.throttle(payload.len(), true, session).await;
                 let allowed=meter.admit(&rule.spec,true,payload.len(),true).await?;
                 if allowed!=Some(payload.len()){stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);stats.meter_refused(&rule,rule.kinds[1],key.info.source.ip());return Ok(());}
                 let wire=if target.header.is_empty() {payload} else {let mut wire=target.header.clone();wire.extend_from_slice(&payload);wire};
@@ -4726,7 +5029,11 @@ async fn udp_session(
                 session.add_upload((sent-target.header.len()) as u64);
             },
             reply=target.socket.recv(&mut buffer)=>{
-                let size=reply.map_err(refused)?;rule.throttle(size, false).await;
+                if reply.is_err() && let UdpOutlet::Tunnel(tunnel)=&target.socket && let Some(detail)=tunnel.refusal() {
+                    // The private server's outbound set refused the target.
+                    stats.blocks.record(&rule.key,rule.kinds[1],key.info.source.ip(),Reason::Firewall,|| crate::reverse_mux::managed::Refused(detail).to_string());
+                }
+                let size=reply.map_err(refused)?;rule.throttle(size, false, session).await;
                 let allowed=meter.admit(&rule.spec,false,size,true).await?;
                 if allowed!=Some(size) {stats.dropped_datagrams.fetch_add(1,Ordering::Relaxed);stats.meter_refused(&rule,rule.kinds[1],key.info.source.ip());return Ok(());}
                 let sent=datagram::send(&listener,&buffer[..size],key.peer,key.local,inlet.address.ip().is_unspecified()).await?;
@@ -4802,7 +5109,7 @@ async fn shadowsocks_association(
                     }
                 }
                 let size=message.payload.len();
-                rule.throttle(size, true).await;
+                rule.throttle(size, true, session).await;
                 let allowed=meter.admit(&rule.spec,true,size,true).await?;
                 if allowed!=Some(size){dropped();stats.meter_refused(&rule,rule.kinds[1],session.client().ip());return Ok(());}
                 match slot.as_ref().unwrap().send_to(&message.payload,address).await {
@@ -4826,7 +5133,7 @@ async fn shadowsocks_association(
                 };
                 let source=canonical_address(source);
                 if !server.permits(source.ip()){dropped();continue;}
-                rule.throttle(size, false).await;
+                rule.throttle(size, false, session).await;
                 let allowed=meter.admit(&rule.spec,false,size,true).await?;
                 if allowed!=Some(size){dropped();stats.meter_refused(&rule,rule.kinds[1],session.client().ip());return Ok(());}
                 let client=client.expect("an association starts with a client datagram");
@@ -4887,6 +5194,305 @@ async fn datagram_address(
 #[cfg(test)]
 mod tests {
     use super::by_latency;
+
+    mod listener_release {
+        use super::super::*;
+        use serde_json::json;
+
+        /// What `to` sends back for `payload`, from a fresh client socket.
+        async fn echoed(to: SocketAddr, payload: &[u8]) -> Vec<u8> {
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            client.send_to(payload, to).await.unwrap();
+            let mut buf = [0u8; 64];
+            let (n, _) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut buf))
+                .await
+                .expect("no answer")
+                .unwrap();
+            buf[..n].to_vec()
+        }
+
+        /// An engine with one UDP rule on a free port of loopback address
+        /// `ip` that forwards to an echo server, after one datagram went
+        /// through it.
+        async fn answered(ip: [u8; 4]) -> (Engine, NodeConfig, ListenerKey, tempfile::TempDir) {
+            let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let target = echo.local_addr().unwrap();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 64];
+                while let Ok((n, from)) = echo.recv_from(&mut buf).await {
+                    let _ = echo.send_to(&buf[..n], from).await;
+                }
+            });
+            let listen = std::net::UdpSocket::bind(SocketAddr::from((ip, 0)))
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            let config: NodeConfig = serde_json::from_value(json!({
+                "api_version": API_VERSION, "node_id": "node", "revision": 1,
+                "rules": [{"id": "udp", "tenant_id": "t", "owner_id": "o", "name": "UDP",
+                    "listen": listen, "protocol": "udp", "targets": [{"address": target.to_string()}],
+                    "meter_epoch": "e", "max_connections": 16, "udp_max_sessions": 16,
+                    "idle_timeout_secs": 60}]
+            }))
+            .unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let engine = Engine::new(Store::open(&temp.path().join("agent.db")).unwrap());
+            engine.apply(config.clone()).await.unwrap();
+            assert_eq!(echoed(listen, b"hello").await, b"hello");
+            let key = ListenerKey {
+                address: listen,
+                tcp: false,
+            };
+            (engine, config, key, temp)
+        }
+
+        /// A stand-in for an association that ends only when let go after
+        /// its listener stopped; it holds a socket of its own meanwhile.
+        fn slow_association(
+            listener: &ListenerHandle,
+        ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>) {
+            let held = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let address = held.local_addr().unwrap();
+            let (go, gate) = tokio::sync::oneshot::channel::<()>();
+            let stop = listener.stop.clone();
+            listener.work.spawn(async move {
+                stop.cancelled().await;
+                let _ = gate.await;
+                drop(held);
+            });
+            (address, go)
+        }
+
+        #[test]
+        fn associations_are_counted_before_they_first_run() {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let spawner = Spawner {
+                    tasks: TaskTracker::new(),
+                    work: TaskTracker::new(),
+                };
+                spawner.spawn(async {});
+                // Not yet polled: a release that starts now still waits for it.
+                assert_eq!((spawner.tasks.len(), spawner.work.len()), (1, 1));
+                spawner.work.close();
+                spawner.work.wait().await;
+            });
+        }
+
+        #[tokio::test]
+        async fn a_udp_listener_is_released_after_the_associations_using_its_socket() {
+            let (engine, _, key, _temp) = answered([127, 0, 0, 1]).await;
+            let listener = engine.inner.lock().await.listeners.remove(&key).unwrap();
+            // The association that answered belongs to its listener.
+            assert_eq!(listener.work.len(), 1);
+            let (held, go) = slow_association(&listener);
+            let release = tokio::spawn(listener.release(key, RELEASE_WAIT));
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                !release.is_finished(),
+                "released while an association still used a socket"
+            );
+            assert!(std::net::UdpSocket::bind(held).is_err());
+            go.send(()).unwrap();
+            release.await.unwrap().unwrap();
+            // Nothing holds either socket any more.
+            std::net::UdpSocket::bind(held).unwrap();
+            std::net::UdpSocket::bind(key.address).unwrap();
+            engine.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn an_association_that_does_not_end_is_reported_by_the_release() {
+            let (engine, _, key, _temp) = answered([127, 0, 0, 1]).await;
+            let listener = engine.inner.lock().await.listeners.remove(&key).unwrap();
+            let (_held, go) = slow_association(&listener);
+            let error = listener
+                .release(key, Duration::from_millis(50))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "UDP listener {} still has 1 association(s) using its socket 50 ms after it was stopped",
+                    key.address
+                )
+            );
+            go.send(()).unwrap();
+            engine.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_failed_listener_task_is_reported_once_its_associations_end() {
+            let (engine, _, key, _temp) = answered([127, 0, 0, 1]).await;
+            let listener = engine.inner.lock().await.listeners.remove(&key).unwrap();
+            listener.task.abort();
+            let (held, go) = slow_association(&listener);
+            let work = listener.work.clone();
+            let release = tokio::spawn(listener.release(key, RELEASE_WAIT));
+            while !release.is_finished() && !work.is_closed() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                !release.is_finished(),
+                "a failed listener task skipped waiting for its associations"
+            );
+            go.send(()).unwrap();
+            let error = release.await.unwrap().unwrap_err();
+            assert_eq!(error.to_string(), "listener task failed");
+            std::net::UdpSocket::bind(held).unwrap();
+            engine.shutdown().await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn a_removed_listener_held_past_the_wait_is_named_until_it_is_free() {
+            let (mut engine, mut config, one, _temp) = answered([127, 0, 0, 1]).await;
+            engine.release_wait = Duration::from_millis(50);
+            let (held, go, work) = {
+                let inner = engine.inner.lock().await;
+                let listener = &inner.listeners[&one];
+                let (held, go) = slow_association(listener);
+                (held, go, listener.work.clone())
+            };
+            // The change is saved before the old listener is released, so it
+            // stands though that listener's association goes on.
+            let elsewhere = std::net::UdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            config.revision = 2;
+            config.rules[0].listen = elsewhere;
+            engine.apply(config.clone()).await.unwrap();
+            assert_eq!(engine.revision().await, 2);
+            assert_eq!(echoed(elsewhere, b"moved").await, b"moved");
+            // The association that answered ends when cancelled; the stand-in
+            // does not.
+            while work.len() > 1 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            config.revision = 3;
+            config.rules[0].listen = taken.local_addr().unwrap();
+            let error = format!("{:#}", engine.apply(config.clone()).await.unwrap_err());
+            assert!(
+                error.starts_with(&format!(
+                    "removed listeners are still held by their associations: UDP {} of rule udp (1 association(s)); ",
+                    one.address
+                )),
+                "{error}"
+            );
+            assert!(error.contains("Address already in use"), "{error}");
+            assert_eq!(engine.revision().await, 2);
+            // Once it ends, failures no longer name it.
+            go.send(()).unwrap();
+            work.wait().await;
+            std::net::UdpSocket::bind(held).unwrap();
+            let error = format!("{:#}", engine.apply(config.clone()).await.unwrap_err());
+            assert!(!error.contains("removed listeners"), "{error}");
+            assert_eq!(engine.revision().await, 2);
+            assert_eq!(echoed(elsewhere, b"still").await, b"still");
+            engine.shutdown().await.unwrap();
+        }
+
+        /// Applies `config` while the listener at `key` has an association
+        /// that ends only when let go. The change must still be running when
+        /// the release closes that listener's work, and the association's
+        /// socket must be free when it returns.
+        async fn apply_past_a_slow_association(
+            engine: &Arc<Engine>,
+            config: NodeConfig,
+            key: ListenerKey,
+        ) -> Result<()> {
+            let (held, go, work) = {
+                let inner = engine.inner.lock().await;
+                let listener = &inner.listeners[&key];
+                let (held, go) = slow_association(listener);
+                (held, go, listener.work.clone())
+            };
+            let change = tokio::spawn({
+                let engine = engine.clone();
+                async move { engine.apply(config).await }
+            });
+            while !change.is_finished() && !work.is_closed() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            assert!(
+                !change.is_finished(),
+                "the change finished without waiting for the old listener's association"
+            );
+            go.send(()).unwrap();
+            let result = change.await.unwrap();
+            std::net::UdpSocket::bind(held).expect("the association's socket is still held");
+            result
+        }
+
+        // Linux routes all of 127.0.0.0/8 locally; the one address is not
+        // 127.0.0.1, which some sandboxes mirror and hold for a moment after
+        // it closes.
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn moves_and_failed_moves_wait_for_the_old_listeners_associations() {
+            let (engine, mut config, one, _temp) = answered([127, 0, 0, 3]).await;
+            let engine = Arc::new(engine);
+            let port = one.address.port();
+            let all = ListenerKey {
+                address: SocketAddr::from(([0, 0, 0, 0], port)),
+                tcp: false,
+            };
+            let other = SocketAddr::from(([127, 0, 0, 2], port));
+            // To the wildcard, and back to one address: each binds only once
+            // the old listener on the same port is released.
+            config.revision = 2;
+            config.rules[0].listen = all.address;
+            apply_past_a_slow_association(&engine, config.clone(), one)
+                .await
+                .unwrap();
+            assert_eq!(echoed(other, b"wildcard").await, b"wildcard");
+            config.revision = 3;
+            config.rules[0].listen = one.address;
+            apply_past_a_slow_association(&engine, config.clone(), all)
+                .await
+                .unwrap();
+            assert_eq!(echoed(one.address, b"one").await, b"one");
+            // Another program holds 127.0.0.2 on the port, so the wildcard
+            // cannot bind: the old listener is released, then reopened.
+            let holder = std::net::UdpSocket::bind(other).unwrap();
+            config.revision = 4;
+            config.rules[0].listen = all.address;
+            let error = apply_past_a_slow_association(&engine, config.clone(), one)
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("Address already in use"),
+                "{error:#}"
+            );
+            assert!(
+                !error.to_string().contains("could not be reopened"),
+                "{error}"
+            );
+            assert_eq!(engine.revision().await, 3);
+            assert_eq!(echoed(one.address, b"reopened").await, b"reopened");
+            drop(holder);
+            // To another port: the old listener is removed after the change
+            // is saved, and released before the change returns.
+            let elsewhere = std::net::UdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap();
+            config.revision = 5;
+            config.rules[0].listen = elsewhere;
+            apply_past_a_slow_association(&engine, config.clone(), one)
+                .await
+                .unwrap();
+            assert_eq!(echoed(elsewhere, b"elsewhere").await, b"elsewhere");
+            std::net::UdpSocket::bind(one.address).unwrap();
+            engine.shutdown().await.unwrap();
+        }
+    }
 
     fn order(latencies: &[Option<u64>], current: usize) -> Vec<usize> {
         let pool: Vec<usize> = (0..latencies.len()).collect();

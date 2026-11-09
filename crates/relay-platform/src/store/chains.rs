@@ -3,7 +3,9 @@
 //! (`chain_use:<entry rule id>`) in metadata, so the schema and recovery log
 //! stay unchanged. Building a forwarding allocates endpoints and publishes
 //! every server in one configuration batch inside the transaction that
-//! records the use.
+//! records the use. [`refresh`] brings a built forwarding up to its groups.
+mod refresh;
+
 use super::shared_rules::node_name;
 use super::*;
 use crate::chain::{
@@ -226,6 +228,7 @@ fn changes(chain: &Chain, groups: &[EndpointGroup], record: &ChainUse) -> Vec<La
 }
 fn use_view(
     conn: &Connection,
+    live: &mut refresh::Live<'_>,
     configs: &Configs,
     groups: &[EndpointGroup],
     chain: &Chain,
@@ -247,6 +250,10 @@ fn use_view(
         layers.push(views);
     }
     let changes = changes(chain, groups, record);
+    let refresh = match refresh::current(conn, entry_rule_id)? {
+        Some(op) => Some(refresh::view(conn, live, configs, &op)?),
+        None => None,
+    };
     Ok(UseView {
         entry_rule_id: entry_rule_id.to_owned(),
         entry_node_id: record.entry_node_id.clone(),
@@ -256,10 +263,14 @@ fn use_view(
         layers,
         out_of_date: !changes.is_empty(),
         changes,
+        auto_sync: record.auto_sync.clone(),
+        auto_sync_stopped: record.auto_sync_stopped.clone(),
+        refresh,
     })
 }
 fn chain_view(
     conn: &Connection,
+    live: &mut refresh::Live<'_>,
     configs: &Configs,
     groups: &[EndpointGroup],
     uses: &[(String, ChainUse)],
@@ -278,7 +289,7 @@ fn chain_view(
     let uses = uses
         .iter()
         .filter(|(_, record)| record.chain_id == chain.id)
-        .map(|(rule, record)| use_view(conn, configs, groups, chain, rule, record))
+        .map(|(rule, record)| use_view(conn, live, configs, groups, chain, rule, record))
         .collect::<Result<_>>()?;
     Ok(ChainView {
         id: chain.id.clone(),
@@ -291,9 +302,10 @@ fn chain_view(
         updated_at_ms: chain.updated_at_ms,
     })
 }
-fn view_of(conn: &Connection, chain: &Chain) -> Result<ChainView> {
+fn view_of(conn: &Connection, live: &mut refresh::Live<'_>, chain: &Chain) -> Result<ChainView> {
     chain_view(
         conn,
+        live,
         &topology::all_configs(conn)?,
         &all_groups(conn)?,
         &load(conn, USE)?,
@@ -585,6 +597,8 @@ fn build(conn: &Connection, actor: &Actor, chain: &Chain, input: &BuildInput) ->
         hops,
         batch: ConfigBatch { updates },
         record: ChainUse {
+            auto_sync: None,
+            auto_sync_stopped: None,
             chain_id: chain.id.clone(),
             entry_node_id: input.entry_node_id.clone(),
             layers: layers
@@ -606,6 +620,12 @@ fn build(conn: &Connection, actor: &Actor, chain: &Chain, input: &BuildInput) ->
 }
 
 impl Store {
+    fn live<'a>(&'a self, clocks: &'a mut leases::LeaseClocks) -> refresh::Live<'a> {
+        refresh::Live {
+            clocks,
+            telemetry: &self.4,
+        }
+    }
     pub fn endpoint_groups(&self, actor: &Actor) -> Result<Vec<GroupView>> {
         let conn = self.0.lock().unwrap();
         let chains = all_chains(&conn)?;
@@ -648,7 +668,8 @@ impl Store {
         group_view(&conn, &[], &group)
     }
     /// Changes a group's servers. Forwardings already built keep their rules
-    /// and are reported out of date; a change that would put a server in two
+    /// and are reported out of date until a confirmed refresh, or an
+    /// automatic one where it is on; a change that would put a server in two
     /// layers of a chain using the group is refused.
     pub fn update_endpoint_group(
         &self,
@@ -751,9 +772,11 @@ impl Store {
         let mut chains = all_chains(&conn)?;
         chains.retain(|chain| actor.permits_tenant(&chain.tenant_id));
         chains.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+        let mut clocks = self.3.lock().unwrap();
+        let mut live = self.live(&mut clocks);
         chains
             .iter()
-            .map(|chain| chain_view(&conn, &configs, &groups, &uses, chain))
+            .map(|chain| chain_view(&conn, &mut live, &configs, &groups, &uses, chain))
             .collect()
     }
     pub fn create_chain(&self, actor: &Actor, input: ChainInput) -> Result<ChainView> {
@@ -782,7 +805,8 @@ impl Store {
                 .to_string(),
         )?;
         tx.commit()?;
-        view_of(&conn, &chain)
+        let mut clocks = self.3.lock().unwrap();
+        view_of(&conn, &mut self.live(&mut clocks), &chain)
     }
     /// Changes the chain's record only; forwardings built from it keep their
     /// rules. Uses whose entry rule is gone are forgotten.
@@ -807,6 +831,7 @@ impl Store {
                     "DELETE FROM metadata WHERE key=?1",
                     [format!("{USE}{rule}")],
                 )?;
+                refresh::forget(&tx, &rule)?;
             }
         }
         chain.name = input.name;
@@ -823,7 +848,8 @@ impl Store {
                 .to_string(),
         )?;
         tx.commit()?;
-        view_of(&conn, &chain)
+        let mut clocks = self.3.lock().unwrap();
+        view_of(&conn, &mut self.live(&mut clocks), &chain)
     }
     /// Deletes the chain and its record of uses; rules built from it stay.
     pub fn delete_chain(&self, actor: &Actor, id: &str) -> Result<()> {
@@ -831,6 +857,14 @@ impl Store {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let chain = visible_chain(&tx, actor, id)?;
+        for (rule, record) in load::<ChainUse>(&tx, USE)? {
+            if record.chain_id == chain.id && refresh::active(&tx, &rule)? {
+                return reject(
+                    409,
+                    "a forwarding of this chain is being refreshed; wait for the refresh, or cancel it (a blocked or restoring refresh is ended the same way; one confirming its rewire can be ended once it is blocked: when an agent rejects the rewire, or at the refresh's deadline, at least a minute after the rewire)",
+                );
+            }
+        }
         let mut forgotten = 0;
         for (rule, record) in load::<ChainUse>(&tx, USE)? {
             if record.chain_id == chain.id {
@@ -838,6 +872,7 @@ impl Store {
                     "DELETE FROM metadata WHERE key=?1",
                     [format!("{USE}{rule}")],
                 )?;
+                refresh::forget(&tx, &rule)?;
                 forgotten += 1;
             }
         }

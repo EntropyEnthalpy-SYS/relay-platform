@@ -1,7 +1,7 @@
 // Executes the shipped firewall rule-set controls with form-control stubs and checks what they send and show:
 // the set editor's rows (order, moving, single IPs as /32 and /128, port and size checks, direction and scope
-// fixed after creation), the rule editor's inbound set (the rule tenant's inbound sets only, none for a
-// protocol gateway, the old-agent warning), a server's bindings and its desired/confirmed state, the tester's
+// fixed after creation), the rule editor's inbound set (the rule tenant's inbound sets only, a protocol
+// gateway's with its note, the old-agent warning), a server's bindings and its desired/confirmed state, the tester's
 // requests and answers, block-record details and the controller's refusals, in the panel's language. Not a
 // browser test.
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
@@ -194,12 +194,15 @@ const sent = () => calls.at(-1);
   assert.ok(!named(form, 'firewall_inbound_set')[0].parentElement.parentElement.text().includes(warning), 'no warning once the agent reports support');
   await send();
   assert.equal(saved.firewall_inbound_set, 'fs-t-in', 'an unchanged edit keeps the set');
-  // A protocol gateway checks its clients in the engine: the field hides and a stale set is dropped.
+  // A protocol gateway's Agent checks its clients before the engine: the set stays, with a note on newer Agents.
   editing = wire.id; context.state.config = { ...context.state.config, rules: [forward, wire] };
   await context.editRule(wire);
-  assert.ok(!named(form, 'firewall_inbound_set')[0].visible());
+  const gatewayPick = named(form, 'firewall_inbound_set')[0];
+  assert.ok(gatewayPick.visible() && gatewayPick.value === 'fs-t-in');
+  assert.ok(gatewayPick.parentElement.parentElement.text().includes(translate('协议网关在 Agent 收到连接时就按客户端自己的地址检查，早于协议握手；需要较新的 Agent，旧版会拒绝发布。')));
+  translated(gatewayPick.parentElement.parentElement, 'gateway firewall field');
   await send();
-  assert.ok(saved.protocol_gateway && !('firewall_inbound_set' in saved), 'a gateway rule never carries a set');
+  assert.ok(saved.protocol_gateway && saved.firewall_inbound_set === 'fs-t-in', 'a gateway rule carries its set');
 
   // A server's bindings: system sets of the matching direction, and the desired/confirmed state.
   tokyo.firewall_support = false;
@@ -222,6 +225,11 @@ const sent = () => calls.at(-1);
     translated(cell, `${state} status`);
   }
   assert.ok(context.firewallStatusCell({ ...tokyo.firewall, state: 'waiting', applied_hash: null }).text().includes(msg`已确认 ${'—'}`), 'nothing confirmed yet');
+  // Paths an older Agent leaves outside the bound sets are named, whatever the state.
+  const uncovered = context.firewallStatusCell({ ...tokyo.firewall, state: 'applied', applied_hash: desired, uncovered: ['gateways', 'reverse_tunnels'] });
+  for (const text of ['协议网关的客户端不受规则集检查：请升级 Agent', '反向隧道的目标不受出站规则集检查：请升级 Agent']) assert.ok(uncovered.text().includes(translate(text)), text);
+  translated(uncovered, 'uncovered paths');
+  assert.ok(!context.firewallStatusCell({ ...tokyo.firewall, state: 'applied', applied_hash: desired, uncovered: [] }).text().includes(translate('协议网关的客户端不受规则集检查：请升级 Agent')));
 
   // The tester: a set with a source, then a server and rule with a destination and its address.
   const tester = context.firewallTesterPanel(sets, [tokyo], { set_id: 'fs-s-in' });
@@ -237,7 +245,7 @@ const sent = () => calls.at(-1);
   translated(result, 'tester answer');
   await new Promise(resolve => setImmediate(resolve));
   named(testForm, 'fw_test_mode')[0].value = 'node'; await named(testForm, 'fw_test_mode')[0].fire('change');
-  assert.deepEqual(plain(options(named(testForm, 'fw_test_rule')[0])), [['', translate('只测服务器绑定')], ['r2', 'web']], 'a gateway rule cannot be tested');
+  assert.deepEqual(plain(options(named(testForm, 'fw_test_rule')[0])), [['', translate('只测服务器绑定')], ['r2', 'web'], ['r3', 'vless']], 'gateway rules are tested like others');
   named(testForm, 'fw_test_rule')[0].value = 'r2';
   named(testForm, 'fw_test_kind')[0].value = 'outbound'; await named(testForm, 'fw_test_kind')[0].fire('change');
   assert.ok(!named(testForm, 'fw_test_source')[0].parentElement.visible() && named(testForm, 'fw_test_destination')[0].parentElement.visible());
@@ -281,6 +289,7 @@ const sent = () => calls.at(-1);
   assert.equal(context.firewallDetail('server outbound rule set: default action denies (No mail)'), msg`${translate('服务器出站')}规则集「${'No mail'}」默认动作拒绝`);
   assert.equal(context.firewallDetail('server inbound rule set fs-x is not available here: refused'), msg`${translate('服务器入站')}规则集 ${'fs-x'} 在这台服务器上不可用：拒绝`);
   assert.equal(context.firewallDetail('egress proxy 203.0.113.20:1080: server outbound rule set: rule 1 denies (No mail)'), msg`出口代理 ${'203.0.113.20:1080'}：${msg`${translate('服务器出站')}规则集「${'No mail'}」第 ${'1'} 条规则拒绝`}`);
+  assert.equal(context.firewallDetail('reverse tunnel private server: server outbound rule set: rule 1 denies (No lab)'), msg`反向隧道私有端：${msg`${translate('服务器出站')}规则集「${'No lab'}」第 ${'1'} 条规则拒绝`}`);
   assert.equal(context.firewallDetail('something else'), 'something else');
   const old = 'the agent on server Tokyo is too old for firewall rule sets; upgrade it first';
   assert.equal(context.firewallReason(old), msg`服务器 ${'Tokyo'} 的 Agent 版本过旧，不支持防火墙规则集；请先升级 Agent`);
@@ -291,8 +300,18 @@ const sent = () => calls.at(-1);
   assert.equal(context.firewallReason('at most 64 firewall rule sets per tenant; delete one first'), msg`每个租户最多 ${'64'} 个防火墙规则集；请先删除一个`);
   assert.equal(context.firewallReason('at most 64 system firewall rule sets; delete one first'), msg`系统防火墙规则集最多 ${'64'} 个；请先删除一个`);
   assert.equal(context.firewallReason('a rule set is at most 1024 KiB; use fewer rules or entries'), msg`单个规则集最多 ${'1024'} KiB；请减少规则或条目`);
+  const gateways = 'the agent on server Tokyo does not apply firewall rule sets to protocol gateways; upgrade it first';
+  const tunnels = 'the agent on server Osaka does not apply its outbound firewall rule set to reverse tunnels; upgrade it first';
+  assert.equal(context.firewallReason(gateways), msg`服务器 ${'Tokyo'} 的 Agent 不会用防火墙规则集检查协议网关的客户端；请先升级 Agent`);
+  assert.equal(context.firewallReason('rule web listens on 0.0.0.0:443: disable it, publish that and wait until the server applies it before turning it into a protocol gateway there or back'), msg`规则 ${'web'} 正在 ${'0.0.0.0:443'} 上监听：请先停用并发布，等服务器应用后，再把它改成协议网关或改回普通规则`);
+  assert.equal(context.firewallReason(tunnels), msg`服务器 ${'Osaka'} 的 Agent 不会用出站防火墙规则集检查反向隧道的目标；请先升级 Agent`);
+  if (english) {
+    assert.equal(context.firewallReason(gateways), 'The agent on server Tokyo does not apply firewall rule sets to protocol gateways; upgrade it first');
+    assert.equal(context.firewallReason('rule web listens on 0.0.0.0:443: disable it, publish that and wait until the server applies it before turning it into a protocol gateway there or back'), 'Rule web listens on 0.0.0.0:443: disable it, publish that and wait until the server applies it before turning it into a protocol gateway there or back');
+    assert.equal(context.firewallReason(tunnels), 'The agent on server Osaka does not apply its outbound firewall rule set to reverse tunnels; upgrade it first');
+  }
   assert.equal(context.firewallReason('configuration changed; reload before saving'), null);
   assert.equal(context.firewallReason(undefined), null);
   if (english) assert.equal(context.firewallReason(old), 'The agent on server Tokyo is too old for firewall rule sets; upgrade it first');
-  console.log(`Firewall (${i18n.getLanguage()}): set editor order, moves and checks, fixed direction, delete guard, rule editor field and gateway, server bindings and states, tester requests and answers, page roles, block details and refusals passed`);
+  console.log(`Firewall (${i18n.getLanguage()}): set editor order, moves and checks, fixed direction, delete guard, rule editor field and gateway, uncovered paths, server bindings and states, tester requests and answers, page roles, block details and refusals passed`);
 })().catch(error => { console.error(error); process.exitCode = 1; });

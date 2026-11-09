@@ -275,16 +275,33 @@ Within a few seconds the node shows as online in **Nodes**. The token is used on
 Some servers cannot open a connection to the panel's address, for example in mainland China or on IX-only lines, while another server can. The node's agent can then connect through that other server without having to trust it. Add one of these to `agent.json`:
 
 - `controller_addresses`: a list of `host:port` addresses to connect to instead of the addresses `panel.example.com` resolves to. They are tried in order: when an address refuses the TCP connection or doesn't answer within its share of the 5-second connect timeout, the agent moves on to the next one. The agent still names `panel.example.com` in TLS and checks the panel's certificate, so the relay only passes encrypted TCP along and can neither read nor change it. Host names in the list are looked up for every new connection.
-- `controller_proxy`: an HTTP proxy that supports `CONNECT`, as `http://host:port`. Every request to the panel goes through it, and TLS again runs end to end inside the tunnel. SOCKS5 is not supported: the agent's HTTP client is built without SOCKS, so use an HTTP proxy or a relay. A user name and password in the proxy URL are refused because they would be visible in the process list; use a proxy that admits the server by its IP address.
+- `controller_proxy`: a proxy that carries every request to the panel. TLS again runs end to end inside it, with the panel's name and certificate checked, so the proxy can neither read nor change the traffic. Three kinds are accepted:
+  - `http://host:port`: an HTTP proxy that supports `CONNECT`.
+  - `socks5h://host:port`: a SOCKS5 proxy that looks up `panel.example.com` itself. Use this when the server cannot resolve the panel's name, or should not ask its own DNS server.
+  - `socks5://host:port`: a SOCKS5 proxy that is given an IP address. The agent looks up the panel's name on this server first and tries only the first address it gets; if the name does not resolve here, the agent stops with an error and never asks the proxy.
 
-Use one or the other, not both. Either way, the agent never reads proxy environment variables such as `HTTPS_PROXY`.
+  SOCKS5 needs an explicit port, and SOCKS4 is not supported. A user name and password in the proxy URL are refused because they would be visible in the process list.
+- `controller_proxy_credentials_file` (SOCKS5 only): the absolute path of a file holding the proxy's user name on the first line and the password on the second, each 1 to 255 bytes and together at most 234 bytes with `socks5://`, or 249 bytes less the length of the panel's host name with `socks5h://` (for `panel.example.com`, 232 bytes; 246 when the panel URL is an IPv4 address and 234 for IPv6). A non-ASCII host name counts in its ASCII `xn--` form, which is what the agent sends; with `socks5h://` and this file, write the panel URL in that form (for example `https://xn--strae-oqa.test` for `straße.test`) or the installer refuses it. Lengths count bytes, so a non-ASCII character counts two or more, and every byte, including `%`, reaches the proxy as written. The agent's SOCKS5 client cannot send a longer login, so the agent refuses one when it starts, and the installer refuses it when the file already exists. It must be a regular file owned by the agent's service account `relayp-agent` with mode `0600`, outside `/home`, `/root` and `/tmp`, which the service cannot read. If the file is missing, has the wrong owner or mode, or is malformed, the agent does not start, so that server forwards nothing until the file is fixed; the service manager keeps restarting it. The first installation creates the `relayp-agent` account, so on a new node create the file right after installing; on a node that already has the account, create it before the upgrade that adds the setting. The agent reads it when it starts, so restart the agent after changing it, and error messages name the file but never what it holds. SOCKS5 sends this login to the proxy unencrypted, so use it only where the path to the proxy is trusted. HTTP proxies can't use a login; use one that admits the server by its IP address.
+
+Use `controller_addresses` or `controller_proxy`, not both. The agent never reads proxy environment variables such as `HTTPS_PROXY`, and it never goes around a configured proxy: while the proxy is down, the agent keeps trying through it, and a node in Availability-first mode keeps forwarding with its last configuration.
+
+```sh
+install -o relayp-agent -g relayp-agent -m 600 /dev/null /etc/relay-platform/agent-proxy.secret
+printf '%s\n%s\n' 'PROXY_USER' 'PROXY_PASSWORD' > /etc/relay-platform/agent-proxy.secret
+```
+
+```json
+{"controller": "https://panel.example.com", "node_id": "PASTE_THE_NODE_ID", "poll_seconds": 5,
+ "controller_proxy": "socks5h://proxy.example.net:1080",
+ "controller_proxy_credentials_file": "/etc/relay-platform/agent-proxy.secret"}
+```
 
 ```json
 {"controller": "https://panel.example.com", "node_id": "PASTE_THE_NODE_ID", "poll_seconds": 5,
  "controller_addresses": ["relay-hk.example.net:30443", "203.0.113.20:30443"]}
 ```
 
-The installer turns this into `relay agent --controller https://panel.example.com --controller-address relay-hk.example.net:30443 --controller-address 203.0.113.20:30443 …`; `controller_proxy` becomes `--controller-proxy`. A few rules:
+The installer turns this into `relay agent --controller https://panel.example.com --controller-address relay-hk.example.net:30443 --controller-address 203.0.113.20:30443 …`; `controller_proxy` becomes `--controller-proxy` and `controller_proxy_credentials_file` becomes `--controller-proxy-credentials-file`. A few rules:
 
 - The `controller` URL must use a host name, not an IP address. TLS checks that name, and an IP address in the URL is dialed directly.
 - If the `controller` URL contains a port, such as `https://panel.example.com:8443`, every relay must listen on that same port. Without a port in the URL, relays may use any port.

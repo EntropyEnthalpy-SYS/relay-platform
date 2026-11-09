@@ -702,6 +702,9 @@ impl Store {
         let mut conn = self.0.lock().unwrap();
         let tx = conn.transaction()?;
         let tenant = servers(&tx, actor, &input)?;
+        if input.enabled.unwrap_or(true) {
+            super::firewall_sets::require_tunnel(&tx, &input.private_node_id)?;
+        }
         let tunnel_port = input
             .tunnel_port
             .unwrap_or(crate::reverse_tunnel::DEFAULT_TUNNEL_PORT);
@@ -803,6 +806,16 @@ impl Store {
             updated_at_ms: now_ms(),
             ..old.clone()
         };
+        // What the private server dials changes: its agent must hold it to
+        // the server's outbound set. Other edits keep a tunnel running.
+        if tunnel.enabled
+            && (!old.enabled
+                || tunnel.private_node_id != old.private_node_id
+                || tunnel.target != old.target
+                || tunnel.protocol != old.protocol)
+        {
+            super::firewall_sets::require_tunnel(&tx, &tunnel.private_node_id)?;
+        }
         set(&tx, &key(id), &serde_json::to_string(&tunnel)?)?;
         // Another server at either end must not keep a working token.
         if tunnel.public_node_id != old.public_node_id

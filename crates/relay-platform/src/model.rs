@@ -1494,6 +1494,15 @@ pub struct SyncResponse {
     /// sync. `None` from controllers older than rule sets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub firewall: Option<serde_json::Value>,
+    /// The controller takes `connections::Report::instance` and
+    /// `terminations`; false from controllers older than ending single
+    /// sessions, which would reject those fields.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connection_termination: bool,
+    /// Sessions to end; sent only to agents that reported their run, only
+    /// for that run, and omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_terminations: Vec<crate::connections::Termination>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

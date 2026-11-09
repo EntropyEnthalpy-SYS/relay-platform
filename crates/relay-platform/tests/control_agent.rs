@@ -239,9 +239,15 @@ async fn websocket_configuration_roundtrips_http_and_managed_agent_both_directio
     ));
     wait_applied(&control, &admin, 1).await;
     let socket = TcpStream::connect(listen).await.unwrap();
-    let mut stream = websocket::connect(Box::new(socket), &ws_out, false, Duration::from_secs(2))
-        .await
-        .unwrap();
+    let mut stream = websocket::connect(
+        Box::new(socket),
+        &ws_out,
+        false,
+        Duration::from_secs(2),
+        &tokio_util::task::TaskTracker::new(),
+    )
+    .await
+    .unwrap();
     stream.write_all(b"managed-ws").await.unwrap();
     stream.shutdown().await.unwrap();
     let mut reply = vec![];
@@ -891,7 +897,7 @@ async fn agent_reaches_an_https_controller_through_a_relay_address_or_proxy_with
     let (proxied, token) = node("proxied");
     let mut opts = options(origin, &proxied, Some(token));
     opts.ca_certificate = Some(ca.clone());
-    opts.controller_proxy = Some(format!("http://{proxy}"));
+    opts.controller_proxy = Some(format!("http://{proxy}").into());
     let stop = CancellationToken::new();
     let running = tokio::spawn(agent::run(
         Store::open(&temp.path().join("proxied.db")).unwrap(),
@@ -918,17 +924,573 @@ async fn agent_reaches_an_https_controller_through_a_relay_address_or_proxy_with
         // An explicit URL port is always dialed; the relay port must match it.
         ("https://relay.test:8443", relay.clone(), None),
         (origin, relay.clone(), Some("http://127.0.0.1:3128")),
-        (origin, vec![], Some("socks5://127.0.0.1:1080")),
         (origin, vec![], Some("http://user:secret@127.0.0.1:3128")),
         (origin, vec!["relay.test".to_string()], None),
     ] {
+        let proxy = proxy.map(|p| agent::ControllerProxy::from(p.to_string()));
         assert!(
-            agent::controller_client(&controller_url(url).unwrap(), &addresses, proxy, None)
-                .is_err(),
+            agent::controller_client(
+                &controller_url(url).unwrap(),
+                &addresses,
+                proxy.as_ref(),
+                None
+            )
+            .is_err(),
             "{url} {addresses:?} {proxy:?}"
         );
     }
     assert!(agent::controller_client(&base, &relay, None, None).is_ok());
+    stop_server(s).await;
+}
+
+/// A minimal SOCKS5 proxy (RFC 1928 CONNECT, optional RFC 1929 login) that
+/// records each request's address type and destination and tunnels every
+/// request to `upstream`, as a proxy resolving that name would. `stop`
+/// closes the listener and every tunnel, like a proxy that went down.
+/// A SOCKS5 request: address type (1 IPv4, 3 name, 4 IPv6), destination
+/// and the login sent, if any.
+type SocksRequest = (u8, String, Option<(String, String)>);
+struct SocksProxy {
+    address: SocketAddr,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<SocksRequest>>>,
+    accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+impl SocksProxy {
+    async fn start(bind: SocketAddr, upstream: SocketAddr, login: Option<(&str, &str)>) -> Self {
+        let listener = TcpListener::bind(bind).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stop = CancellationToken::new();
+        let login = login.map(|(u, p)| (u.to_owned(), p.to_owned()));
+        let (log, count, cancel) = (seen.clone(), accepted.clone(), stop.clone());
+        let task = tokio::spawn(async move {
+            loop {
+                let mut client = tokio::select! {
+                    _ = cancel.cancelled() => return,
+                    accepted = listener.accept() => match accepted {
+                        Ok((client, _)) => client,
+                        Err(_) => return,
+                    },
+                };
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (log, cancel, login) = (log.clone(), cancel.clone(), login.clone());
+                tokio::spawn(async move {
+                    let tunnel = async {
+                        let mut head = [0u8; 2];
+                        client.read_exact(&mut head).await?;
+                        let mut methods = vec![0u8; head[1] as usize];
+                        client.read_exact(&mut methods).await?;
+                        let mut sent = None;
+                        if let Some((user, password)) = &login {
+                            if head[0] != 5 || !methods.contains(&2) {
+                                client.write_all(&[5, 0xff]).await?;
+                                return Ok(());
+                            }
+                            client.write_all(&[5, 2]).await?;
+                            let mut version = [0u8; 2];
+                            client.read_exact(&mut version).await?;
+                            let mut name = vec![0u8; version[1] as usize];
+                            client.read_exact(&mut name).await?;
+                            let mut length = [0u8; 1];
+                            client.read_exact(&mut length).await?;
+                            let mut secret = vec![0u8; length[0] as usize];
+                            client.read_exact(&mut secret).await?;
+                            let (name, secret) = (
+                                String::from_utf8_lossy(&name).into_owned(),
+                                String::from_utf8_lossy(&secret).into_owned(),
+                            );
+                            let ok = &name == user && &secret == password;
+                            sent = Some((name, secret));
+                            client.write_all(&[1, if ok { 0 } else { 1 }]).await?;
+                            if !ok {
+                                log.lock().unwrap().push((0, String::new(), sent));
+                                return Ok(());
+                            }
+                        } else {
+                            if head[0] != 5 || !methods.contains(&0) {
+                                client.write_all(&[5, 0xff]).await?;
+                                return Ok(());
+                            }
+                            client.write_all(&[5, 0]).await?;
+                        }
+                        let mut request = [0u8; 4];
+                        client.read_exact(&mut request).await?;
+                        let host = match request[3] {
+                            1 => {
+                                let mut ip = [0u8; 4];
+                                client.read_exact(&mut ip).await?;
+                                std::net::Ipv4Addr::from(ip).to_string()
+                            }
+                            4 => {
+                                let mut ip = [0u8; 16];
+                                client.read_exact(&mut ip).await?;
+                                format!("[{}]", std::net::Ipv6Addr::from(ip))
+                            }
+                            _ => {
+                                let mut length = [0u8; 1];
+                                client.read_exact(&mut length).await?;
+                                let mut name = vec![0u8; length[0] as usize];
+                                client.read_exact(&mut name).await?;
+                                String::from_utf8_lossy(&name).into_owned()
+                            }
+                        };
+                        let mut port = [0u8; 2];
+                        client.read_exact(&mut port).await?;
+                        log.lock().unwrap().push((
+                            request[3],
+                            format!("{host}:{}", u16::from_be_bytes(port)),
+                            sent,
+                        ));
+                        let mut server = TcpStream::connect(upstream).await?;
+                        client.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await?;
+                        tokio::io::copy_bidirectional(&mut client, &mut server).await?;
+                        std::io::Result::Ok(())
+                    };
+                    tokio::select! {
+                        _ = cancel.cancelled() => {}
+                        _ = tunnel => {}
+                    }
+                });
+            }
+        });
+        Self {
+            address,
+            seen,
+            accepted,
+            stop,
+            task,
+        }
+    }
+    async fn stop(self) {
+        self.stop.cancel();
+        self.task.await.unwrap();
+    }
+    fn seen(&self) -> Vec<SocksRequest> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+/// Counts TCP connections and passes them to `upstream`.
+async fn counting_front(
+    upstream: SocketAddr,
+) -> (SocketAddr, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = count.clone();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(async move {
+                if let Ok(mut server) = TcpStream::connect(upstream).await {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                }
+            });
+        }
+    });
+    (address, count)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn agent_reaches_the_controller_through_socks5_with_tls_verified_end_to_end() {
+    let certs = topology_tls::Certificates::new();
+    let ca = certs.root.join("root/ca.pem");
+    let temp = tempfile::tempdir().unwrap();
+    let control = Store::open(&temp.path().join("control.db")).unwrap();
+    let admin = control.bootstrap(PASSWORD).unwrap();
+    let s = server(control.clone(), "127.0.0.1:0".parse().unwrap()).await;
+    let front = https_front(&certs, s.address).await;
+    let echo = tcp_echo().await;
+    let forward = |name: &str| {
+        let mut r = rule(echo.address, Protocol::Tcp);
+        r.id = name.into();
+        r
+    };
+    let node = |name: &str| {
+        let (node, token) = control.create_node(&admin, "default", name).unwrap();
+        control
+            .set_config(&admin, &node.id, 0, vec![forward(name)])
+            .unwrap();
+        let path = temp.path().join(format!("{name}.secret"));
+        write_secret(&path, token.as_bytes()).unwrap();
+        (node.id, path)
+    };
+    let applied = |id: String, revision: u64| {
+        let control = control.clone();
+        let admin = admin.clone();
+        async move {
+            timeout(Duration::from_secs(15), async {
+                loop {
+                    let node = control
+                        .nodes(&admin)
+                        .unwrap()
+                        .into_iter()
+                        .find(|n| n.id == id)
+                        .unwrap();
+                    if node.applied_revision == revision {
+                        return;
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("agent never applied revision {revision}"));
+        }
+    };
+    let enrolled = |id: &str| {
+        control
+            .nodes(&admin)
+            .unwrap()
+            .into_iter()
+            .find(|n| n.id == id)
+            .unwrap()
+            .enrolled
+    };
+    // A password with a colon, a space and a percent sign, which a URL
+    // would have to escape; the file is the only place it is written.
+    let password = "pa:ss w%rd%41%20é";
+    // The user name too: %XX must arrive as these bytes, not decoded.
+    let user = "relay%2Fagent%41";
+    let login = temp.path().join("proxy-login.secret");
+    write_secret(&login, format!("{user}\n{password}\n").as_bytes()).unwrap();
+    let proxy_with = |url: String, file: &std::path::Path| agent::ControllerProxy {
+        url,
+        credentials_file: Some(file.to_path_buf()),
+    };
+    let run_until_error = |db: &str, opts: AgentOptions| {
+        let store = Store::open(&temp.path().join(db)).unwrap();
+        async move {
+            timeout(
+                Duration::from_secs(15),
+                agent::run(store, opts, CancellationToken::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap_err()
+        }
+    };
+
+    // socks5h: the proxy alone resolves relay.test (a `.test` name never
+    // resolves here); TLS still checks relay.test end to end, and the login
+    // from the file reaches the proxy intact.
+    let proxy = SocksProxy::start(
+        "127.0.0.1:0".parse().unwrap(),
+        front,
+        Some((user, password)),
+    )
+    .await;
+    let (named, token) = node("named");
+    let mut opts = options("https://relay.test", &named, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(proxy_with(format!("socks5h://{}", proxy.address), &login));
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        Store::open(&temp.path().join("named.db")).unwrap(),
+        opts,
+        stop.clone(),
+    ));
+    applied(named.clone(), 1).await;
+    let seen = proxy.seen();
+    assert!(!seen.is_empty());
+    for (kind, destination, sent) in &seen {
+        assert_eq!((*kind, destination.as_str()), (3, "relay.test:443"));
+        assert_eq!(
+            sent.as_ref().map(|(u, p)| (u.as_str(), p.as_str())),
+            Some((user, password))
+        );
+    }
+
+    // The proxy goes down with the agent's open connection: the agent keeps
+    // running on its configuration and picks up a change once the proxy is
+    // back, without being restarted.
+    let address = proxy.address;
+    proxy.stop().await;
+    control
+        .set_config(
+            &admin,
+            &named,
+            1,
+            vec![forward("named"), forward("named-2")],
+        )
+        .unwrap();
+    sleep(Duration::from_secs(1)).await;
+    assert!(
+        !running.is_finished(),
+        "the agent stopped without its proxy"
+    );
+    let proxy = SocksProxy::start(address, front, Some((user, password))).await;
+    applied(named.clone(), 2).await;
+    assert!(!proxy.seen().is_empty());
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    proxy.stop().await;
+
+    // socks5: this server resolves the controller's name and sends the
+    // proxy an address. localhost is in the certificate, which TLS checks.
+    let proxy = SocksProxy::start("127.0.0.1:0".parse().unwrap(), front, None).await;
+    let (local, token) = node("local");
+    let mut opts = options("https://localhost", &local, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(format!("socks5://{}", proxy.address).into());
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        Store::open(&temp.path().join("local.db")).unwrap(),
+        opts,
+        stop.clone(),
+    ));
+    applied(local.clone(), 1).await;
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let seen = proxy.seen();
+    assert!(!seen.is_empty());
+    assert!(
+        seen.iter()
+            .all(|(kind, destination, _)| matches!(kind, 1 | 4)
+                && ["127.0.0.1:443", "[::1]:443"].contains(&destination.as_str())),
+        "{seen:?}"
+    );
+    // With socks5 a name this server cannot resolve fails here, before the
+    // proxy is asked, instead of leaking the name to the proxy.
+    let (unresolved, token) = node("unresolved");
+    let mut opts = options("https://relay.test", &unresolved, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(format!("socks5://{}", proxy.address).into());
+    let before = proxy.accepted.load(std::sync::atomic::Ordering::SeqCst);
+    let error = run_until_error("unresolved.db", opts).await;
+    assert!(format!("{error:#}").contains("resolv"), "{error:#}");
+    assert_eq!(
+        proxy.accepted.load(std::sync::atomic::Ordering::SeqCst),
+        before
+    );
+    assert!(!enrolled(&unresolved));
+    proxy.stop().await;
+
+    // Through the proxy, TLS still checks the controller's own name: the
+    // front presents relay.test's certificate, so other.test is refused.
+    let proxy = SocksProxy::start(
+        "127.0.0.1:0".parse().unwrap(),
+        front,
+        Some((user, password)),
+    )
+    .await;
+    let (mismatch, token) = node("socks-mismatch");
+    let mut opts = options("https://other.test", &mismatch, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(proxy_with(format!("socks5h://{}", proxy.address), &login));
+    let error = run_until_error("socks-mismatch.db", opts).await;
+    assert!(
+        format!("{error:#}").to_lowercase().contains("certificate"),
+        "{error:#}"
+    );
+    assert_eq!(proxy.seen()[0].1, "other.test:443");
+    assert!(!enrolled(&mismatch));
+
+    // A wrong password is refused by the proxy; no error repeats it.
+    let wrong = temp.path().join("wrong-login.secret");
+    write_secret(&wrong, b"relay-agent\nnot-the-password-Zq7\n").unwrap();
+    let (refused, token) = node("socks-refused");
+    let mut opts = options("https://relay.test", &refused, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(proxy_with(format!("socks5h://{}", proxy.address), &wrong));
+    let error = run_until_error("socks-refused.db", opts).await;
+    let error = format!("{error:#} {error:?}");
+    assert!(!error.contains("not-the-password-Zq7"), "{error}");
+    assert!(!enrolled(&refused));
+    proxy.stop().await;
+
+    // A proxy that is down never makes the agent go around it, even when
+    // the controller's address is reachable directly.
+    let (direct, direct_count) = counting_front(front).await;
+    let (bypass, token) = node("bypass");
+    let mut opts = options(
+        &format!("https://localhost:{}", direct.port()),
+        &bypass,
+        Some(token),
+    );
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(format!("socks5h://{}", free_address()).into());
+    run_until_error("bypass.db", opts).await;
+    assert_eq!(direct_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(!enrolled(&bypass));
+
+    // Settings that cannot work are refused before any request, and the
+    // errors name the file, never what it holds.
+    let base = controller_url("https://relay.test").unwrap();
+    let open = temp.path().join("open-login.secret");
+    std::fs::write(&open, b"relay-agent\nreadable-by-all-Q4\n").unwrap();
+    let one_line = temp.path().join("one-line.secret");
+    write_secret(&one_line, b"relay-agent:oneline-K2\n").unwrap();
+    let long = temp.path().join("long.secret");
+    write_secret(
+        &long,
+        format!("relay-agent\n{}\n", "x".repeat(256)).as_bytes(),
+    )
+    .unwrap();
+    let missing = temp.path().join("missing.secret");
+    let relay = [front.to_string()];
+    for (url, addresses, file, expected) in [
+        ("socks4://127.0.0.1:1080", &[][..], None, "SOCKS4"),
+        ("socks5://127.0.0.1", &[], None, "explicit port"),
+        ("socks5h://127.0.0.1:1080/x", &[], None, "without path"),
+        (
+            "socks5h://user:pw-in-url-J8@127.0.0.1:1080",
+            &[],
+            None,
+            "credentials-file",
+        ),
+        ("socks5h://127.0.0.1:1080", &relay[..], None, "not both"),
+        (
+            "http://127.0.0.1:3128",
+            &[],
+            Some(&login),
+            "SOCKS5 proxies only",
+        ),
+        ("socks5h://127.0.0.1:1080", &[], Some(&open), "chmod 600"),
+        (
+            "socks5h://127.0.0.1:1080",
+            &[],
+            Some(&one_line),
+            "two lines",
+        ),
+        (
+            "socks5h://127.0.0.1:1080",
+            &[],
+            Some(&long),
+            "1 to 255 bytes",
+        ),
+        (
+            "socks5h://127.0.0.1:1080",
+            &[],
+            Some(&missing),
+            "missing.secret",
+        ),
+    ] {
+        let proxy = agent::ControllerProxy {
+            url: url.into(),
+            credentials_file: file.cloned(),
+        };
+        let error = agent::controller_client(&base, addresses, Some(&proxy), None).unwrap_err();
+        let text = format!("{error:#} {error:?}");
+        assert!(text.contains(expected), "{url}: {text}");
+        for secret in [password, "readable-by-all-Q4", "oneline-K2", "pw-in-url-J8"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+    }
+    for url in [
+        "socks5://127.0.0.1:1080",
+        "socks5h://[::1]:1080/",
+        "socks5h://proxy.example.net:1080",
+    ] {
+        agent::controller_client(&base, &[], Some(&proxy_with(url.into(), &login)), None)
+            .unwrap_or_else(|e| panic!("{url}: {e:#}"));
+    }
+
+    // The SOCKS5 client has room for 253 bytes of login less the connect
+    // request's address, counted in bytes: 4 plus the name for socks5h, 19
+    // for socks5 (the name may resolve to IPv6), 7 for an IPv4 panel URL.
+    // One byte over is refused at start, without naming what the file holds.
+    let file = |name: &str, user: String, password: String| {
+        let path = temp.path().join(name);
+        write_secret(&path, format!("{user}\n{password}\n").as_bytes()).unwrap();
+        path
+    };
+    let ipv4 = controller_url("https://127.0.0.1").unwrap();
+    for (base, url, user, password, fits) in [
+        // relay.test: 253 - 14.
+        (&base, "socks5h", 120, 119, true),
+        (&base, "socks5h", 120, 120, false),
+        (&base, "socks5", 117, 117, true),
+        (&base, "socks5", 117, 118, false),
+        (&ipv4, "socks5", 123, 123, true),
+        (&ipv4, "socks5", 123, 124, false),
+    ] {
+        let path = file(
+            &format!("length-{url}-{user}-{password}-{fits}.secret"),
+            "u".repeat(user),
+            "p".repeat(password),
+        );
+        let proxy = proxy_with(format!("{url}://127.0.0.1:1080"), &path);
+        let result = agent::controller_client(base, &[], Some(&proxy), None);
+        assert_eq!(result.is_ok(), fits, "{url} {user}+{password}");
+        if let Err(error) = result {
+            let text = format!("{error:#}");
+            assert!(
+                text.contains("too long together") && !text.contains("ppp"),
+                "{text}"
+            );
+        }
+    }
+    // Bytes, not characters: 117 characters of é are 234 bytes.
+    let wide = file("wide.secret", "é".repeat(58), "é".repeat(59));
+    assert!(
+        agent::controller_client(
+            &base,
+            &[],
+            Some(&proxy_with("socks5://127.0.0.1:1080".into(), &wide)),
+            None
+        )
+        .is_ok()
+    );
+    let wide = file("wider.secret", "é".repeat(58), "é".repeat(59) + "x");
+    assert!(
+        agent::controller_client(
+            &base,
+            &[],
+            Some(&proxy_with("socks5://127.0.0.1:1080".into(), &wide)),
+            None
+        )
+        .is_err()
+    );
+
+    // The longest login socks5h allows to relay.test reaches the proxy byte
+    // for byte, with %XX in both parts and two-byte characters, and works.
+    let (user, password) = (
+        format!("%41{}é", "u".repeat(115)),
+        format!("%20{}é", "p".repeat(114)),
+    );
+    assert_eq!(user.len() + password.len(), 239);
+    let longest = file("longest.secret", user.clone(), password.clone());
+    let proxy = SocksProxy::start(
+        "127.0.0.1:0".parse().unwrap(),
+        front,
+        Some((user.as_str(), password.as_str())),
+    )
+    .await;
+    let (widest, token) = node("socks-longest");
+    let mut opts = options("https://relay.test", &widest, Some(token));
+    opts.ca_certificate = Some(ca.clone());
+    opts.controller_proxy = Some(proxy_with(format!("socks5h://{}", proxy.address), &longest));
+    let stop = CancellationToken::new();
+    let running = tokio::spawn(agent::run(
+        Store::open(&temp.path().join("longest.db")).unwrap(),
+        opts,
+        stop.clone(),
+    ));
+    applied(widest.clone(), 1).await;
+    stop.cancel();
+    timeout(Duration::from_secs(5), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let seen = proxy.seen();
+    assert!(!seen.is_empty());
+    assert!(
+        seen.iter()
+            .all(|(_, _, sent)| sent.as_ref() == Some(&(user.clone(), password.clone())))
+    );
+    proxy.stop().await;
     stop_server(s).await;
 }
 

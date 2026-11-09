@@ -1628,6 +1628,8 @@ enum ClientTargets {
     Managed {
         routes: managed::Routes,
         replies: mpsc::UnboundedSender<Frame>,
+        /// Holds targets to this server's outbound firewall set.
+        firewall: Arc<crate::firewall::Runtime>,
     },
 }
 
@@ -1660,6 +1662,10 @@ async fn client_read_loop_with(
     cancel: CancellationToken,
 ) {
     let udp_sessions: UdpSessions = Arc::new(Mutex::new(HashMap::new()));
+    let firewall = match &targets {
+        ClientTargets::Managed { firewall, .. } => Some(firewall.clone()),
+        ClientTargets::Fixed { .. } => None,
+    };
     loop {
         let frame = tokio::select! {
             frame = read_frame(&mut reader) => frame,
@@ -1717,6 +1723,7 @@ async fn client_read_loop_with(
                         inbox,
                         writer.clone(),
                         udp_sessions.clone(),
+                        firewall.clone(),
                     ));
                     continue;
                 }
@@ -1737,9 +1744,18 @@ async fn client_read_loop_with(
                 }
                 let writer = writer.clone();
                 let sessions = sessions.clone();
+                let firewall = firewall.clone();
                 tokio::spawn(async move {
+                    let connect = async {
+                        match &firewall {
+                            Some(firewall) => managed::connect(firewall, &target).await,
+                            None => TcpStream::connect(&target)
+                                .await
+                                .map_err(managed::Unreached::Failed),
+                        }
+                    };
                     let local = tokio::select! {
-                        local = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&target)) => local,
+                        local = tokio::time::timeout(CONNECT_TIMEOUT, connect) => local,
                         _ = stream_cancel.cancelled() => {
                             sessions.lock().await.remove(&id);
                             let _ = write_frame(&writer, RESET, id, &[]).await;
@@ -1770,6 +1786,11 @@ async fn client_read_loop_with(
                                 let _ = write_frame(&writer, RESET, id, &[]).await;
                                 tracing::debug!(%error, "reverse mux local bridge ended");
                             }
+                        }
+                        Ok(Err(managed::Unreached::Refused(detail))) => {
+                            tracing::debug!(%target, %detail, "reverse tunnel target refused by the firewall");
+                            let payload = managed::refusal_payload(&detail);
+                            let _ = write_frame(&writer, FAIL, id, &payload).await;
                         }
                         _ => {
                             let _ = write_frame(&writer, FAIL, id, &[]).await;
@@ -1832,18 +1853,23 @@ async fn client_udp_worker(
     inbox: UdpInbox,
     writer: Writer,
     sessions: UdpSessions,
+    firewall: Option<Arc<crate::firewall::Runtime>>,
 ) {
     let result = tokio::select! {
         biased;
         _ = inbox.cancel.cancelled() => Ok(()),
-        result = client_udp_session(id, mode, receiver, &writer) => result,
+        result = client_udp_session(id, mode, receiver, &writer, firewall.as_deref()) => result,
     };
     if let Err(error) = result {
         tracing::debug!(%error, id, "reverse mux UDP association failed");
+        let payload = error
+            .downcast_ref::<managed::Refused>()
+            .map(|refused| managed::refusal_payload(&refused.0))
+            .unwrap_or_default();
         tokio::select! {
             biased;
             _ = inbox.cancel.cancelled() => {},
-            _ = write_frame(&writer, FAIL, id, &[]) => {},
+            _ = write_frame(&writer, FAIL, id, &payload) => {},
         }
     }
     let mut entries = sessions.lock().await;
@@ -1861,14 +1887,24 @@ async fn client_udp_session(
     mode: Option<UdpMode>,
     receiver: mpsc::Receiver<Vec<u8>>,
     writer: &Writer,
+    firewall: Option<&crate::firewall::Runtime>,
 ) -> Result<()> {
     let mode = mode.context("UDP mode is not enabled on this client")?;
     let socket = tokio::time::timeout(CONNECT_TIMEOUT, async {
         let socket = if let UdpMode::Fixed(target) = &mode {
             // IPv4 first, as before; a target with only IPv6 addresses gets
-            // an IPv6 socket.
-            let addresses: Vec<SocketAddr> =
-                tokio::net::lookup_host(target.as_str()).await?.collect();
+            // an IPv6 socket. A managed tunnel's target is held to this
+            // server's outbound firewall set first.
+            let addresses: Vec<SocketAddr> = match firewall {
+                Some(firewall) => match managed::permitted(firewall, target).await {
+                    Ok(addresses) => addresses,
+                    Err(managed::Unreached::Refused(detail)) => {
+                        return Ok(Err(managed::Refused(detail)));
+                    }
+                    Err(managed::Unreached::Failed(error)) => return Err(error),
+                },
+                None => tokio::net::lookup_host(target.as_str()).await?.collect(),
+            };
             let address = addresses
                 .iter()
                 .find(|address| address.is_ipv4())
@@ -1886,10 +1922,10 @@ async fn client_udp_session(
         } else {
             UdpSocket::bind("0.0.0.0:0").await?
         };
-        Ok::<_, std::io::Error>(Arc::new(socket))
+        Ok::<_, std::io::Error>(Ok(Arc::new(socket)))
     })
     .await
-    .context("UDP target setup timed out")??;
+    .context("UDP target setup timed out")???;
     let peers = match mode {
         UdpMode::Socks5 { .. } => Some(Arc::new(StdMutex::new(UdpReplyPeers::default()))),
         UdpMode::Fixed(_) => None,

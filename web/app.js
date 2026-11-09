@@ -309,8 +309,12 @@ function firewallReason(message) {
   if (m) return msg`规则集 ${m[1]} 属于租户；服务器只能绑定系统规则集`;
   m = /^rule (.+) belongs to share (.+); a share's rules cannot have a firewall rule set$/.exec(text);
   if (m) return msg`规则 ${m[1]} 属于共享 ${m[2]}，共享的规则不能绑定防火墙规则集`;
-  m = /^rule (.+): a protocol gateway checks its clients in the protocol engine and cannot take a firewall rule set$/.exec(text);
-  if (m) return msg`规则 ${m[1]}：受管协议网关在协议引擎中检查客户端，不能绑定防火墙规则集`;
+  m = /^the agent on server (.+) does not apply firewall rule sets to protocol gateways; upgrade it first$/.exec(text);
+  if (m) return msg`服务器 ${m[1]} 的 Agent 不会用防火墙规则集检查协议网关的客户端；请先升级 Agent`;
+  m = /^the agent on server (.+) does not apply its outbound firewall rule set to reverse tunnels; upgrade it first$/.exec(text);
+  if (m) return msg`服务器 ${m[1]} 的 Agent 不会用出站防火墙规则集检查反向隧道的目标；请先升级 Agent`;
+  m = /^rule (.+) listens on (.+): disable it, publish that and wait until the server applies it before turning it into a protocol gateway there or back$/.exec(text);
+  if (m) return msg`规则 ${m[1]} 正在 ${m[2]} 上监听：请先停用并发布，等服务器应用后，再把它改成协议网关或改回普通规则`;
   m = /^rule set (.+) is an (inbound|outbound) set; bind it as the server's (?:inbound|outbound) set$/.exec(text);
   if (m) return m[2] === 'inbound' ? msg`规则集 ${m[1]} 是入站规则集，只能绑定为服务器的入站规则集` : msg`规则集 ${m[1]} 是出站规则集，只能绑定为服务器的出站规则集`;
   m = /^the rule sets used on server (.+) exceed (\d+) KiB together; use fewer or smaller sets$/.exec(text);
@@ -329,7 +333,6 @@ function firewallReason(message) {
     'an outbound test needs a destination port (1-65535)': '出站测试需要目的地端口（1-65535）',
     'the destination must be a domain or an IP address': '目的地须为域名或 IP 地址',
     'rule not found on this server': '这台服务器上没有这条规则',
-    'a protocol gateway checks its clients in the protocol engine; the tester cannot answer for it': '受管协议网关在协议引擎中检查客户端，规则测试无法判断',
   };
   return Object.hasOwn(known, text) ? translate(known[text]) : null;
 }
@@ -1641,7 +1644,7 @@ function gatewayEditor(spec, payload, publicListen) {
   }
   type.addEventListener('change', () => { if (type.value !== 'vless') security.value = 'certificate'; if (type.value !== 'off') payload.value = type.value === 'any_tls' ? 'tcp' : 'both'; show(); });
   security.addEventListener('change', show); obfs.addEventListener('change', show); masquerade.addEventListener('change', show);
-  box.append(fields, generate, keys, el('p', translate('节点需要安装受支持的协议引擎。面板负责规则权限、流量账本、配额、限速和目的地 ACL。上方监听地址用于客户端连接；来源 ACL 使用实际客户端 IP。订阅请选择 sing-box JSON 或 mihomo YAML。证书模式须让客户端信任签发 CA。Reality 握手与伪装回落流量也计入配额并受目的地限制；请允许握手服务器地址与端口。来源 ACL 不替代握手前的主机防火墙。'), 'fine')); show();
+  box.append(fields, generate, keys, el('p', translate('节点需要安装受支持的协议引擎。面板负责规则权限、流量账本、配额、限速和目的地 ACL。上方监听地址用于客户端连接；来源 ACL 和入站防火墙规则集在协议握手之前按实际客户端 IP 检查，被拒绝的客户端不会触发 TLS/QUIC 握手或 Reality 回落，但这不是主机防火墙。订阅请选择 sing-box JSON 或 mihomo YAML。证书模式须让客户端信任签发 CA。Reality 握手与伪装回落流量也计入配额并受目的地限制；请允许握手服务器地址与端口。'), 'fine')); show();
   return { box, setEnabled(on) { type.value = on ? (type.value === 'off' ? 'vless' : type.value) : 'off'; if (on && !uuid.value) uuid.value = crypto.randomUUID(); show(); }, enabled: () => type.value !== 'off', onchange: f => type.addEventListener('change', f), read: () => gatewayConfig(type.value, publicListen.value, uuid.value, password.value, vision.value, security.value, identity.value, serverName.value, handshake.value, privateKey.value, shortId.value, allowPrivate.value, payload.value, { obfs: obfs.value, obfsPassword: obfsPassword.value, masquerade: masquerade.value, masqueradeStatus: masqueradeStatus.value, masqueradeContent: masqueradeContent.value, congestion: congestion.value, zeroRtt: zeroRtt.value, maxTimeDiff: maxTimeDiff.value }) };
 }
 function mptcpConfig(inbound, outbound, protocol) {
@@ -1883,7 +1886,7 @@ async function editRule(existing, seed = {}) {
     if (proxyInput) sectionVisible(proxyInput, !gateway.enabled());
     for (const [kind, editor] of Object.entries(services)) { sectionVisible(editor.box, purpose.value === kind); if (purpose.value === kind) editor.box.open = true; }
     sectionVisible(egress.box, dynamicDestination()); egress.show();
-    firewall.show(gateway.enabled() || !!asTemplate);
+    firewall.show(gateway.enabled(), !!asTemplate);
     describePlacement();
   }
   const routing = el('details'); routing.append(el('summary', translate('出口绑定与 DNS 缓存'))); const routeFields = el('div', undefined, 'form-grid');
@@ -1947,7 +1950,7 @@ async function editRule(existing, seed = {}) {
     else if (http) rule.inbound_http_connect = http;
     else if (h2) rule.inbound_http2_connect = h2;
     if (wire) { rule.protocol_gateway = wire; rule.targets = []; rule.listen = gatewayBridge(r, baseConfig.rules, wire.listen); }
-    const firewallSet = wire ? null : firewall.read(); if (firewallSet) rule.firewall_inbound_set = firewallSet;
+    const firewallSet = firewall.read(); if (firewallSet) rule.firewall_inbound_set = firewallSet;
     const egressProxy = server || socks || http || h2 ? egress.read() : null;
     if (egressProxy) {
       if (rule.protocol !== 'tcp') throw egress.fail(translate('出口代理只转发 TCP：请把传输协议设为 TCP'));
@@ -2114,22 +2117,24 @@ function egressProxyEditor(spec, nodeOf) {
   };
 }
 // A rule's inbound firewall rule set: one of the rule tenant's inbound sets, checked after the server's inbound
-// set and before the rule's own source lists. Protocol gateways check their clients in the engine and take none.
+// set and before the rule's own source lists. A protocol gateway's Agent checks its clients the same way, before
+// the protocol engine sees them; older Agents do not, and the panel refuses the set for them.
 function ruleFirewallEditor(sets, tenant, current, nodeOf) {
   const box = el('div');
   const choices = sets.filter(s => s.scope === 'tenant' && s.tenant_id === tenant && s.direction === 'inbound').map(s => [s.id, s.name]);
   if (current && !choices.some(([id]) => id === current)) choices.push([current, current]);
   const pick = select(box, 'firewall_inbound_set', translate('入站防火墙规则集（先于下方来源列表检查）'), [['', translate('不使用')], ...choices], current || '');
-  const support = el('p', '', 'workflow-callout warning'); box.append(support);
-  let gateway = false;
-  function show(isGateway = gateway) {
-    gateway = isGateway; sectionVisible(box, !gateway); pick.disabled = gateway;
+  const support = el('p', '', 'workflow-callout warning'), note = el('p', translate('协议网关在 Agent 收到连接时就按客户端自己的地址检查，早于协议握手；需要较新的 Agent，旧版会拒绝发布。'), 'fine'); box.append(support, note);
+  let gateway = false, hidden = false;
+  // Templates carry no set.
+  function show(isGateway = gateway, template = hidden) {
+    gateway = isGateway; hidden = template; sectionVisible(box, !hidden); pick.disabled = hidden; sectionVisible(note, gateway);
     const node = nodeOf();
     support.textContent = node && pick.value && !node.firewall_support ? msg`服务器 ${node.name || node.id} 的 Agent 尚未报告支持防火墙规则集，发布会被拒绝；请先升级 Agent。` : '';
-    sectionVisible(support, !gateway && !!support.textContent);
+    sectionVisible(support, !hidden && !!support.textContent);
   }
   pick.addEventListener('change', () => show());
-  return { box, show, read: () => gateway ? null : pick.value || null };
+  return { box, show, read: () => hidden ? null : pick.value || null };
 }
 const shadowsocksMethods = localize([['2022-blake3-aes-256-gcm', '2022-blake3-aes-256-gcm（推荐 · 防重放）'], ['2022-blake3-aes-128-gcm', '2022-blake3-aes-128-gcm（防重放）'], ['2022-blake3-chacha20-poly1305', '2022-blake3-chacha20-poly1305（无 AES 加速的设备）'], ['aes-256-gcm', 'aes-256-gcm（旧客户端兼容）'], ['aes-128-gcm', 'aes-128-gcm（旧客户端兼容）'], ['chacha20-ietf-poly1305', 'chacha20-ietf-poly1305（旧客户端兼容）']]);
 function shadowsocksKey(method) {
@@ -3637,6 +3642,9 @@ function firewallStatusCell(status) {
   // One hash per line, so the column stays narrow enough for the actions beside it.
   if (s.state !== 'unused') cell.append(el('div', msg`期望 ${shortHash(s.desired_hash)}`, 'subline mono'), el('div', msg`已确认 ${shortHash(s.applied_hash)}`, 'subline mono'));
   if (s.error) cell.append(el('div', s.error, 'subline'));
+  // Paths its Agent does not hold to the bound sets, kept running from before it was known.
+  const uncovered = { gateways: '协议网关的客户端不受规则集检查：请升级 Agent', reverse_tunnels: '反向隧道的目标不受出站规则集检查：请升级 Agent' };
+  for (const path of s.uncovered || []) cell.append(el('div', uncovered[path] ? translate(uncovered[path]) : path, 'subline warning'));
   return cell;
 }
 const firewallPlace = b => b.rule_id ? msg`${b.node_name} · 规则 ${b.rule_name || b.rule_id}` : msg`${b.node_name} · ${firewallLayers[b.layer]}`;
@@ -3776,7 +3784,7 @@ function firewallTesterPanel(sets, nodes, seed = {}) {
       const config = await api(`/nodes/${encodeURIComponent(id)}/config`);
       if (nodePick.value !== id) return;
       const keep = rulePick.value; rulePick.replaceChildren();
-      for (const [value, text] of [['', translate('只测服务器绑定')], ...config.rules.filter(r => !r.protocol_gateway).map(r => [r.id, r.name])]) { const option = el('option', text); option.value = value; rulePick.append(option); }
+      for (const [value, text] of [['', translate('只测服务器绑定')], ...config.rules.map(r => [r.id, r.name])]) { const option = el('option', text); option.value = value; rulePick.append(option); }
       rulePick.value = config.rules.some(r => r.id === keep) ? keep : (seed.rule_id && config.rules.some(r => r.id === seed.rule_id) ? seed.rule_id : '');
     } catch (e) { error.textContent = e.message; }
   }
@@ -3862,13 +3870,19 @@ async function renderFirewall() {
 const blockReasons = localize({ source_not_allowed: '来源不在允许列表', source_denied: '来源在拒绝列表', proxy_untrusted: 'PROXY 头的发送方不受信任', expired: '规则已到期', connection_limit: '达到连接数上限', udp_session_limit: '达到 UDP 会话上限', http2_stream_limit: '达到 HTTP/2 并发隧道上限', quota: '配额已用完', budget: '共享额度拒绝或未及时授予', inactive: '规则未在这台服务器生效', no_target: '没有可用目标（全部暂停、不可用或已满）', destination_denied: '目的地址不在允许范围', auth_failed: '代理认证失败', handshake_failed: '代理或网关握手失败', firewall: '防火墙规则集拒绝' });
 const connectionProtocols = localize({ tcp: 'TCP', tls: 'TLS', websocket: 'WebSocket', wss: 'WebSocket + TLS', socks5: 'SOCKS5', socks5_udp: 'SOCKS5 UDP', http_connect: 'HTTP CONNECT', http2_connect: 'HTTP/2 CONNECT', shadowsocks: 'Shadowsocks', shadowsocks_uot: 'Shadowsocks UDP over TCP', shadowsocks_udp: 'Shadowsocks UDP', multipath: '多路径聚合', gateway: '协议网关', udp: 'UDP' });
 const connectionStates = localize({ pending: '正在等待服务器回报当前连接…', no_answer: '服务器 30 秒内没有回报当前连接，它可能正忙或刚断开；请稍后点“刷新”重试。', unsupported: '这台服务器的 Agent 版本过旧，不记录当前连接和拦截记录；请先升级 Agent。下方的累计统计仍然有效。', offline: '服务器离线，无法获取当前连接。' });
+// What became of a request to end a session (POST …/connections/terminate, then GET …/terminations/{id}).
+const terminationStates = localize({ pending: '正在等待服务器断开这个会话…', closed: '会话已断开。客户端仍可重新连接。', not_found: '服务器上已没有这个会话：它已经结束。', stale_instance: '服务器的 Agent 已重启，这个会话已随之结束。', unsupported: '这类会话不能单独断开（协议网关的桥接会话、Shadowsocks、出口代理、反向隧道，或尚未测试断开的入站组合）。', timed_out: '已要求结束，但会话 3 秒内没有结束；请刷新查看。', expired: 'Agent 30 秒内没有回答，无法确认会话是否已断开；请刷新查看。' });
+function terminationText(request) { return terminationStates[request.state] || msg`服务器回答：${request.state}`; }
 function connectionsReason(message) { return /^too many connection snapshots are waiting for this server/.test(String(message ?? '')) ? translate('这台服务器有太多连接快照在等待回报；请几秒后再试') : ''; }
 // A firewall refusal's detail as the agent writes it ("server inbound rule set: rule 2 denies (Name)", after
-// "egress proxy host:port: " for a refused upstream), in the panel's language; rules count from 1.
+// "egress proxy host:port: " for a refused upstream or "reverse tunnel private server: " for a tunnel target its
+// private server refused), in the panel's language; rules count from 1.
 function firewallDetail(detail) {
   const text = String(detail ?? ''), layers = { 'server inbound': '服务器入站', 'rule inbound': '规则入站', 'server outbound': '服务器出站' };
   let m = /^egress proxy (\S+): (.+)$/.exec(text);
   if (m) return msg`出口代理 ${m[1]}：${firewallDetail(m[2])}`;
+  m = /^reverse tunnel private server: (.+)$/.exec(text);
+  if (m) return msg`反向隧道私有端：${firewallDetail(m[1])}`;
   m = /^(server inbound|rule inbound|server outbound) rule set: (?:rule (\d+)|default action) denies \((.*)\)$/.exec(text);
   if (m) return m[2] ? msg`${translate(layers[m[1]])}规则集「${m[3]}」第 ${m[2]} 条规则拒绝` : msg`${translate(layers[m[1]])}规则集「${m[3]}」默认动作拒绝`;
   m = /^(server inbound|rule inbound|server outbound) rule set (.+) is not available here: refused$/.exec(text);
@@ -3893,7 +3907,7 @@ function connectionCounters(view) {
 }
 async function openRuleConnections(nodeId, rule) {
   const base = `/nodes/${encodeURIComponent(nodeId)}`, box = el('div', undefined, 'connections-dialog'), tools = el('div', undefined, 'toolbar'), search = el('input');
-  const status = el('p', '', 'fine'), error = el('p', undefined, 'error'), sessionsBox = el('div'), countersBox = el('div'), blocksBox = el('div');
+  const status = el('p', '', 'fine'), error = el('p', undefined, 'error'), ended = el('p', '', 'fine'), sessionsBox = el('div'), countersBox = el('div'), blocksBox = el('div'), heading = msg`连接 · ${rule.name}`;
   search.type = 'search'; search.placeholder = translate('按客户端、协议、目标或下一跳筛选'); search.setAttribute('aria-label', translate('筛选连接')); error.setAttribute('role', 'alert');
   let view = null, blocks = null;
   function drawSessions() {
@@ -3905,19 +3919,46 @@ async function openRuleConnections(nodeId, rule) {
     if (view.truncated) notes.push(msg`显示最新的 ${view.sessions.length} 个，共 ${total} 个`);
     if (query) notes.push(msg`筛选后 ${shown.length} 个`);
     // A rule with an egress proxy connects to the proxy: it is the next hop.
-    const rows = shown.map(s => { const main = s.destination || s.target || '—', egress = rule.egress_proxy && s.remote; return [el('span', s.client, 'mono'), connectionProtocols[s.protocol] || s.protocol, namedCell(main, [s.destination ? s.target : '', egress ? '' : s.remote].filter(part => part && part !== main).join(' → ')), egress ? namedCell(translate('出口代理'), s.remote) : connectionHop(s.via), namedCell(timestamp(s.started_ms), durationText(Math.max(0, Math.round((taken - s.started_ms) / 1000)))), bytes(s.upload_bytes), bytes(s.download_bytes)]; });
-    sessionsBox.replaceChildren(el('p', notes.join(' · '), 'fine'), rows.length ? table([translate('客户端'), translate('协议'), translate('目标 / 真实目的地'), translate('下一跳'), translate('开始 / 时长'), translate('上传'), translate('下载')], rows) : el('p', translate('没有符合条件的连接。'), 'fine'));
+    // Users who may end sessions get a column; a protocol gateway's bridge sessions cannot be ended one by one.
+    // A protocol gateway's sessions are its local bridge: their client is the gateway's loopback address.
+    const ending = view.can_terminate, bridge = Boolean(rule.protocol_gateway), rows = shown.map(s => { const main = s.destination || s.target || '—', egress = rule.egress_proxy && s.remote; return [bridge ? namedCell(s.client, translate('网关本机桥接，不是真实客户端')) : el('span', s.client, 'mono'), connectionProtocols[s.protocol] || s.protocol, namedCell(main, [s.destination ? s.target : '', egress ? '' : s.remote].filter(part => part && part !== main).join(' → ')), egress ? namedCell(translate('出口代理'), s.remote) : connectionHop(s.via), namedCell(timestamp(s.started_ms), durationText(Math.max(0, Math.round((taken - s.started_ms) / 1000)))), bytes(s.upload_bytes), bytes(s.download_bytes), ...(ending ? [s.terminable ? button(translate('断开'), () => endSession(s), 'table-action danger') : el('span', '—', 'fine')] : [])]; });
+    sessionsBox.replaceChildren(el('p', notes.join(' · '), 'fine'), rows.length ? table([translate('客户端'), translate('协议'), translate('目标 / 真实目的地'), translate('下一跳'), translate('开始 / 时长'), translate('上传'), translate('下载'), ...(ending ? [translate('操作')] : [])], rows) : el('p', translate('没有符合条件的连接。'), 'fine'));
+    if (!ending && view.state === 'ready' && !view.instance && state.actor?.role !== 'viewer') sessionsBox.append(el('p', translate('这台服务器的 Agent 版本不支持单独断开会话；请先升级 Agent。'), 'fine'));
+    if (bridge && view.sessions.length) sessionsBox.append(el('p', translate('这是协议网关的本机桥接会话：来源是网关的回环地址，不是真实客户端；客户端外层的 TLS / QUIC 连接由网关持有，这些会话不能单独断开。'), 'fine'));
+    else if (ending && shown.some(s => !s.terminable)) sessionsBox.append(el('p', translate('显示“—”的会话不能单独断开：Shadowsocks、出口代理和反向隧道的会话，路径走 WebSocket 的多路径入站，WebSocket 或多路径入站里的 SOCKS5 / HTTP CONNECT，以及带 PROXY 协议头的规则的 UDP 会话，暂不支持。'), 'fine'));
+  }
+  // Ends one session after confirmation, then follows the agent's answer for up to 35 seconds. The
+  // confirmation takes the panel's only dialog, so this one opens again to show the answer.
+  async function endSession(s) {
+    const confirmed = await confirmAction(msg`断开客户端 ${s.client} 的这个 ${connectionProtocols[s.protocol] || s.protocol} 会话？这只结束当前会话，不是封禁：TCP 客户端可以立即重新连接，UDP 客户端的下一个数据报会建立新会话。要阻止这个来源，请改用规则的来源列表或防火墙规则集。`);
+    modal(heading, box);
+    if (!confirmed) { if (!following) follow(); return; }
+    try {
+      let request = await api(`${base}/rules/${encodeURIComponent(rule.id)}/connections/terminate`, { method: 'POST', body: { instance: view.instance, session_id: s.id, confirm: true } });
+      ended.textContent = terminationText(request); error.textContent = '';
+      for (let waited = 0; request.state === 'pending' && waited < 35 && box.isConnected; waited += 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        request = await api(`${base}/rules/${encodeURIComponent(rule.id)}/connections/terminations/${encodeURIComponent(request.id)}`);
+        ended.textContent = terminationText(request);
+      }
+    } catch (e) { error.textContent = e.message; }
+    await follow();
   }
   function draw() {
     if (!view) return;
     status.textContent = view.state === 'ready' ? msg`服务器于 ${timestamp(view.taken_at_ms)} 回报` : view.state === 'pending' && view.taken_at_ms ? msg`下面是 ${timestamp(view.taken_at_ms)} 的数据，正在刷新…` : [connectionStates[view.state] || view.state, view.taken_at_ms ? msg`下面是 ${timestamp(view.taken_at_ms)} 的数据。` : ''].filter(Boolean).join(' ');
     status.className = ['ready', 'pending'].includes(view.state) ? 'fine' : 'workflow-callout';
     drawSessions(); countersBox.replaceChildren(connectionCounters(view));
-    blocksBox.replaceChildren(!blocks?.supported ? el('p', translate('这台服务器的 Agent 升级后才有拦截记录。'), 'fine') : blocks.blocks.length ? blockTable(blocks.blocks) : el('p', translate('没有拦截记录。'), 'fine'));
+    blocksBox.replaceChildren(blocks?.failed ? el('p', blocks.failed, 'error') : blocks?.unavailable ? el('p', translate('控制器暂时无法读取拦截记录（原因见控制器日志，修好文件后重启控制器）；当前连接和断开不受影响。'), 'workflow-callout') : !blocks?.supported ? el('p', translate('这台服务器的 Agent 升级后才有拦截记录。'), 'fine') : blocks.blocks.length ? blockTable(blocks.blocks) : el('p', translate('没有拦截记录。'), 'fine'));
+    if (blocks?.supported && blocks.next_before) blocksBox.append(el('p', msg`显示最近 ${blocks.blocks.length} 条；更早的记录在服务器的“拦截记录”中翻页查看。`, 'fine'));
   }
   async function load() {
     try {
-      [view, blocks] = await Promise.all([api(`${base}/rules/${encodeURIComponent(rule.id)}/connections`), api(`${base}/blocks?rule_id=${encodeURIComponent(rule.id)}&limit=200`)]);
+      // Block records that cannot be read hide neither the sessions nor ending them.
+      const [sessions, records] = await Promise.allSettled([api(`${base}/rules/${encodeURIComponent(rule.id)}/connections`), api(`${base}/blocks?rule_id=${encodeURIComponent(rule.id)}&limit=200`)]);
+      blocks = records.status === 'fulfilled' ? records.value : { failed: records.reason.message };
+      if (sessions.status === 'rejected') throw sessions.reason;
+      view = sessions.value;
       error.textContent = '';
     } catch (e) { error.textContent = connectionsReason(e.detail?.error) || e.message; return false; } finally { draw(); }
     return true;
@@ -3938,24 +3979,29 @@ async function openRuleConnections(nodeId, rule) {
   }
   search.addEventListener('input', drawSessions);
   tools.append(search, button(translate('刷新'), follow));
-  box.append(tools, status, error, el('h3', translate('当前连接')), sessionsBox, el('h3', translate('累计统计（Agent 启动以来）')), countersBox, el('h3', translate('拦截记录')), blocksBox, el('p', translate('客户端地址属于个人数据，只有能查看这台服务器配置的用户看得到。当前连接按需向服务器获取，不保存；拦截记录只保存在面板内存中，面板重启后清空。'), 'fine'));
-  modal(msg`连接 · ${rule.name}`, box);
+  box.append(tools, status, error, ended, el('h3', translate('当前连接')), sessionsBox, el('h3', translate('累计统计（Agent 启动以来）')), countersBox, el('h3', translate('拦截记录')), blocksBox, el('p', translate('客户端地址属于个人数据，只有能查看这台服务器配置的用户看得到。当前连接按需向服务器获取，不保存；拦截记录保存在面板数据库旁的独立文件中，面板重启后仍在，按保留天数和每台服务器的条数上限清理。'), 'fine'));
+  modal(heading, box);
   await follow();
 }
 async function openNodeBlocks(node, config) {
   const box = el('div', undefined, 'connections-dialog'), tools = el('div', undefined, 'toolbar'), filter = el('select'), list = el('div'), error = el('p', undefined, 'error'), names = new Map(config.rules.map(r => [r.id, r.name]));
   filter.setAttribute('aria-label', translate('按规则筛选')); error.setAttribute('role', 'alert');
   for (const [id, text] of [['', translate('全部规则')], ...config.rules.map(r => [r.id, r.name])]) { const option = el('option', text); option.value = id; filter.append(option); }
-  async function load() {
+  // Pages of 200, the latest change first; "Load more" asks for the page before the last one shown.
+  let shown = [];
+  async function load(more = null) {
     try {
-      const view = await api(`/nodes/${encodeURIComponent(node.id)}/blocks?limit=1000${filter.value ? `&rule_id=${encodeURIComponent(filter.value)}` : ''}`);
-      error.textContent = '';
-      list.replaceChildren(!view.supported ? el('p', translate('这台服务器的 Agent 版本过旧，不记录拦截记录；请先升级 Agent。'), 'workflow-callout') : view.blocks.length ? blockTable(view.blocks, names) : el('p', translate('没有拦截记录。'), 'fine'));
+      const view = await api(`/nodes/${encodeURIComponent(node.id)}/blocks?limit=200${filter.value ? `&rule_id=${encodeURIComponent(filter.value)}` : ''}${more ? `&before=${more}` : ''}`);
+      error.textContent = ''; shown = more ? [...shown, ...view.blocks] : view.blocks;
+      list.replaceChildren(view.unavailable ? el('p', translate('控制器暂时无法读取拦截记录（原因见控制器日志，修好文件后重启控制器）；当前连接和断开不受影响。'), 'workflow-callout') : !view.supported ? el('p', translate('这台服务器的 Agent 版本过旧，不记录拦截记录；请先升级 Agent。'), 'workflow-callout') : shown.length ? blockTable(shown, names) : el('p', translate('没有拦截记录。'), 'fine'));
+      if (view.supported && view.next_before) list.append(button(translate('加载更早的记录'), () => load(view.next_before)));
+      if (view.retention) kept.textContent = msg`面板保留每条记录到最后一次变化后 ${view.retention.days} 天，每台服务器最多 ${view.retention.per_node} 条，先删最久没有变化的；记录保存在面板数据库旁的独立文件中，面板重启后仍在，但不在面板备份内。`;
     } catch (e) { error.textContent = e.message; }
   }
-  filter.addEventListener('change', load);
-  tools.append(filter, button(translate('刷新'), load));
-  box.append(el('p', translate('被拒绝的连接和 UDP 会话：来源不在允许列表、达到连接数上限、配额用完、代理目的地址不允许等。同一规则、来源 IP 和原因在 60 秒内合并为一条并计数。面板保存每台服务器最近 1000 条，只在内存中，重启后清空。'), 'fine'), tools, error, list);
+  const kept = el('p', '', 'fine');
+  filter.addEventListener('change', () => load());
+  tools.append(filter, button(translate('刷新'), () => load()));
+  box.append(el('p', translate('被拒绝的连接和 UDP 会话：来源不在允许列表、达到连接数上限、配额用完、代理目的地址不允许等。同一规则、来源 IP 和原因在 60 秒内合并为一条并计数。'), 'fine'), kept, tools, error, list);
   modal(msg`拦截记录 · ${node.name}`, box);
   await load();
 }
@@ -5297,8 +5343,16 @@ function chainsPanel(groups, chains, nodes) {
       row.append(el('span', msg`${use.name || translate('已删除的转发')} · 入口 ${use.entry_node_name || use.entry_node_id}`));
       if (use.missing) row.append(badge(translate('转发已删除'), 'red'));
       else if (use.out_of_date) row.append(badge(translate('组成员已变化'), 'orange'));
+      if (canWrite() && !use.missing) {
+        if (use.out_of_date && !refreshActive(use)) row.append(button(translate('预览更新…'), () => openChainRefresh(chain, use), 'table-action'));
+        if (['preparing', 'draining', 'stopping'].includes(use.refresh?.phase)) row.append(button(translate('取消更新'), () => cancelChainRefresh(chain, use), 'table-action danger'), button(translate('取消并保持停止…'), () => cancelChainRefresh(chain, use, true), 'table-action danger'));
+        if (use.refresh?.phase === 'blocked') row.append(button(translate('不再等待确认…'), () => cancelChainRefresh(chain, use), 'table-action'));
+        if (use.refresh?.phase === 'restoring') row.append(button(translate('结束恢复…'), () => cancelChainRefresh(chain, use), 'table-action'));
+        row.append(use.auto_sync ? button(translate('关闭自动更新'), () => setChainAutoSync(chain, use, false), 'table-action') : button(translate('开启自动更新…'), () => setChainAutoSync(chain, use, true), 'table-action'));
+      }
       uses.append(row);
       for (const change of use.changes) uses.append(el('div', [msg`第 ${change.layer} 层`, change.added.length ? msg`新增 ${named(change.added)}` : '', change.removed.length ? msg`移除 ${named(change.removed)}` : ''].filter(Boolean).join(' · '), 'subline warning'));
+      uses.append(refreshStatus(use));
     }
     if (!chain.uses.length) uses.append(el('span', '—'));
     const tools = el('div');
@@ -5308,7 +5362,7 @@ function chainsPanel(groups, chains, nodes) {
     }
     return [name, layers, uses, tools];
   })));
-  if (chains.some(chain => chain.uses.some(use => use.out_of_date))) body.append(el('p', translate('已创建的转发不会随端点组自动更新。“组成员已变化”表示创建之后组里增加或移除了服务器；要使用新的成员，请用此链重新创建转发，再删除旧转发。'), 'workflow-callout warning'));
+  if (chains.some(chain => chain.uses.some(use => use.out_of_date))) body.append(el('p', translate('修改端点组不会改变已创建的转发。“组成员已变化”表示创建之后组里增加或移除了服务器；点“预览更新”查看差异并确认，或为这条转发开启自动更新。更新会暂停这条转发，直到改向完成。'), 'workflow-callout warning'));
   p.append(body);
   return p;
 }
@@ -5349,7 +5403,7 @@ async function openEndpointGroup(view = null) {
     if (!members.length) throw new Error(translate('请至少添加一台服务器。'));
     const body = { name: String(data.get('group_name')).trim(), description: String(data.get('group_description') || '').trim(), members: [...members] };
     await api(view ? `/endpoint-groups/${encodeURIComponent(view.id)}` : '/endpoint-groups', { method: view ? 'PUT' : 'POST', body });
-    $('#dialog').close(); notify(view ? translate('端点组已保存。已用转发链创建的转发保持不变，若成员变化会标为“组成员已变化”。') : translate('端点组已创建。')); await refresh();
+    $('#dialog').close(); notify(view ? translate('端点组已保存。已创建的转发不会立即改变：成员变化会标为“组成员已变化”，开启了自动更新的转发稍后自动更新。') : translate('端点组已创建。')); await refresh();
   });
   modal(view ? msg`编辑端点组 · ${view.name}` : translate('新建端点组'), form);
 }
@@ -5401,6 +5455,107 @@ async function deleteChain(view) {
   if (!await confirmAction(msg`删除转发链「${view.name}」？用它创建的 ${view.uses.length} 条转发及其规则保持不变，只是不再显示来自此链。`)) return;
   await api(`/chains/${encodeURIComponent(view.id)}`, { method: 'DELETE' });
   notify(translate('转发链已删除；用它创建的转发保持不变。')); await refresh();
+}
+// Refreshing a forwarding built from a chain to its groups' current servers. The controller
+// previews it; the panel shows the cost (the forwarding takes no new connections from the pause
+// until the rewire, and the listed servers must have no sessions at all, of any rule) and starts
+// it on confirmation. Automatic refresh is off unless turned on for one forwarding.
+const refreshPhases = localize({ preparing: '更新中 · 准备新服务器', draining: '更新中 · 已暂停新连接，等待会话结束', stopping: '更新中 · 已停止，等待服务器确认', restoring: '正在恢复原转发', cleanup: '清理已移除的规则', finished: '已完成' });
+// Where a refresh is apart from its updating steps: the controller's commit is not the agents'
+// confirmation, and a blocked or refused step is not a restored forwarding.
+const refreshStages = localize({ confirming: '已改向，等待 Agent 确认', blocked: '受阻 · 改向未被全部确认，需要处理', restoring: '正在恢复原转发', restore_blocked: '恢复受阻 · 正在重试', restore_confirming: '恢复配置已提交，等待 Agent 确认', restore_failed: '恢复受阻 · Agent 无法应用恢复配置', restore_overdue: '恢复逾期 · Agent 未按时确认', cleanup: '清理已移除的规则', finished: '已完成' });
+const refreshSteps = localize({ add: '在新服务器添加规则', pause: '暂停新连接', stop: '停止规则', rewire: '改向并重新启用', restore: '恢复原转发', cleanup: '删除不再使用的规则' });
+const refreshOutcomes = localize({ succeeded: '上次更新成功', failed: '上次更新失败', cancelled: '上次更新已取消' });
+function refreshActive(use) { return ['preparing', 'draining', 'stopping', 'confirming', 'blocked', 'restoring'].includes(use.refresh?.phase); }
+function usePath(chain, use) { return `/chains/${encodeURIComponent(chain.id)}/uses/${encodeURIComponent(use.entry_rule_id)}`; }
+// The automatic setting, the current or last refresh, what it waits for and each agent's confirmation.
+function refreshStatus(use) {
+  // A wrapping block: direct div children of the uses column are single flex rows.
+  const box = el('section', undefined, 'wrap'), r = use.refresh, sync = use.auto_sync;
+  if (sync) box.append(badge(msg`自动更新已开启 · 最长 ${sync.timeout_secs} 秒`, 'blue'));
+  // Waiting for a server that never connected is not a failure: shown apart from the count of
+  // failures before it, whose reason it replaced.
+  const waitingFor = sync?.last_result?.startsWith('waiting:') ? sync.last_result.slice('waiting:'.length).trim() : null;
+  if (sync?.failures) box.append(el('div', waitingFor === null ? msg`自动更新连续 ${sync.failures} 次未成功：${sync.last_result || ''}` : msg`自动更新此前连续 ${sync.failures} 次未成功`, 'subline warning'));
+  if (waitingFor !== null) box.append(el('div', msg`自动更新在等待，不计为失败，${timestamp(sync.next_attempt_ms)} 再检查：${waitingFor}`, 'subline'));
+  if (use.auto_sync_stopped) box.append(el('div', msg`自动更新已关闭：${use.auto_sync_stopped}`, 'subline warning'));
+  if (!r) return box;
+  const active = refreshActive(use) || r.phase === 'cleanup';
+  const label = r.stage === 'updating' ? refreshPhases[r.phase] : refreshStages[r.stage] || refreshPhases[r.phase];
+  box.append(badge(active ? label : refreshOutcomes[r.outcome] || label, ['blocked', 'restore_blocked', 'restore_failed', 'restore_overdue'].includes(r.stage) || r.outcome === 'failed' ? 'red' : active ? 'orange' : r.outcome === 'succeeded' ? 'green' : ''));
+  if (r.phase === 'cleanup' && r.outcome) box.append(el('div', refreshOutcomes[r.outcome], 'subline'));
+  if (r.interrupted) box.append(el('div', translate('这条转发现在不接受新连接，现有连接保持。'), 'subline warning'));
+  if (r.stage === 'updating') box.append(el('div', translate('更新期间在规则编辑里再保存一次“停用”不会让规则保持停止；要保持停止，请用“取消并保持停止”。'), 'subline'));
+  if (r.error) box.append(el('div', msg`原因：${r.error}`, 'subline warning'));
+  // A refused restore lists the same reasons per server below.
+  if (r.retry_error && !(r.stage === 'restore_blocked' && r.waiting.length)) box.append(el('div', r.retry_error, 'subline warning'));
+  // A committed restore is not a working forwarding until the path's agents applied it.
+  if (['restore_confirming', 'restore_failed', 'restore_overdue'].includes(r.stage)) box.append(el('div', translate('恢复配置已由控制器提交；路径上的 Agent 全部确认之前，转发还没有恢复可用。'), 'subline'));
+  if (['restore_failed', 'restore_overdue'].includes(r.stage)) box.append(el('div', translate('处理办法：按下列原因排除后，Agent 会自动重试；服务器已永久不可用时，吊销并删除它，更新就不再等它；也可以“结束恢复…”，把还没恢复的规则交给人工处理。'), 'subline warning'));
+  if (r.stage === 'restore_blocked') box.append(el('div', translate('控制器拒绝了部分恢复配置，逐台原因如下；相关配置或 Agent 能力变化时立即重试，否则每 30 秒重试一次。也可以“结束恢复…”，把还没恢复的规则交给人工处理。'), 'subline warning'));
+  const names = new Map([...r.servers, ...r.agents].map(item => [item.node_id, item.node_name || item.node_id])), name = id => names.get(id) || id;
+  // Most server messages already name their server; name it where one does not.
+  for (const problem of r.problems) box.append(el('div', problem.error.includes(name(problem.node_id)) ? problem.error : msg`${name(problem.node_id)}：${problem.error}`, 'subline warning'));
+  for (const wait of r.waiting) box.append(el('div', msg`等待：${wait.error}`, 'subline'));
+  const last = r.commits.at(-1);
+  if (r.agents.length && last) {
+    // The controller commits each step at once; every agent confirms its own server's part. The
+    // count is of the latest commit's servers, named with its step, not of the whole refresh.
+    const mine = r.agents.filter(agent => agent.step === last.step), applied = mine.filter(agent => agent.state === 'applied').length, waiting = new Set(r.waiting.map(wait => wait.node_id));
+    box.append(el('div', msg`最近一次提交“${refreshSteps[last.step]}”（${mine.map(agent => name(agent.node_id)).join(' · ')}）：控制器已提交；${applied}/${mine.length} 台服务器的 Agent 已确认`, 'subline'));
+    for (const agent of r.agents.filter(agent => agent.state !== 'applied' && !waiting.has(agent.node_id))) {
+      const server = name(agent.node_id), step = refreshSteps[agent.step];
+      if (agent.state === 'failed') box.append(el('div', msg`${server} 应用失败：${agent.error || ''}。它继续运行上一份已应用的配置；排除原因后 Agent 会自动重试。`, 'subline warning'));
+      else if (agent.state === 'not_enrolled') box.append(el('div', msg`${server}：“${step}”已提交，这台服务器还没有安装 Agent`, 'subline'));
+      else box.append(el('div', agent.online ? msg`${server}：“${step}”已提交，等待 Agent 确认` : msg`${server}：“${step}”已提交，服务器离线，恢复连接后确认`, 'subline'));
+    }
+  }
+  // Rules the refresh left to an operator, each with why and what to do.
+  for (const left of r.unresolved || []) box.append(el('div', msg`需要人工处理 · ${name(left.node_id)}${left.rule_id ? ` · ${left.rule_id}` : ''}：${left.error}`, 'subline warning'));
+  if (r.notes.length) { const notes = el('details'); notes.append(el('summary', msg`说明（${r.notes.length}）`)); for (const note of r.notes) notes.append(el('div', note, 'subline')); box.append(notes); }
+  return box;
+}
+async function openChainRefresh(chain, use) {
+  const path = usePath(chain, use), plan = await api(`${path}/refresh/plan`, { method: 'POST', body: {} });
+  const body = el('div'), title = msg`更新转发 · ${use.name || use.entry_rule_id}`;
+  if (plan.up_to_date) { body.append(el('p', translate('这条转发已经使用端点组当前的服务器。'), 'workflow-callout')); modal(title, body); return; }
+  const names = new Map([...plan.idle_servers, ...plan.result].map(item => [item.node_id, item.node_name]).concat(plan.hops.map(hop => [hop.node_id, hop.node_name])));
+  const named = ids => ids.map(id => names.get(id) || id).join(' · '), yes = value => value ? translate('是') : translate('否');
+  for (const change of plan.changes) body.append(el('p', [msg`第 ${change.layer} 层`, change.added.length ? msg`新增 ${named(change.added)}` : '', change.removed.length ? msg`移除 ${named(change.removed)}` : ''].filter(Boolean).join(' · ')));
+  body.append(el('p', msg`更新会中断这条转发：先暂停入口及上游规则的新连接，等下列服务器整机没有任何会话（包括其他规则的会话）后停止、改向并重新启用；现有连接保持到自然结束。从确认起最长 ${plan.timeout_secs} 秒，超时、取消或任一步失败都会恢复原转发。`, 'workflow-callout warning'));
+  body.append(el('p', translate('暂停在最长用时到期时结束；若那时还没改向，新连接会因规则已停止而失败，直到改向完成或恢复原转发。恢复不等待会话结束。'), 'fine'));
+  body.append(table([translate('必须空闲的服务器'), translate('在线'), translate('已同步'), translate('TCP / UDP 会话'), translate('现在空闲')], plan.idle_servers.map(server => [server.node_name || server.node_id, server.enrolled ? yes(server.online) : translate('等待安装 Agent'), server.enrolled ? yes(server.applied_revision === server.desired_revision && !server.apply_error) : '—', `${server.active_tcp} / ${server.active_udp}`, yes(server.idle)])));
+  if (plan.hops.length) body.append(table([translate('层'), translate('新服务器'), translate('连接地址')], plan.hops.map(hop => [String(hop.layer), hop.node_name, hop.advertise])));
+  for (const conflict of plan.conflicts) body.append(el('p', conflict.message, 'error'));
+  for (const warning of plan.warnings) body.append(el('p', warning.message, 'workflow-callout warning'));
+  for (const note of plan.notes) body.append(el('p', note, 'fine'));
+  for (const change of plan.result) for (const diff of change.rule_changes) { const details = el('details'); details.append(el('summary', msg`${change.node_name || change.node_id} · ${diff.after?.name || diff.before?.name} · 查看更新前后配置`), el('pre', JSON.stringify({ before: diff.before, after: diff.after }, null, 2))); body.append(details); }
+  if (plan.conflicts.length) { body.append(el('p', translate('有冲突时不能更新；解决后重新预览。'), 'fine')); modal(title, body); return; }
+  const form = el('form'), grid = el('div', undefined, 'form-grid');
+  const timeout = field(grid, 'refresh_timeout', translate('最长用时（秒，60–86400）'), String(plan.timeout_secs), 'number'); timeout.min = 60; timeout.max = 86400;
+  form.append(grid); body.append(form);
+  submit(form, translate('确认更新'), async data => {
+    await api(`${path}/refresh`, { method: 'POST', body: { token: plan.token, expected_revisions: plan.expected_revisions, timeout_secs: Number(data.get('refresh_timeout')) } });
+    $('#dialog').close(); notify(translate('更新已开始，进度显示在“用此链创建的转发”中。')); await refresh();
+  });
+  modal(title, body);
+}
+// Cancel puts the forwarding back at once; `keep` keeps the rules the stop disabled stopped. A
+// blocked refresh is dismissed instead: its configuration stays as the rewire published it.
+async function cancelChainRefresh(chain, use, keep = false) {
+  const blocked = use.refresh?.phase === 'blocked', restoring = use.refresh?.phase === 'restoring';
+  const question = blocked ? translate('不再等待确认：配置保持改向后的样子，不会撤回。未确认的服务器请按显示的原因处理，它们的 Agent 会继续重试。')
+    : restoring ? translate('结束恢复：已发布的配置保持不变，不再自动重试；还停着的规则和还暂停的目标列入“需要人工处理”，写明原因和处理办法。未确认的 Agent 会继续自行重试，转发在它们应用之前仍算中断。')
+    : keep ? translate('取消更新，并让已停止的规则保持停止？暂停的目标照常恢复，新加的规则停用。以后要启用这些规则，请在规则编辑里启用，这需要服务器没有会话。')
+    : translate('取消更新会立即恢复原转发：已停止的规则按原来的路由重新启用，不必等待会话结束；新加的规则先停用，服务器空闲后删除。');
+  if (!await confirmAction(question)) return;
+  await api(`${usePath(chain, use)}/refresh/cancel`, keep ? { method: 'POST', body: { keep_stopped: true } } : { method: 'POST' });
+  notify(blocked ? translate('已不再等待确认。') : restoring ? translate('已结束恢复；未恢复的规则列在“需要人工处理”中。') : keep ? translate('已取消更新；已停止的规则保持停止。') : translate('已取消更新，正在恢复原转发。')); await refresh();
+}
+async function setChainAutoSync(chain, use, on) {
+  if (on && !await confirmAction(translate('开启后，端点组成员变化时会自动更新这条转发。每次自动更新都会中断这条转发：暂停新连接，等相关服务器整机没有会话后改向，最长 10 分钟，失败会恢复原转发。相关服务器上还有其他转发的规则时，自动更新不会开始。自动更新以你的身份执行，你被停用或失去权限时自动关闭；连续 3 次未成功也会关闭。'))) return;
+  await api(`${usePath(chain, use)}/sync`, { method: 'PUT', body: { auto_sync: on } });
+  notify(on ? translate('已开启自动更新。') : translate('已关闭自动更新。')); await refresh();
 }
 // New forwarding from a saved chain: the controller plans every rule and endpoint, the usual
 // publish preview shows the path, and publishing applies the plan's revisions in one batch.

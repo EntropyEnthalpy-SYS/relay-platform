@@ -3,7 +3,10 @@
 // duration, bytes), "N of M shown", the text filter, the counters with the per-target distribution and
 // refusals by reason, the rule's block records, polling while the agent has not answered and its end,
 // and the messages for old agents, offline servers, no answer and too many waiting snapshots; then the
-// per-server block records with their rule filter; and which views offer the actions. Not a browser test.
+// per-server block records with their rule filter and older pages; ending one session after a confirmation
+// that says it is not a block, and following the agent's answer; block records that cannot be read, which
+// hide neither the sessions nor ending them; a protocol gateway's bridge sessions; and which views offer
+// the actions. Not a browser test.
 const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
 const helpers = require('./web_i18n_helpers.cjs');
 const source = fs.readFileSync(process.argv[2] || 'web/app.js', 'utf8');
@@ -43,13 +46,13 @@ const tables = root => root.all().filter(n => n.tag === 'table');
 const i18n = helpers.loadI18n(), { translate, msg } = i18n, english = i18n.getLanguage() === 'en';
 const translated = (node, what) => { if (english) assert.ok(!/[\u3400-\u9fff]/.test(node.text()), `${what} has untranslated text: ${node.text().match(/[^ ]*[\u3400-\u9fff][^ ]*/)}`); };
 
-let calls = [], replies = [], dialog = null, title = null, timers = [];
+let calls = [], replies = [], dialog = null, title = null, timers = [], questions = [], confirmReply = true;
 const context = {
   ...i18n, Date, Promise, Map, encodeURIComponent,
   setTimeout: (resolve, ms) => { timers.push({ resolve, ms }); return 0; },
   state: { actor: { id: 'u1', role: 'viewer' }, nodes: [{ id: 'n1', name: 'Tokyo' }, { id: 'n2', name: 'Osaka' }] },
   async api(path, options = {}) {
-    calls.push({ path, method: options.method || 'GET' });
+    calls.push({ path, method: options.method || 'GET', ...(options.body ? { body: options.body } : {}) });
     const reply = replies.shift();
     if (reply instanceof Error) throw reply;
     assert.ok(reply !== undefined, `unexpected request ${options.method || 'GET'} ${path}`);
@@ -59,7 +62,9 @@ const context = {
   button: (text, action, className) => Object.assign(new Element('button', text, className), { action }),
   table: (head, body) => { const n = new Element('table'); n.append(...head.map(h => new Element('th', h))); for (const row of body) { const tr = new Element('tr'); tr.append(...row.map(cell => cell instanceof Element ? cell : new Element('td', String(cell)))); n.append(tr); } return n; },
   timestamp: n => `@${n}`,
-  modal(heading, body) { title = heading; dialog = body; },
+  // As in the panel, there is one dialog: a confirmation or another view replaces what it showed.
+  async confirmAction(message) { questions.push(message); if (dialog) dialog.isConnected = false; title = translate('确认操作'); return confirmReply; },
+  modal(heading, body) { if (dialog && dialog !== body) dialog.isConnected = false; title = heading; dialog = body; body.isConnected = true; },
 };
 vm.createContext(context);
 vm.runInContext(code + '\nObject.assign(this, { openRuleConnections, openNodeBlocks, connectionsReason });', context);
@@ -68,6 +73,7 @@ const settle = async () => { for (let i = 0; i < 5; i += 1) await new Promise(re
 let finished = false;
 process.on('exit', code => { if (!code && !finished) { console.error('the test stopped before its end'); process.exitCode = 1; } });
 const fail = (status, error) => Object.assign(new Error(error), { detail: { error } });
+const unavailable = translate('控制器暂时无法读取拦截记录（原因见控制器日志，修好文件后重启控制器）；当前连接和断开不受影响。');
 
 const now = 1_800_000_000_000;
 const counts = (attempts, connected, extra = {}) => ({ attempts, connected, timeout: 0, refused: 0, dns: 0, closed: 0, other: 0, connect_us: connected * 1500, ...extra });
@@ -192,13 +198,96 @@ const view = (state, extra = {}) => ({ state, totals: { tcp: 0, udp: 0 }, sessio
   await buttons(dialog, translate('刷新'))[0].action();
   assert.equal(dialog.all().find(n => n.className === 'error').textContent, 'rule not found');
 
+  // Ending a session: only for users who may, only on sessions that can end, after a confirmation that
+  // says it blocks nothing; then the agent's answer is followed and the list loaded again.
+  calls = []; timers = [];
+  const endable = [{ ...sessions[0], terminable: true }, { id: 8, protocol: 'gateway', client: '127.0.0.1:41001', started_ms: now, upload_bytes: 0, download_bytes: 0, terminable: false }];
+  replies = [view('ready', { taken_at_ms: now, totals: { tcp: 2, udp: 0 }, sessions: endable, instance: 'i1', can_terminate: true }), blocks(true)];
+  const ending = context.openRuleConnections('n1', rule); await settle();
+  assert.deepEqual(headers(tables(dialog)[0]).at(-1), translate('操作'));
+  assert.equal(buttons(dialog, translate('断开')).length, 1, 'the gateway bridge session has no button');
+  assert.equal(rows(tables(dialog)[0])[1].at(-1), '—');
+  assert.ok(dialog.text().includes(translate('显示“—”的会话不能单独断开：Shadowsocks、出口代理和反向隧道的会话，路径走 WebSocket 的多路径入站，WebSocket 或多路径入站里的 SOCKS5 / HTTP CONNECT，以及带 PROXY 协议头的规则的 UDP 会话，暂不支持。')));
+  translated(dialog, 'ending dialog');
+  confirmReply = false; calls = [];
+  await buttons(dialog, translate('断开'))[0].action();
+  assert.equal(questions.length, 1);
+  assert.equal(questions[0], msg`断开客户端 ${'203.0.113.7:50001'} 的这个 ${'TCP'} 会话？这只结束当前会话，不是封禁：TCP 客户端可以立即重新连接，UDP 客户端的下一个数据报会建立新会话。要阻止这个来源，请改用规则的来源列表或防火墙规则集。`);
+  assert.equal(calls.length, 0, 'nothing is asked without confirmation');
+  assert.equal(title, msg`连接 · ${rule.name}`, 'cancelling returns to the connections');
+  confirmReply = true; calls = [];
+  const request = { id: 'q1', state: 'pending' };
+  replies = [request, { ...request, state: 'closed' }, view('ready', { taken_at_ms: now + 1, totals: { tcp: 1, udp: 0 }, sessions: endable.slice(1), instance: 'i1', can_terminate: true }), blocks(true)];
+  const clicked = buttons(dialog, translate('断开'))[0].action(); await settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[0])), { path: '/nodes/n1/rules/r1/connections/terminate', method: 'POST', body: { instance: 'i1', session_id: 2, confirm: true } });
+  assert.ok(dialog.isConnected && title === msg`连接 · ${rule.name}`, 'the connections dialog opens again for the answer');
+  assert.ok(dialog.text().includes(translate('正在等待服务器断开这个会话…')));
+  timers.at(-1).resolve(); timers.pop(); await clicked;
+  assert.deepEqual(calls.slice(1).map(c => c.path), ['/nodes/n1/rules/r1/connections/terminations/q1', '/nodes/n1/rules/r1/connections', '/nodes/n1/blocks?rule_id=r1&limit=200']);
+  assert.ok(dialog.text().includes(translate('会话已断开。客户端仍可重新连接。')));
+  // Answers other than closed say what happened, also an expired request.
+  for (const [state, text] of [['not_found', '服务器上已没有这个会话：它已经结束。'], ['expired', 'Agent 30 秒内没有回答，无法确认会话是否已断开；请刷新查看。']]) {
+    replies = [view('ready', { taken_at_ms: now + 2, totals: { tcp: 1, udp: 0 }, sessions: endable, instance: 'i1', can_terminate: true }), blocks(true)];
+    await buttons(dialog, translate('刷新'))[0].action();
+    replies = [{ id: 'q2', state }, view('ready', { taken_at_ms: now + 3, totals: { tcp: 1, udp: 0 }, sessions: endable, instance: 'i1', can_terminate: true }), blocks(true)];
+    await buttons(dialog, translate('断开'))[0].action();
+    assert.ok(dialog.text().includes(translate(text)), state);
+  }
+  dialog.isConnected = false; timers.forEach(t => t.resolve()); timers = []; await ending;
+  // Block records that cannot be read hide neither the sessions nor ending them.
+  for (const [records, says] of [[fail(500, 'database is locked'), 'database is locked'], [{ ...blocks(true), unavailable: true }, unavailable]]) {
+    timers = [];
+    replies = [view('ready', { taken_at_ms: now, totals: { tcp: 1, udp: 0 }, sessions: [endable[0]], instance: 'i1', can_terminate: true }), records];
+    const shown = context.openRuleConnections('n1', rule); await settle();
+    assert.equal(buttons(dialog, translate('断开')).length, 1, says);
+    assert.equal(dialog.all().find(n => n.className === 'error').textContent, '', 'the sessions loaded');
+    assert.ok(dialog.text().includes(says), says);
+    translated(dialog, 'records unavailable');
+    dialog.isConnected = false; timers.forEach(t => t.resolve()); timers = []; await shown;
+  }
+  // A protocol gateway's sessions are its local bridge: the client shown is not the real one.
+  timers = [];
+  replies = [view('ready', { taken_at_ms: now, totals: { tcp: 1, udp: 0 }, sessions: [endable[1]], instance: 'i1', can_terminate: true }), blocks(true)];
+  const bridged = context.openRuleConnections('n1', { id: 'gw', name: 'Gateway', protocol_gateway: { protocol: { type: 'vless' } } }); await settle();
+  assert.ok(dialog.text().includes(translate('网关本机桥接，不是真实客户端')));
+  assert.ok(dialog.text().includes(translate('这是协议网关的本机桥接会话：来源是网关的回环地址，不是真实客户端；客户端外层的 TLS / QUIC 连接由网关持有，这些会话不能单独断开。')));
+  assert.equal(buttons(dialog, translate('断开')).length, 0);
+  translated(dialog, 'gateway dialog');
+  dialog.isConnected = false; timers.forEach(t => t.resolve()); timers = []; await bridged;
+  // A viewer sees no column; a writer on an agent that cannot end sessions is told to upgrade it.
+  for (const role of ['viewer', 'tenant_admin']) {
+    context.state.actor.role = role; timers = [];
+    replies = [view('ready', { taken_at_ms: now, totals: { tcp: 1, udp: 0 }, sessions: [sessions[0]], can_terminate: false }), blocks(true)];
+    const shown = context.openRuleConnections('n1', rule); await settle();
+    assert.ok(!headers(tables(dialog)[0]).includes(translate('操作')) && !buttons(dialog, translate('断开')).length, role);
+    assert.equal(dialog.text().includes(translate('这台服务器的 Agent 版本不支持单独断开会话；请先升级 Agent。')), role !== 'viewer', role);
+    translated(dialog, `${role} dialog`);
+    dialog.isConnected = false; timers.forEach(t => t.resolve()); timers = []; await shown;
+  }
+  context.state.actor.role = 'viewer';
+
   // The per-server view: all rules first, with a rule column; the filter asks for one rule's records.
   calls = [];
   const config = { rules: [{ id: 'r1', name: 'Web' }, { id: 'socks', name: 'Proxy' }] };
-  replies = [blocks(true, [record, { ...record, rule_id: 'socks', reason: 'auth_failed', detail: '', source: '198.51.100.2', count: 1, first_ms: now, last_ms: now }])];
+  replies = [{ ...blocks(true, [record, { ...record, rule_id: 'socks', reason: 'auth_failed', detail: '', source: '198.51.100.2', count: 1, first_ms: now, last_ms: now }]), next_before: 77, retention: { days: 30, per_node: 10000 } }];
   await context.openNodeBlocks({ id: 'n1', name: 'Tokyo' }, config);
   assert.equal(title, msg`拦截记录 · ${'Tokyo'}`);
-  assert.deepEqual(calls.map(c => c.path), ['/nodes/n1/blocks?limit=1000']);
+  assert.deepEqual(calls.map(c => c.path), ['/nodes/n1/blocks?limit=200']);
+  assert.ok(dialog.text().includes(msg`面板保留每条记录到最后一次变化后 ${30} 天，每台服务器最多 ${10000} 条，先删最久没有变化的；记录保存在面板数据库旁的独立文件中，面板重启后仍在，但不在面板备份内。`));
+  // An older page adds its records after the ones shown; the last page offers no more.
+  calls = []; replies = [{ ...blocks(true, [{ ...record, source: '192.0.2.99', count: 9 }]), retention: { days: 30, per_node: 10000 } }];
+  await buttons(dialog, translate('加载更早的记录'))[0].action();
+  assert.deepEqual(calls.map(c => c.path), ['/nodes/n1/blocks?limit=200&before=77']);
+  assert.deepEqual(rows(tables(dialog)[0]).map(r => r[1]), ['192.0.2.4', '198.51.100.2', '192.0.2.99']);
+  assert.equal(buttons(dialog, translate('加载更早的记录')).length, 0);
+  calls = []; replies = [{ ...blocks(true, [record, { ...record, rule_id: 'socks', reason: 'auth_failed', detail: '', source: '198.51.100.2', count: 1, first_ms: now, last_ms: now }]), retention: { days: 30, per_node: 10000 } }];
+  await buttons(dialog, translate('刷新'))[0].action();
+  assert.deepEqual(calls.map(c => c.path), ['/nodes/n1/blocks?limit=200'], 'refresh starts again from the newest page');
+  replies = [{ ...blocks(true), unavailable: true, retention: { days: 30, per_node: 10000 } }];
+  await buttons(dialog, translate('刷新'))[0].action();
+  assert.ok(dialog.text().includes(unavailable) && !tables(dialog).length, 'the server says why there are no records');
+  replies = [{ ...blocks(true, [record, { ...record, rule_id: 'socks', reason: 'auth_failed', detail: '', source: '198.51.100.2', count: 1, first_ms: now, last_ms: now }]), retention: { days: 30, per_node: 10000 } }];
+  await buttons(dialog, translate('刷新'))[0].action();
   assert.deepEqual(headers(tables(dialog)[0]), [translate('最近一次'), translate('来源'), translate('规则'), translate('协议'), translate('原因 / 详情'), translate('次数')]);
   assert.deepEqual(rows(tables(dialog)[0]).map(r => r.slice(1)), [['192.0.2.4', 'Web', 'TCP', `${translate('来源在拒绝列表')} matched deny 192.0.2.0/24`, '3'], ['198.51.100.2', 'Proxy', 'TCP', translate('代理认证失败'), '1']]);
   translated(dialog, 'server blocks');
@@ -206,7 +295,7 @@ const view = (state, extra = {}) => ({ state, totals: { tcp: 0, udp: 0 }, sessio
   assert.deepEqual(filter.children.map(o => [o.value, o.textContent]), [['', translate('全部规则')], ['r1', 'Web'], ['socks', 'Proxy']]);
   calls = []; replies = [blocks(true)];
   filter.value = 'socks'; await filter.fire('change');
-  assert.deepEqual(calls.map(c => c.path), ['/nodes/n1/blocks?limit=1000&rule_id=socks']);
+  assert.deepEqual(calls.map(c => c.path), ['/nodes/n1/blocks?limit=200&rule_id=socks']);
   assert.ok(dialog.text().includes(translate('没有拦截记录。')));
   replies = [blocks(false)];
   await context.openNodeBlocks({ id: 'n3', name: 'Legacy' }, { rules: [] });
@@ -214,5 +303,5 @@ const view = (state, extra = {}) => ({ state, totals: { tcp: 0, udp: 0 }, sessio
   translated(dialog, 'old agent blocks');
   assert.equal(replies.length, 0);
   finished = true;
-  console.log(`Connections panel (${i18n.getLanguage()}): sessions, N of M shown, filter, counters and distribution, refusals, block records, polling and its end, old agents, offline, no answer, 429 and per-server records passed`);
+  console.log(`Connections panel (${i18n.getLanguage()}): sessions, N of M shown, filter, counters and distribution, refusals, block records, polling and its end, old agents, offline, no answer, 429, ending a session and per-server record pages passed`);
 })().catch(error => { console.error(error); process.exit(1); });

@@ -38,6 +38,7 @@ use tokio_tungstenite::{
         protocol::{WebSocketConfig, frame::coding::CloseCode},
     },
 };
+use tokio_util::task::TaskTracker;
 
 pub const SUBPROTOCOL: &str = "relay-stream-v1";
 pub const MAX_PAYLOAD: usize = 64 * 1024;
@@ -283,10 +284,13 @@ impl AsyncWrite for HeaderIo {
     }
 }
 
+/// `tasks` takes the connection's driver: a session's task group, so that
+/// the session ends after its socket closed.
 pub async fn accept(
     stream: BoxStream,
     spec: &WebSocketServer,
     close_timeout: Duration,
+    tasks: &TaskTracker,
 ) -> Result<BoxStream> {
     validate_server(spec)?;
     let ws = accept_hdr_async_with_config(
@@ -295,13 +299,15 @@ pub async fn accept(
         Some(config()),
     )
     .await?;
-    Ok(bridge(ws, close_timeout))
+    Ok(bridge(ws, close_timeout, tasks))
 }
+/// `tasks` takes the connection's driver, as for [`accept`].
 pub async fn connect(
     stream: BoxStream,
     spec: &WebSocketClient,
     secure: bool,
     close_timeout: Duration,
+    tasks: &TaskTracker,
 ) -> Result<BoxStream> {
     validate_client(spec)?;
     let mut request = format!(
@@ -338,7 +344,7 @@ pub async fn connect(
                 .contains_key(header::SEC_WEBSOCKET_EXTENSIONS),
         "WebSocket subprotocol or extensions mismatch"
     );
-    Ok(bridge(ws, close_timeout))
+    Ok(bridge(ws, close_timeout, tasks))
 }
 
 type Ws = WebSocketStream<HeaderIo>;
@@ -472,12 +478,14 @@ async fn write_frames(
     }
 }
 
-fn bridge(ws: Ws, close_timeout: Duration) -> BoxStream {
+/// The driver owns the socket. Dropping the stream aborts it; an aborted
+/// task stays in `tasks` until its future, and so the socket, is dropped.
+fn bridge(ws: Ws, close_timeout: Duration, tasks: &TaskTracker) -> BoxStream {
     let (sink, stream) = ws.split();
     let (outgoing, requests) = mpsc::channel(1);
     let (responses, incoming) = mpsc::channel(1);
     let (state, status) = watch::channel(State::default());
-    let driver = tokio::spawn(async move {
+    let driver = tasks.spawn(async move {
         if let Err(error) = tokio::try_join!(
             read_frames(stream, responses, state.clone()),
             write_frames(sink, requests, state.clone(), close_timeout)

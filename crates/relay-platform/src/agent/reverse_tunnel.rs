@@ -24,7 +24,13 @@ pub(super) struct Tunnels {
 }
 
 impl Tunnels {
-    pub fn new(store: &Store, server: Arc<Server>) -> Result<Self> {
+    /// `firewall` is the server's policy, whose outbound set the private
+    /// end's dials are held to.
+    pub fn new(
+        store: &Store,
+        server: Arc<Server>,
+        firewall: Arc<crate::firewall::Runtime>,
+    ) -> Result<Self> {
         let identity = store
             .metadata(KEY)?
             .map(|saved| Identity::from_saved(&saved))
@@ -32,7 +38,7 @@ impl Tunnels {
         let mut tunnels = Self {
             identity,
             server,
-            client: Client::default(),
+            client: Client::new(firewall),
             saved: String::new(),
         };
         if let Some(saved) = store.metadata(SAVED)?
